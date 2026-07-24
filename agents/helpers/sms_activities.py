@@ -6,6 +6,7 @@ Activities for:
 - Sending lifecycle SMS notifications (agent started, write lock, cost limit)
 """
 
+import asyncio
 import time
 from typing import Dict
 
@@ -188,7 +189,8 @@ async def _notify_sms_event_real(user_id: str, event_type: str, agent_id: str, p
             response.raise_for_status()
             result = response.json()
             archive_root_agent_id = current_root_agent_id() or agent_id
-            archive_json(
+            await asyncio.to_thread(
+                archive_json,
                 root_agent_id=archive_root_agent_id,
                 path=f"provider/sms/notify/{event_type}-{agent_id}.json.gz.enc",
                 payload={

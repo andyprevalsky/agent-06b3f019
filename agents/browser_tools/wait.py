@@ -4,6 +4,7 @@ import asyncio
 import time
 from typing import Any, Dict
 
+from browser_tools.schemas import normalize_browser_wait_ms
 from tools.base import format_tool_message, format_error_message
 
 
@@ -20,9 +21,8 @@ async def wait_tool(stagehand: Any, args: Dict[str, Any], logger: Any) -> Dict[s
         Result dictionary with success status and time waited
     """
     start_time = time.time()
-    time_ms = args.get("timeMs", 0)
-    
     try:
+        time_ms = normalize_browser_wait_ms(args.get("timeMs"), default=0)
         logger.info(
             f"Agent calling tool: wait",
             category="agent",

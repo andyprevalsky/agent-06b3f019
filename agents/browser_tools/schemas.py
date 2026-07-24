@@ -7,7 +7,7 @@ INDEX-BASED APPROACH: Elements are referenced by their index in the DOM tree.
 The DOM tree is serialized with indices like [1] button "Submit", [2] input[type=text], etc.
 """
 
-from typing import Any, List, Literal, Optional, Type
+from typing import Any, Dict, List, Literal, Optional, Type
 
 from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator, model_validator
 
@@ -18,6 +18,19 @@ from utils.purchase_approval import (
     validate_product_url_for_page,
     validate_product_url_for_pages,
 )
+from utils.user_facing_writing_prompt import user_facing_text_description
+
+MAX_BROWSER_WAIT_MS = 60_000
+
+
+def normalize_browser_wait_ms(value: Any, *, default: int = 1000) -> int:
+    """Normalize raw LLM tool arguments before they reach any wait executor."""
+    candidate = default if value is None else value
+    try:
+        return min(MAX_BROWSER_WAIT_MS, max(0, int(float(candidate))))
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("wait time_ms must be numeric") from exc
+
 
 # ============================================================================
 # OBSERVATION TOOLS
@@ -66,6 +79,7 @@ class InputTextTool(BaseModel):
     tool: Literal["input_text"]
     index: int = Field(description="Element index of the input field from the DOM tree")
     text: str = Field(description="Text to type into the field. Replaces any existing content in the field.")
+    clear: bool = Field(default=True, description="Clear the field before typing (default: true)")
 
 
 class PressKeyTool(BaseModel):
@@ -149,7 +163,11 @@ class WaitTool(BaseModel):
     """Wait for a specified time in milliseconds."""
 
     tool: Literal["wait"]
-    time_ms: int = Field(description="Time to wait in milliseconds")
+    time_ms: int = Field(
+        description="Time to wait in milliseconds",
+        ge=0,
+        le=MAX_BROWSER_WAIT_MS,
+    )
 
 
 # ============================================================================
@@ -221,9 +239,10 @@ class SendMessageToUserBrowserTool(BaseModel):
     """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
 
     tool: Literal["send_message_to_user"]
-    message: str = Field(description="Explain what the user needs to do and why you cannot do it")
-    reason: Literal["login", "payment", "captcha", "verification", "blocked", "other"] = Field(
-        description="Category of the user action needed"
+    message: str = Field(
+        description=user_facing_text_description(
+            "The exact message shown to the user for an update or request for help."
+        )
     )
 
 
@@ -401,7 +420,10 @@ class WriteLockPurchaseItem(BaseModel):
     )
     rating: str = Field(description="Required numeric product rating, such as '4.6 stars'.")
     review_count: str = Field(
-        description="Required numeric review count, preserving visible formatting.",
+        description=(
+            "Required numeric review count followed by 'reviews' or 'ratings', "
+            "for example '312 reviews'."
+        ),
         validation_alias=AliasChoices("review_count", "reviewCount", "reviews"),
     )
     image_url: Optional[str] = Field(default=None, description="Best image URL for this item.")
@@ -682,7 +704,7 @@ BROWSER_TOOL_MODELS = {
     # Completion
     # "done": DoneTool,  # Use attempt_completion instead - browser-use 'done' maps to attempt_completion
     "attempt_completion": AttemptCompletionBrowserTool,
-    # "send_message_to_user": SendMessageToUserBrowserTool,
+    "send_message_to_user": SendMessageToUserBrowserTool,
     "request_user_assistance_for_authentication": RequestUserAssistanceForAuthenticationBrowserTool,
     "recover_from_challenge": RecoverFromChallengeBrowserTool,
     "request_payment_card": RequestPaymentCardBrowserTool,
@@ -690,6 +712,28 @@ BROWSER_TOOL_MODELS = {
     # so a forked request can append only a user message and preserve cache reads.
     "generate_write_lock_notification": GenerateWriteLockNotificationTool,
 }
+
+
+def validate_browser_tool_args(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    *,
+    context: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and normalize one browser tool call through its Pydantic model.
+
+    This mirrors the main-agent boundary: model output is parsed into the
+    registered tool model and execution receives ``model_dump()`` rather than
+    the original untyped dictionary.
+    """
+    model = BROWSER_TOOL_MODELS.get(tool_name)
+    if model is None:
+        raise ValueError(f"Unknown browser tool: {tool_name}")
+    parsed = model.model_validate(
+        {"tool": tool_name, **tool_args},
+        context=context,
+    )
+    return parsed.model_dump(exclude={"tool"}, exclude_none=True)
 
 
 # List of available actions for Rose API request
@@ -745,6 +789,7 @@ __all__ = [
     "NavbackTool",
     "ScrollTool",
     "WaitTool",
+    "validate_browser_tool_args",
     # Tab management
     "SwitchTabTool",
     "CloseTabTool",

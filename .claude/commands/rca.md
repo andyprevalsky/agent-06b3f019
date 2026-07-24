@@ -67,6 +67,21 @@ third-party-state explanation as a completed RCA.
 race / a 404". Come back with: here's the repro that failed, here's the fix,
 here's the repro now passing.** A hypothesis is not a deliverable.
 
+## Model-intelligence classification gate
+
+Classify a failure as **model intelligence** only after reconstructing the exact
+failing LLM call as required by Step 3a of the methodology. The proof must show:
+
+1. The original model fails and the upgraded model passes with all non-model variables held constant.
+2. The replay uses the same local client path, messages, system prompt, tools,
+   response schema, and generation configuration; only model selection changes.
+3. For nondeterministic behavior, report repeated trial counts that show a clear
+   separation. One failing sample followed by one passing sample is not proof.
+
+For example, an unchanged call failing on Opus 4.8 and passing on Fable 5 can
+qualify. If the prompt, context, schema, tools, provider behavior, or config also
+changed, do not use this classification until a model-only replay proves it.
+
 ## What "done" means (RCA completion gate)
 
 - Deterministic repro artifact exists locally and was executed (record the command + output).
