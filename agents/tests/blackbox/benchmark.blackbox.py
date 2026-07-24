@@ -1864,6 +1864,189 @@ def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
     assert _run_declared_static_check(evaluator, unsuccessful)[0] is False
 
 
+def test_completion_summary_and_sms_static_checks_are_fail_closed():
+    """Completion quality checks use the rendered summary and durable SMS receipt."""
+    from copy import deepcopy
+
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    summary = "x" * 81
+    outputs = [{"key": "pickup_time", "label": "Pickup Time", "value": "7:41 AM"}]
+    evaluator = {
+        "checks": [
+            {"type": "completion_summary_length", "min_chars": 81},
+            {
+                "type": "completion_sms_event",
+                "expected_count": 1,
+                "allow_skipped_reasons": ["benchmark_agent"],
+                "require_output_payload": True,
+                "require_rendered_message": True,
+                "max_lines": 8,
+            },
+        ],
+    }
+    good = {
+        "agent": {"agent_id": "root-blue-bottle", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "isFinalSummary": True,
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": summary, "outputs": outputs},
+                },
+            }
+        ],
+        "_benchmark": {
+            "completion_sms_events": [
+                {
+                    "path": "provider/sms/notify/completion-root-blue-bottle.json.gz.enc",
+                    "status_code": 200,
+                    "request": {
+                        "event_type": "completion",
+                        "agent_id": "root-blue-bottle",
+                        "payload": {"summary": summary, "outputs": outputs},
+                    },
+                    "response": {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "benchmark_agent",
+                        "messagePreview": (
+                            f"Done: {summary}\n"
+                            "Pickup Time: 7:41 AM\n"
+                            "View agent: https://roselabs.ai/?agent-id=root-blue-bottle"
+                        ),
+                    },
+                }
+            ]
+        },
+    }
+    assert _run_declared_static_check(evaluator, good)[0] is True
+
+    short = deepcopy(good)
+    short["messages"][0]["metadata"]["completionSummary"]["summary"] = "x" * 80
+    passed, reason = _run_declared_static_check(evaluator, short)
+    assert passed is False
+    assert "80 characters" in reason
+
+    missing_output_payload = deepcopy(good)
+    missing_output_payload["_benchmark"]["completion_sms_events"][0]["request"]["payload"]["outputs"] = []
+    passed, reason = _run_declared_static_check(evaluator, missing_output_payload)
+    assert passed is False
+    assert "payload" in reason.lower()
+
+    too_many_lines = deepcopy(good)
+    too_many_lines["_benchmark"]["completion_sms_events"][0]["response"]["messagePreview"] = "\n".join(
+        [f"Done: {summary}", *(f"Output {index}: value" for index in range(7)), "View agent: agent-id=root-blue-bottle"]
+    )
+    passed, reason = _run_declared_static_check(evaluator, too_many_lines)
+    assert passed is False
+    assert "at most 8" in reason
+
+    child_notification = deepcopy(good)
+    child_notification["_benchmark"]["completion_sms_events"].append(
+        {
+            "path": "provider/sms/notify/completion-child.json.gz.enc",
+            "status_code": 200,
+            "request": {
+                "event_type": "completion",
+                "agent_id": "child",
+                "payload": {"summary": "child", "outputs": []},
+            },
+            "response": {"success": True},
+        }
+    )
+    passed, reason = _run_declared_static_check(evaluator, child_notification)
+    assert passed is False
+    assert "exactly 1" in reason
+
+
+def test_blue_bottle_catalog_enforces_summary_and_completion_sms():
+    """The incident benchmark owns deterministic summary and SMS regressions."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-blue-bottle-challenge-recovery")
+    evaluator = next(item for item in task.evaluators if item["id"] == "blue_bottle_completion_delivery")
+    checks = {check["type"]: check for check in evaluator["checks"]}
+
+    assert evaluator["method"] == "static_check"
+    assert checks["completion_summary_length"]["min_chars"] == 81
+    assert checks["completion_sms_event"] == {
+        "type": "completion_sms_event",
+        "expected_count": 1,
+        "allow_skipped_reasons": ["benchmark_agent"],
+        "require_output_payload": True,
+        "require_rendered_message": True,
+        "max_lines": 8,
+    }
+
+
+async def test_declared_evaluator_hydrates_completion_sms_receipt():
+    """The benchmark boundary reads the provider receipt before static grading."""
+    from dataclasses import replace
+
+    import benchmarks.run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    summary = "Blue Bottle pickup was prepared through checkout without placing the order." + ("!" * 20)
+    outputs = [{"key": "pickup_time", "label": "Pickup Time", "value": "7:41 AM"}]
+    static_evaluator = next(
+        item
+        for item in get_task_by_name("browser-blue-bottle-challenge-recovery").evaluators
+        if item["id"] == "blue_bottle_completion_delivery"
+    )
+    task = replace(
+        get_task_by_name("browser-blue-bottle-challenge-recovery"),
+        evaluators=[static_evaluator],
+    )
+    data = {
+        "agent": {"agent_id": "root-blue-bottle", "status": "COMPLETED"},
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "completion_summary",
+                    "toolStatus": "FINISHED",
+                    "completionSummary": {"summary": summary, "outputs": outputs},
+                },
+            }
+        ],
+    }
+    path = "provider/sms/notify/completion-root-blue-bottle.json.gz.enc"
+    original_paths = bench.archive_artifact_paths
+    original_read = bench.read_archive_json
+    try:
+        bench.archive_artifact_paths = lambda agent_id: [path]
+        bench.read_archive_json = lambda agent_id, artifact_path: {
+            "status_code": 200,
+            "request": {
+                "event_type": "completion",
+                "agent_id": "root-blue-bottle",
+                "payload": {"summary": summary, "outputs": outputs},
+            },
+            "response": {
+                "success": True,
+                "skipped": True,
+                "reason": "benchmark_agent",
+                "messagePreview": (
+                    f"Done: {summary}\n"
+                    "Pickup Time: 7:41 AM\n"
+                    "View agent: https://roselabs.ai/?agent-id=root-blue-bottle"
+                ),
+            },
+        }
+        passed, reason, results = await bench._run_declared_evaluators(task, data)
+    finally:
+        bench.archive_artifact_paths = original_paths
+        bench.read_archive_json = original_read
+
+    assert passed is True
+    assert reason is None
+    assert results[0]["passed"] is True
+    assert data["_benchmark"]["completion_sms_events"][0]["path"] == path
+
+
 def test_doordash_catalog_requires_single_clean_completed_browser_run():
     """DoorDash combines deterministic runtime invariants with product semantics."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -9698,6 +9881,18 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures",
         test_no_tool_failures_static_check_rejects_any_failed_tool_event,
+    )
+    r.record(
+        "declared_static_completion_summary_and_sms",
+        test_completion_summary_and_sms_static_checks_are_fail_closed,
+    )
+    r.record(
+        "blue_bottle_completion_delivery_contract",
+        test_blue_bottle_catalog_enforces_summary_and_completion_sms,
+    )
+    await r.record_async(
+        "blue_bottle_completion_sms_receipt_hydration",
+        test_declared_evaluator_hydrates_completion_sms_receipt,
     )
     r.record(
         "doordash_single_clean_completed_browser_run",

@@ -3740,12 +3740,16 @@ async def test_workflow_mark_complete_happy_path():
         # Child-completed signal to parent
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" in signal_names
+        assert not any(
+            name == "notify_sms_event_activity" and args[1] == "completion"
+            for name, args in fake.activity_calls
+        )
     finally:
         _restore_workflow(original)
 
 
 async def test_workflow_mark_complete_no_parent_no_signal():
-    """_mark_complete without parent does not signal."""
+    """A WEB-source root sends one completion SMS with verified outputs."""
     wf = _bare_workflow_instance()
     wf.agent_id = "root-mc"
     wf.user_id = "u-mc"
@@ -3758,11 +3762,15 @@ async def test_workflow_mark_complete_no_parent_no_signal():
     wf.tokens_out = 0
     wf.context_size = 0
     wf.child_tool_counts = {}
-    wf.output_schema = None
+    wf.output_schema = {
+        "fields": [
+            {"name": "pickup_time", "type": "str"},
+            {"name": "order_total_usd", "type": "float"},
+        ]
+    }
     wf.agent_source = "WEB"
 
     fake = _FakeWorkflowModule()
-    fake.activity_returns["fetch_agent_config"] = {"response_schema": None}
     fake.activity_returns["generate_completion_summary"] = {
         "summary": "root done",
         "tool_counts": {},
@@ -3770,9 +3778,26 @@ async def test_workflow_mark_complete_no_parent_no_signal():
     }
     original = _patch_workflow(fake)
     try:
-        await wf._mark_complete(context=[], structured_response=None)
+        await wf._mark_complete(
+            context=[],
+            structured_response={"pickup_time": "7:41 AM", "order_total_usd": 11.25},
+        )
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" not in signal_names
+        completion_notifications = [
+            args
+            for name, args in fake.activity_calls
+            if name == "notify_sms_event_activity" and args[1] == "completion"
+        ]
+        assert len(completion_notifications) == 1
+        assert completion_notifications[0][2] == "root-mc"
+        assert completion_notifications[0][3] == {
+            "summary": "root done",
+            "outputs": [
+                {"key": "pickup_time", "label": "Pickup Time", "value": "7:41 AM"},
+                {"key": "order_total_usd", "label": "Order Total Usd", "value": 11.25},
+            ],
+        }
     finally:
         _restore_workflow(original)
 

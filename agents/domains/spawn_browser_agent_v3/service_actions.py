@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import structlog
 from PIL import Image
 
-from browser_tools.schemas import RequestPaymentCardBrowserTool
+from browser_tools.schemas import RequestPaymentCardBrowserTool, normalize_browser_wait_ms
 from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 from domains.spawn_browser_agent_v3.service_crypto import (
     PAYMENT_CARD_SECRET_REFS,
@@ -515,7 +515,10 @@ async def execute_action(  # noqa: C901
             return {"success": True, "message": ""}
 
         elif action_name == "wait":
-            time_ms = params.get("time_ms", 1000)
+            try:
+                time_ms = normalize_browser_wait_ms(params.get("time_ms"), default=1000)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
             seconds = time_ms / 1000.0
             event = session.event_bus.dispatch(WaitEvent(seconds=seconds))
             await event

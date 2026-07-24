@@ -40,6 +40,8 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "approval_request_count",
     "approval_request_details",
     "browser_agent_session_count",
+    "completion_sms_event",
+    "completion_summary_length",
     "expected_gate",
     "expected_payment_receipt",
     "no_browser_agent_failures",

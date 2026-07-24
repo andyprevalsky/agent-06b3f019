@@ -3688,6 +3688,7 @@ class AgentWorkflow:
             # message insert cannot leave a verified agent durably ACTIVE.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after the explicit COMPLETED update.
+            formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
                 "TOOL",
@@ -3699,7 +3700,7 @@ class AgentWorkflow:
                     "title": "✅ Task Complete",
                     "completionSummary": {
                         "summary": summary,
-                        "outputs": self._format_outputs(structured_response),
+                        "outputs": formatted_outputs,
                         "toolUsage": tool_usage,
                         "totalToolCalls": total_tool_calls,
                         "durationSeconds": duration_seconds,
@@ -3709,12 +3710,18 @@ class AgentWorkflow:
                 update_tree=False,
             )
 
-            # Send completion SMS notification (root + SMS-source only)
-            if not self.parent_workflow_id and summary and self.agent_source == "SMS":
+            # Completion lifecycle SMS is root-only. Sub-agents report to their
+            # parent; notifying per child would fan out at tree scale.
+            if not self.parent_workflow_id and summary:
                 try:
                     await workflow.execute_activity(
                         notify_sms_event_activity,
-                        args=[self.user_id, "completion", self.agent_id, {"summary": summary}],
+                        args=[
+                            self.user_id,
+                            "completion",
+                            self.agent_id,
+                            {"summary": summary, "outputs": formatted_outputs},
+                        ],
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )

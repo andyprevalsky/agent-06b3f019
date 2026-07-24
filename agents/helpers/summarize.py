@@ -957,32 +957,63 @@ Just write plain text describing what was done."""
                 )
             )
 
-        # Use call_llm which handles Rose model routing automatically
-        result = await call_llm(
-            messages=messages,
-            model=model,
-            temperature=0.3,
-            max_tokens=200,  # Brief summary only needs ~50-100 tokens
-            claude_token=claude_token,
-            claude_token_source=claude_token_source,
-            claude_token_pool_id=claude_token_pool_id,
-            claude_token_user_id=claude_token_user_id,
-            gpt_token=gpt_token,
-            gpt_account_id=gpt_account_id,
-            gpt_token_source=gpt_token_source,
-            gpt_token_pool_id=gpt_token_pool_id,
-            gpt_token_user_id=gpt_token_user_id,
-            compute_token_lineage_key=compute_token_lineage_key,
-            compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
-            skip_cache_write=True,  # One-shot call — no cache reuse
-            call_site="completion_summary",
-            agent_id=agent_id,
-            user_id=claude_token_user_id or gpt_token_user_id,
-            local_context=context,
-        )
+        # Reasoning models count hidden thinking against max_tokens. A 200-token
+        # ceiling produced 196 reasoning tokens + the visible fragment
+        # "Your order for a 1" in production. Give the short answer ample room,
+        # and retry once when the provider explicitly reports truncation.
+        result: Dict[str, Any] = {}
+        aggregate_usage: Dict[str, Any] = {}
+        for max_tokens in (1024, 4096):
+            result = await call_llm(
+                messages=messages,
+                model=model,
+                temperature=0.3,
+                max_tokens=max_tokens,
+                claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                claude_token_user_id=claude_token_user_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=gpt_token_user_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                skip_cache_write=True,  # One-shot call — no cache reuse
+                call_site="completion_summary",
+                agent_id=agent_id,
+                user_id=claude_token_user_id or gpt_token_user_id,
+                local_context=context,
+            )
+            attempt_usage = result.get("usage", {})
+            if isinstance(attempt_usage, dict):
+                for key, value in attempt_usage.items():
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        aggregate_usage[key] = aggregate_usage.get(key, 0) + value
+                    else:
+                        aggregate_usage[key] = value
+            if result.get("finish_reason") != "length":
+                break
+            logger.warning(
+                "Completion summary hit max_tokens; retrying",
+                agent_id=agent_id,
+                max_tokens=max_tokens,
+                visible_chars=len(result.get("content", "")),
+            )
 
-        summary = result.get("content", "")
-        usage = result.get("usage", {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0})
+        if result.get("finish_reason") == "length":
+            # Never persist a known partial sentence. The verified values remain
+            # visible in the output card/SMS even if both prose attempts truncate.
+            summary = "The task completed successfully; verified results are included below."
+        else:
+            summary = result.get("content", "")
+        usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            **aggregate_usage,
+        }
 
         # Count this agent's tool usage and merge with sub-agent counts
         # (returned as structured data, not appended as text)

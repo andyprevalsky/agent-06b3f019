@@ -92,7 +92,12 @@ from benchmarks.timeout_history import (
 from benchmarks.timeout_history import (
     summary as _history_summary,
 )
-from benchmarks.world_model_harness import evaluate_archive_with_world_model, update_world_model_for_simulation
+from benchmarks.world_model_harness import (
+    archive_artifact_paths,
+    evaluate_archive_with_world_model,
+    read_archive_json,
+    update_world_model_for_simulation,
+)
 from domains.set_plan.config import (
     PLANNER_ACTIVITY_MAX_ATTEMPTS,
     PLANNER_ACTIVITY_TIMEOUT_SECONDS,
@@ -6676,6 +6681,50 @@ def _tool_runtime_failures(data: dict) -> list[str]:
     return failures
 
 
+def _final_completion_summaries(data: dict) -> list[dict]:
+    """Return durable root completion cards in transcript order."""
+    summaries: list[dict] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        completion = metadata.get("completionSummary")
+        if (
+            metadata.get("toolName") == "completion_summary"
+            and str(metadata.get("toolStatus") or "").upper() == "FINISHED"
+            and isinstance(completion, dict)
+        ):
+            summaries.append(completion)
+    return summaries
+
+
+async def _hydrate_completion_sms_events(data: dict) -> None:
+    """Attach durable completion-SMS provider receipts for static evaluators."""
+    agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+    root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+    benchmark_state = data.setdefault("_benchmark", {})
+    if not root_agent_id:
+        benchmark_state["completion_sms_events"] = []
+        benchmark_state["completion_sms_evidence_error"] = "root agent id is missing"
+        return
+
+    prefix = "provider/sms/notify/completion-"
+    suffix = ".json.gz.enc"
+    try:
+        paths = await asyncio.to_thread(archive_artifact_paths, root_agent_id)
+        completion_paths = sorted(path for path in paths if path.startswith(prefix) and path.endswith(suffix))
+        events: list[dict] = []
+        for path in completion_paths:
+            receipt = await asyncio.to_thread(read_archive_json, root_agent_id, path)
+            events.append({"path": path, **receipt})
+        benchmark_state["completion_sms_events"] = events
+    except Exception as exc:
+        benchmark_state["completion_sms_events"] = []
+        benchmark_state["completion_sms_evidence_error"] = str(exc)[:300]
+
+
 _APPROVAL_CLOCK_RE = re.compile(
     r"(?:\b(?:[01]?\d|2[0-3]):[0-5]\d\b|\b(?:1[0-2]|[1-9])(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b)",
     re.IGNORECASE,
@@ -6722,6 +6771,83 @@ def _run_declared_static_check(evaluator: dict, data: dict) -> tuple[bool, str]:
             failures = _tool_runtime_failures(data)
             if failures:
                 return False, f"Observed tool failure: {failures[0]}"
+            continue
+        if check_type == "completion_summary_length":
+            summaries = _final_completion_summaries(data)
+            if not summaries:
+                return False, "No finished completion summary was observed"
+            minimum = int(check.get("min_chars", 1))
+            summary = str(summaries[-1].get("summary") or "").strip()
+            if len(summary) < minimum:
+                return (
+                    False,
+                    f"Completion summary was {len(summary)} characters; expected at least {minimum}",
+                )
+            continue
+        if check_type == "completion_sms_event":
+            events = benchmark_state.get("completion_sms_events") or []
+            expected_count = int(check.get("expected_count", 1))
+            if len(events) != expected_count:
+                evidence_error = benchmark_state.get("completion_sms_evidence_error")
+                suffix = f" ({evidence_error})" if evidence_error else ""
+                return (
+                    False,
+                    f"Observed {len(events)} completion SMS events; expected exactly {expected_count}{suffix}",
+                )
+
+            agent = data.get("agent") if isinstance(data.get("agent"), dict) else {}
+            root_agent_id = str(agent.get("agent_id") or agent.get("agentId") or agent.get("id") or "").strip()
+            allowed_skips = {str(reason) for reason in check.get("allow_skipped_reasons", [])}
+            summaries = _final_completion_summaries(data)
+            final_completion = summaries[-1] if summaries else {}
+            for event in events:
+                request = event.get("request") if isinstance(event.get("request"), dict) else {}
+                response = event.get("response") if isinstance(event.get("response"), dict) else {}
+                payload = request.get("payload") if isinstance(request.get("payload"), dict) else {}
+                status_code = int(event.get("status_code") or 0)
+                if request.get("event_type") != "completion":
+                    return False, "Completion SMS receipt had the wrong event type"
+                if not root_agent_id or request.get("agent_id") != root_agent_id:
+                    return False, "Completion SMS was not emitted by the root agent"
+                if not 200 <= status_code < 300 or response.get("success") is not True:
+                    return False, "Completion SMS provider receipt was not successful"
+                if response.get("skipped") is True and response.get("reason") not in allowed_skips:
+                    return False, f"Completion SMS was unexpectedly skipped: {response.get('reason')}"
+                if check.get("require_output_payload") is True and (
+                    payload.get("summary") != final_completion.get("summary")
+                    or payload.get("outputs") != final_completion.get("outputs")
+                ):
+                    return False, "Completion SMS payload did not match the final summary and outputs"
+                if check.get("require_rendered_message") is True:
+                    message = response.get("messagePreview")
+                    if not isinstance(message, str) or not message.strip():
+                        return False, "Completion SMS receipt did not include a rendered message"
+                    lines = message.splitlines()
+                    max_lines = int(check.get("max_lines", 8))
+                    if len(lines) > max_lines:
+                        return False, f"Completion SMS rendered {len(lines)} lines; expected at most {max_lines}"
+                    expected_summary = " ".join(str(final_completion.get("summary") or "").split())
+                    if not lines or lines[0] != f"Done: {expected_summary}":
+                        return False, "Completion SMS rendered the wrong summary"
+                    if not lines[-1].startswith("View agent:") or f"agent-id={root_agent_id}" not in lines[-1]:
+                        return False, "Completion SMS rendered the wrong agent link"
+                    outputs = final_completion.get("outputs")
+                    if not isinstance(outputs, list) or not outputs:
+                        return False, "Completion SMS had no structured outputs to render"
+                    output_lines = lines[1:-1]
+                    expected_output_count = min(len(outputs), max_lines - 2)
+                    if len(output_lines) != expected_output_count:
+                        return False, "Completion SMS rendered the wrong number of structured outputs"
+                    for output, rendered in zip(outputs[:expected_output_count], output_lines):
+                        label = str(output.get("label") or output.get("key") or "").strip()
+                        rendered_label, separator, rendered_value = rendered.partition(": ")
+                        if (
+                            not label
+                            or rendered_label.casefold() != label.casefold()
+                            or separator != ": "
+                            or not rendered_value
+                        ):
+                            return False, "Completion SMS did not render its structured output values"
             continue
         if check_type == "browser_agent_session_count":
             session_count, _ = _browser_agent_runtime_facts(data)
@@ -6795,6 +6921,14 @@ async def _run_declared_evaluators(
     """Run required catalog evaluators; unsupported/erroring evaluators fail closed."""
     if not task.enforce_declared_evaluators:
         return True, None, []
+
+    if any(
+        check.get("type") == "completion_sms_event"
+        for evaluator in task.evaluators
+        if evaluator.get("method") == "static_check"
+        for check in evaluator.get("checks", [])
+    ):
+        await _hydrate_completion_sms_events(data)
 
     results: list[dict] = []
     for evaluator in task.evaluators:

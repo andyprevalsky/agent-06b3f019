@@ -699,11 +699,10 @@ def test_check_progress_is_canonical_verifier_entrypoint():
 # ============================================================================
 # 6. Browser-use catalog ↔ v3 prompt are in sync; envelope is {thinking, action}
 # ----------------------------------------------------------------------------
-# WHY: BROWSER_USE_TOOLS is the source of truth in providers/rose/browser_use.py.
-# The v3 system prompt (domains/spawn_browser_agent_v3/service.py) renders
-# actions from BROWSER_USE_TOOLS filtered by AVAILABLE_ACTIONS. Any action
-# the v3 prompt advertises must exist in BROWSER_USE_TOOLS, or the model will
-# hallucinate a tool the executor can't dispatch. Conversely, the model's
+# WHY: AVAILABLE_ACTIONS comes from the canonical Pydantic tool registry while
+# BROWSER_USE_TOOLS carries rich provider-facing descriptions. Every registered
+# action needs description metadata so the model is not given a valid schema
+# with an empty or misleading explanation. Conversely, the model's
 # JSON envelope is `{thinking, action}` only — the legacy fields
 # (evaluation_previous_goal, memory, next_goal) inflate the response and were
 # dropped.
@@ -1642,6 +1641,27 @@ def test_planner_depends_on_schema_matches_prompt_contract():
     assert depends_on["description"] == PLANNER_TASK_DEPENDS_ON_DESCRIPTION
 
 
+def test_planner_routes_retrieval_before_stateful_execution():
+    """Planner and runtime tool descriptions share the explore-before-browser contract."""
+    from tools.prompts.spawn_agent import PROMPT as SPAWN_AGENT_PROMPT
+    from utils.prompts import build_planner_system_prompt
+
+    prompt = build_planner_system_prompt(SPAWN_AGENT_PROMPT)
+    assert (
+        "Plan information retrieval and discovery in spawn_explore_agent before dependent execution."
+        in prompt
+    )
+    assert "spawn_browser_agent may read pages only while executing a known stateful trajectory" in prompt
+    assert (
+        "Step 0 spawn_explore_agent retrieves the public target or route; "
+        "Step 1 spawn_browser_agent executes the complete stateful flow"
+        in prompt
+    )
+    assert "explore: The agent for information retrieval and discovery." in prompt
+    assert "Public research, target discovery, and route discovery belong in explore first." in prompt
+    assert "entry_point_source" not in prompt
+
+
 # ============================================================================
 # 17. Tool prompts open with a declarative third-person sentence
 # ----------------------------------------------------------------------------
@@ -1968,6 +1988,10 @@ async def run_all_tests():
     r.record(
         "planner_depends_on_schema_matches_prompt_contract",
         test_planner_depends_on_schema_matches_prompt_contract,
+    )
+    r.record(
+        "planner_routes_retrieval_before_stateful_execution",
+        test_planner_routes_retrieval_before_stateful_execution,
     )
 
     # 19. Tool prompt length stays within budget

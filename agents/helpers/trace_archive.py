@@ -680,6 +680,7 @@ _ARCHIVE_EXECUTOR = ThreadPoolExecutor(
     thread_name_prefix="trace-archive",
 )
 _ARCHIVE_SLOTS = threading.BoundedSemaphore(int(os.environ.get("TRACE_ARCHIVE_MAX_IN_FLIGHT", "64") or "64"))
+_ARCHIVE_DROPPED_JOBS = 0
 
 # Artifacts ship to the backend as base64-in-JSON; a single oversized body (e.g.
 # a browser session video) freezes the Node event loop on parse/GC for minutes
@@ -733,13 +734,29 @@ def _submit_archive_job(
     body_factory: Callable[[], bytes],
     compress: Optional[bool],
 ) -> Optional[dict[str, Any]]:
+    global _ARCHIVE_DROPPED_JOBS
+
     safe_root = _safe_segment(root_agent_id)
     safe_path = _safe_path(path)
     if not safe_path:
         return None
 
     drain_backend_outbox_after_success = _use_r2_archive()
-    _ARCHIVE_SLOTS.acquire()
+    # Best-effort telemetry must never apply blocking backpressure to the agent
+    # event loop. At 65+ concurrent jobs the old blocking acquire starved the
+    # loop, delaying a 45s recording timeout until 142s and preventing the FE
+    # recording pointer from being saved. Keep memory bounded and drop overflow.
+    if not _ARCHIVE_SLOTS.acquire(blocking=False):
+        _ARCHIVE_DROPPED_JOBS += 1
+        drop_count = _ARCHIVE_DROPPED_JOBS
+        if drop_count == 1 or drop_count & (drop_count - 1) == 0:
+            logger.warning(
+                "trace_archive.queue_saturated",
+                root_agent_id=safe_root,
+                path=safe_path,
+                dropped_jobs=drop_count,
+            )
+        return None
 
     def _job() -> None:
         try:

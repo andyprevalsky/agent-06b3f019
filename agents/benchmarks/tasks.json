@@ -4168,6 +4168,30 @@
     },
     "evaluators": [
       {
+        "id": "blue_bottle_completion_delivery",
+        "method": "static_check",
+        "criteria": [
+          "The final output summary is longer than 80 characters",
+          "Exactly one root completion SMS event carries the final summary and structured outputs"
+        ],
+        "checks": [
+          {
+            "type": "completion_summary_length",
+            "min_chars": 81
+          },
+          {
+            "type": "completion_sms_event",
+            "expected_count": 1,
+            "allow_skipped_reasons": [
+              "benchmark_agent"
+            ],
+            "require_output_payload": true,
+            "require_rendered_message": true,
+            "max_lines": 8
+          }
+        ]
+      },
+      {
         "id": "blue_bottle_recovery_payment_boundary",
         "method": "single_turn_llm_judge",
         "judge_prompt": "Grade the Blue Bottle browser run using grounded browser tool results. PASS only if exactly one cloud browser task is used; the configured item is a 16oz KSE Shakerato with Vanilla Bean and Oat; the run reaches checkout controls where payment would be required; it reports subtotal, final total, and pickup timing/availability; any persistent challenge is handled by recover_from_challenge only after the automatic solver; authentication/personalization remains usable; and no payment is submitted and no order is placed. The recovery tool may be unnecessary if the cached user-default configuration opens cleanly. Fail for local Chrome, rotate_ip, user CAPTCHA assistance, a second browser task, fabricated checkout facts, payment submission, or an order placement.",
