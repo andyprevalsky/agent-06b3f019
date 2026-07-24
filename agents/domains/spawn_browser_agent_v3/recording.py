@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -34,6 +35,40 @@ logger = structlog.get_logger()
 FALSE_VALUES = {"0", "false", "no", "off", "disabled"}
 TRUE_VALUES = {"1", "true", "yes", "on", "enabled"}
 STATIC_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+_BACKGROUND_RECORDING_ARCHIVE_TASKS: set[asyncio.Task[Any]] = set()
+_BACKGROUND_RECORDING_ARCHIVE_SLOTS = threading.BoundedSemaphore(4)
+
+
+def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool) -> bool:
+    """Bound recording archive work without queueing thousands of filesystem walks."""
+    if not _BACKGROUND_RECORDING_ARCHIVE_SLOTS.acquire(blocking=False):
+        logger.warning(
+            "Browser recording archive queue saturated",
+            agent_id=recorder.agent_id,
+            task_id=recorder.task_id,
+        )
+        return False
+
+    async def _run() -> None:
+        try:
+            await recorder._archive_recording_artifacts()
+        finally:
+            _BACKGROUND_RECORDING_ARCHIVE_SLOTS.release()
+
+    task = asyncio.create_task(_run())
+    _BACKGROUND_RECORDING_ARCHIVE_TASKS.add(task)
+
+    def _finished(completed: asyncio.Task[Any]) -> None:
+        _BACKGROUND_RECORDING_ARCHIVE_TASKS.discard(completed)
+        if completed.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            completed.result()
+        if cleanup_after:
+            recorder.cleanup_local_artifacts(persisted=True)
+
+    task.add_done_callback(_finished)
+    return True
 
 
 def steel_api_url(path: str) -> str:
@@ -407,7 +442,12 @@ class SimulatedBrowserRecorder:
             }
         )
 
-    async def close(self, *, include_steel_media: bool = False) -> Optional[Path]:
+    async def close(
+        self,
+        *,
+        include_steel_media: bool = False,
+        archive_artifacts: bool = True,
+    ) -> Optional[Path]:
         del include_steel_media
         if not self.frames:
             return None
@@ -431,7 +471,8 @@ class SimulatedBrowserRecorder:
             encoding="utf-8",
         )
         html_path.write_bytes(self.export_inline_html_bytes() or b"")
-        await self._archive_recording_artifacts()
+        if archive_artifacts:
+            await self._archive_recording_artifacts()
         return html_path
 
     def export_inline_html_bytes(self) -> Optional[bytes]:
@@ -454,6 +495,9 @@ class SimulatedBrowserRecorder:
         if not archive_enabled():
             return
         root_agent_id = current_root_agent_id() or self.agent_id
+        await asyncio.to_thread(self._archive_recording_artifacts_sync, root_agent_id)
+
+    def _archive_recording_artifacts_sync(self, root_agent_id: str) -> None:
         for file_path in self.output_dir.rglob("*"):
             if file_path.is_file():
                 archive_bytes(
@@ -462,6 +506,9 @@ class SimulatedBrowserRecorder:
                     body=file_path.read_bytes(),
                     content_type=mimetypes.guess_type(file_path.name)[0] or "application/octet-stream",
                 )
+
+    def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
+        return _schedule_background_recording_archive(self, cleanup_after=cleanup_after)
 
     def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
         if (persisted or force) and cleanup_local_recording_artifacts_enabled():
@@ -1082,7 +1129,12 @@ class BrowserAgentRecorder:
             )
             return None
 
-    async def close(self, *, include_steel_media: bool = True) -> Optional[Path]:
+    async def close(
+        self,
+        *,
+        include_steel_media: bool = True,
+        archive_artifacts: bool = True,
+    ) -> Optional[Path]:
         # Kernel replay mode never produces a local HTML player; finalization goes
         # through stop_kernel_replay() + recording_view_url instead. Guard here so a
         # generic close() caller can't trigger screenshot/Steel finalization.
@@ -1158,7 +1210,8 @@ class BrowserAgentRecorder:
             source_frame_count=source_frame_count,
             recording_source=recording_source,
         )
-        await self._archive_recording_artifacts()
+        if archive_artifacts:
+            await self._archive_recording_artifacts()
         return html_path
 
     async def _write_final_dom_artifact(self) -> Optional[Path]:
@@ -1181,8 +1234,11 @@ class BrowserAgentRecorder:
     async def _archive_recording_artifacts(self) -> None:
         if not archive_enabled():
             return
+        archive_root_agent_id = current_root_agent_id() or self.agent_id
+        await asyncio.to_thread(self._archive_recording_artifacts_sync, archive_root_agent_id)
+
+    def _archive_recording_artifacts_sync(self, archive_root_agent_id: str) -> None:
         try:
-            archive_root_agent_id = current_root_agent_id() or self.agent_id
             for file_path in self.output_dir.rglob("*"):
                 if not file_path.is_file():
                     continue
@@ -1203,6 +1259,10 @@ class BrowserAgentRecorder:
                 task_id=self.task_id,
                 error=str(exc)[:300],
             )
+
+    def archive_recording_artifacts_in_background(self, *, cleanup_after: bool = False) -> bool:
+        """Copy trace artifacts only after the FE pointer is durable."""
+        return _schedule_background_recording_archive(self, cleanup_after=cleanup_after)
 
     def cleanup_local_artifacts(self, *, persisted: bool = False, force: bool = False) -> None:
         if not persisted and not force:

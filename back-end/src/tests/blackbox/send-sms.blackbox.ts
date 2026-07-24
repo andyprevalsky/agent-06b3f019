@@ -27,14 +27,15 @@
  *   - observability: covered by the runner's manifest and artifact directory
  *
  * Invariants not applicable:
- *   - idempotency/retry: fire-and-forget SMS send; no idempotency key
+ *   - idempotency/retry: repeated completion events send at most one SMS per agent
  *   - read-after-write: no read endpoints; responses are immediate
  *   - state transition: only /notify agent deletion check; tested via contract tests
  *   - ordering/pagination: no list endpoints
  *   - atomicity: no multi-step transactions (shortcode + SMS are independent)
  *   - referential integrity: SmsShortcode has no FKs; agent lookup is a soft check
  *   - event/job cardinality: no async events emitted by these endpoints
- *   - duplication prevention: SMS sends are intentionally non-deduplicated
+ *   - duplication prevention: completion notifications are deduplicated per agent;
+ *     other lifecycle event types remain intentionally repeatable
  *   - tenant isolation: all endpoints are internal (API key auth), not user-scoped
  *   - time/clock: no timestamps in response
  *   - call ordering: each endpoint makes at most 1 outbound Surge call
@@ -946,24 +947,39 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
   const agent = await createNotifyAgent('boundary completion agent');
   const archiveBefore = new Set(await listSmsArchivePaths(agent.id));
   try {
-    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
-      method: 'POST',
-      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
-      body: JSON.stringify({
-        user_id: TEST_USER_ID,
-        event_type: 'completion',
-        agent_id: agent.id,
-        payload: { summary: 'boundary test completed' },
-      }),
-    });
+    const requestBody = {
+      user_id: TEST_USER_ID,
+      event_type: 'completion',
+      agent_id: agent.id,
+      payload: {
+        summary: 'boundary test completed',
+        outputs: [
+          { key: 'pickup_time', label: 'Pickup Time', value: '7:41 AM' },
+          { key: 'order_total_usd', label: 'Order Total', value: 11.25 },
+          { key: 'order_confirmation_id', label: 'Confirmation', value: 'order-123' },
+          { key: 'merchant', value: 'Blue Bottle Coffee' },
+          { key: 'location', value: 'Ferry Building' },
+          { key: 'size', value: '16oz' },
+          { key: 'milk', value: 'oat' },
+          { key: 'flavor', value: 'vanilla bean' },
+        ],
+      },
+    };
+    const sendCompletion = () =>
+      request(`${BASE_URL}/api/send-sms/notify`, {
+        method: 'POST',
+        headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+        body: JSON.stringify(requestBody),
+      });
+
+    const res = await sendCompletion();
     assertStatus(res.status, 200, res.data);
+    const duplicate = await sendCompletion();
+    assertStatus(duplicate.status, 200, duplicate.data);
+
     const calls = await readCapturesForToken(token);
     const surgeCalls = filterSurgeCalls(calls, 'boundary test completed');
-    if (surgeCalls.length === 0) {
-      console.log('    [skipped] No Surge calls -- Surge may not be configured');
-      return;
-    }
-    assert(surgeCalls.length === 1, `Expected 1 Surge call, got ${surgeCalls.length}`);
+    assert(surgeCalls.length === 1, `Expected 1 idempotent Surge call, got ${surgeCalls.length}`);
     const call = surgeCalls[0];
     assert(
       call.url.startsWith('https://api.surge.app/accounts/') && call.url.endsWith('/messages'),
@@ -981,6 +997,23 @@ async function testBoundary_notifyCompletionCallsSurgeApi() {
     assert(
       body.body.includes('boundary test completed'),
       `Expected completion summary in SMS, got: ${body.body.substring(0, 100)}`
+    );
+    assert(
+      body.body.includes('Pickup Time: 7:41 AM'),
+      `Expected output schema values: ${body.body}`
+    );
+    assert(
+      body.body.includes('Order Total: 11.25'),
+      `Expected schema-derived output label: ${body.body}`
+    );
+    assert(body.body.includes('Size: 16oz'), `Expected sixth output line: ${body.body}`);
+    assert(
+      !body.body.includes('Milk: oat'),
+      `Expected outputs after sixth line to be truncated: ${body.body}`
+    );
+    assert(
+      body.body.split('\n').length <= 8,
+      `Expected completion SMS to be at most 8 lines, got: ${body.body}`
     );
     assertNoRoutingLeaks(body.body, agent.id);
     assertAgentLinkPresent(body.body, agent.id);
@@ -1383,7 +1416,7 @@ async function testBoundary_notifyWriteLockPaymentCardEnriched() {
  * Benchmark/eval runs create real root agents under the operator's own phone.
  * The dispatcher must suppress ALL lifecycle SMS for them (Agent.isBenchmark)
  * so relaxing the workflow-side source guards never texts the operator during
- * benchmark runs.
+ * benchmark runs. Completion responses may include a rendered preview for evals.
  */
 async function testBoundary_notifyAgentStartedSuppressedForBenchmark() {
   const token = captureToken('notify-started-benchmark');
@@ -1425,6 +1458,71 @@ async function testBoundary_notifyAgentStartedSuppressedForBenchmark() {
       surgeCalls.length === 0,
       `Expected NO Surge call for benchmark agent, got ${surgeCalls.length}`
     );
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agent.id } });
+  }
+}
+
+async function testBoundary_notifyCompletionPreviewForBenchmark() {
+  const token = captureToken('notify-completion-benchmark');
+  const summary = 'Blue Bottle order was completed\nwith the requested pickup configuration.';
+  const outputs = Array.from({ length: 7 }, (_, index) => ({
+    key: `output_${String(index + 1)}`,
+    label: `Output ${String(index + 1)}`,
+    value: `value ${String(index + 1)}`,
+  }));
+  const agent = await prisma.agent.create({
+    data: {
+      userId: TEST_USER_ID,
+      goal: 'benchmark completion preview',
+      status: 'ACTIVE',
+      source: 'WEB',
+      progress: 0.25,
+      isBenchmark: true,
+    },
+  });
+  try {
+    const res = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { ...apiKeyHeaders(), 'X-Capture-Token': token },
+      body: JSON.stringify({
+        user_id: TEST_USER_ID,
+        event_type: 'completion',
+        agent_id: agent.id,
+        payload: { summary, outputs },
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+    const result = res.data as {
+      skipped?: boolean;
+      reason?: string;
+      messagePreview?: string;
+    };
+    assert(result.skipped === true, `Expected benchmark completion to be skipped`);
+    assert(result.reason === 'benchmark_agent', `Expected benchmark_agent suppression`);
+    const lines = result.messagePreview?.split('\n') ?? [];
+    assert(lines.length === 8, `Expected an 8-line completion preview, got ${lines.length}`);
+    assert(
+      lines[0] === 'Done: Blue Bottle order was completed with the requested pickup configuration.',
+      `Expected normalized completion summary, got: ${lines[0] ?? ''}`
+    );
+    for (let index = 1; index <= 6; index += 1) {
+      assert(
+        lines[index] === `Output ${String(index)}: value ${String(index)}`,
+        `Expected output ${String(index)} in preview, got: ${lines[index] ?? ''}`
+      );
+    }
+    assert(
+      lines[7]?.includes(`agent-id=${agent.id}`) === true,
+      `Expected root agent link in completion preview`
+    );
+    assert(
+      !result.messagePreview?.includes('Output 7:'),
+      `Expected completion preview to truncate outputs at 8 total lines`
+    );
+    const calls = await readCapturesForToken(token);
+    const surgeCalls = filterSurgeCalls(calls, summary);
+    assert(surgeCalls.length === 0, `Expected no Surge call for benchmark completion`);
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
@@ -1730,6 +1828,10 @@ async function runAll() {
         {
           name: 'notify agent_started suppressed for benchmark agent',
           fn: testBoundary_notifyAgentStartedSuppressedForBenchmark,
+        },
+        {
+          name: 'notify completion renders benchmark preview without outbound SMS',
+          fn: testBoundary_notifyCompletionPreviewForBenchmark,
         },
       ],
     });

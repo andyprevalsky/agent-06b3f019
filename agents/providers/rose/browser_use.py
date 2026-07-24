@@ -5,9 +5,10 @@ and rose-1-ultra (see `pools.py:rose-1-browser-use`). What's specific:
 
   - The user message bundles a full browser snapshot (URL, viewport,
     DOM tree, action history, optional screenshot).
-  - Available browser actions are passed as provider tools built from
-    `BROWSER_USE_TOOLS`, then the first native tool call is normalized into
-    the `UnifiedAction` shape the browser handler expects.
+  - Available browser actions are passed as provider tools generated from the
+    Pydantic models in `BROWSER_TOOL_MODELS`, then the first native tool call
+    is validated and normalized into the `UnifiedAction` shape the browser
+    handler expects.
   - Legacy JSON text replies are still normalized defensively for old dumps
     and mocked streams.
 """
@@ -21,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from providers.rose.schema import build_anthropic_tools_from_response_model
 from tools.prompts import attempt_completion_prompt
 
 # Single source of truth for verifier rules. The browser prompt embeds the
@@ -33,7 +35,10 @@ logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
-# Tool catalog (mirrors research/.../browser-use-native.ts:BROWSER_USE_TOOLS)
+# Rich tool-description metadata retained under the historical public name.
+# Argument schemas are not read from ``params`` below: provider schemas and
+# runtime validation both come from browser_tools.schemas.BROWSER_TOOL_MODELS.
+# The legacy params remain temporarily for callers that inspect this catalog.
 # ---------------------------------------------------------------------------
 
 BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
@@ -43,8 +48,8 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "navback": {"description": "Go back to the previous page in browser history", "params": {}},
     "wait": {
-        "description": "Wait for x seconds (no enforced cap; use sparingly).",
-        "params": {"seconds": {"type": "integer", "description": "Seconds to wait (default: 3)"}},
+        "description": "Wait for a bounded number of milliseconds; use sparingly.",
+        "params": {"time_ms": {"type": "integer", "description": "Milliseconds to wait (maximum 60000)"}},
     },
     "click": {
         "description": "Click element by index",
@@ -80,19 +85,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "scroll": {
         "description": (
-            "Scroll by pages (approximate; one 'page' is a fixed pixel amount per call, NOT a true viewport-aware page). "
-            "Use down=True for scroll down, down=False for scroll up. Use index for scroll containers. "
-            "For deeply long pages, you may need multiple scroll calls; pages=10 is approximate and may not actually reach the bottom/top in one call."
+            "Scroll up or down by a pixel amount. Use index for a specific scroll container. "
+            "About 600 pixels is roughly one page; deeply long pages may require multiple calls."
         ),
         "params": {
-            "down": {
-                "type": "boolean",
-                "description": "True=scroll down, False=scroll up (default: true)",
+            "direction": {
+                "type": "string",
+                "description": "Direction to scroll: up or down",
                 "required": True,
             },
-            "pages": {
-                "type": "number",
-                "description": "0.5=half page, 1=full page, 10=approximately to bottom/top (default: 1.0). Approximate; may need multiple calls.",
+            "amount": {
+                "type": "integer",
+                "description": "Number of pixels to scroll (default: 300)",
             },
             "index": {"type": "integer", "description": "Optional element index to scroll within specific container"},
         },
@@ -427,13 +431,12 @@ def filter_browser_use_actions_for_state(
 def generate_tool_descriptions(available_actions: List[str]) -> str:
     """Produce the system-prompt action list filtered by `available_actions`."""
     descriptions: List[str] = []
-    for action_name in available_actions:
-        tool = BROWSER_USE_TOOLS.get(action_name)
-        if not tool:
-            continue
+    for tool in build_browser_use_tools(available_actions):
+        action_name = tool["name"]
         param_parts: List[str] = []
-        for param_name, info in tool["params"].items():
-            part = f"{param_name}={info['type']}"
+        for param_name, info in tool["input_schema"]["properties"].items():
+            param_type = info.get("type", "value")
+            part = f"{param_name}={param_type}"
             desc = info.get("description")
             if desc:
                 part += f" ({desc})"
@@ -443,43 +446,57 @@ def generate_tool_descriptions(available_actions: List[str]) -> str:
     return "\n".join(descriptions)
 
 
-def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]]:
-    """Build provider-tool schemas from `BROWSER_USE_TOOLS`.
+def _collapse_nullable_schema(value: Any) -> Any:
+    """Remove Pydantic's null unions from optional provider-tool fields.
 
-    The catalog remains the single source of truth for tool descriptions and
-    argument descriptions. This helper only reshapes those strings into native
-    tool schemas.
+    Optional tool arguments are represented by omission. Sending
+    ``anyOf: [T, null]`` needlessly enlarges provider grammars and historically
+    broke the write-lock schema. Runtime Pydantic validation remains the
+    authoritative semantic boundary.
     """
+    if isinstance(value, list):
+        return [_collapse_nullable_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    transformed = {key: _collapse_nullable_schema(item) for key, item in value.items()}
+    any_of = transformed.get("anyOf")
+    if isinstance(any_of, list):
+        non_null = [item for item in any_of if not (isinstance(item, dict) and item.get("type") == "null")]
+        if len(non_null) == 1 and len(non_null) != len(any_of):
+            replacement = dict(non_null[0])
+            for key, item in transformed.items():
+                if key not in {"anyOf", "default"}:
+                    replacement.setdefault(key, item)
+            return replacement
+    return transformed
+
+
+def build_browser_use_tools(available_actions: List[str]) -> List[Dict[str, Any]]:
+    """Build provider tools from the same Pydantic models used at runtime."""
+    # Lazy import avoids providers.rose -> browser_tools.__init__ -> helpers ->
+    # providers.rose during worker startup.
+    from browser_tools.schemas import BROWSER_TOOL_MODELS, create_browser_agent_action_model
+
+    known_actions = [name for name in available_actions if name in BROWSER_TOOL_MODELS]
+    if not known_actions:
+        return []
+
+    action_model = create_browser_agent_action_model(known_actions)
+    generated = build_anthropic_tools_from_response_model(action_model) or []
+    by_name = {tool["name"]: tool for tool in generated}
+
     tools: List[Dict[str, Any]] = []
-    for action_name in available_actions:
-        tool = BROWSER_USE_TOOLS.get(action_name)
-        if not tool:
-            continue
-
-        properties: Dict[str, Any] = {}
-        required: List[str] = []
-        for param_name, info in tool["params"].items():
-            prop: Dict[str, Any] = {"type": info["type"]}
-            description = info.get("description")
-            if description:
-                prop["description"] = description
-            for schema_key in ("items", "properties", "additionalProperties", "enum"):
-                if schema_key in info:
-                    prop[schema_key] = info[schema_key]
-            nested_required = info.get("required")
-            if isinstance(nested_required, list):
-                prop["required"] = nested_required
-            properties[param_name] = prop
-            if info.get("required") is True:
-                required.append(param_name)
-
-        input_schema = {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-            "additionalProperties": False,
-        }
-        tools.append({"name": action_name, "description": tool["description"], "input_schema": input_schema})
+    for action_name in known_actions:
+        generated_tool = by_name[action_name]
+        prompt_metadata = BROWSER_USE_TOOLS.get(action_name) or {}
+        tools.append(
+            {
+                "name": action_name,
+                "description": prompt_metadata.get("description") or generated_tool["description"],
+                "input_schema": _collapse_nullable_schema(generated_tool["input_schema"]),
+            }
+        )
     return tools
 
 
@@ -519,7 +536,7 @@ Each turn you will receive a snapshot of the current browser environment which i
   If a relevant [index] exists, call `click` or `input_text` with that index.
 - If expected elements are missing, try scrolling or waiting
 - By default, only elements in the visible viewport are listed; use scroll if content is offscreen
-- You can scroll by pages using the pages parameter (0.5 for half page, 2.0 for two pages)
+- Scroll with direction and a pixel amount; about 600 pixels is roughly one page
 - If you fill an input field and the action is interrupted, suggestions may have appeared
 
 # Output Format
@@ -799,8 +816,9 @@ def normalize_browser_use_tool_call(
     tool_call: Dict[str, Any],
     *,
     thinking: Optional[str] = None,
+    validation_context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Convert one provider-native tool call into the UnifiedAction shape."""
+    """Validate one provider-native tool call and return UnifiedAction."""
     name = tool_call.get("name")
     function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
     if not isinstance(name, str) or not name:
@@ -830,10 +848,22 @@ def normalize_browser_use_tool_call(
             f"normalize_browser_use_tool_call: unsupported arguments type for {name}: {type(raw_args).__name__}"
         )
 
+    normalized_name = _ACTION_NAME_MAP.get(name, name)
+    # Keep the same lazy-import boundary as build_browser_use_tools; importing
+    # browser_tools at providers.rose module load time creates a package cycle.
+    from browser_tools.schemas import BROWSER_TOOL_MODELS, validate_browser_tool_args
+
+    if normalized_name in BROWSER_TOOL_MODELS:
+        args = validate_browser_tool_args(
+            normalized_name,
+            args,
+            context=validation_context,
+        )
+
     return normalize_browser_use_response(
         {
             "thinking": thinking,
-            "action": [{name: args}],
+            "action": [{normalized_name: args}],
         }
     )
 
