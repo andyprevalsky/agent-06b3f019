@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+/* eslint-disable max-lines -- replacement accounting and generation-race cases share one DB harness */
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { Prisma } from '@prisma/client';

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir, hostname } from 'node:os';
 import path from 'node:path';
+import { retryWithBackoff } from '../retry';
 
 const DEFAULT_ADMIN_API_URL = 'https://api.agentcard.sh';
 const DEFAULT_SANDBOX_FLOAT_CENTS = 50_000;
@@ -159,6 +160,8 @@ interface CredentialRefreshLockOwner {
   nonce: string;
 }
 
+class CredentialRefreshLockBusyError extends Error {}
+
 export function agentCardCredentialRefreshLockBudgets(refreshTimeoutMs: number): {
   waitMs: number;
   staleMs: number;
@@ -257,34 +260,51 @@ async function withCredentialRefreshLock<T>(
 ): Promise<T> {
   const budgets = agentCardCredentialRefreshLockBudgets(refreshTimeoutMs);
   const deadline = Date.now() + budgets.waitMs;
+  const warmupDelays = [50, 100, 200, 400, 800];
+  const warmupMs = warmupDelays.reduce((total, delay) => total + delay, 0);
+  const fixedDelays = [
+    ...warmupDelays,
+    ...Array.from(
+      { length: Math.ceil(Math.max(0, budgets.waitMs - warmupMs) / 1_000) },
+      () => 1_000
+    ),
+  ];
   const owner: CredentialRefreshLockOwner = {
     pid: process.pid,
     hostname: hostname(),
     nonce: randomUUID(),
   };
-  while (true) {
-    try {
-      const lock = await open(lockPath, 'wx', 0o600);
+  return retryWithBackoff(
+    async () => {
       try {
-        await lock.writeFile(`${JSON.stringify(owner)}\n`);
-        await lock.sync();
-        return await operation();
-      } finally {
-        await lock.close();
-        await releaseCredentialRefreshLock(lockPath, owner);
+        const lock = await open(lockPath, 'wx', 0o600);
+        try {
+          await lock.writeFile(`${JSON.stringify(owner)}\n`);
+          await lock.sync();
+          return await operation();
+        } finally {
+          await lock.close();
+          await releaseCredentialRefreshLock(lockPath, owner);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        const lockStat = await stat(lockPath).catch(() => undefined);
+        if (lockStat !== undefined && lockStat.mtimeMs < Date.now() - budgets.staleMs) {
+          await recoverDeadCredentialRefreshLock(lockPath, budgets.staleMs);
+        }
+        if (Date.now() >= deadline) {
+          throw new Error('Timed out waiting for the AgentCard credential refresh lock');
+        }
+        throw new CredentialRefreshLockBusyError('AgentCard credential refresh lock is busy');
       }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      const lockStat = await stat(lockPath).catch(() => undefined);
-      if (lockStat !== undefined && lockStat.mtimeMs < Date.now() - budgets.staleMs) {
-        if (await recoverDeadCredentialRefreshLock(lockPath, budgets.staleMs)) continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error('Timed out waiting for the AgentCard credential refresh lock');
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
+    },
+    {
+      maxRetries: fixedDelays.length + 1,
+      fixedDelays,
+      isRetryable: (error) => error instanceof CredentialRefreshLockBusyError,
+      component: 'AgentCardCredentialRefresh',
     }
-  }
+  );
 }
 
 async function persistRefreshedCredentialConfig<T extends CredentialConfig>(

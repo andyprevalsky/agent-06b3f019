@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+/* eslint-disable max-lines -- cohesive provider matrix shares DB cleanup and cross-process credential fixtures */
 /**
  * Unit tests for the remaining AgentCard provider surfaces:
  *  - `benchmark-float.ts` — sandbox-float top-up math against an injected fetch.
