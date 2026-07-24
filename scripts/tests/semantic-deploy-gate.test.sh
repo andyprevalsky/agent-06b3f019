@@ -18,6 +18,10 @@ DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
 DEPLOY_STRUCTURAL_RUNNER="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
 DEPLOY_STRUCTURAL_RUNNER_TEST="$ROOT_DIR/scripts/tests/run-deploy-structural-gates.test.py"
 DEPLOY_LIVE_PROBE_RUNNER="$ROOT_DIR/scripts/run_deploy_live_probes.py"
+RUN_PREDEPLOY_LOCAL="$ROOT_DIR/scripts/run-predeploy-local"
+RUN_PREDEPLOY_CLOUD="$ROOT_DIR/scripts/run-predeploy-cloud"
+RUN_BENCH_CLOUD="$ROOT_DIR/scripts/run-bench-cloud"
+CLOUDBENCH_RUN="$ROOT_DIR/scripts/cloudbench-run.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 AGENTCARD_LIFECYCLE_SCRIPT="$ROOT_DIR/scripts/run-agentcard-lifecycle-task.sh"
@@ -44,7 +48,7 @@ require_count() {
   [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -86,7 +90,9 @@ require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
 LOCK_TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/semantic-lock.XXXXXX")
 trap 'rm -rf "$LOCK_TEST_DIR"' EXIT
 cp "$ROOT_DIR/front-end/package.json" "$FRONTEND_LOCK" "$LOCK_TEST_DIR/"
-npm ci --prefix "$LOCK_TEST_DIR" --dry-run --ignore-scripts --no-audit --no-fund >/dev/null ||
+# Match the workflow's working-directory install; npm --prefix can substitute the
+# temporary directory basename as the isolated root package identity.
+(cd "$LOCK_TEST_DIR" && npm ci --dry-run --ignore-scripts --no-audit --no-fund >/dev/null) ||
   fail "frontend lockfile must support a standalone clean install"
 if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
   fail "production semantic installs must not bypass the workspace lockfile"
@@ -160,6 +166,12 @@ require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" 'deploy stage-start runtime-blackbox' "/deploy must record the shared runtime-blackbox start boundary"
 require_text "$DEPLOY_COMMAND" 'deploy stage-finish runtime-blackbox' "/deploy must record the shared runtime-blackbox finish boundary"
+require_text "$DEPLOY_COMMAND" 'Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only' "/deploy must document the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "local predeploy smoke must wire the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_PREDEPLOY_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "cloud predeploy smoke must request the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_BENCH_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}' "cloud benchmark controller must pass the Claude Code cache-ratchet skip into benchmark machines"
+require_text "$CLOUDBENCH_RUN" 'STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")' "cloud benchmark stack must inherit the Claude Code cache-ratchet skip"
+require_text "$CLOUDBENCH_RUN" "export BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY='\$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY'" "cloud benchmark driver must pass the Claude Code cache-ratchet skip into run_benchmark.py"
 require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=4' "/deploy must cap backend blackbox workers when agents coverage also runs"
 require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=5' "/deploy must use the measured backend blackbox width in the all-repo batch"
 require_text "$DEPLOY_COMMAND" 'BACKEND_UNIT_WORKERS=2' "/deploy must retain the measured all-repo backend unit width"
