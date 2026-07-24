@@ -145,8 +145,9 @@ async function main(): Promise<void> {
       data: { status: 'COMPLETED', temporalWorkflowId: null },
     });
     try {
+      await assert.rejects(assertNoUnsafeOpenDescendantWorkflows(), /open descendant workflow/);
       await assert.rejects(
-        assertNoUnsafeOpenDescendantWorkflows(),
+        assertNoUnsafeOpenDescendantWorkflows([parent]),
         (error: unknown) =>
           error instanceof Error &&
           error.message.includes('open descendant workflow') &&
@@ -157,7 +158,7 @@ async function main(): Promise<void> {
         data: { status: 'FAILED', temporalWorkflowStartPending: false },
       });
       try {
-        await assertNoUnsafeOpenDescendantWorkflows();
+        await assertNoUnsafeOpenDescendantWorkflows([parent]);
       } catch (error) {
         assert.ok(error instanceof Error);
         assert.ok(
