@@ -1,1 +1,1 @@
-/RCA on production agent <agent-id>
+Run /RCA on production agent <agent-id>
