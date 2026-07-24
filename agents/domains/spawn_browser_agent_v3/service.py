@@ -577,9 +577,9 @@ def get_browser_system_prompt(
     ``custom_instructions``, and ``available_files``.
     """
     # 1. Static (canonical) browser system prompt. Identical across every
-    #    spawn and across the Rose pool path. AVAILABLE_ACTIONS is the
-    #    catalog of browser_use actions the v3 executor implements; the
-    #    invariant test asserts every entry exists in BROWSER_USE_TOOLS.
+    #    spawn and across the Rose pool path. AVAILABLE_ACTIONS comes from the
+    #    canonical Pydantic browser-tool registry; BROWSER_USE_TOOLS supplies
+    #    rich provider-facing descriptions for those registered actions.
     static_prompt = build_browser_use_system_prompt(AVAILABLE_ACTIONS)
 
     # 2. Dynamic per-spawn addendum. Goal, custom instructions, and the
