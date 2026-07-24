@@ -22,14 +22,21 @@ set -euo pipefail
 args=" $* "
 case "$args" in
   *" branch --show-current "*) printf '%s\n' "$RCA_BRANCH" ;;
-  *" status --porcelain --untracked-files=normal "*) ;;
+  *" status --porcelain --untracked-files=normal "*) printf '%s' "${FAKE_GIT_STATUS:-}" ;;
   *" diff --name-only --diff-filter=U "*) ;;
+  *" diff --cached --quiet "*)
+    [ "${FAKE_GIT_CACHED_DIRTY:-false}" != true ]
+    ;;
   *" rev-list --count origin/main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
   *" rev-parse HEAD "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
   *" remote set-url origin "*) ;;
   *" push --set-upstream origin "*) ;;
-  *" add "*) ;;
-  *" commit "*) ;;
+  *" add "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'add %s\n' "$*" >> "$GIT_CALLS"
+    ;;
+  *" commit "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'commit %s\n' "$*" >> "$GIT_CALLS"
+    ;;
   *) printf 'unexpected fake git invocation: %s\n' "$*" | tee -a "$UNEXPECTED_CALLS" >&2; exit 90 ;;
 esac
 SH
@@ -105,6 +112,9 @@ case "${1:-}" in
   chmod)
     exit 0
     ;;
+  chown)
+    exit 0
+    ;;
   install)
     source="${@: -2:1}"
     target="${@: -1}"
@@ -118,6 +128,24 @@ cat > "$FAKE_BIN/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$CURL_CALLS"
+if [[ "$*" == *"/api/agents/"* ]]; then
+  body_file=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '-o' ]; then
+      body_file="$2"
+      break
+    fi
+    shift
+  done
+  [ -n "$body_file" ] || exit 92
+  printf '%s\n' '{"message":"Agent not found"}' > "$body_file"
+  printf '404'
+  exit 0
+fi
+if [[ "$*" == *"clickhouse.test"* ]]; then
+  printf '%s\n' '{"timestamp":"2026-07-23 18:00:00","raw":"retained agent failure"}'
+  exit 0
+fi
 if [[ "$*" == *"conversations.history"* ]] && [ -n "${FAKE_HISTORY_TS:-}" ]; then
   printf '{"ok":true,"messages":[{"ts":"%s","metadata":{"event_type":"rose_auto_rca","event_payload":{"agent_id":"d29e631e-b78a-40dd-8f0b-732d1143a854"}}}]}\n' "$FAKE_HISTORY_TS"
   exit 0
@@ -147,8 +175,10 @@ chmod +x "$FAKE_BIN/git" "$FAKE_BIN/gh" "$FAKE_BIN/sudo" "$FAKE_BIN/curl"
 
 ZERO_TURN_EXECUTION="$TEST_ROOT/zero-turn-execution.json"
 SUCCESSFUL_EXECUTION="$TEST_ROOT/successful-execution.json"
+MAX_TURN_EXECUTION="$TEST_ROOT/max-turn-execution.json"
 printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":0}]' > "$ZERO_TURN_EXECUTION"
 printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":1}]' > "$SUCCESSFUL_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":81}]' > "$MAX_TURN_EXECUTION"
 if RCA_INVESTIGATOR_EXECUTION_FILE="$ZERO_TURN_EXECUTION" \
   "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
   echo "FAIL: a zero-turn Claude execution passed the investigator invariant" >&2
@@ -156,6 +186,48 @@ if RCA_INVESTIGATOR_EXECUTION_FILE="$ZERO_TURN_EXECUTION" \
 fi
 RCA_INVESTIGATOR_EXECUTION_FILE="$SUCCESSFUL_EXECUTION" \
   "$RCA_TOOL" verify-investigator-run >/dev/null
+RCA_INVESTIGATOR_EXECUTION_FILE="$MAX_TURN_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null
+
+CHECKPOINT_GIT_CALLS="$TEST_ROOT/checkpoint-git-calls.txt"
+: > "$CHECKPOINT_GIT_CALLS"
+PATH="$FAKE_BIN:$PATH" \
+UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+GIT_CALLS="$CHECKPOINT_GIT_CALLS" \
+FAKE_GIT_STATUS=' M fix.py' \
+FAKE_GIT_CACHED_DIRTY=true \
+AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+RCA_BRANCH="auto-rca/d29e631eb78a-123" \
+AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+AUTO_RCA_CONTEXT_DIR="$CONTEXT" \
+GITHUB_REPOSITORY="Rose-Ai-Labs/rose" \
+  "$RCA_TOOL" checkpoint-draft >/dev/null
+grep -Fq 'auto-RCA: checkpoint production agent d29e631e-b78a-40dd-8f0b-732d1143a854' \
+  "$CHECKPOINT_GIT_CALLS" || {
+    echo 'FAIL: max-turn investigator work was not committed before trusted gates' >&2
+    exit 1
+  }
+
+: > "$TEST_ROOT/curl-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CURL_CALLS="$TEST_ROOT/curl-calls.txt" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+PROD_BACKEND_URL='https://backend.test' \
+BACKEND_API_KEY='test-backend-key' \
+CLICKHOUSE_ENDPOINT='https://clickhouse.test' \
+CLICKHOUSE_USER='test-clickhouse-user' \
+CLICKHOUSE_PASSWORD='test-clickhouse-password' \
+  "$RCA_TOOL" collect-evidence >/dev/null
+grep -Fq '"unavailable":true' "$FAKE_GATE_ROOT/evidence.txt" || {
+  echo 'FAIL: expired backend agent record was not represented in trusted evidence' >&2
+  exit 1
+}
+grep -Fq 'retained agent failure' "$FAKE_GATE_ROOT/evidence.txt" || {
+  echo 'FAIL: retained worker logs were discarded when the backend agent record expired' >&2
+  exit 1
+}
 
 assert_dispatch_plan() {
   local expected="$1" actual
