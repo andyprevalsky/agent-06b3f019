@@ -148,12 +148,12 @@ async function main(): Promise<void> {
       new AgentCardProviderError('x', 409, undefined, 'agentcard_company_funding_in_progress', {
         transferId: 'owt_1',
         retryAfterSeconds: 3,
-        agentcardResult: { ok: true },
+        agentcardResult: { ok: true, transfer: { id: 'owt_1' } },
       })
     );
     assert.equal(details?.transferId, 'owt_1');
     assert.equal(details?.retryAfterSeconds, 3);
-    assert.deepEqual(details?.agentcardResult, { ok: true });
+    assert.deepEqual(details?.agentcardResult, { ok: true, transfer: { id: 'owt_1' } });
   });
 
   // ── kyc.ts ──
@@ -170,6 +170,14 @@ async function main(): Promise<void> {
       isKycRequiredError(new AgentCardProviderError('kyc_required', 500)),
       false,
       'non-4xx status is not KYC'
+    );
+    assert.equal(
+      isKycRequiredError(Object.assign(new Error('Cardholder KYC required'), { status: 422 })),
+      true
+    );
+    assert.equal(
+      isKycRequiredError(Object.assign(new Error('kyc required'), { status: 500 })),
+      false
     );
     assert.equal(isKycRequiredError(new Error('totally unrelated')), false);
     const purchaseError = kycRequiredPurchaseError();
