@@ -14,6 +14,7 @@ import { prisma } from '../../providers/database';
 import {
   ensureAgentCardSandboxFloat,
   loadAgentCardBenchmarkAdmin,
+  refreshAgentCardSession,
   selectAgentCardBenchmarkAdminToken,
   selectAgentCardBenchmarkWalletToken,
 } from '../../providers/agentcard/benchmark-float';
@@ -48,6 +49,11 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     json: async () => body,
   } as unknown as Response;
+}
+
+function jwtWithExpiration(exp: number): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none' })}.${encode({ exp })}.signature`;
 }
 
 async function seedUser(): Promise<string> {
@@ -183,6 +189,31 @@ async function main(): Promise<void> {
     assert.equal(token, 'active-api-key');
   });
 
+  await test('benchmark admin token skips an expired access JWT for the active API key', () => {
+    const token = selectAgentCardBenchmarkAdminToken(
+      {
+        accessToken: jwtWithExpiration(Math.floor(Date.now() / 1000) - 1),
+        activeKeyId: 'active-key-id',
+        storedKeys: [{ id: 'active-key-id', key: 'active-api-key' }],
+      },
+      {}
+    );
+    assert.equal(token, 'active-api-key');
+  });
+
+  await test('benchmark admin token keeps a live access JWT ahead of stored API keys', () => {
+    const accessToken = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    const token = selectAgentCardBenchmarkAdminToken(
+      {
+        accessToken,
+        activeKeyId: 'active-key-id',
+        storedKeys: [{ id: 'active-key-id', key: 'active-api-key' }],
+      },
+      {}
+    );
+    assert.equal(token, accessToken);
+  });
+
   await test('benchmark wallet token prefers the user CLI session over admin API keys', () => {
     const token = selectAgentCardBenchmarkWalletToken(
       { jwt: 'cli-member-jwt' },
@@ -195,6 +226,55 @@ async function main(): Promise<void> {
       {}
     );
     assert.equal(token, 'cli-member-jwt');
+  });
+
+  await test('benchmark wallet token drops expired sessions so the admin token can be used', () => {
+    const token = selectAgentCardBenchmarkWalletToken(
+      { accessToken: jwtWithExpiration(Math.floor(Date.now() / 1000) - 1) },
+      { jwt: jwtWithExpiration(Math.floor(Date.now() / 1000) - 1) },
+      {}
+    );
+    assert.equal(token, undefined);
+  });
+
+  await test('benchmark session refresh rotates the short-lived credential pair', async () => {
+    let receivedUrl = '';
+    let receivedBody: unknown;
+    const refreshed = await refreshAgentCardSession(
+      'https://api.agentcard.test',
+      'old-refresh-token',
+      (async (url: string, init: RequestInit) => {
+        receivedUrl = url;
+        receivedBody = JSON.parse(String(init.body));
+        return jsonResponse(200, {
+          accessToken: 'new-access-token',
+          refreshToken: 'new-refresh-token',
+        });
+      }) as typeof fetch
+    );
+    assert.equal(receivedUrl, 'https://api.agentcard.test/auth/refresh');
+    assert.deepEqual(receivedBody, { refreshToken: 'old-refresh-token' });
+    assert.deepEqual(refreshed, {
+      accessToken: 'new-access-token',
+      refreshToken: 'new-refresh-token',
+    });
+  });
+
+  await test('benchmark session refresh fails closed on rejected or malformed responses', async () => {
+    const rejected = await refreshAgentCardSession(
+      'https://api.agentcard.test',
+      'old-refresh-token',
+      (async () => jsonResponse(401, { error: 'expired' })) as typeof fetch
+    );
+    assert.equal(rejected, undefined);
+
+    const malformed = await refreshAgentCardSession(
+      'https://api.agentcard.test',
+      'old-refresh-token',
+      (async () =>
+        jsonResponse(200, { accessToken: 'missing-rotated-refresh-token' })) as typeof fetch
+    );
+    assert.equal(malformed, undefined);
   });
 
   // ── org-wallet-monitor extraction + message ──

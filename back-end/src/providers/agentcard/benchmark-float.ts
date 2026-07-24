@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -10,6 +10,7 @@ type FetchLike = typeof fetch;
 interface AdminConfig {
   apiUrl?: string;
   accessToken?: string;
+  refreshToken?: string;
   jwt?: string;
   activeKeyId?: string;
   lastApiKey?: string;
@@ -19,6 +20,7 @@ interface AdminConfig {
 interface UserConfig {
   apiUrl?: string;
   accessToken?: string;
+  refreshToken?: string;
   jwt?: string;
 }
 
@@ -49,16 +51,88 @@ function activeStoredApiKey(config: AdminConfig): string | undefined {
   return config.storedKeys?.find((entry) => entry.id?.trim() === activeKeyId)?.key?.trim();
 }
 
+function usableCredentialToken(token: string | undefined): string | undefined {
+  const value = token?.trim();
+  if (!value) return undefined;
+  const segments = value.split('.');
+  if (segments.length !== 3) return value;
+  try {
+    const payload = JSON.parse(Buffer.from(segments[1], 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    if (typeof payload.exp === 'number' && payload.exp <= Math.floor(Date.now() / 1000)) {
+      return undefined;
+    }
+  } catch {
+    // API keys and nonstandard tokens are opaque credentials, not invalid JWTs.
+  }
+  return value;
+}
+
+function accessTokenNeedsRefresh(token: string | undefined): boolean {
+  const value = token?.trim();
+  return Boolean(value && usableCredentialToken(value) === undefined);
+}
+
+interface RefreshedSession {
+  accessToken: string;
+  refreshToken: string;
+}
+
+export async function refreshAgentCardSession(
+  apiUrl: string,
+  refreshToken: string,
+  fetchImpl: FetchLike = fetch
+): Promise<RefreshedSession | undefined> {
+  try {
+    const response = await fetchImpl(`${apiUrl}/auth/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (!response.ok) return undefined;
+    const body = (await response.json()) as Partial<RefreshedSession>;
+    const accessToken = body.accessToken?.trim();
+    const rotatedRefreshToken = body.refreshToken?.trim();
+    if (!accessToken || !rotatedRefreshToken) return undefined;
+    return { accessToken, refreshToken: rotatedRefreshToken };
+  } catch {
+    return undefined;
+  }
+}
+
+async function persistCredentialConfig(
+  filePath: string,
+  config: AdminConfig | UserConfig
+): Promise<void> {
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporaryPath, filePath);
+}
+
+async function refreshExpiredConfig<T extends AdminConfig | UserConfig>(
+  filePath: string,
+  config: T,
+  apiUrl: string
+): Promise<T> {
+  if (!accessTokenNeedsRefresh(config.accessToken) || !config.refreshToken?.trim()) return config;
+  const session = await refreshAgentCardSession(apiUrl, config.refreshToken);
+  if (!session) return config;
+  const refreshed = { ...config, ...session };
+  await persistCredentialConfig(filePath, refreshed);
+  return refreshed;
+}
+
 export function selectAgentCardBenchmarkAdminToken(
   config: AdminConfig,
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
   return (
-    env.AGENT_CARDS_ADMIN_JWT?.trim() ||
-    config.accessToken?.trim() ||
+    usableCredentialToken(env.AGENT_CARDS_ADMIN_JWT) ||
+    usableCredentialToken(config.accessToken) ||
     activeStoredApiKey(config) ||
     config.lastApiKey?.trim() ||
-    config.jwt?.trim()
+    usableCredentialToken(config.jwt)
   );
 }
 
@@ -68,12 +142,12 @@ export function selectAgentCardBenchmarkWalletToken(
   env: Record<string, string | undefined> = process.env
 ): string | undefined {
   return (
-    env.AGENT_CARDS_JWT?.trim() ||
-    userConfig.accessToken?.trim() ||
-    userConfig.jwt?.trim() ||
-    env.AGENT_CARDS_ADMIN_JWT?.trim() ||
-    adminConfig.accessToken?.trim() ||
-    adminConfig.jwt?.trim()
+    usableCredentialToken(env.AGENT_CARDS_JWT) ||
+    usableCredentialToken(userConfig.accessToken) ||
+    usableCredentialToken(userConfig.jwt) ||
+    usableCredentialToken(env.AGENT_CARDS_ADMIN_JWT) ||
+    usableCredentialToken(adminConfig.accessToken) ||
+    usableCredentialToken(adminConfig.jwt)
   );
 }
 
@@ -114,35 +188,33 @@ async function adminRequest(
 export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkAdmin> {
   let adminConfig: AdminConfig = {};
   let userConfig: UserConfig = {};
+  const adminConfigPath = path.join(homedir(), '.agent-cards-admin.json');
+  const userConfigPath = path.join(homedir(), '.agent-cards/config.json');
   try {
-    adminConfig = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards-admin.json'), 'utf8')
-    ) as AdminConfig;
+    adminConfig = JSON.parse(await readFile(adminConfigPath, 'utf8')) as AdminConfig;
   } catch {
     // The env token below supports CI and fresh developer machines.
   }
   try {
-    userConfig = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards/config.json'), 'utf8')
-    ) as UserConfig;
+    userConfig = JSON.parse(await readFile(userConfigPath, 'utf8')) as UserConfig;
   } catch {
     // The legacy admin config remains enough for older local setups.
   }
+  const adminApiUrl =
+    process.env.ADMIN_API_URL?.trim() || adminConfig.apiUrl?.trim() || DEFAULT_ADMIN_API_URL;
+  const walletApiUrl =
+    process.env.AGENT_CARDS_API_URL?.trim() || userConfig.apiUrl?.trim() || adminApiUrl;
+  adminConfig = await refreshExpiredConfig(adminConfigPath, adminConfig, adminApiUrl);
+  userConfig = await refreshExpiredConfig(userConfigPath, userConfig, walletApiUrl);
   const walletToken = selectAgentCardBenchmarkWalletToken(userConfig, adminConfig);
   const token = selectAgentCardBenchmarkAdminToken(adminConfig) || walletToken;
   if (!token) {
     throw new Error('AgentCard admin login required; run npx agent-cards login');
   }
   return {
-    apiUrl:
-      process.env.ADMIN_API_URL?.trim() || adminConfig.apiUrl?.trim() || DEFAULT_ADMIN_API_URL,
+    apiUrl: adminApiUrl,
     token,
-    walletApiUrl:
-      process.env.AGENT_CARDS_API_URL?.trim() ||
-      userConfig.apiUrl?.trim() ||
-      process.env.ADMIN_API_URL?.trim() ||
-      adminConfig.apiUrl?.trim() ||
-      DEFAULT_ADMIN_API_URL,
+    walletApiUrl,
     walletToken,
   };
 }
