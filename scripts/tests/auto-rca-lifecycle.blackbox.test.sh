@@ -229,6 +229,47 @@ grep -Fq 'retained agent failure' "$FAKE_GATE_ROOT/evidence.txt" || {
   exit 1
 }
 
+mkdir -p "$CHECKOUT/.test-logs/synthetic-failure"
+ln -sfn synthetic-failure "$CHECKOUT/.test-logs/latest"
+printf '%s\n' 'FAIL: dependency preflight could not resolve test package' \
+  'credential=test-backend-key' \
+  > "$CHECKOUT/.test-logs/synthetic-failure/Dependency_Preflight.log"
+cat > "$CHECKOUT/scripts/test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$CHECKOUT/scripts/test.sh"
+if PATH="$FAKE_BIN:$PATH" \
+  UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+  AUTO_RCA_CONTEXT_DIR="$CONTEXT" \
+  BACKEND_API_KEY='test-backend-key' \
+    "$RCA_TOOL" offline-gates >/dev/null 2>&1; then
+  echo 'FAIL: a synthetic offline gate failure was accepted' >&2
+  exit 1
+fi
+gate_failure="$(
+  PATH="$FAKE_BIN:$PATH" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+    "$RCA_TOOL" verification
+)"
+grep -Fq 'FAIL: dependency preflight could not resolve test package' <<< "$gate_failure" || {
+  echo 'FAIL: retry investigator did not receive the deploy failure detail' >&2
+  exit 1
+}
+grep -Fq '[REDACTED:BACKEND_API_KEY]' <<< "$gate_failure" || {
+  echo 'FAIL: deploy failure evidence did not redact workflow credentials' >&2
+  exit 1
+}
+if grep -Fq 'test-backend-key' <<< "$gate_failure"; then
+  echo 'FAIL: deploy failure evidence exposed a workflow credential' >&2
+  exit 1
+fi
+
 assert_dispatch_plan() {
   local expected="$1" actual
   shift

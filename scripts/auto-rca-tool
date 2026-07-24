@@ -108,6 +108,7 @@ read_state() {
 timeline_steps() {
   cat <<'EOF'
 rca-evidence|/RCA · production evidence
+rca-environment|/RCA · test environment setup
 rca-primary-investigation|/RCA · primary investigation
 rca-primary-reproduction|/RCA · unchanged local reproduction
 deploy-primary-offline|/deploy · offline gates
@@ -650,8 +651,8 @@ evidence() {
 verification() {
   require_agent_id
   require_gate_state_dir
-  if [ -f "$GATE_STATE_DIR/verification.txt" ]; then
-    cat "$GATE_STATE_DIR/verification.txt"
+  if sudo test -f "$GATE_STATE_DIR/verification.txt"; then
+    read_state verification.txt
   else
     printf 'No trusted verification has run yet.\n'
   fi
@@ -915,17 +916,79 @@ PY
   grep -Fq "$(basename "$path")" "$ROOT_DIR/scripts/test.sh"
 }
 
+capture_gate_failure() {
+  local gate_name="$1" log_root="$2" raw_file scrubbed_file
+  require_gate_state_dir
+  mkdir -p "$CONTEXT_DIR"
+  raw_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-gate-failure.XXXXXX")"
+  scrubbed_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-gate-failure-scrubbed.XXXXXX")"
+  trap 'rm -f "$raw_file" "$scrubbed_file"' RETURN
+  {
+    printf 'Trusted /deploy failure: %s\n' "$gate_name"
+    printf 'Full per-suite logs remain in: %s\n\n' "$log_root"
+    if [ -d "$log_root" ]; then
+      while IFS= read -r log_file; do
+        printf '===== %s =====\n' "${log_file##*/}"
+        tail -n 120 "$log_file"
+        printf '\n'
+      done < <(find -H "$log_root" -maxdepth 1 -type f -name '*.log' | sort)
+    else
+      printf 'No per-suite log directory was produced.\n'
+    fi
+  } > "$raw_file"
+  python3 - "$raw_file" "$scrubbed_file" <<'PY'
+import os
+import pathlib
+import sys
+
+source, target = map(pathlib.Path, sys.argv[1:])
+text = source.read_text(encoding="utf-8", errors="replace")
+for name in (
+    "BACKEND_API_KEY",
+    "ENCRYPTION_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "SUPABASE_URL",
+    "VITE_SUPABASE_ANON_KEY",
+    "VITE_SUPABASE_URL",
+):
+    value = os.environ.get(name, "")
+    if value:
+        text = text.replace(value, f"[REDACTED:{name}]")
+pathlib.Path(target).write_text(text[-240_000:], encoding="utf-8")
+PY
+  sudo install -o root -g rose-auto-rca -m 0440 \
+    "$scrubbed_file" "$GATE_STATE_DIR/verification.txt"
+}
+
 offline_gates() {
+  local status
   require_clean_checkout
+  set +e
   AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
     bash "$ROOT_DIR/scripts/test.sh" --no-smoke \
       --defer-human-approval-to-exact-head-pr-review=true
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    capture_gate_failure "offline gates" "$ROOT_DIR/.test-logs/latest"
+    return "$status"
+  fi
   record_gate offline-gates
 }
 
 smoke_gates() {
+  local log_file status
   require_clean_checkout
-  "$ROOT_DIR/scripts/run-predeploy-cloud"
+  log_file="$CONTEXT_DIR/smoke-gates.log"
+  mkdir -p "$CONTEXT_DIR"
+  set +e
+  "$ROOT_DIR/scripts/run-predeploy-cloud" > "$log_file" 2>&1
+  status=$?
+  set -e
+  if [ "$status" -ne 0 ]; then
+    capture_gate_failure "smoke gates" "$CONTEXT_DIR"
+    return "$status"
+  fi
   record_gate smoke-gates
 }
 

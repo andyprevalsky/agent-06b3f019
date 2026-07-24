@@ -439,7 +439,7 @@ if [ $FAIL_COUNT -gt 0 ]; then
     if [ "${SUITE_STATUSES[$i]}" = "fail" ]; then
       echo "── ${SUITE_NAMES[$i]} failures ──"
       # Extract failure summaries: ❌ lines, FAIL lines, assertion diffs (no stack traces)
-      grep -E '❌|^--- FAIL|^  FAIL|^FAILURES|Expected.*got|Received|assert.*failed' "${SUITE_LOGS[$i]}" | head -40
+      grep -Ei '❌|^--- FAIL|^  FAIL|^FAILURES|^FAIL:|Expected.*got|Received|assert.*failed|(^|[[:space:]])error:' "${SUITE_LOGS[$i]}" | head -40 || true
       echo "  → full log: ${SUITE_LOGS[$i]}"
       echo ""
     fi

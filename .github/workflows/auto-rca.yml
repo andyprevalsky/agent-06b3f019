@@ -39,6 +39,20 @@ jobs:
       !contains(github.event.comment.body, '<!-- rca-feedback-consumed'))
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: victoria
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d victoria"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     permissions:
       actions: read
       contents: write
@@ -364,9 +378,40 @@ jobs:
         if: env.RCA_NOOP != 'true'
         uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1 # master
 
+      - name: Timeline — start test environment setup
+        id: timeline_environment_start
+        if: env.RCA_NOOP != 'true'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-environment
+        run: /usr/local/bin/rose-auto-rca-tool timeline-start
+
+      - name: Hydrate Auto RCA test environment
+        id: hydrate
+        if: env.RCA_NOOP != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+          npm ci --no-audit --no-fund
+          npm ci --prefix mac-app --no-audit --no-fund
+          python -m venv agents/venv
+          agents/venv/bin/python -m pip install --disable-pip-version-check -q -r agents/requirements.txt
+          (cd back-end && npx prisma generate)
+
+      - name: Timeline — finish test environment setup
+        if: always() && steps.timeline_environment_start.outcome == 'success'
+        shell: bash
+        env:
+          RCA_TIMELINE_STEP: rca-environment
+          RCA_TIMELINE_STATUS: ${{ steps.hydrate.outcome == 'success' && 'passed' || 'failed' }}
+        run: /usr/local/bin/rose-auto-rca-tool timeline-finish
+
       - name: Build trusted investigator prompt
         id: prompt
-        if: env.RCA_NOOP != 'true'
+        if: env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -393,7 +438,7 @@ jobs:
 
       - name: Timeline — start primary investigation
         id: timeline_primary_investigation_start
-        if: env.RCA_NOOP != 'true'
+        if: env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-primary-investigation
@@ -401,7 +446,7 @@ jobs:
 
       - name: Root-cause with dedicated Claude account
         id: investigator_primary
-        if: env.RCA_NOOP != 'true'
+        if: env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
@@ -476,6 +521,17 @@ jobs:
         if: steps.repro_primary.outcome == 'success'
         continue-on-error: true
         shell: bash
+        env:
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          BACKEND_CODEX_TOKEN_SYNC_SKIP: "1"
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          NODE_ENV: test
+          SUPABASE_JWT_SECRET: auto-rca-local-jwt-secret-32-bytes
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          VITE_BACKEND_API_URL: http://127.0.0.1:3001
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
         run: /usr/local/bin/rose-auto-rca-tool offline-gates
 
       - name: Timeline — finish primary offline deploy gates
@@ -519,7 +575,7 @@ jobs:
 
       - name: Timeline — start retry investigation
         id: timeline_retry_investigation_start
-        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
+        if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-retry-investigation
@@ -527,7 +583,7 @@ jobs:
 
       - name: Retry incomplete RCA with secondary Claude account
         id: investigator_retry
-        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
+        if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
@@ -602,6 +658,17 @@ jobs:
         if: steps.repro_retry.outcome == 'success'
         continue-on-error: true
         shell: bash
+        env:
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          BACKEND_CODEX_TOKEN_SYNC_SKIP: "1"
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+          NODE_ENV: test
+          SUPABASE_JWT_SECRET: auto-rca-local-jwt-secret-32-bytes
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          VITE_BACKEND_API_URL: http://127.0.0.1:3001
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
         run: /usr/local/bin/rose-auto-rca-tool offline-gates
 
       - name: Timeline — finish retry offline deploy gates
