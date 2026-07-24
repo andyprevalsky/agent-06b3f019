@@ -193,8 +193,7 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
-    bash "$SCRIPT_DIR/apply-local-workflow-ddl.sh"
+  bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
@@ -291,8 +290,8 @@ TEST_EXIT=0
 UNIT_EXIT=0
 NODE_V8_COVERAGE="$COV_TMP" \
 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 CONTRACT_TEST_USE_EXISTING_BACKEND=1 \
-BLACKBOX_TEST_SKIP_SCHEMA_SYNC=1 \
 BLACKBOX_TEST_DATABASE_URL="$LOCAL_DB_URL" CONTRACT_TEST_DATABASE_URL="$LOCAL_DB_URL" \
+BLACKBOX_TEST_SKIP_DB_SYNC=1 CONTRACT_TEST_SKIP_DB_SYNC=1 \
 BACKEND_CODEX_TOKEN_SYNC_SKIP=1 \
 BLACKBOX_TEST_CONCURRENCY="${BLACKBOX_TEST_CONCURRENCY:-4}" CONTRACT_TEST_CONCURRENCY="${CONTRACT_TEST_CONCURRENCY:-4}" \
 BLACKBOX_TEST_CASE_CONCURRENCY="${BLACKBOX_TEST_CASE_CONCURRENCY:-30}" CONTRACT_TEST_CASE_CONCURRENCY="${CONTRACT_TEST_CASE_CONCURRENCY:-30}" \

@@ -2,6 +2,7 @@
 
 import asyncio
 import inspect
+import os
 
 from _test_utils import BlackboxResult
 
@@ -172,6 +173,37 @@ def test_runner_enforces_repeatable_fields_and_missing_metrics_fail_closed():
     assert "enforce_cache_ratchets(run.task_results)" in inspect.getsource(main_async)
 
 
+def test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled():
+    """Deploy smoke may warn on Claude Code cache telemetry without weakening other ratchets."""
+    from benchmarks.run_benchmark import CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, enforce_cache_ratchets
+
+    claude_code_low = _task_result(
+        "claude-code-agent",
+        repeatable_cache_read_input_tokens=0,
+        repeatable_cache_creation_input_tokens=100,
+    )
+    parallel_low = _task_result(
+        "parallel-tool-calls",
+        repeatable_cache_read_input_tokens=0,
+        repeatable_cache_creation_input_tokens=100,
+    )
+
+    previous = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV)
+    try:
+        os.environ[CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV] = "1"
+        enforce_cache_ratchets([claude_code_low])
+        try:
+            enforce_cache_ratchets([parallel_low])
+            raise AssertionError("non-Claude cache ratchet failed open")
+        except SystemExit as exc:
+            assert exc.code == 1
+    finally:
+        if previous is None:
+            os.environ.pop(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, None)
+        else:
+            os.environ[CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV] = previous
+
+
 async def test_collector_identity_is_authoritative_and_separates_agents():
     """Payload identity cannot merge one call from each agent into a fake repeatable group."""
     import benchmarks.run_benchmark as runner
@@ -314,6 +346,10 @@ async def run_all_tests():
     result.record(
         "runner_repeatable_fields_fail_closed",
         test_runner_enforces_repeatable_fields_and_missing_metrics_fail_closed,
+    )
+    result.record(
+        "claude_code_cache_ratchet_deploy_warn_only",
+        test_claude_code_cache_ratchet_is_deploy_warn_only_when_enabled,
     )
     await result.record_async(
         "collector_identity_separates_agents",

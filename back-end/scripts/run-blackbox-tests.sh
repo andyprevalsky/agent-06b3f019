@@ -193,8 +193,16 @@ if $DB_FOUND; then
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   export FAST_MODE_CACHE_DATABASE_URL="${FAST_MODE_CACHE_DATABASE_URL:-$LOCAL_DB_URL}"
-  if command -v psql >/dev/null 2>&1; then
-    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+  SKIP_DB_SYNC="${BLACKBOX_TEST_SKIP_DB_SYNC:-${CONTRACT_TEST_SKIP_DB_SYNC:-0}}"
+  if [[ "$SKIP_DB_SYNC" == "1" ]]; then
+    if [[ "$USE_EXISTING_BACKEND" != "1" ]]; then
+      echo "❌ BLACKBOX_TEST_SKIP_DB_SYNC is only valid with an existing backend." >&2
+      exit 1
+    fi
+    echo "Skipping local DB schema sync; existing backend caller prepared the test database."
+  else
+    if command -v psql >/dev/null 2>&1; then
+      psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
 BEGIN
   IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
@@ -208,33 +216,29 @@ BEGIN
   END IF;
 END $$;
 SQL
-  fi
-  if [[ "${BLACKBOX_TEST_SKIP_SCHEMA_SYNC:-0}" == "1" ]]; then
-    echo "Using schema prepared by the existing backend launcher."
-  else
+    fi
     echo "Syncing Prisma schema to local test database..."
     npx prisma db push --skip-generate --accept-data-loss >/dev/null
-    DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
-      bash "$SCRIPT_DIR/apply-local-workflow-ddl.sh"
-  fi
-  # Credential seeding and smoke execution are separate controls. A caller may
-  # pre-seed a valid production credential without disabling the real Codex
-  # black-box test that consumes it.
-  if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
-    CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
-    CODEX_AUTH_MODE="$(jq -r '.auth_mode // empty' "$CODEX_AUTH_FILE" 2>/dev/null || true)"
-    if [[ "$CODEX_AUTH_MODE" == "chatgpt" ]]; then
-      echo "Syncing local Codex credentials to local test database..."
-      npx tsx scripts/sync-codex-token.ts >/dev/null
-    else
-      SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
-        "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
-      if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-        echo "Using the connected gpt_code credential already seeded in the isolated test database."
+    bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+    # Credential seeding and smoke execution are separate controls. A caller may
+    # pre-seed a valid production credential without disabling the real Codex
+    # black-box test that consumes it.
+    if [[ "${BACKEND_CODEX_TOKEN_SYNC_SKIP:-0}" != "1" ]]; then
+      CODEX_AUTH_FILE="${CODEX_AUTH_PATH:-$HOME/.codex/auth.json}"
+      CODEX_AUTH_MODE="$(jq -r '.auth_mode // empty' "$CODEX_AUTH_FILE" 2>/dev/null || true)"
+      if [[ "$CODEX_AUTH_MODE" == "chatgpt" ]]; then
+        echo "Syncing local Codex credentials to local test database..."
+        npx tsx scripts/sync-codex-token.ts >/dev/null
       else
-        echo "❌ Codex auth is not ChatGPT mode and the isolated test database has no connected gpt_code credential." >&2
-        echo "   Run codex login, seed the integration, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
-        exit 1
+        SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
+          "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
+        if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+          echo "Using the connected gpt_code credential already seeded in the isolated test database."
+        else
+          echo "❌ Codex auth is not ChatGPT mode and the isolated test database has no connected gpt_code credential." >&2
+          echo "   Run codex login, seed the integration, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
+          exit 1
+        fi
       fi
     fi
   fi

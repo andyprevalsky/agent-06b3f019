@@ -491,6 +491,7 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert result["domain_question"] == result["tool_question"]
     assert result["same_fingerprint"] is True
     assert result["mint_activity_timeout_seconds"] == 90.0
+    assert result["mint_activity_imported"] is True
 
 
 async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
