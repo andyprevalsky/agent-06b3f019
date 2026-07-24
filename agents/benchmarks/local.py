@@ -32,7 +32,7 @@ REPO_ROOT = AGENTS_DIR.parent
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-from benchmarks.benchmark_tasks import all_tasks
+from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
@@ -60,7 +60,6 @@ TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-NON_PURCHASE_GATE_TASK_NAMES = {"gate-source-connect-gmail"}
 BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
@@ -681,7 +680,7 @@ def needs_payment_fixture(tasks: Sequence[str]) -> bool:
 
 
 def needs_non_purchase_gates(tasks: Sequence[str]) -> bool:
-    return bool(NON_PURCHASE_GATE_TASK_NAMES & set(tasks))
+    return selected_tasks_require_gate_type(list(tasks), "source_connect")
 
 
 def _dotenv_values(path: Path) -> dict[str, str]:

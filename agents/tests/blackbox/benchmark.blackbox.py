@@ -5448,15 +5448,25 @@ def test_benchmark_env_override_can_disable_approval_handling():
 
 
 def test_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Source-connect gate benchmarks must start workers with non-purchase gates enabled."""
+    """Any task whose canonical contract expects source_connect must enable its worker gate."""
+    from dataclasses import replace
+
+    from benchmarks import benchmark_tasks
     from benchmarks import local as local_bench
 
     previous = os.environ.get("NON_PURCHASE_GATES_ENABLED")
+    original_tasks = benchmark_tasks._cached_tasks
     try:
+        source_task = replace(
+            benchmark_tasks.get_task_by_name("gate-source-connect-gmail"),
+            name="future-source-connect-benchmark",
+        )
+        benchmark_tasks._cached_tasks = [source_task]
         os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
-        local_bench.configure_task_environment(["gate-source-connect-gmail"])
+        local_bench.configure_task_environment(["future-source-connect-benchmark"])
         assert os.environ.get("NON_PURCHASE_GATES_ENABLED") == "1"
     finally:
+        benchmark_tasks._cached_tasks = original_tasks
         if previous is None:
             os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
         else:
@@ -5464,12 +5474,39 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
 
 def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Cloudbench must pass the same source-connect gate env into run.sh workers."""
-    script = (Path(__file__).resolve().parents[3] / "scripts" / "cloudbench-run.sh").read_text()
+    """Cloudbench's executable task-env resolution must export the worker gate flag."""
+    import subprocess
 
-    assert "gate-source-connect-gmail" in script
-    assert "BENCH_ENABLE_NON_PURCHASE_GATES" in script
-    assert "NON_PURCHASE_GATES_ENABLED=1" in script
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    base_env = {
+        **os.environ,
+        "CLOUDBENCH_REPO_DIR": str(repo_root),
+        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+        "CLOUDBENCH_PRINT_TASK_ENV": "1",
+    }
+    enabled = subprocess.run(
+        ["bash", str(script)],
+        env={**base_env, "BENCH_TASKS": "gate-source-connect-gmail"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    disabled = subprocess.run(
+        ["bash", str(script)],
+        env={**base_env, "BENCH_TASKS": "chat-mode"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert enabled.returncode == 0, enabled.stderr
+    assert enabled.stdout.splitlines() == [
+        "stack:NON_PURCHASE_GATES_ENABLED=1",
+        "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
+    ]
+    assert disabled.returncode == 0, disabled.stderr
+    assert disabled.stdout == ""
 
 
 def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():
