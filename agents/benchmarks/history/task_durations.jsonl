@@ -1852,3 +1852,5 @@
 {"task": "parallel-tool-calls", "duration_seconds": 122.3, "cost_cents": 21.0, "timestamp": "2026-07-24T00:56:18.335993+00:00", "agent_id": "2c8cedcc-2b9a-49fc-8856-a9de7ac40e67"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 137.7, "cost_cents": 2.0, "timestamp": "2026-07-24T00:56:18.335993+00:00", "agent_id": "4f9050da-e1ea-401e-9672-3dd7e4a8e349"}
 {"task": "spawn-sub-agents", "duration_seconds": 173.1, "cost_cents": 3.0, "timestamp": "2026-07-24T00:56:18.335993+00:00", "agent_id": "3e92b2b2-36b3-4d27-8a32-b02756adad62"}
+{"task": "gate-subscription-free-credit", "duration_seconds": 17.2, "cost_cents": 0.0, "timestamp": "2026-07-24T03:06:57.742333+00:00", "agent_id": "9d32a658-0e80-4f1e-be93-949f41e9acf0"}
+{"task": "gate-source-connect-gmail", "duration_seconds": 28.9, "cost_cents": 0.0, "timestamp": "2026-07-24T03:09:45.036835+00:00", "agent_id": "bbe528aa-6e41-4007-9b3a-0563efab92fb"}
