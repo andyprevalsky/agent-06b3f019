@@ -6,6 +6,14 @@ description: "Root-cause a bug the RIGHT way: read the RCA methodology, then pro
 
 Use this whenever you are diagnosing ANY bug, flake, regression, or "why did X happen".
 
+## Canonical human-approval format
+
+Whenever this workflow stops for agreement, implementation approval, or any
+other human approval, follow `.claude/shared/approval-format.md`.
+Read it completely immediately before composing the request. The automated
+production-alert mode remains non-interactive and therefore emits no chat
+approval request.
+
 ## Step 0 — READ THE METHODOLOGY (mandatory, every time)
 
 Read `docs/root-cause-analysis.md` in full before forming any hypothesis. It is
@@ -81,9 +89,12 @@ here's the repro now passing.** A hypothesis is not a deliverable.
 
 ## Output
 
-When RCA-only: present (a) the evidence, (b) the one-sentence root cause at the
-first-bad boundary, (c) the exact local repro command + its recorded failure,
-(d) the proposed generalizable fix. Then stop for agreement before implementing.
+When RCA-only: present the evidence, one-sentence root cause at the first-bad
+boundary, exact local repro command + recorded failure, and proposed
+generalizable fix. Then stop for agreement before implementing using the
+canonical four-part approval narrative from
+`.claude/shared/approval-format.md`; include the unchanged repro's current
+failing result in Detail and the expected post-fix assertion in After Behavior.
 
 When fixing too: implement, re-run the identical repro command, and report the
 pre-fix failure AND the post-fix pass side by side.
