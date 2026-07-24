@@ -1111,7 +1111,8 @@ checkpoint_draft() {
   if [ -s "$CONTEXT_DIR/pr-body.md" ]; then
     write_final_report
   fi
-  printf 'Investigator work checkpointed for trusted verification and retry continuity.\n'
+  git_push_branch "$RCA_BRANCH"
+  printf 'Investigator work committed and pushed for crash-safe trusted verification and retry continuity.\n'
 }
 
 write_preliminary_scaffold() {
@@ -1558,9 +1559,8 @@ existing_slack_message_text() {
     | head -1
 }
 
-preserve_reconciled_affected_user() {
+preserve_known_affected_user() {
   local existing_text preserved
-  [ "${RCA_RECONCILE_SLACK:-false}" = true ] || return 0
   [ "${AFFECTED_USER_NAME:-}" = 'Affected user unavailable' ] || return 0
   existing_text="$(existing_slack_message_text || true)"
   preserved="$(printf '%s\n' "$existing_text" | \
@@ -1582,7 +1582,7 @@ slack_update() {
       SLACK_TS="$existing_ts"
     fi
   fi
-  preserve_reconciled_affected_user
+  preserve_known_affected_user
   text="$(slack_message)"
   if [ -n "${SLACK_TS:-}" ]; then
     [[ "$SLACK_TS" =~ ^[0-9]{10,}\.[0-9]{6}$ ]] || fail "SLACK_TS is invalid"

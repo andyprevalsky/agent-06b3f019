@@ -77,6 +77,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Reclaim hosted-runner disk for RCA workspace
+        if: env.RCA_NOOP != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/share/dotnet
+          sudo apt-get clean
+          df -h /
+
       - name: Install trusted RCA lifecycle code
         shell: bash
         run: |
@@ -398,8 +413,11 @@ jobs:
           npm install --no-audit --no-fund
           npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts
           python -m venv agents/venv
-          agents/venv/bin/python -m pip install --disable-pip-version-check -q -r agents/requirements.txt
+          agents/venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir -q -r agents/requirements.txt
           (cd back-end && npx prisma generate)
+          npm cache clean --force
+          sudo apt-get clean
+          df -h /
 
       - name: Timeline — finish test environment setup
         if: always() && steps.timeline_environment_start.outcome == 'success'
@@ -466,6 +484,8 @@ jobs:
         if: always() && steps.investigator_primary.outcome != 'skipped'
         continue-on-error: true
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
         run: /usr/local/bin/rose-auto-rca-tool checkpoint-draft
 
       - name: Require a real primary investigator turn
@@ -581,6 +601,16 @@ jobs:
           RCA_TIMELINE_STEP: rca-retry-investigation
         run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
+      - name: Reclaim download caches before RCA continuation
+        if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm cache clean --force || true
+          agents/venv/bin/python -m pip cache purge || true
+          sudo apt-get clean
+          df -h /
+
       - name: Continue incomplete RCA with dedicated Claude account
         id: investigator_retry
         if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'
@@ -603,6 +633,8 @@ jobs:
         if: always() && steps.investigator_retry.outcome != 'skipped'
         continue-on-error: true
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
         run: /usr/local/bin/rose-auto-rca-tool checkpoint-draft
 
       - name: Require a real retry investigator turn

@@ -30,7 +30,9 @@ case "$args" in
   *" rev-list --count origin/main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
   *" rev-parse HEAD "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
   *" remote set-url origin "*) ;;
-  *" push --set-upstream origin "*) ;;
+  *" push --set-upstream origin "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'push %s\n' "$*" >> "$GIT_CALLS"
+    ;;
   *" add "*)
     [ -z "${GIT_CALLS:-}" ] || printf 'add %s\n' "$*" >> "$GIT_CALLS"
     ;;
@@ -203,6 +205,7 @@ UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
 GIT_CALLS="$CHECKPOINT_GIT_CALLS" \
 FAKE_GIT_STATUS=' M fix.py' \
 FAKE_GIT_CACHED_DIRTY=true \
+GH_TOKEN='test-github-token' \
 AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
 RCA_BRANCH="auto-rca/d29e631eb78a-123" \
 AUTO_RCA_ROOT_DIR="$CHECKOUT" \
@@ -212,6 +215,11 @@ GITHUB_REPOSITORY="Rose-Ai-Labs/rose" \
 grep -Fq 'auto-RCA: checkpoint production agent d29e631e-b78a-40dd-8f0b-732d1143a854' \
   "$CHECKPOINT_GIT_CALLS" || {
     echo 'FAIL: max-turn investigator work was not committed before trusted gates' >&2
+    exit 1
+  }
+grep -Fq 'push --set-upstream origin auto-rca/d29e631eb78a-123' \
+  "$CHECKPOINT_GIT_CALLS" || {
+    echo 'FAIL: investigator checkpoint was not pushed before trusted gates' >&2
     exit 1
   }
 
@@ -947,8 +955,7 @@ FAKE_REPLY_TEXT='*Affected user:* Ada Lovelace
 *Current state:* 🔴 RCA blocked — draft needs attention' \
 AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
 AFFECTED_USER_NAME='Affected user unavailable' \
-RCA_STATE=blocked \
-RCA_RECONCILE_SLACK=true \
+RCA_STATE=revising \
 RCA_FE_URL='https://roselabs.ai/?agent-id=d29e631e-b78a-40dd-8f0b-732d1143a854' \
 RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
 RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
@@ -957,11 +964,11 @@ SLACK_CHANNEL='C0BE1B87882' \
 SLACK_TS='1784617220.480779' \
 "$RCA_TOOL" slack-update
 grep -Fq 'conversations.replies' "$TEST_ROOT/curl-calls.txt" || {
-  echo "FAIL: reconciler did not read the existing lifecycle card before degrading its affected user" >&2
+  echo "FAIL: revision did not read the existing lifecycle card before degrading its affected user" >&2
   exit 1
 }
 grep -Fq '*Affected user:* Ada Lovelace' "$TEST_ROOT/curl-calls.txt" || {
-  echo "FAIL: reconciler replaced a known affected user with an unavailable placeholder" >&2
+  echo "FAIL: revision replaced a known affected user with an unavailable placeholder" >&2
   exit 1
 }
 
