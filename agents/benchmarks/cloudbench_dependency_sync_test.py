@@ -6679,6 +6679,56 @@ def test_isolated_stack_forwards_anthropic_exclusion_to_wmh_provider() -> None:
     assert '"ROSE_EXCLUDE_ANTHROPIC_FAMILY=${ROSE_EXCLUDE_ANTHROPIC_FAMILY:-}"' in stack_env
 
 
+def test_cloud_isolated_stack_provides_frontend_build_identity(tmp_path: Path) -> None:
+    """The on-box stack must receive the run identity required to isolate Vite output.
+
+    Cloudbench launches scripts/run.sh through a strict STACK_ENV allow-list.
+    Once bundled frontend builds became run-scoped, omitting BENCHMARK_RUN_ID
+    made every real ecommerce guest exit before the synchronized start barrier.
+    Exercise the production allow-list against run.sh's real path resolver so a
+    string elsewhere in the driver cannot satisfy this regression.
+    """
+    driver = DRIVER_SCRIPT.read_text()
+    stack_env_start = driver.index("STACK_ENV=(")
+    stack_env_end = driver.index("\n)", stack_env_start) + 2
+    stack_env = driver[stack_env_start:stack_env_end]
+    resolve_frontend_dist_dir = _extract_fleet_function(
+        STACK_SCRIPT.read_text(), "resolve_frontend_dist_dir() {"
+    )
+    workspace_name = "flt-browser-alchemy-springs-sauna-2890-3"
+    script = f"""set -euo pipefail
+APP_USER=rose
+BASE_PORT=3000
+CONTEXT_DIR=/data/repo/.context/cloudbench
+WORKSPACE_NAME={shlex.quote(workspace_name)}
+STACK_SEED_DUMP=/data/cloudbench-cache/victoria-seed.dump
+WMH_MODEL_NAME=fixture
+WMH_DIR=/data/world-model
+ROSE_EXCLUDE_ANTHROPIC_FAMILY=
+{stack_env}
+benchmark_run_id=
+for item in "${{STACK_ENV[@]}}"; do
+    case "$item" in
+        BENCHMARK_RUN_ID=*) benchmark_run_id="${{item#BENCHMARK_RUN_ID=}}" ;;
+    esac
+done
+{resolve_frontend_dist_dir}
+resolve_frontend_dist_dir {shlex.quote(str(tmp_path))} true "$benchmark_run_id" 3002
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == str(
+        tmp_path / ".context" / "frontend-builds" / workspace_name
+    )
+
+
 def test_wmh_health_wait_allows_cold_model_load_past_thirty_seconds(tmp_path: Path) -> None:
     """A live WMH process must not be discarded before its cold model finishes loading."""
     stack = STACK_SCRIPT.read_text()
