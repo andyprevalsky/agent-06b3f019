@@ -1,4 +1,4 @@
-import { IntegrationStatus, type AgentStatus } from '@prisma/client';
+import { IntegrationStatus, type AgentStatus, type Prisma } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 
@@ -132,28 +132,45 @@ export interface WaitlistPersonRow {
   invitedAt: Date | null;
 }
 
+export interface WaitlistPeoplePage {
+  rows: WaitlistPersonRow[];
+  total: number;
+}
+
+const actionableWaitlistWhere = {
+  AND: [{ phone: { not: null } }, { phone: { not: '' } }],
+} satisfies Prisma.WaitlistWhereInput;
+
 /**
- * All actionable waitlist people — the same phone-bearing population the
- * signup metric counts. Newest first. Email-only legacy rows (no phone) are
- * excluded because they can't be texted.
+ * One bounded page of actionable waitlist people — the same phone-bearing
+ * population the signup metric counts. Newest first, with id as the stable
+ * tie-breaker. Email-only legacy rows (no phone) are excluded because they
+ * can't be texted.
  */
-export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
-  const rows = await prisma.waitlist.findMany({
-    where: { phone: { not: null } },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      variant: true,
-      createdAt: true,
-      invitedAt: true,
-    },
-    orderBy: { createdAt: 'desc' },
-  });
-  return rows
-    .filter((row) => (row.phone ?? '').trim() !== '')
-    .map((row) => ({
+export async function findWaitlistPeople(params: {
+  skip: number;
+  take: number;
+}): Promise<WaitlistPeoplePage> {
+  const [rows, total] = await prisma.$transaction([
+    prisma.waitlist.findMany({
+      where: actionableWaitlistWhere,
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        phone: true,
+        variant: true,
+        createdAt: true,
+        invitedAt: true,
+      },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      skip: params.skip,
+      take: params.take,
+    }),
+    prisma.waitlist.count({ where: actionableWaitlistWhere }),
+  ]);
+  return {
+    rows: rows.map((row) => ({
       id: row.id,
       name: row.name,
       email: row.email,
@@ -161,7 +178,9 @@ export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
       variant: row.variant,
       createdAt: row.createdAt,
       invitedAt: row.invitedAt,
-    }));
+    })),
+    total,
+  };
 }
 
 export async function findWaitlistPersonById(id: string): Promise<WaitlistPersonRow | null> {

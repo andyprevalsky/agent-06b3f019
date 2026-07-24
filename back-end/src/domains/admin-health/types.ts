@@ -86,6 +86,7 @@ export interface AdminHealthConnectorAdoption {
 export interface AdminWaitlistPerson {
   id: string;
   name: string;
+  email: string | null;
   phone: string;
   variant: string | null;
   joinedAt: string;
@@ -99,6 +100,9 @@ export interface AdminWaitlistPerson {
 export interface AdminWaitlistPeopleResponse {
   people: AdminWaitlistPerson[];
   total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
 }
 
 export interface AdminWaitlistInviteResponse {

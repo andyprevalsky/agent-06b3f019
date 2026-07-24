@@ -17,6 +17,7 @@ import {
   WaitlistInviteSmsError,
   WaitlistPersonNotFoundError,
 } from './service.waitlist';
+import { parseWaitlistPagination, WaitlistPaginationError } from './service.waitlist-pagination';
 
 const log = createLogger('AdminHealth');
 const router = Router();
@@ -59,11 +60,16 @@ router.get(
 
     try {
       await assertCanViewAdminHealth(req.user.id, req.user.phone);
-      const result = await getWaitlistPeople();
+      const pagination = parseWaitlistPagination(req.query.page, req.query.pageSize);
+      const result = await getWaitlistPeople(pagination);
       res.json(result);
     } catch (error) {
       if (error instanceof AdminHealthForbiddenError) {
         res.status(403).json({ error: error.message });
+        return;
+      }
+      if (error instanceof WaitlistPaginationError) {
+        res.status(400).json({ error: error.message });
         return;
       }
       log.error('Admin waitlist list failed', {

@@ -8,7 +8,7 @@
  *
  * Invariants covered:
  *   - auth boundary: no auth -> 401, non-admin JWT -> 403 on both routes
- *   - list shape: people carry name/phone/joined/invited/account-status
+ *   - list shape: people carry name/email/phone/joined/invited/account-status
  *   - not-found: inviting an unknown id -> 404 (before any SMS is sent)
  *   - flag: markOffWaitlistByPhone stamps offWaitlistAt and is idempotent
  *   - status derivation: getWaitlistPeople joins signups to accounts + gate state
@@ -140,9 +140,12 @@ async function testList_nonAdminForbidden() {
 
 async function testList_adminListsSeededPerson() {
   const marker = `blackbox-wlp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const email = `${marker}@example.com`;
   const phone = uniquePhone();
   try {
-    await prisma.waitlist.create({ data: { name: marker, phone, variant: 'gated-login' } });
+    await prisma.waitlist.create({
+      data: { name: marker, email, phone, variant: 'gated-login' },
+    });
     const res = await request(`${BASE_URL}/api/admin-health/waitlist`, {
       headers: authHeaders(tokenFor(ANDY_USER_ID, '+19729777432')),
     });
@@ -151,10 +154,65 @@ async function testList_adminListsSeededPerson() {
     const seeded = body.people.find((person) => person.phone === phone);
     if (!seeded) throw new Error('Seeded waitlist person missing from list');
     if (seeded.name !== marker) throw new Error(`Expected name ${marker}, got ${seeded.name}`);
+    const rawPeople = (res.data as { people?: Array<Record<string, unknown>> }).people;
+    const rawSeeded = rawPeople?.find((person) => person.phone === phone);
+    if (rawSeeded?.email !== email) {
+      throw new Error(`Expected email ${email}, got ${String(rawSeeded?.email)}`);
+    }
     if (seeded.invitedAt !== null) throw new Error('Fresh signup must not be invited yet');
     if (seeded.hasAccount) throw new Error('No account exists for the seeded phone');
   } finally {
     await prisma.waitlist.deleteMany({ where: { name: marker } });
+  }
+}
+
+async function testList_paginatesNewestFirst() {
+  const marker = `blackbox-wlpage-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const rows = [1, 2, 3].map((position) => ({
+    name: `${marker}-${position}`,
+    phone: `${uniquePhone()}${position}`,
+    variant: 'gated-login',
+    createdAt: new Date(`2099-01-0${position}T00:00:00.000Z`),
+  }));
+  try {
+    await prisma.waitlist.createMany({ data: rows });
+    const headers = authHeaders(tokenFor(ANDY_USER_ID, '+19729777432'));
+    const first = await request(`${BASE_URL}/api/admin-health/waitlist?page=1&pageSize=2`, {
+      headers,
+    });
+    const second = await request(`${BASE_URL}/api/admin-health/waitlist?page=2&pageSize=2`, {
+      headers,
+    });
+    assertStatus(first.status, 200, first.data);
+    assertStatus(second.status, 200, second.data);
+
+    const firstBody = first.data as Record<string, unknown>;
+    const secondBody = second.data as Record<string, unknown>;
+    const firstPeople = firstBody.people as Array<Record<string, unknown>>;
+    const secondPeople = secondBody.people as Array<Record<string, unknown>>;
+    if (firstBody.page !== 1 || firstBody.pageSize !== 2) {
+      throw new Error(`Unexpected first-page metadata: ${JSON.stringify(firstBody)}`);
+    }
+    if (secondBody.page !== 2 || secondBody.pageSize !== 2) {
+      throw new Error(`Unexpected second-page metadata: ${JSON.stringify(secondBody)}`);
+    }
+    if (firstBody.totalPages !== Math.ceil(Number(firstBody.total) / 2)) {
+      throw new Error(`Unexpected totalPages: ${JSON.stringify(firstBody)}`);
+    }
+    if (
+      firstPeople[0]?.name !== `${marker}-3` ||
+      firstPeople[1]?.name !== `${marker}-2` ||
+      secondPeople[0]?.name !== `${marker}-1`
+    ) {
+      throw new Error(
+        `Expected stable newest-first pages, got ${JSON.stringify({
+          first: firstPeople.map((person) => person.name),
+          second: secondPeople.map((person) => person.name),
+        })}`
+      );
+    }
+  } finally {
+    await prisma.waitlist.deleteMany({ where: { name: { startsWith: marker } } });
   }
 }
 
@@ -450,6 +508,10 @@ async function main() {
     {
       name: 'GET /api/admin-health/waitlist admin -> lists seeded person',
       fn: testList_adminListsSeededPerson,
+    },
+    {
+      name: 'GET /api/admin-health/waitlist paginates newest-first',
+      fn: testList_paginatesNewestFirst,
     },
     {
       name: 'POST /api/admin-health/waitlist/:id/invite non-admin -> 403',

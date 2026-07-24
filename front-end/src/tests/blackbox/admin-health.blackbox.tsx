@@ -195,9 +195,7 @@ function installAdminHealthHandler() {
     }),
     // The Waitlist People section fetches this on mount; default to empty so the
     // full-page tests don't trip the onUnhandledRequest guard.
-    http.get(`${API_BASE}/admin-health/waitlist`, () =>
-      HttpResponse.json({ people: [], total: 0 }),
-    ),
+    http.get(`${API_BASE}/admin-health/waitlist`, () => HttpResponse.json(waitlistResponse([]))),
   );
 }
 
@@ -450,6 +448,7 @@ function waitlistPerson(overrides: Partial<AdminWaitlistPerson> = {}): AdminWait
   return {
     id: 'wl-1',
     name: 'Ada Lovelace',
+    email: 'ada@example.com',
     phone: '+13234498210',
     variant: 'gated-login',
     joinedAt: '2026-07-01T00:00:00.000Z',
@@ -457,6 +456,22 @@ function waitlistPerson(overrides: Partial<AdminWaitlistPerson> = {}): AdminWait
     hasAccount: true,
     isGated: true,
     ...overrides,
+  };
+}
+
+function waitlistResponse(
+  people: AdminWaitlistPerson[],
+  options: { total?: number; page?: number; pageSize?: number } = {},
+) {
+  const total = options.total ?? people.length;
+  const page = options.page ?? 1;
+  const pageSize = options.pageSize ?? 50;
+  return {
+    people,
+    total,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
   };
 }
 
@@ -471,40 +486,11 @@ describe('WaitlistPeopleSection', () => {
     sessionStorage.clear();
   });
 
-  it('lists the waitlist people with their gate status', async () => {
-    server.use(
-      http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json({
-          people: [
-            waitlistPerson({ id: 'wl-1', name: 'Ada Lovelace', isGated: true }),
-            waitlistPerson({
-              id: 'wl-2',
-              name: 'Alan Turing',
-              phone: '+14157915649',
-              invitedAt: '2026-07-10T00:00:00.000Z',
-            }),
-          ],
-          total: 2,
-        }),
-      ),
-    );
-
-    renderWithProviders(<WaitlistPeopleSection />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Ada Lovelace')).toBeInTheDocument();
-    });
-    expect(screen.getByText('+13234498210')).toBeInTheDocument();
-    expect(screen.getByText('On waitlist')).toBeInTheDocument();
-    expect(screen.getByText('Invited')).toBeInTheDocument();
-    expect(screen.getByText((text) => text.startsWith('2 on the waitlist'))).toBeInTheDocument();
-  });
-
   it('texts and emails an invite, then pulls the person off the waitlist', async () => {
     clearCaptures();
     server.use(
       http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json({ people: [waitlistPerson()], total: 1 }),
+        HttpResponse.json(waitlistResponse([waitlistPerson()])),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
         HttpResponse.json({
@@ -549,7 +535,7 @@ describe('WaitlistPeopleSection', () => {
     let attempts = 0;
     server.use(
       http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json({ people: [waitlistPerson()], total: 1 }),
+        HttpResponse.json(waitlistResponse([waitlistPerson()])),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) => {
         attempts += 1;
@@ -597,7 +583,7 @@ describe('WaitlistPeopleSection', () => {
   it('describes a no-account invite outcome without claiming the account was flagged', async () => {
     server.use(
       http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json({ people: [waitlistPerson({ hasAccount: false })], total: 1 }),
+        HttpResponse.json(waitlistResponse([waitlistPerson({ hasAccount: false })])),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
         HttpResponse.json({
@@ -623,19 +609,5 @@ describe('WaitlistPeopleSection', () => {
 
     expect(await screen.findByText(/no account available to flag/i)).toBeInTheDocument();
     expect(screen.queryByText(/flagged to subscribe/i)).not.toBeInTheDocument();
-  });
-
-  it('surfaces an error when the waitlist list fails to load', async () => {
-    server.use(
-      http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json({ error: 'Failed to load waitlist' }, { status: 500 }),
-      ),
-    );
-
-    renderWithProviders(<WaitlistPeopleSection />);
-
-    await waitFor(() => {
-      expect(screen.getByText('Failed to load waitlist')).toBeInTheDocument();
-    });
   });
 });

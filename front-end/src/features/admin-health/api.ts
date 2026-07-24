@@ -48,14 +48,21 @@ async function parseError(response: Response): Promise<string> {
   return `Request failed (${response.status})`;
 }
 
-export async function fetchWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> {
+export async function fetchWaitlistPeople(
+  page: number,
+  pageSize: number,
+): Promise<AdminWaitlistPeopleResponse> {
   const session = getStoredSession();
   if (!session) throw new Error('Not authenticated');
 
+  const params = new URLSearchParams({
+    page: String(page),
+    pageSize: String(pageSize),
+  });
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${backendApiUrl()}/admin-health/waitlist`, {
+    const response = await fetch(`${backendApiUrl()}/admin-health/waitlist?${params.toString()}`, {
       headers: {
         Authorization: `Bearer ${session.access_token}`,
         'Content-Type': 'application/json',
