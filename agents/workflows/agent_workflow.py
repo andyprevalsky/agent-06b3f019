@@ -2018,6 +2018,7 @@ class AgentWorkflow:
             self._has_credits = False
             self.is_paused = True
             if result.get("tier") is None:
+                checkout_url = None
                 try:
                     checkout_url = await workflow.execute_activity(
                         mint_subscription_checkout_activity,
@@ -2025,6 +2026,12 @@ class AgentWorkflow:
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=3),
                     )
+                except Exception as e:
+                    workflow.logger.warning(
+                        f"Subscription checkout URL unavailable; raising subscription gate with default action: {e}"
+                    )
+
+                try:
                     await raise_gate_direct(
                         self,
                         build_subscription_gate(
