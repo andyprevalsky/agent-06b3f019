@@ -153,7 +153,8 @@ require_text "$WORKFLOW" 'id-token: write' "investigator actions must be able to
 require_text "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}" "primary attempt must use the dedicated RCA account"
 require_text "$WORKFLOW" 'id: investigator_retry' "incomplete primary attempts must retry"
 require_text "$WORKFLOW" "steps.primary_contract.outputs.complete != 'true'" "retry must derive from the completion contract"
-require_text "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "retry must use the independent secondary account"
+[ "$(grep -Fc "claude_code_oauth_token: \${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}" "$WORKFLOW")" -eq 2 ] || fail "both investigator attempts must use the working dedicated RCA account"
+require_absent "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "retry must not silently switch to the broken generic Claude account"
 require_text "$WORKFLOW" 'name: Finalize PR from trusted completion contract' "trusted finalizer is required"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "trusted finalizer must own readiness"
 require_text "$WORKFLOW" 'name: Require complete evidence-backed RCA' "workflow must enforce the completion postcondition"
@@ -194,7 +195,7 @@ primary_verify_line="$(grep -nF 'name: Verify unchanged reproduction after prima
   [ "$primary_checkpoint_line" -lt "$primary_validate_line" ] &&
   [ "$primary_validate_line" -lt "$primary_verify_line" ] ||
   fail "primary action/checkpoint/turn-validation/reproduction order is unsafe"
-retry_action_line="$(grep -nF 'name: Retry incomplete RCA with secondary Claude account' "$WORKFLOW" | cut -d: -f1)"
+retry_action_line="$(grep -nF 'name: Continue incomplete RCA with dedicated Claude account' "$WORKFLOW" | cut -d: -f1)"
 retry_checkpoint_line="$(grep -nF 'name: Checkpoint retry investigator work' "$WORKFLOW" | cut -d: -f1)"
 retry_validate_line="$(grep -nF 'name: Require a real retry investigator turn' "$WORKFLOW" | cut -d: -f1)"
 retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' "$WORKFLOW" | cut -d: -f1)"
@@ -220,6 +221,9 @@ require_text "$WORKFLOW" 'npm install --no-audit --no-fund' "Auto RCA must insta
 require_text "$WORKFLOW" 'npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts' "Linux Auto RCA must hydrate the mac-app test graph without executing Darwin-only native installation"
 require_text "$WORKFLOW" 'agents/venv/bin/python -m pip install' "Auto RCA must install agent Python dependencies"
 require_text "$WORKFLOW" "steps.hydrate.outcome == 'success'" "investigators must not run against a broken test environment"
+require_text "$RCA_TOOL" 'link_repro_dependencies "$base_dir"' "trusted baseline reproductions must use the hydrated dependency graph"
+require_text "$RCA_TOOL" 'link_repro_dependencies "$head_dir"' "trusted current-head reproductions must use the hydrated dependency graph"
+require_text "$RCA_TOOL" 'cat "$result_file"' "trusted reproduction failures must expose their baseline/current waterfall in Actions logs"
 require_text "$WORKFLOW" 'DISPATCH_AFFECTED_USER_NAME' "historical recovery must retain the known affected user"
 require_text "$RCA_TOOL" '{unavailable:true,http_status:$status}' "expired backend records must be represented without discarding retained logs"
 require_text "$RCA_TOOL" 'no retained production evidence exists for this expired agent' "expired agents must still fail closed when every evidence source is empty"

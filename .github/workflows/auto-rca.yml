@@ -581,13 +581,13 @@ jobs:
           RCA_TIMELINE_STEP: rca-retry-investigation
         run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
-      - name: Retry incomplete RCA with secondary Claude account
+      - name: Continue incomplete RCA with dedicated Claude account
         id: investigator_retry
         if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
           bot_id: ${{ github.actor_id }}
           bot_name: ${{ github.actor }}

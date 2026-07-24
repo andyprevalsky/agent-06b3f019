@@ -176,12 +176,19 @@ chmod +x "$FAKE_BIN/git" "$FAKE_BIN/gh" "$FAKE_BIN/sudo" "$FAKE_BIN/curl"
 ZERO_TURN_EXECUTION="$TEST_ROOT/zero-turn-execution.json"
 SUCCESSFUL_EXECUTION="$TEST_ROOT/successful-execution.json"
 MAX_TURN_EXECUTION="$TEST_ROOT/max-turn-execution.json"
+ONE_TURN_ERROR_EXECUTION="$TEST_ROOT/one-turn-error-execution.json"
 printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":0}]' > "$ZERO_TURN_EXECUTION"
 printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":1}]' > "$SUCCESSFUL_EXECUTION"
 printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":81}]' > "$MAX_TURN_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0}]' > "$ONE_TURN_ERROR_EXECUTION"
 if RCA_INVESTIGATOR_EXECUTION_FILE="$ZERO_TURN_EXECUTION" \
   "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
   echo "FAIL: a zero-turn Claude execution passed the investigator invariant" >&2
+  exit 1
+fi
+if RCA_INVESTIGATOR_EXECUTION_FILE="$ONE_TURN_ERROR_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
+  echo "FAIL: a one-turn errored Claude execution passed the investigator invariant" >&2
   exit 1
 fi
 RCA_INVESTIGATOR_EXECUTION_FILE="$SUCCESSFUL_EXECUTION" \

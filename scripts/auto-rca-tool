@@ -742,6 +742,16 @@ raise SystemExit(completed.returncode)
 PY
 }
 
+link_repro_dependencies() {
+  local workdir="$1" dependency
+  for dependency in node_modules back-end/node_modules mac-app/node_modules agents/venv; do
+    [ -e "$ROOT_DIR/$dependency" ] || continue
+    [ ! -e "$workdir/$dependency" ] || continue
+    mkdir -p "$workdir/$(dirname "$dependency")"
+    ln -s "$ROOT_DIR/$dependency" "$workdir/$dependency"
+  done
+}
+
 materialize_investigator_head() {
   local destination="$1" path source
   git -C "$ROOT_DIR" archive HEAD | tar -x -C "$destination"
@@ -788,6 +798,8 @@ PY
 
   git -C "$ROOT_DIR" archive "$base" | tar -x -C "$base_dir"
   materialize_investigator_head "$head_dir"
+  link_repro_dependencies "$base_dir"
+  link_repro_dependencies "$head_dir"
   mkdir -p "$base_dir/$(dirname "$test_path")"
   cp "$ROOT_DIR/$test_path" "$base_dir/$test_path"
   chmod +x "$base_dir/$test_path" "$head_dir/$test_path"
@@ -825,12 +837,23 @@ verify_investigator_run() {
     any(.[];
       .type == "result" and
       ((.num_turns // 0) | type == "number") and
-      (.num_turns >= 1)
+      (
+        (
+          .subtype == "success" and
+          (.is_error == false) and
+          (.num_turns >= 1)
+        ) or
+        (
+          .subtype == "error_max_turns" and
+          (.is_error == true) and
+          (.num_turns >= 2)
+        )
+      )
     )
   ' "$execution_file" >/dev/null; then
-    fail "investigator did not execute a Claude turn"
+    fail "investigator did not complete useful Claude work"
   fi
-  printf 'Investigator executed at least one Claude turn; trusted artifact gates own completion.\n'
+  printf 'Investigator completed useful Claude work; trusted artifact gates own completion.\n'
 }
 
 verify_repro() {
@@ -863,6 +886,8 @@ PY
   trap 'rm -rf "$temp_root"' RETURN
   git -C "$ROOT_DIR" archive "$base" | tar -x -C "$base_dir"
   git -C "$ROOT_DIR" archive "$head" | tar -x -C "$head_dir"
+  link_repro_dependencies "$base_dir"
+  link_repro_dependencies "$head_dir"
   mkdir -p "$base_dir/$(dirname "$test_path")"
   cp "$head_dir/$test_path" "$base_dir/$test_path"
   chmod +x "$base_dir/$test_path" "$head_dir/$test_path"
@@ -886,6 +911,7 @@ PY
     sed -n '1,120p' "$after_log"
   } > "$result_file"
   sudo install -o root -g rose-auto-rca -m 0440 "$result_file" "$GATE_STATE_DIR/verification.txt"
+  cat "$result_file"
 
   [ "$before_status" -ne 0 ] || fail "the unchanged reproduction did not fail on the baseline"
   [ "$after_status" -eq 0 ] || fail "the unchanged reproduction did not pass on the current HEAD"
