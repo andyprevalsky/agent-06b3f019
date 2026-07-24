@@ -597,15 +597,31 @@ collect_evidence() {
   [ -n "${CLICKHOUSE_USER:-}" ] || fail "CLICKHOUSE_USER is required"
   [ -n "${CLICKHOUSE_PASSWORD:-}" ] || fail "CLICKHOUSE_PASSWORD is required"
 
-  agent_json="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 30 \
-    "$PROD_BACKEND_URL/api/agents/$AGENT_ID" \
-    -H "X-API-Key: $BACKEND_API_KEY")"
-  context_json="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 30 \
-    "$PROD_BACKEND_URL/api/agents/$AGENT_ID/alert-context" \
-    -H "X-API-Key: $BACKEND_API_KEY")"
+  fetch_backend_evidence() {
+    local url="$1" body_file http_status
+    body_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-backend.XXXXXX")"
+    http_status="$(curl -sS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 30 \
+      -o "$body_file" -w '%{http_code}' "$url" \
+      -H "X-API-Key: $BACKEND_API_KEY" 2>/dev/null || true)"
+    if [[ "$http_status" =~ ^2[0-9][0-9]$ ]] && jq -e . "$body_file" >/dev/null 2>&1; then
+      cat "$body_file"
+    else
+      jq -cn --arg status "${http_status:-unavailable}" \
+        '{unavailable:true,http_status:$status}'
+    fi
+    rm -f "$body_file"
+  }
+
+  agent_json="$(fetch_backend_evidence "$PROD_BACKEND_URL/api/agents/$AGENT_ID")"
+  context_json="$(fetch_backend_evidence "$PROD_BACKEND_URL/api/agents/$AGENT_ID/alert-context")"
   logs_json="$(curl -fsS --retry 3 --retry-all-errors --connect-timeout 5 --max-time 45 \
     -u "$CLICKHOUSE_USER:$CLICKHOUSE_PASSWORD" --get "$CLICKHOUSE_ENDPOINT" \
     --data-urlencode "query=SELECT timestamp, raw FROM observability.fly_logs WHERE raw LIKE '%$AGENT_ID%' ORDER BY ingested_at ASC LIMIT 1000 FORMAT JSONEachRow")"
+  if jq -e '.unavailable == true' <<< "$agent_json" >/dev/null 2>&1 &&
+    jq -e '.unavailable == true' <<< "$context_json" >/dev/null 2>&1 &&
+    [ -z "$(printf '%s' "$logs_json" | tr -d '[:space:]')" ]; then
+    fail "no retained production evidence exists for this expired agent"
+  fi
 
   temp_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-evidence.XXXXXX")"
   trap 'rm -f "$temp_file"' RETURN
@@ -807,15 +823,13 @@ verify_investigator_run() {
     type == "array" and
     any(.[];
       .type == "result" and
-      .subtype == "success" and
-      .is_error == false and
       ((.num_turns // 0) | type == "number") and
       (.num_turns >= 1)
     )
   ' "$execution_file" >/dev/null; then
-    fail "investigator completed without a successful Claude turn"
+    fail "investigator did not execute a Claude turn"
   fi
-  printf 'Investigator completed at least one successful Claude turn.\n'
+  printf 'Investigator executed at least one Claude turn; trusted artifact gates own completion.\n'
 }
 
 verify_repro() {
@@ -981,6 +995,34 @@ publish_draft() {
 
   write_final_report
   printf 'RCA commit and report published locally for trusted verification.\n'
+}
+
+checkpoint_draft() {
+  local manifest test_path
+  require_agent_id
+  require_branch
+  require_repo
+  if git -C "$ROOT_DIR" diff --name-only --diff-filter=U | grep -q .; then
+    fail "checkout has unresolved merge conflicts; refusing to checkpoint conflict markers"
+  fi
+
+  manifest="$(repro_manifest_path)"
+  if [ -s "$manifest" ]; then
+    test_path="$(read_repro_test_path)"
+    chmod +x "$ROOT_DIR/$test_path"
+  fi
+
+  if [ -n "$(git -C "$ROOT_DIR" status --porcelain --untracked-files=normal)" ]; then
+    git -c core.hooksPath=/dev/null -C "$ROOT_DIR" add -A
+    if ! git -C "$ROOT_DIR" diff --cached --quiet; then
+      git -c core.hooksPath=/dev/null -C "$ROOT_DIR" commit \
+        -m "auto-RCA: checkpoint production agent $AGENT_ID"
+    fi
+  fi
+  if [ -s "$CONTEXT_DIR/pr-body.md" ]; then
+    write_final_report
+  fi
+  printf 'Investigator work checkpointed for trusted verification and retry continuity.\n'
 }
 
 write_preliminary_scaffold() {
@@ -1488,6 +1530,7 @@ case "${1:-}" in
   pin-baseline) [ "$#" -eq 1 ] || fail "pin-baseline takes no arguments"; pin_baseline ;;
   investigator-repro) [ "$#" -eq 1 ] || fail "investigator-repro takes no arguments"; investigator_repro ;;
   verify-investigator-run) [ "$#" -eq 1 ] || fail "verify-investigator-run takes no arguments"; verify_investigator_run ;;
+  checkpoint-draft) [ "$#" -eq 1 ] || fail "checkpoint-draft takes no arguments"; checkpoint_draft ;;
   benchmark) [ "$#" -eq 1 ] || fail "benchmark takes no arguments"; benchmark ;;
   verify-repro) [ "$#" -eq 1 ] || fail "verify-repro takes no arguments"; verify_repro ;;
   offline-gates) [ "$#" -eq 1 ] || fail "offline-gates takes no arguments"; offline_gates ;;
@@ -1506,5 +1549,5 @@ case "${1:-}" in
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
   slack-reply) [ "$#" -eq 1 ] || fail "slack-reply takes no arguments"; slack_reply ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-investigator-run|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-investigator-run|checkpoint-draft|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
 esac
