@@ -116,18 +116,56 @@ async function main(): Promise<void> {
     );
   });
 
+  await test('ensureAgentCardSandboxFloat refreshes and retries an expired admin session', async () => {
+    const authorizations: string[] = [];
+    const persisted: string[][] = [];
+    const admin = {
+      ...ADMIN,
+      refreshToken: 'refresh-old',
+      persistTokens: async (accessToken: string, refreshToken: string) => {
+        persisted.push([accessToken, refreshToken]);
+      },
+    };
+    let calls = 0;
+    const result = await ensureAgentCardSandboxFloat(admin, 'org-1', 50_000, (async (
+      url: string,
+      init: RequestInit
+    ) => {
+      calls += 1;
+      if (url.endsWith('/auth/refresh')) {
+        assert.deepEqual(JSON.parse(String(init.body)), { refreshToken: 'refresh-old' });
+        return jsonResponse(200, {
+          accessToken: 'access-new',
+          refreshToken: 'refresh-new',
+        });
+      }
+      authorizations.push(String((init.headers as Record<string, string>).authorization));
+      if (calls === 1) return jsonResponse(401, {});
+      return jsonResponse(200, { settings: { sandbox_balance_cents: 50_000 } });
+    }) as typeof fetch);
+    assert.equal(result.balanceCents, 50_000);
+    assert.deepEqual(authorizations, ['Bearer jwt-token', 'Bearer access-new']);
+    assert.deepEqual(persisted, [['access-new', 'refresh-new']]);
+    assert.equal(admin.refreshToken, 'refresh-new');
+  });
+
   await test('loadAgentCardBenchmarkAdmin reads the env JWT + API url override', async () => {
     const prevJwt = process.env.AGENT_CARDS_ADMIN_JWT;
+    const prevRefresh = process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN;
     const prevUrl = process.env.ADMIN_API_URL;
     process.env.AGENT_CARDS_ADMIN_JWT = 'env-jwt';
+    process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN = 'env-refresh';
     process.env.ADMIN_API_URL = 'https://admin.override.test';
     try {
       const admin = await loadAgentCardBenchmarkAdmin();
       assert.equal(admin.token, 'env-jwt');
+      assert.equal(admin.refreshToken, 'env-refresh');
       assert.equal(admin.apiUrl, 'https://admin.override.test');
     } finally {
       if (prevJwt === undefined) delete process.env.AGENT_CARDS_ADMIN_JWT;
       else process.env.AGENT_CARDS_ADMIN_JWT = prevJwt;
+      if (prevRefresh === undefined) delete process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN;
+      else process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN = prevRefresh;
       if (prevUrl === undefined) delete process.env.ADMIN_API_URL;
       else process.env.ADMIN_API_URL = prevUrl;
     }

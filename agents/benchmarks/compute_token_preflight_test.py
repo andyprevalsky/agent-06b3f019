@@ -645,7 +645,7 @@ def test_cache_ratchet_ignores_skipped_tasks():
         message_count=0,
         failure_reason=rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON,
     )
-    assert rb.cache_ratchet_failures([skipped], {"claude-code-agent": 40.0}) == []
+    assert rb.cache_ratchet_failures([skipped], {"claude-code-agent": 35.0}) == []
 
 
 def test_simulation_preflight_uses_restored_seed_without_prod_sync():
