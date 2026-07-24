@@ -33,6 +33,10 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
 from config import load_config
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+)
+from domains.request_payment_card.handler import build_payment_question, normalize_payment_payload
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -7709,11 +7713,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_payment_card import (
-                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-                        build_payment_question,
-                        normalize_payment_payload,
-                    )
                     from tools.request_user_approval import (
                         request_user_approval_direct,
                         request_user_attention_direct,

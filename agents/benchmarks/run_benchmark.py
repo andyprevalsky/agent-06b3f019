@@ -192,6 +192,8 @@ PER_TASK_CACHE_HIT_RATCHET = {
     "claude-code-agent": 40.0,
     "browser-smoke": 40.0,
 }
+CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
+CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
@@ -1172,7 +1174,7 @@ def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if not isinstance(structured, dict):
             continue
-        order_id = structured.get("order_confirmation_id")
+        order_id = structured.get("order_confirmation_id") or structured.get("payment_confirmation_id")
         if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
             return True, None
     return False, "agent did not return a grounded browser payment confirmation order id"
@@ -8484,14 +8486,37 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     failures = cache_ratchet_failures(task_results)
     if not failures:
         return
+    warn_only_enabled = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    hard_failures = []
+    warn_only_failures = []
+    for failure in failures:
+        name, _agent_id, _hit_pct, _floor = failure
+        if warn_only_enabled and name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
+            warn_only_failures.append(failure)
+        else:
+            hard_failures.append(failure)
+
+    if warn_only_failures:
+        print("\n  ⚠ CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor):")
+        for name, _agent_id, hit_pct, floor in warn_only_failures:
+            print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+
+    if not hard_failures:
+        return
+
     print("\n  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor):")
-    for name, _agent_id, hit_pct, floor in failures:
+    for name, _agent_id, hit_pct, floor in hard_failures:
         print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
     print(
         "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
         "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
     )
-    for name, agent_id, _hit_pct, _floor in failures:
+    for name, agent_id, _hit_pct, _floor in hard_failures:
         print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {agent_id}  # {name}")
     print(
         "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"

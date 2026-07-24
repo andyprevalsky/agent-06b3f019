@@ -16,6 +16,7 @@ type McpResult = {
 };
 
 const log = createLogger('AgentCardOrgMCP');
+const CREATE_CARD_TIMEOUT_MAX_ATTEMPTS = 2;
 const TRANSFER_LOOKUP_ATTEMPTS = 20;
 const TRANSFER_LOOKUP_DELAY_MS = 500;
 const TRANSFER_ID_FIELD_NAMES = [
@@ -214,6 +215,16 @@ function requiredString(value: unknown, name: string): string {
   return value;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isTimeoutError(error: unknown): boolean {
+  const message = errorMessage(error);
+  const name = error instanceof Error ? error.name : '';
+  return /\b(?:request timed out|timed out|timeout|etimedout)\b/i.test(`${name} ${message}`);
+}
+
 function labeledValue(text: string, label: string): string | undefined {
   const match = text.match(new RegExp(`^\\s*${label}\\s*:\\s*([^\\n]+)`, 'im'));
   return match?.[1]?.trim() || undefined;
@@ -374,7 +385,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       funds_source: args.funds_source,
       idempotency_key: request.idempotencyKey,
     });
-    let result = await this.toolCaller('create_card', args);
+    let result = await this.createCard(args, request);
     let record = resultRecord(result);
     if (errorCode(record, resultText(result)) === 'kyc_required') {
       const setupResult = await this.toolCaller('start_cardholder_kyc', {
@@ -383,7 +394,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       const setupRecord = resultRecord(setupResult);
       const setupStatus = optionalString(setupRecord, ['status', 'kyc_status', 'kycStatus']);
       if (setupStatus === 'verified' || setupStatus === 'approved') {
-        result = await this.toolCaller('create_card', args);
+        result = await this.createCard(args, request);
         record = resultRecord(result);
       } else {
         const setupUrl = findUrl(setupRecord);
@@ -435,6 +446,47 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       status: details.status,
       ...(transferId !== undefined ? { providerTransferId: transferId, metadata: record } : {}),
     };
+  }
+
+  private async createCard(
+    args: Record<string, unknown>,
+    request: CardProviderMintRequest
+  ): Promise<unknown> {
+    const maxAttempts = request.idempotencyKey === undefined ? 1 : CREATE_CARD_TIMEOUT_MAX_ATTEMPTS;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.toolCaller('create_card', args);
+      } catch (error) {
+        const canRetry = isTimeoutError(error) && attempt < maxAttempts;
+        if (!canRetry) {
+          if (isTimeoutError(error)) {
+            throw new AgentCardProviderError(
+              `create_card failed: ${errorMessage(error)}`,
+              502,
+              undefined,
+              'agentcard_org_mcp_timeout',
+              { attempts: attempt }
+            );
+          }
+          throw error;
+        }
+        log.warn('AgentCard Organization MCP create_card timed out; retrying', {
+          cardholder_id: maskId(this.cardholderId),
+          amount_cents: request.amountCents,
+          funds_source: request.fundsSource ?? 'company_flow',
+          attempt,
+          max_attempts: maxAttempts,
+          error: errorMessage(error),
+        });
+      }
+    }
+    throw new AgentCardProviderError(
+      'create_card failed: AgentCard Organization MCP timed out',
+      502,
+      undefined,
+      'agentcard_org_mcp_timeout',
+      { attempts: maxAttempts }
+    );
   }
 
   private async findCompanyTransferId(cardId: string): Promise<string | undefined> {

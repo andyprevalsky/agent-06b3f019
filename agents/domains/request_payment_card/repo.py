@@ -4,19 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-import httpx
-import structlog
 from temporalio import activity
 
-from config import load_config
-from helpers.trace_archive import archive_json
-from helpers.tracing import current_root_agent_id
-from helpers.world_model_runtime import WorldModelToolExecutionAdapter
-
-logger = structlog.get_logger()
-MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
-MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
-MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
+    MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
+)
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",
@@ -26,7 +20,37 @@ KYC_REQUIRED_CODES = {
 }
 
 
-def _error_payload(response: httpx.Response) -> Dict[str, Any]:
+def _logger():
+    import structlog
+
+    return structlog.get_logger()
+
+
+def _world_model_adapter():
+    from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+    return WorldModelToolExecutionAdapter
+
+
+def _load_config():
+    from config import load_config
+
+    return load_config()
+
+
+def _current_root_agent_id() -> str | None:
+    from helpers.tracing import current_root_agent_id
+
+    return current_root_agent_id()
+
+
+def _archive_json(*, root_agent_id: str, path: str, payload: Dict[str, Any]) -> None:
+    from helpers.trace_archive import archive_json
+
+    archive_json(root_agent_id=root_agent_id, path=path, payload=payload)
+
+
+def _error_payload(response: Any) -> Dict[str, Any]:
     try:
         body = response.json()
     except ValueError:
@@ -42,7 +66,7 @@ async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, 
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await _lookup_purchase_real(user_id, fingerprint)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
+    return await _world_model_adapter().from_env(agent_id=user_id).execute(
         "payment_lookup",
         {"user_id": user_id, "fingerprint": fingerprint},
         f"payment_lookup:{fingerprint}",
@@ -51,7 +75,9 @@ async def lookup_purchase_activity(user_id: str, fingerprint: str) -> Dict[str, 
 
 
 async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any]:
-    config = load_config()
+    import httpx
+
+    config = _load_config()
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
             f"{config.backend.api_url}/api/purchases/lookup",
@@ -64,8 +90,8 @@ async def _lookup_purchase_real(user_id: str, fingerprint: str) -> Dict[str, Any
         )
         response.raise_for_status()
         result = response.json()
-        archive_root_agent_id = current_root_agent_id() or user_id
-        archive_json(
+        archive_root_agent_id = _current_root_agent_id() or user_id
+        _archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"provider/payment/lookup/{fingerprint}.json.gz.enc",
             payload={"request": {"user_id": user_id, "fingerprint": fingerprint}, "response": result},
@@ -80,7 +106,7 @@ async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> 
     async def real_executor(_tool_name: str, _tool_args: Dict[str, Any], _tool_call_id: str) -> Dict[str, Any]:
         return await _mint_purchase_card_real(user_id, payload)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
+    return await _world_model_adapter().from_env(agent_id=str(payload.get("agentId") or user_id)).execute(
         "payment_mint",
         {"user_id": user_id, "payload": payload},
         f"payment_mint:{fingerprint}",
@@ -89,7 +115,9 @@ async def mint_purchase_card_activity(user_id: str, payload: Dict[str, Any]) -> 
 
 
 async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    config = load_config()
+    import httpx
+
+    config = _load_config()
     body = {
         "fingerprint": payload["fingerprint"],
         "merchant": payload["merchant"],
@@ -136,19 +164,19 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
                 response.status_code in (400, 403, 409, 422)
                 and "kyc" in f"{code} {detail}".lower()
             ):
-                logger.info("Mint requires KYC", code=code, detail=detail[:200])
+                _logger().info("Mint requires KYC", code=code, detail=detail[:200])
                 return {"status": "kyc_required", "error": detail, "code": code or "kyc_required"}
 
             # 402 = the user needs an active subscription before Rose can spend real
             # money. Surface it as a signal (not an exception) so the workflow can
             # raise a subscription gate organically and retry, instead of failing.
             if response.status_code == 402:
-                logger.info("Mint requires subscription (402)", detail=detail[:200])
+                _logger().info("Mint requires subscription (402)", detail=detail[:200])
                 return {"status": "subscription_required", "error": detail}
             response.raise_for_status()
         result = response.json()
-        archive_root_agent_id = current_root_agent_id() or str(payload.get("agentId") or user_id)
-        archive_json(
+        archive_root_agent_id = _current_root_agent_id() or str(payload.get("agentId") or user_id)
+        _archive_json(
             root_agent_id=archive_root_agent_id,
             path=f"provider/payment/mint/{body['fingerprint']}.json.gz.enc",
             payload={"request": body, "response": result},
@@ -158,7 +186,9 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
 
 @activity.defn
 async def agentcard_status_activity(user_id: str) -> Dict[str, Any]:
-    config = load_config()
+    import httpx
+
+    config = _load_config()
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(
             f"{config.backend.api_url}/api/agentcard/status",
@@ -170,7 +200,7 @@ async def agentcard_status_activity(user_id: str) -> Dict[str, Any]:
         )
         response.raise_for_status()
         result = response.json()
-        archive_json(
+        _archive_json(
             root_agent_id=user_id,
             path="provider/agentcard/status.json.gz.enc",
             payload={"request": {"user_id": user_id}, "response": result},
