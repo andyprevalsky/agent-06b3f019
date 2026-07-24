@@ -70,7 +70,7 @@ from .config import (
     BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
     HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
-    MAX_ACTIVITY_RETRIES,
+    MAX_ACTIVITY_ATTEMPTS,
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
@@ -2723,8 +2723,12 @@ async def _finalize_browser_recording_for_fe(
         )
 
     cleanup_local_artifacts = False
+    cleanup_delegated = False
     try:
-        recording_path = await browser_recorder.close(include_steel_media=False)
+        recording_path = await browser_recorder.close(
+            include_steel_media=False,
+            archive_artifacts=False,
+        )
         if not recording_path:
             return None
 
@@ -2771,6 +2775,15 @@ async def _finalize_browser_recording_for_fe(
             },
         )
         cleanup_local_artifacts = bool(recording_file_pointer)
+        schedule_archive = getattr(
+            browser_recorder,
+            "archive_recording_artifacts_in_background",
+            None,
+        )
+        if callable(schedule_archive):
+            cleanup_delegated = bool(
+                schedule_archive(cleanup_after=cleanup_local_artifacts)
+            )
         return {
             "recording_path": str(recording_path),
             "recording_file_pointer": recording_file_pointer,
@@ -2778,7 +2791,7 @@ async def _finalize_browser_recording_for_fe(
         }
     finally:
         cleanup = getattr(browser_recorder, "cleanup_local_artifacts", None)
-        if callable(cleanup):
+        if callable(cleanup) and not cleanup_delegated:
             cleanup(persisted=cleanup_local_artifacts)
 
 
@@ -7557,7 +7570,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
-                        retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_RETRIES),
+                        retry_policy=RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS),
                     )
 
                     was_cancelled = False

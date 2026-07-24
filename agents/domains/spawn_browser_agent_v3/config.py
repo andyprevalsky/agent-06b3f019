@@ -13,14 +13,17 @@ STEEL_API_KEY = os.environ.get("STEEL_API_KEY", "")
 # Agent loop limits
 MAX_ITERATIONS = 50
 MAX_CONSECUTIVE_API_FAILURES = 5
-ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 15
+ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES = 30
 HEARTBEAT_TIMEOUT_SECONDS = 120
 # A background task heartbeats at this cadence independent of the main loop, so a
 # CPU-bound bot-challenge that freezes the page renderer (and every CDP call) for
 # 90-260s can't starve the Temporal heartbeat and get the activity killed.
 # Must stay comfortably below HEARTBEAT_TIMEOUT_SECONDS.
 HEARTBEAT_KEEPALIVE_SECONDS = 15
-MAX_ACTIVITY_RETRIES = 2
+# Browser activities can commit external writes. Automatic Temporal retries
+# restart from scratch and can duplicate those writes, so each activity gets one
+# attempt within the full timeout.
+MAX_ACTIVITY_ATTEMPTS = 1
 BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS = int(os.getenv("BROWSER_RECORDING_FINALIZE_TIMEOUT_SECONDS", "45"))
 
 # browser-use per-event timeouts. browser-use fetches DOM+screenshot before every

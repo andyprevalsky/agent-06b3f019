@@ -184,16 +184,27 @@ require_absent "$WORKFLOW" 'allowed_non_write_users:' "the trusted maintainer wo
 require_text "$WORKFLOW" '${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com' "the initial RCA commit must map to the triggering GitHub account"
 require_absent "$WORKFLOW" 'auto-rca@roselabs.ai' "RCA commits must not use an unmapped Vercel identity"
 [ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool verify-investigator-run' "$WORKFLOW")" -eq 2 ] || fail "both investigators must prove that Claude completed a real turn"
+[ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool checkpoint-draft' "$WORKFLOW")" -eq 2 ] || fail "both investigators must preserve work before trusted verification"
 require_text "$RCA_TOOL" '.num_turns >= 1' "zero-turn Claude sessions must fail the trusted investigator invariant"
 primary_action_line="$(grep -nF 'name: Root-cause with dedicated Claude account' "$WORKFLOW" | cut -d: -f1)"
+primary_checkpoint_line="$(grep -nF 'name: Checkpoint primary investigator work' "$WORKFLOW" | cut -d: -f1)"
 primary_validate_line="$(grep -nF 'name: Require a real primary investigator turn' "$WORKFLOW" | cut -d: -f1)"
 primary_verify_line="$(grep -nF 'name: Verify unchanged reproduction after primary attempt' "$WORKFLOW" | cut -d: -f1)"
-[ "$primary_action_line" -lt "$primary_validate_line" ] && [ "$primary_validate_line" -lt "$primary_verify_line" ] || fail "primary action/turn-validation/reproduction order is unsafe"
+[ "$primary_action_line" -lt "$primary_checkpoint_line" ] &&
+  [ "$primary_checkpoint_line" -lt "$primary_validate_line" ] &&
+  [ "$primary_validate_line" -lt "$primary_verify_line" ] ||
+  fail "primary action/checkpoint/turn-validation/reproduction order is unsafe"
 retry_action_line="$(grep -nF 'name: Retry incomplete RCA with secondary Claude account' "$WORKFLOW" | cut -d: -f1)"
+retry_checkpoint_line="$(grep -nF 'name: Checkpoint retry investigator work' "$WORKFLOW" | cut -d: -f1)"
 retry_validate_line="$(grep -nF 'name: Require a real retry investigator turn' "$WORKFLOW" | cut -d: -f1)"
 retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' "$WORKFLOW" | cut -d: -f1)"
-[ "$retry_action_line" -lt "$retry_validate_line" ] && [ "$retry_validate_line" -lt "$retry_verify_line" ] || fail "retry action/turn-validation/reproduction order is unsafe"
+[ "$retry_action_line" -lt "$retry_checkpoint_line" ] &&
+  [ "$retry_checkpoint_line" -lt "$retry_validate_line" ] &&
+  [ "$retry_validate_line" -lt "$retry_verify_line" ] ||
+  fail "retry action/checkpoint/turn-validation/reproduction order is unsafe"
 require_text "$WORKFLOW" "if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'" "retry must run even when the primary investigator never started"
+require_text "$WORKFLOW" "steps.checkpoint_primary.outcome == 'success' && steps.validate_primary.outcome == 'success'" "primary reproduction must judge preserved investigator work"
+require_text "$WORKFLOW" "steps.checkpoint_retry.outcome == 'success' && steps.validate_retry.outcome == 'success'" "retry reproduction must judge preserved investigator work"
 job_env="$(sed -n '/^    env:/,/^    steps:/p' "$WORKFLOW")"
 for secret_name in GH_TOKEN BACKEND_API_KEY CLICKHOUSE_ENDPOINT CLICKHOUSE_USER CLICKHOUSE_PASSWORD FLY_API_TOKEN SLACK_BOT_TOKEN; do
   if grep -Fq "$secret_name:" <<< "$job_env"; then
@@ -203,6 +214,9 @@ done
 require_text "$WORKFLOW" 'name: Collect production evidence outside the investigator process' "production evidence must be collected before the model runs"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool collect-evidence' "trusted evidence collection is required"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool pin-baseline' "trusted baseline must be pinned before the model runs"
+require_text "$WORKFLOW" 'DISPATCH_AFFECTED_USER_NAME' "historical recovery must retain the known affected user"
+require_text "$RCA_TOOL" '{unavailable:true,http_status:$status}' "expired backend records must be represented without discarding retained logs"
+require_text "$RCA_TOOL" 'no retained production evidence exists for this expired agent' "expired agents must still fail closed when every evidence source is empty"
 require_text "$RCA_TOOL" "base=\"${LITERAL_DOLLAR}(trusted_baseline)\"" "reproduction checks must use the root-owned baseline instead of mutable origin/main"
 require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}temp_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/evidence.txt\"" "investigator evidence must be read-only to the coding user"
 require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}result_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/verification.txt\"" "trusted verification must be read-only to the coding user"

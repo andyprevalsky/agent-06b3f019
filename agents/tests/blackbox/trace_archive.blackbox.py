@@ -38,10 +38,20 @@ def _with_archive_env(tmp: str):
     import helpers.trace_archive as trace_archive
 
     old_root = trace_archive._LOCAL_ROOT
-    old_env = {key: os.environ.get(key) for key in ["TRACE_ARCHIVE_ENABLED", "TRACE_ARCHIVE_BACKEND"]}
+    old_env = {
+        key: os.environ.get(key)
+        for key in [
+            "TRACE_ARCHIVE_ENABLED",
+            "TRACE_ARCHIVE_BACKEND",
+            "FLY_APP_NAME",
+            "ENVIRONMENT",
+        ]
+    }
     trace_archive._LOCAL_ROOT = Path(tmp)
     os.environ["TRACE_ARCHIVE_ENABLED"] = "1"
     os.environ["TRACE_ARCHIVE_BACKEND"] = "local"
+    os.environ.pop("FLY_APP_NAME", None)
+    os.environ.pop("ENVIRONMENT", None)
 
     def restore():
         trace_archive._LOCAL_ROOT = old_root
@@ -853,7 +863,7 @@ async def test_deferred_json_payload_factory_runs_off_event_loop():
             restore()
 
 
-async def test_async_archive_burst_preserves_all_artifacts():
+async def test_async_archive_burst_is_bounded_without_blocking_event_loop():
     import asyncio
     import time as time_mod
 
@@ -867,29 +877,35 @@ async def test_async_archive_burst_preserves_all_artifacts():
         original_store = trace_archive.store_encrypted_artifact
         try:
             def _slow_store(**kwargs):
-                time_mod.sleep(0.02)
+                time_mod.sleep(0.2)
                 return original_store(**kwargs)
 
             trace_archive.store_encrypted_artifact = _slow_store
             count = 96
+            accepted = 0
+            started = time_mod.monotonic()
             for idx in range(count):
                 result = archive_json(
                     root_agent_id="agent-burst",
                     path=f"llm/burst-{idx}.json.gz.enc",
                     payload={"idx": idx},
                 )
-                assert result is not None
+                accepted += result is not None
+            elapsed = time_mod.monotonic() - started
+
+            assert elapsed < 0.25, f"archive admission blocked the event loop for {elapsed:.3f}s"
+            assert 0 < accepted <= 64, f"expected bounded admission, accepted={accepted}"
 
             bundle = Path(tmp) / "agent-burst" / "llm"
             for _ in range(200):
                 files = list(bundle.glob("burst-*.json.gz.enc")) if bundle.exists() else []
                 metas = list(bundle.glob("burst-*.json.gz.enc.meta.json")) if bundle.exists() else []
-                if len(files) == count and len(metas) == count:
+                if len(files) == accepted and len(metas) == accepted:
                     break
                 await asyncio.sleep(0.05)
             assert bundle.exists()
-            assert len(list(bundle.glob("burst-*.json.gz.enc"))) == count
-            assert len(list(bundle.glob("burst-*.json.gz.enc.meta.json"))) == count
+            assert len(list(bundle.glob("burst-*.json.gz.enc"))) == accepted
+            assert len(list(bundle.glob("burst-*.json.gz.enc.meta.json"))) == accepted
         finally:
             trace_archive.store_encrypted_artifact = original_store
             if old_flag is None:
@@ -1238,7 +1254,10 @@ async def run_all_tests():
         "deferred_json_payload_factory_runs_off_event_loop",
         test_deferred_json_payload_factory_runs_off_event_loop,
     )
-    await r.record_async("async_archive_burst_preserves_all_artifacts", test_async_archive_burst_preserves_all_artifacts)
+    await r.record_async(
+        "async_archive_burst_bounded_nonblocking",
+        test_async_archive_burst_is_bounded_without_blocking_event_loop,
+    )
     await r.record_async(
         "backend_failure_spools_encrypted_outbox_and_async_drain",
         test_backend_failure_spools_encrypted_outbox_and_async_drain,

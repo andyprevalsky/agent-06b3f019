@@ -25,7 +25,7 @@
  * desktop AttentionInbox bell owns notifications there).
  */
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { LogOut, Menu, Plus } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
@@ -116,6 +116,7 @@ export default function MobileAgentDrawer({
 }: MobileAgentDrawerProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<DrawerTab>('agents');
+  const loginAfterCloseRef = useRef(false);
 
   const { requests, refetch } = useAttentionRequests(isSignedIn && realtimeReady);
   const notifCount = isSignedIn ? unansweredCount(requests) : 0;
@@ -131,8 +132,18 @@ export default function MobileAgentDrawer({
   };
 
   const handleLogin = () => {
-    onLoginClick();
+    loginAfterCloseRef.current = true;
     setOpen(false);
+  };
+
+  const handleCloseAutoFocus = (event: Event) => {
+    if (!loginAfterCloseRef.current) return;
+
+    // Radix restores focus to the Sheet trigger as it closes. Opening the auth
+    // Dialog before that handoff completes makes the new Dialog dismiss itself.
+    event.preventDefault();
+    loginAfterCloseRef.current = false;
+    window.setTimeout(onLoginClick, 0);
   };
 
   const handleLogout = () => {
@@ -154,6 +165,7 @@ export default function MobileAgentDrawer({
       </SheetTrigger>
       <SheetContent
         side="right"
+        onCloseAutoFocus={handleCloseAutoFocus}
         className="flex w-[min(340px,88vw)] flex-col p-0 pt-[var(--safe-area-inset-top)]"
       >
         <SheetTitle className="sr-only">Menu</SheetTitle>
