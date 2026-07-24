@@ -217,7 +217,7 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool pin-baseline' "trust
 require_text "$WORKFLOW" 'image: postgres:16' "Auto RCA deploy gates require an isolated local Postgres service"
 require_text "$WORKFLOW" 'name: Hydrate Auto RCA test environment' "Auto RCA must hydrate dependencies before running investigators or deploy gates"
 require_text "$WORKFLOW" 'npm install --no-audit --no-fund' "Auto RCA must install root workspace dependencies without assuming an intentionally untracked lockfile"
-require_text "$WORKFLOW" 'npm install --prefix mac-app --no-audit --no-fund' "Auto RCA must install mac-app dependencies without assuming an intentionally untracked lockfile"
+require_text "$WORKFLOW" 'npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts' "Linux Auto RCA must hydrate the mac-app test graph without executing Darwin-only native installation"
 require_text "$WORKFLOW" 'agents/venv/bin/python -m pip install' "Auto RCA must install agent Python dependencies"
 require_text "$WORKFLOW" "steps.hydrate.outcome == 'success'" "investigators must not run against a broken test environment"
 require_text "$WORKFLOW" 'DISPATCH_AFFECTED_USER_NAME' "historical recovery must retain the known affected user"
