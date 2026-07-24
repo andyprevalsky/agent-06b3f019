@@ -1,7 +1,22 @@
 import type { CreateAgentBody } from './types';
 import { isNonRealWorldModelMode, normalizeWorldModelMode } from '../../providers/worldModelMode';
+import { isAdminUser } from '../../utils/adminAccess';
 export { normalizeWorldModelMode } from '../../providers/worldModelMode';
 const DEFAULT_FAST_MODE_USER_IDS = new Set(['1f85ff25-6e29-4c1b-8739-f917bd101a30']);
+
+export class WorldModelModeAccessError extends Error {
+  constructor() {
+    super('Simulator mode requires administrator access');
+    this.name = 'WorldModelModeAccessError';
+  }
+}
+
+/** Non-real provider execution is an admin capability, enforced server-side. */
+export function assertWorldModelModeAccess(body: CreateAgentBody, userId: string): void {
+  if (isNonRealWorldModelMode(body.world_model_mode) && !isAdminUser(userId)) {
+    throw new WorldModelModeAccessError();
+  }
+}
 
 /** Apply account-scoped Fast Mode defaults for root agents only. */
 export function applyFastModeDefault(body: CreateAgentBody, userId: string): void {

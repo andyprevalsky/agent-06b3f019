@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import { planWaitlistAccessReset } from '../../domains/waitlist/accessReset';
 
@@ -52,6 +54,23 @@ assert.deepEqual(plan.targetUserIds, ['customer-already-gated', 'customer-with-a
 assert.deepEqual(plan.protectedUserIds, ['aman', 'andy', 'tamy']);
 assert.deepEqual(plan.protectedUsersNeedingAccess, ['tamy']);
 assert.equal(plan.targetsNeedingReset, 1);
+
+const resetScript = readFileSync(
+  resolve(process.cwd(), 'scripts', 'move-users-to-waitlist.ts'),
+  'utf8'
+);
+const transactionStart = resetScript.indexOf('await prisma.$transaction(async (tx)');
+const inTransactionSubscriptionCheck = resetScript.indexOf(
+  'activeTargetSubscriptionCount(tx, plan.targetUserIds)',
+  transactionStart
+);
+const firstAccessWrite = resetScript.indexOf('await tx.user.updateMany', transactionStart);
+assert.ok(transactionStart >= 0, 'access reset must use an interactive transaction');
+assert.ok(
+  inTransactionSubscriptionCheck > transactionStart &&
+    inTransactionSubscriptionCheck < firstAccessWrite,
+  'active subscriptions must be rechecked inside the transaction before either access write'
+);
 
 assert.throws(
   () =>

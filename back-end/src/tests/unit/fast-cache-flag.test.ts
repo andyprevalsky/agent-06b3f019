@@ -27,6 +27,7 @@ import {
   applyFastModeDefault,
   applyFastModeInheritance,
   applyWorldModelModeInheritance,
+  assertWorldModelModeAccess,
   disableFastModeForWorldModel,
 } from '../../domains/agents/agentExecutionMode';
 import { buildChatTemporalStartParams } from '../../providers/chat/chatHandler';
@@ -200,6 +201,24 @@ test('createAgentSchema accepts supported world-model modes', () => {
   assert.throws(() => createAgentSchema.parse({ goal: 'x', world_model_mode: 'bogus' }));
 });
 
+test('non-real world-model modes require a canonical admin account', () => {
+  const simulated = createAgentSchema.parse({ goal: 'x', world_model_mode: 'simulate' });
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(simulated, '1f85ff25-6e29-4c1b-8739-f917bd101a30')
+  );
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(simulated, '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9')
+  );
+  assert.throws(
+    () => assertWorldModelModeAccess(simulated, '22222222-2222-4222-8222-222222222222'),
+    /requires administrator access/
+  );
+  const real = createAgentSchema.parse({ goal: 'x', world_model_mode: 'real' });
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(real, '22222222-2222-4222-8222-222222222222')
+  );
+});
+
 test('Simulator mode disables Fast Mode provider-cache reads', () => {
   const body = createAgentSchema.parse({
     goal: 'x',
@@ -317,7 +336,7 @@ test('batch-created sub-agents use parent Fast Mode inheritance', () => {
     'batch create must apply the same inheritance helper as single create'
   );
   assert.ok(
-    batchService.includes('for (const body of bodies) disableFastModeForWorldModel(body)'),
+    batchService.includes('disableFastModeForWorldModel(body);'),
     'batch create must disable Fast Mode for every explicit or inherited non-real mode'
   );
 });

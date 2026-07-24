@@ -1,4 +1,4 @@
-import { IntegrationStatus, type AgentStatus, type Prisma } from '@prisma/client';
+import { IntegrationStatus, Prisma, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 
@@ -137,10 +137,6 @@ export interface WaitlistPeoplePage {
   total: number;
 }
 
-const actionableWaitlistWhere = {
-  AND: [{ phone: { not: null } }, { phone: { not: '' } }],
-} satisfies Prisma.WaitlistWhereInput;
-
 /**
  * One bounded page of actionable waitlist people — the same phone-bearing
  * population the signup metric counts. Newest first, with id as the stable
@@ -151,35 +147,36 @@ export async function findWaitlistPeople(params: {
   skip: number;
   take: number;
 }): Promise<WaitlistPeoplePage> {
-  const [rows, total] = await prisma.$transaction([
-    prisma.waitlist.findMany({
-      where: actionableWaitlistWhere,
-      select: {
-        id: true,
-        name: true,
-        email: true,
-        phone: true,
-        variant: true,
-        createdAt: true,
-        invitedAt: true,
-      },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      skip: params.skip,
-      take: params.take,
-    }),
-    prisma.waitlist.count({ where: actionableWaitlistWhere }),
-  ]);
+  const [rows, total] = await prisma.$transaction(
+    [
+      prisma.$queryRaw<WaitlistPersonRow[]>`
+        SELECT
+          "id",
+          "name",
+          "email",
+          "phone",
+          "variant",
+          "created_at" AS "createdAt",
+          "invited_at" AS "invitedAt"
+        FROM "Waitlist"
+        WHERE "phone" IS NOT NULL
+          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+        ORDER BY "created_at" DESC, "id" DESC
+        OFFSET ${params.skip}
+        LIMIT ${params.take}
+      `,
+      prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS "count"
+        FROM "Waitlist"
+        WHERE "phone" IS NOT NULL
+          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+      `,
+    ],
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+  );
   return {
-    rows: rows.map((row) => ({
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      phone: row.phone as string,
-      variant: row.variant,
-      createdAt: row.createdAt,
-      invitedAt: row.invitedAt,
-    })),
-    total,
+    rows,
+    total: total[0]?.count ?? 0,
   };
 }
 

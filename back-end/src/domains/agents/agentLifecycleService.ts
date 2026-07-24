@@ -18,6 +18,7 @@ import {
   applyFastModeDefault,
   applyFastModeInheritance,
   applyWorldModelModeInheritance,
+  assertWorldModelModeAccess,
   disableFastModeForWorldModel,
 } from './agentExecutionMode';
 import {
@@ -137,9 +138,7 @@ export async function createAgent(
   clientIP: string | null,
   isBenchmark = false
 ) {
-  if (isInternal) {
-    body.goal = resolvePromptSecrets(body.goal);
-  }
+  if (isInternal) body.goal = resolvePromptSecrets(body.goal);
   const verifier = { type: 'FLOAT_LLM_JUDGE' as const };
   const isSubAgent = body.parent_agent_id !== undefined;
   applyFastModeDefault(body, userId);
@@ -156,6 +155,7 @@ export async function createAgent(
     applyWorldModelModeInheritance(body, parent?.worldModelMode);
   }
   disableFastModeForWorldModel(body);
+  assertWorldModelModeAccess(body, userId);
   const existingSubAgent = await resumeExistingSubAgent(body, userId, verifier);
   if (existingSubAgent !== null) return existingSubAgent;
   const { tokenInPriceMicrodollars, tokenOutPriceMicrodollars, proxyGeo } =

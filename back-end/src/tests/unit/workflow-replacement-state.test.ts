@@ -445,6 +445,8 @@ async function main(): Promise<void> {
     const ordinary = buildAgentWorkflowArgs(base);
     assert.strictEqual(ordinary.length, 16);
     assert.strictEqual(ordinary[11], 'plan');
+    const explicitReal = buildAgentWorkflowArgs({ ...base, worldModelMode: 'real' });
+    assert.strictEqual(explicitReal.length, 16);
 
     const resumeState = {
       version: 1 as const,

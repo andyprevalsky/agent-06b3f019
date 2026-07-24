@@ -6932,6 +6932,82 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
     assert recorder.entries == {}
 
 
+async def test_network_recorder_does_not_reject_successful_fingerprint_warning():
+    """A detector warning inside an accepted response is not a provider exit.
+
+    This is the exact response shape captured from FCaptcha immediately before
+    the browser runtime unnecessarily replaced its next action with challenge
+    recovery.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._max_body_bytes = 262_144
+    recorder._body_index = 0
+    recorder._started_at = 0.0
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "mime_type": "application/json",
+            "url": "https://fcaptcha.webdecoy.com/api/verify",
+        }
+    }
+    accepted_body = {
+        "success": True,
+        "score": 0.087,
+        "recommendation": "allow",
+        "categoryScores": {"fingerprint": 0.6},
+        "detections": [
+            {
+                "category": "fingerprint",
+                "score": 0.6,
+                "confidence": 0.6,
+                "reason": "IP has used many different fingerprints",
+            }
+        ],
+    }
+    get_body = AsyncMock(return_value={"body": json.dumps(accepted_body), "base64Encoded": False})
+    client = SimpleNamespace(send=SimpleNamespace(Network=SimpleNamespace(getResponseBody=get_body)))
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", client)
+
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._rejected_network_generations == set()
+    assert recorder.entries == {}
+
+    recorder.entries["1:r2"] = {
+        "browser_generation": 1,
+        "mime_type": "application/json",
+        "url": "https://shop.test/provider-exit",
+    }
+    get_body.return_value = {
+        "body": json.dumps(
+            {
+                **accepted_body,
+                "providerExit": {
+                    "category": "fingerprint",
+                    "reason": "IP has used many different fingerprints",
+                },
+            }
+        ),
+        "base64Encoded": False,
+    }
+    await recorder._fetch_response_body("1:r2", "r2", "cdp-1", client)
+
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "ip has used many different fingerprints",
+        "url": "https://shop.test/provider-exit",
+        "browser_generation": 1,
+    }
+
+
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
     import tempfile
@@ -12937,6 +13013,10 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_fingerprint_exit_rejection",
         test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser,
+    )
+    await r.record_async(
+        "network_recorder_accepted_fingerprint_warning",
+        test_network_recorder_does_not_reject_successful_fingerprint_warning,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",

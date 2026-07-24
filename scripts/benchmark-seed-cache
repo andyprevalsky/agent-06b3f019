@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 MODE="${1:-}"
 if [ -z "$MODE" ]; then
-    echo "usage: benchmark-seed-cache <path|materialize|wait|acquire|release> ..." >&2
+    echo "usage: benchmark-seed-cache <path|materialize|wait> ..." >&2
     exit 2
 fi
 shift
@@ -20,12 +20,6 @@ case "$MODE" in
         ;;
     wait)
         wait_for_benchmark_seed_publish "$@"
-        ;;
-    acquire)
-        acquire_benchmark_seed_lock "$@"
-        ;;
-    release)
-        release_benchmark_seed_lock "$@"
         ;;
     *)
         echo "unknown benchmark seed-cache mode: $MODE" >&2

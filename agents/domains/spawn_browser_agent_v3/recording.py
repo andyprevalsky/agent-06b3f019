@@ -1782,16 +1782,22 @@ def provider_exit_monitoring_enabled() -> bool:
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
 
 
-def _contains_fingerprint_poison_detection(value: Any) -> bool:
-    """Recognize only an explicit detector verdict, never infer from a score."""
+def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
+    """Treat a poison warning as an exit only when its enclosing verdict did not pass."""
     if isinstance(value, dict):
+        recommendation = " ".join(str(value.get("recommendation") or "").strip().lower().split())
+        accepted_detections = value.get("success") is True and recommendation == "allow"
         category = str(value.get("category") or "").strip().lower()
         reason = " ".join(str(value.get("reason") or "").strip().lower().split())
         if category == "fingerprint" and reason == _FINGERPRINT_POISON_REASON:
             return True
-        return any(_contains_fingerprint_poison_detection(item) for item in value.values())
+        return any(
+            _contains_actionable_fingerprint_poison_detection(item)
+            for key, item in value.items()
+            if not (accepted_detections and key == "detections")
+        )
     if isinstance(value, list):
-        return any(_contains_fingerprint_poison_detection(item) for item in value)
+        return any(_contains_actionable_fingerprint_poison_detection(item) for item in value)
     return False
 
 
@@ -2158,7 +2164,7 @@ class BrowserNetworkRecorder:
                     if (
                         generation == current_generation
                         and generation not in rejected_generations
-                        and _contains_fingerprint_poison_detection(payload)
+                        and _contains_actionable_fingerprint_poison_detection(payload)
                     ):
                         rejected_generations.add(generation)
                         self._rejected_network_generations = rejected_generations

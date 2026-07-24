@@ -28,6 +28,8 @@ import {
   randomUUID,
 } from './agents-blackbox-harness';
 
+const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+
 test('GET / — no auth → 401', async () => {
   const res = await request(`${BASE_URL}/api/agents`);
   assertStatus(res.status, 401, res.data);
@@ -207,8 +209,7 @@ test('POST / — happy path — full response schema', async () => {
 });
 
 test('POST / — Simulator mode persists and disables real-provider cache reads', async () => {
-  const session = await createAnonymousSession('create-simulator');
-  const agentId = await createTestAgent(session.user.id, `Simulator test ${RUN_ID}`, {
+  const agentId = await createTestAgent(ANDY_USER_ID, `Simulator test ${RUN_ID}`, {
     world_model_mode: 'simulate',
     fast_mode_cache_enabled: true,
   });
@@ -224,13 +225,28 @@ test('POST / — Simulator mode persists and disables real-provider cache reads'
   );
 
   const detailRes = await request(`${BASE_URL}/api/agents/${agentId}`, {
-    headers: apiKeyHeaders(session.user.id),
+    headers: apiKeyHeaders(ANDY_USER_ID),
   });
   assertStatus(detailRes.status, 200, detailRes.data);
   const detail = assertSchema(GetAgentResponse, detailRes.data, 'POST / simulator detail');
   assert(detail.agent.world_model_mode === 'simulate', 'Agent detail must expose simulate mode');
 
-  await deleteTestAgent(agentId, session.user.id);
+  await deleteTestAgent(agentId, ANDY_USER_ID);
+});
+
+test('POST / — non-admin cannot enable Simulator mode', async () => {
+  const userId = `simulator-non-admin-${RUN_ID}`;
+  const res = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(userId),
+    body: JSON.stringify({
+      goal: `Unauthorized Simulator test ${RUN_ID}`,
+      world_model_mode: 'simulate',
+    }),
+  });
+  assertStatus(res.status, 403, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'POST / unauthorized simulator');
+  assert(body.error.includes('administrator access'), `Unexpected error: ${body.error}`);
 });
 
 test('POST / — creates initial goal message', async () => {

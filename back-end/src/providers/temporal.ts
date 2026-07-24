@@ -307,7 +307,10 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
   // Keep ordinary real-mode starts compatible with the previous 16-argument
   // worker. Deployment state remains #17; Simulator mode uses #18 so it does
   // not change the durable replacement contract.
-  if (params.resumeState !== undefined || params.worldModelMode !== undefined) {
+  if (
+    params.resumeState !== undefined ||
+    (params.worldModelMode !== undefined && params.worldModelMode !== 'real')
+  ) {
     args.push(params.resumeState ?? null);
   }
   if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {

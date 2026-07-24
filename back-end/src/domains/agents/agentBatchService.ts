@@ -26,6 +26,7 @@ import {
   applyFastModeDefault,
   applyFastModeInheritance,
   applyWorldModelModeInheritance,
+  assertWorldModelModeAccess,
   disableFastModeForWorldModel,
 } from './agentExecutionMode';
 import { resolveCreateMetadata } from './agentCreateMetadata';
@@ -275,7 +276,10 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   }
   for (const body of bodies) applyFastModeDefault(body, userId);
   await applyExecutionModeInheritanceForBatch(bodies);
-  for (const body of bodies) disableFastModeForWorldModel(body);
+  for (const body of bodies) {
+    disableFastModeForWorldModel(body);
+    assertWorldModelModeAccess(body, userId);
+  }
 
   // Idempotency: existing rows are returned untouched.
   const allAgentIds = bodies.map((b) => b.agent_id!);

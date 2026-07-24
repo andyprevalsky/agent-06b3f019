@@ -8,7 +8,7 @@
 import 'dotenv/config';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 
 import { planWaitlistAccessReset } from '../src/domains/waitlist/accessReset';
 
@@ -56,7 +56,7 @@ function writeRecoverySnapshot(users: Awaited<ReturnType<typeof loadUsers>>): st
 }
 
 async function activeTargetSubscriptionCount(
-  prisma: PrismaClient,
+  prisma: PrismaClient | Prisma.TransactionClient,
   targetUserIds: string[]
 ): Promise<number> {
   return prisma.subscription.count({
@@ -122,8 +122,14 @@ async function main() {
     }
 
     const snapshotPath = writeRecoverySnapshot(users);
-    await prisma.$transaction([
-      prisma.user.updateMany({
+    await prisma.$transaction(async (tx) => {
+      const stillActive = await activeTargetSubscriptionCount(tx, plan.targetUserIds);
+      if (stillActive !== 0) {
+        throw new Error(
+          `${stillActive} target users activated a subscription; aborting access reset`
+        );
+      }
+      await tx.user.updateMany({
         where: {
           userId: { in: plan.targetUserIds },
           isAnonymous: false,
@@ -132,12 +138,12 @@ async function main() {
           usedInviteCode: null,
           offWaitlistAt: null,
         },
-      }),
-      prisma.user.updateMany({
+      });
+      await tx.user.updateMany({
         where: { userId: { in: plan.protectedUsersNeedingAccess } },
         data: { usedInviteCode: PROTECTED_ACCESS_CODE },
-      }),
-    ]);
+      });
+    });
 
     await verifyPostcondition(prisma, plan.targetUserIds);
     writeLine(`Moved ${plan.targetUserIds.length} accounts to the waitlist.`);

@@ -26,6 +26,7 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
 import { getWaitlistPeople } from '../../domains/admin-health/service.waitlist';
+import { findWaitlistPeople } from '../../domains/admin-health/repo';
 import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
@@ -161,6 +162,27 @@ async function testList_adminListsSeededPerson() {
     }
     if (seeded.invitedAt !== null) throw new Error('Fresh signup must not be invited yet');
     if (seeded.hasAccount) throw new Error('No account exists for the seeded phone');
+  } finally {
+    await prisma.waitlist.deleteMany({ where: { name: marker } });
+  }
+}
+
+async function testList_excludesWhitespaceOnlyPhones() {
+  const marker = `blackbox-wlspace-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const whitespacePhone = `${' '.repeat(20)}\t${' '.repeat(Math.floor(Math.random() * 20) + 1)}`;
+  try {
+    const seeded = await prisma.waitlist.create({
+      data: { name: marker, phone: whitespacePhone, variant: 'gated-login' },
+    });
+    const page = await findWaitlistPeople({ skip: 0, take: 10_000 });
+    if (page.rows.some((row) => row.id === seeded.id)) {
+      throw new Error('Whitespace-only phone consumed an actionable waitlist row');
+    }
+    if (page.total !== page.rows.length) {
+      throw new Error(
+        `Actionable total ${page.total} does not match the complete row set ${page.rows.length}`
+      );
+    }
   } finally {
     await prisma.waitlist.deleteMany({ where: { name: marker } });
   }
@@ -508,6 +530,10 @@ async function main() {
     {
       name: 'GET /api/admin-health/waitlist admin -> lists seeded person',
       fn: testList_adminListsSeededPerson,
+    },
+    {
+      name: 'GET /api/admin-health/waitlist excludes whitespace-only phones from rows + total',
+      fn: testList_excludesWhitespaceOnlyPhones,
     },
     {
       name: 'GET /api/admin-health/waitlist paginates newest-first',

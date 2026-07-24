@@ -154,6 +154,20 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ setup-db never invokes the tested materialization boundary"
 fi
 
+# Lock ownership is PID-bound, so acquire/release cannot be separate CLI
+# processes. Consumers source seed-cache.sh and hold the lock in one shell.
+set +e
+bash "$SEED_CLI" acquire "$EXPECTED_PATH" >/dev/null 2>&1
+ACQUIRE_CLI_STATUS=$?
+bash "$SEED_CLI" release "$EXPECTED_PATH" >/dev/null 2>&1
+RELEASE_CLI_STATUS=$?
+set -e
+if [ "$ACQUIRE_CLI_STATUS" -ne 0 ] && [ "$RELEASE_CLI_STATUS" -ne 0 ]; then
+    PASS=$((PASS+1)); echo "  ✅ PID-bound acquire/release are not exposed as separate CLI processes"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ seed-cache CLI still exposes PID-invalid acquire/release commands"
+fi
+
 # Producer-first ordering: a consumer arriving during publication must acquire
 # the same lock and see the complete pair, never a half-published result.
 rm -f "$EXPECTED_PATH" "${EXPECTED_PATH}.schemahash"
