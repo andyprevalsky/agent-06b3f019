@@ -243,8 +243,13 @@ const AUTH_FAILURE_PATTERNS: readonly RegExp[] = [
   /Please run \/login/i,
   /Not logged in/i,
   /Invalid authentication credentials/i,
+  /API Error:\s*401\b.*OAuth access token has been revoked/i,
   /Credit balance(?: is)? too low/i,
   /Add funds:\s*https:\/\/platform\.claude\.com\/settings\/billing/i,
+];
+
+const REVOKED_OAUTH_PATTERNS: readonly RegExp[] = [
+  /API Error:\s*401\b.*OAuth access token has been revoked/i,
 ];
 
 /**
@@ -262,6 +267,7 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
   );
   const isRateLimited = /You've hit your limit/i.test(output);
   const authFailure = AUTH_FAILURE_PATTERNS.some((re) => re.test(output));
+  const revokedOauth = REVOKED_OAUTH_PATTERNS.some((re) => re.test(output));
   if (!isRateLimited && !authFailure) return;
   const sharedCredentialReason = authFailure
     ? 'claude_code_auth_failure'
@@ -299,6 +305,7 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
     await markPoolTokenRateLimited(integrationId, {
       rateLimitedUntil: resetUntil,
       cooldownMs,
+      failureReason: revokedOauth ? 'claude_code_auth_error' : undefined,
     });
   } else if (tokenSource === 'user' && session.agentId !== undefined) {
     const agent = await repo.findAgentById(session.agentId);
@@ -308,6 +315,7 @@ async function detectAndMarkExhaustion(taskId: string, output: string): Promise<
       await markUserTokenRateLimited(ownerId, {
         rateLimitedUntil: resetUntil,
         cooldownMs,
+        failureReason: revokedOauth ? 'claude_code_auth_error' : undefined,
       });
     }
   } else if (tokenSource === 'anthropic') {

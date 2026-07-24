@@ -13,9 +13,15 @@
  * idempotent: existing rows are returned unchanged with already_existed=true.
  */
 
-import { startAgentWorkflow } from '../../providers/temporal';
+import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
 import { resolvePromptSecrets } from './agentLifecycleService';
+import {
+  executeDescendantWorkflowStart,
+  readDescendantWorkflowStartState,
+  type DescendantWorkflowStartIdentity,
+} from '../../providers/descendantWorkflowStart';
+import { assertExistingDescendantRequestMatches } from './agentDescendantStartService';
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
@@ -86,6 +92,10 @@ function buildBatchItem(
       : {}),
     // Workflow id === agent id by convention (providers/temporal.ts:88).
     temporalWorkflowId: agentId,
+    ...(body.max_iterations !== undefined ? { workflowMaxIterations: body.max_iterations } : {}),
+    ...(body.context_gates !== undefined ? { workflowContextGates: body.context_gates } : {}),
+    ...(body.start_phase !== undefined ? { workflowStartPhase: body.start_phase } : {}),
+    ...(body.task_queue !== undefined ? { workflowTaskQueue: body.task_queue } : {}),
   };
 }
 
@@ -93,31 +103,65 @@ function buildBatchItem(
 async function startBatchWorkflow(
   body: CreateAgentBody,
   userId: string,
-  verifierType: string
-): Promise<string> {
-  return startAgentWorkflow({
-    agentId: body.agent_id!,
-    userId,
-    goal: body.goal,
-    model: body.model,
-    reasoningMaxTokens: body.reasoning_max_tokens,
-    verifier: { type: verifierType },
-    ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
-    ...(body.parent_workflow_id !== undefined ? { parentWorkflowId: body.parent_workflow_id } : {}),
-    ...(body.parent_agent_id !== undefined ? { parentAgentId: body.parent_agent_id } : {}),
-    ...(body.depth !== undefined ? { depth: body.depth } : {}),
-    ...(body.bus_id !== undefined ? { busId: body.bus_id } : {}),
-    ...(body.start_phase !== undefined ? { startPhase: body.start_phase } : {}),
-    ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
-    priceLimitCents: body.price_limit_cents ?? 100,
-    ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
-    ...(body.fast_mode_cache_enabled !== undefined
-      ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
-      : {}),
-    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
-  });
+  verifierType: string,
+  deadlineAtMs?: number
+) {
+  return startAgentWorkflowExecution(
+    {
+      agentId: body.agent_id!,
+      userId,
+      goal: body.goal,
+      model: body.model,
+      reasoningMaxTokens: body.reasoning_max_tokens,
+      verifier: { type: verifierType },
+      ...(body.task_queue !== undefined ? { taskQueue: body.task_queue } : {}),
+      ...(body.parent_workflow_id !== undefined
+        ? { parentWorkflowId: body.parent_workflow_id }
+        : {}),
+      ...(body.parent_agent_id !== undefined ? { parentAgentId: body.parent_agent_id } : {}),
+      ...(body.depth !== undefined ? { depth: body.depth } : {}),
+      ...(body.bus_id !== undefined ? { busId: body.bus_id } : {}),
+      ...(body.start_phase !== undefined ? { startPhase: body.start_phase } : {}),
+      ...(body.max_iterations !== undefined ? { maxIterations: body.max_iterations } : {}),
+      priceLimitCents: body.price_limit_cents ?? 100,
+      ...(body.context_gates !== undefined ? { contextGates: body.context_gates } : {}),
+      ...(body.fast_mode_cache_enabled !== undefined
+        ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
+        : {}),
+      ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
+      rejectDuplicateWorkflowId: true,
+    },
+    deadlineAtMs
+  );
 }
 /* c8 ignore stop */
+
+function descendantStartIdentity(body: CreateAgentBody): DescendantWorkflowStartIdentity | null {
+  if (body.parent_agent_id === undefined || body.parent_workflow_id === undefined) return null;
+  return {
+    agentId: body.agent_id!,
+    parentAgentId: body.parent_agent_id,
+    parentWorkflowId: body.parent_workflow_id,
+  };
+}
+
+async function startManagedBatchWorkflow(
+  body: CreateAgentBody,
+  userId: string,
+  verifierType: string
+): Promise<string> {
+  const identity = descendantStartIdentity(body);
+  if (identity === null) {
+    return (await startBatchWorkflow(body, userId, verifierType)).workflowId;
+  }
+  const execution = await executeDescendantWorkflowStart(identity, (deadlineAtMs) =>
+    startBatchWorkflow(body, userId, verifierType, deadlineAtMs)
+  );
+  if (execution === null) {
+    throw new Error('Descendant workflow start settled without an execution');
+  }
+  return execution.workflowId;
+}
 
 /** Run phase 2 — Promise.allSettled of workflow starts. Marks failed rows
  *  FAILED in the DB and returns the per-child result map. */
@@ -127,7 +171,7 @@ async function runPhaseTwoStarts(
   verifierType: string
 ): Promise<Map<string, BatchAgentResult>> {
   const startResults = await Promise.allSettled(
-    newBodies.map((body) => startBatchWorkflow(body, userId, verifierType))
+    newBodies.map((body) => startManagedBatchWorkflow(body, userId, verifierType))
   );
   const out = new Map<string, BatchAgentResult>();
   for (let i = 0; i < newBodies.length; i++) {
@@ -147,14 +191,17 @@ async function runPhaseTwoStarts(
     const errMsg =
       settled.reason instanceof Error ? settled.reason.message : String(settled.reason);
     log.error('Batch workflow start failed', { agent_id: agentId, error: errMsg });
-    await repo
-      .failAgentIfStillActive(agentId, 'Failed to start workflow: ' + errMsg)
-      .catch((e: unknown) =>
-        log.error('Failed to mark agent FAILED after workflow-start error', {
-          agent_id: agentId,
-          error: e instanceof Error ? e.message : String(e),
-        })
-      );
+    const state = await readDescendantWorkflowStartState(agentId);
+    if (state?.temporalWorkflowStartPending !== true) {
+      await repo
+        .failAgentIfStillActive(agentId, 'Failed to start workflow: ' + errMsg)
+        .catch((e: unknown) =>
+          log.error('Failed to mark agent FAILED after workflow-start error', {
+            agent_id: agentId,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        );
+    }
     out.set(agentId, {
       agent_id: agentId,
       status: 'FAILED',
@@ -234,8 +281,15 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   const allAgentIds = bodies.map((b) => b.agent_id!);
   const existing = await repo.findExistingAgentsByIds(allAgentIds, userId);
   const existingById = new Map(existing.map((a) => [a.id, a]));
+  for (const body of bodies) {
+    const stored = existingById.get(body.agent_id!);
+    if (stored !== undefined) assertExistingDescendantRequestMatches(body, stored);
+  }
 
   const newBodies = bodies.filter((b) => !existingById.has(b.agent_id!));
+  const pendingBodies = bodies.filter(
+    (body) => existingById.get(body.agent_id!)?.temporalWorkflowStartPending === true
+  );
   const metaMap = await resolveAllMetadata(newBodies, clientIP, userId);
   const newItems = newBodies.map((b) => buildBatchItem(b, userId, metaMap.get(b)!, verifierType));
 
@@ -245,7 +299,11 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
   }
 
   // Phase 2: parallel workflow starts (with built-in gRPC retry).
-  const newResultByAgentId = await runPhaseTwoStarts(newBodies, userId, verifierType);
+  const newResultByAgentId = await runPhaseTwoStarts(
+    [...newBodies, ...pendingBodies],
+    userId,
+    verifierType
+  );
 
   // Mirror input order; existing rows surface their stored status.
   return bodies.map((body) => {

@@ -9,6 +9,7 @@ import httpx
 import structlog
 
 from config import load_config
+from helpers.workflow_generation import stamp_tool_workflow_generation
 from tools.base import MessageStatus
 from utils.error_utils import extract_error_message
 
@@ -73,6 +74,7 @@ async def save_claude_code_message(
 
     if status == MessageStatus.ERROR:
         metadata["error"] = True
+    metadata = stamp_tool_workflow_generation(metadata) or metadata
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -153,8 +155,7 @@ async def create_e2b_session(
             )
             detail = f": {response_text}" if response_text else ""
             raise Exception(
-                f"Failed to create code session (provider={code_provider}): "
-                f"HTTP {response.status_code}{detail}"
+                f"Failed to create code session (provider={code_provider}): HTTP {response.status_code}{detail}"
             )
 
         return response.json()

@@ -189,6 +189,28 @@ port_range_can_reassign() {
     return 0
 }
 
+resolve_frontend_dist_dir() {
+    local workspace_root=$1
+    local isolated_run=$2
+    local benchmark_run_id=${3:-}
+    local frontend_port=${4:-}
+    local dist_key
+    if [ "$isolated_run" = "true" ]; then
+        [ -n "$benchmark_run_id" ] || {
+            echo "❌ BENCHMARK_RUN_ID is required for an isolated bundled frontend." >&2
+            return 1
+        }
+        dist_key=$(printf '%s' "$benchmark_run_id" | tr -c '[:alnum:]_.-' '_')
+    else
+        [ -n "$frontend_port" ] || {
+            echo "❌ FRONTEND_PORT is required for a shared bundled frontend." >&2
+            return 1
+        }
+        dist_key="shared_${frontend_port}"
+    fi
+    printf '%s/.context/frontend-builds/%s\n' "${workspace_root%/}" "$dist_key"
+}
+
 if [ "${RUN_SH_SOURCE_ONLY:-false}" = "true" ]; then
     return 0 2>/dev/null || exit 0
 fi
@@ -753,6 +775,10 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         echo "   ✅ DB restored from dump"
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
+        # The target database's own pg_restore just proved this archive bad.
+        # Invalidate it so a failed regeneration cannot make every later boot
+        # retry the same unreadable archive and matching schema sidecar.
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
         if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
             fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
         fi
@@ -829,13 +855,14 @@ if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
     acquire_benchmark_seed_lock "$_SEED_DUMP"
     _SEED_LOCK_HELD=1
-    _SEED_DUMP_TMP="${_SEED_DUMP}.tmp.$$"
-    _SEED_HASH_TMP="${_SEED_DUMP}.schemahash.tmp.$$"
-    rm -f "$_SEED_DUMP_TMP" 2>/dev/null || true
-    if PGPASSWORD=postgres pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME" > "$_SEED_DUMP_TMP" 2>/dev/null; then
-        printf '%s' "$_SCHEMA_HASH" > "$_SEED_HASH_TMP"
-        mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"
-        mv "$_SEED_HASH_TMP" "${_SEED_DUMP}.schemahash"
+    _SEED_DUMP_CONTAINER=""
+    if ! $USE_SYSTEM_PG; then
+        _SEED_DUMP_CONTAINER="$DB_CONTAINER"
+    fi
+    if PGPASSWORD=postgres bash scripts/save-seed-dump.sh \
+        "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
+        "$_SEED_DUMP_CONTAINER"; then
+        printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
         # Publish to the shared cache so the NEXT clone (any workspace — including a
         # neighbor's daily run) restores in seconds instead of cold-syncing. Best-
@@ -846,7 +873,7 @@ if [ -n "$_SEED_DUMP" ]; then
             fi
         fi
     else
-        rm -f "$_SEED_DUMP_TMP" "$_SEED_HASH_TMP" 2>/dev/null || true
+        echo "   ⚠️ seed dump save failed; no partial archive was published"
     fi
     release_seed_lock_if_held
 fi
@@ -1460,6 +1487,15 @@ if [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     export NAVI_WORKER_LOG_STREAM=false
 fi
 
+# Every concurrent benchmark stack owns its production frontend bundle. Vite
+# empties its output directory while building, so sharing front-end/dist lets an
+# isolated smoke/payment build delete chunks that the semantic preview is
+# actively serving.
+FRONTEND_DIST_DIR=$(resolve_frontend_dist_dir \
+    "$PWD" "$BENCHMARK_ISOLATED_RUN" "${BENCHMARK_RUN_ID:-}" "$FRONTEND_PORT")
+export FRONTEND_DIST_DIR
+mkdir -p "$(dirname "$FRONTEND_DIST_DIR")"
+
 # A few fleet-width cold starts have left `tsx src/server.ts` alive but stuck
 # during module loading (backend log contains only the first Supabase warning).
 # The public-tunnel smoke used to discover that indirectly after 60 blank curls
@@ -1606,14 +1642,14 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
         NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" \
         VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
-        npx vite build > "$FRONTEND_LOG_FILE" 2>&1)
+        npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service
 
 # Front-end is always launched. Public payment benchmarks use a production bundle
 # so the cloud browser does not fetch the Vite development module graph over ngrok.
 if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
-    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
+    run_service "front-end" bash -c 'set -eo pipefail; cd front-end && npx vite preview --outDir "$FRONTEND_DIST_DIR" --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE" 2>&1' &
 elif [ "$BENCHMARK_ISOLATED_RUN" = "true" ]; then
     run_service "front-end" bash -c 'set -eo pipefail; cd front-end && rm -f "$FRONTEND_LOG_FILE" && VITE_DEV_PORT=$FRONTEND_PORT npx vite > "$FRONTEND_LOG_FILE" 2>&1' &
 else

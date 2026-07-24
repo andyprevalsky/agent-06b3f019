@@ -221,6 +221,61 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'organization MCP retries idempotent create_card timeouts before failing the purchase',
+    async () => {
+      const calls: Array<{ name: string; args: unknown }> = [];
+      const provider = new AgentCardOrgMcpProvider('cardholder-timeout', async (name, args) => {
+        calls.push({ name, args });
+        if (name === 'create_card' && calls.filter((call) => call.name === name).length === 1) {
+          throw new Error('Request timed out');
+        }
+        if (name === 'create_card') {
+          return {
+            structuredContent: {
+              card_id: 'card-after-timeout',
+              transfer_id: 'owt-after-timeout',
+              status: 'OPEN',
+              amount_cents: 4396,
+            },
+          };
+        }
+        if (name === 'get_card_details') {
+          return {
+            structuredContent: {
+              pan: '4242424242424242',
+              cvv: '123',
+              expiry: '12/30',
+              balance_cents: 4396,
+              status: 'OPEN',
+            },
+          };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      });
+
+      const request = {
+        amountCents: 4396,
+        fundsSource: 'company_flow' as const,
+        idempotencyKey: 'purchase:timeout-retry',
+      };
+      const minted = await provider.mintCard(request);
+
+      assert(minted.cardId === 'card-after-timeout', 'retry should recover the minted card');
+      assert(
+        minted.providerTransferId === 'owt-after-timeout',
+        'retry should preserve transfer id'
+      );
+      assert(
+        calls.length === 3 && calls[0]?.name === 'create_card' && calls[1]?.name === 'create_card',
+        `expected create_card retry before details; calls=${calls.map((call) => call.name).join(',')}`
+      );
+      assert(
+        JSON.stringify(calls[0]?.args) === JSON.stringify(calls[1]?.args),
+        'retry must use the exact original create_card arguments and idempotency key'
+      );
+    },
+  ],
+  [
     'mint recovers stale charging rows before retrying the same cart',
     async () => {
       const userId = await createSubscribedUser('stale-charging-retry');

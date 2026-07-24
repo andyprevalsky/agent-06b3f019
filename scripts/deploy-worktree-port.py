@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Claim durable, non-overlapping local port ranges for deploy worktrees."""
+
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+from pathlib import Path
+import socket
+import tempfile
+
+
+FIRST_BASE_PORT = 56_000
+LAST_BASE_PORT = 64_990
+PORTS_PER_WORKTREE = 10
+
+
+def _record(path: Path) -> dict[str, object] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _range_is_bindable(base_port: int) -> bool:
+    sockets: list[socket.socket] = []
+    try:
+        for port in range(base_port, base_port + PORTS_PER_WORKTREE):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sockets.append(sock)
+            sock.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
+    finally:
+        for sock in sockets:
+            sock.close()
+
+
+class Registry:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+        self.lock = (root / ".lock").open("a+", encoding="utf-8")
+
+    def __enter__(self) -> "Registry":
+        fcntl.flock(self.lock.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        fcntl.flock(self.lock.fileno(), fcntl.LOCK_UN)
+        self.lock.close()
+
+    def _records(self) -> list[tuple[Path, dict[str, object]]]:
+        records: list[tuple[Path, dict[str, object]]] = []
+        for path in self.root.glob("*.json"):
+            value = _record(path)
+            owner = Path(str(value.get("owner", ""))) if value else None
+            if value is None or owner is None or not owner.is_dir():
+                path.unlink(missing_ok=True)
+                continue
+            records.append((path, value))
+        return records
+
+    def claim(self, owner: Path) -> int:
+        owner = owner.resolve()
+        records = self._records()
+        for _, value in records:
+            if value.get("owner") == str(owner):
+                return int(value["base_port"])
+
+        claimed = {int(value["base_port"]) for _, value in records}
+        for base_port in range(
+            FIRST_BASE_PORT, LAST_BASE_PORT + 1, PORTS_PER_WORKTREE
+        ):
+            if base_port in claimed or not _range_is_bindable(base_port):
+                continue
+            payload = {
+                "schema_version": 1,
+                "owner": str(owner),
+                "base_port": base_port,
+            }
+            fd, temp_name = tempfile.mkstemp(
+                prefix=".claim-", suffix=".tmp", dir=self.root
+            )
+            temp = Path(temp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, sort_keys=True)
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, self.root / f"{base_port}.json")
+            finally:
+                temp.unlink(missing_ok=True)
+            return base_port
+        raise RuntimeError("no free ten-port deploy-worktree range is available")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action", choices=("claim",))
+    parser.add_argument("--registry", type=Path, required=True)
+    parser.add_argument("--owner", type=Path, required=True)
+    args = parser.parse_args()
+
+    if not args.owner.is_dir():
+        parser.error(f"owner path is not a directory: {args.owner}")
+    with Registry(args.registry) as registry:
+        print(registry.claim(args.owner))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

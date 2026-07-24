@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -289,6 +290,43 @@ class ApprovalLifecycleTest(unittest.TestCase):
             set(FACTORY_REVIEW.deploy_invocation_labels(amplitude)),
             {"Static verify", "Runtime blackbox"},
         )
+        structural_bundle = FACTORY_REVIEW.Invocation(
+            "structural-bundle",
+            "Bash",
+            "bash scripts/run-deploy-stage deploy-command-structural -- "
+            "python3 scripts/run-deploy-structural-gates.py",
+            "",
+            0.0,
+            3.0,
+            False,
+        )
+        self.assertEqual(
+            FACTORY_REVIEW.deploy_invocation_label(structural_bundle),
+            "Static verify",
+        )
+        live_probe_bundle = FACTORY_REVIEW.Invocation(
+            "live-probes",
+            "Bash",
+            "python3 scripts/run_deploy_live_probes.py",
+            "",
+            0.0,
+            9.0,
+            False,
+        )
+        self.assertEqual(
+            set(FACTORY_REVIEW.deploy_invocation_labels(live_probe_bundle)),
+            {"Static verify", "Runtime blackbox"},
+        )
+        reused = FACTORY_REVIEW.Invocation(
+            "reused",
+            "Bash",
+            "bash scripts/run-deploy-stage backend-coverage-blackbox --reuse-passed -- test",
+            "== reused passed deploy stage: backend-coverage-blackbox (exact worktree + command) ==",
+            0.0,
+            0.4,
+            False,
+        )
+        self.assertEqual(FACTORY_REVIEW.deploy_invocation_labels(reused), ())
 
     def test_combined_coverage_blackbox_gates_are_attributed_to_both_rows(self) -> None:
         for repository in ("backend", "frontend", "agents", "mac"):
@@ -343,9 +381,135 @@ class ApprovalLifecycleTest(unittest.TestCase):
         )
         mixed_values = FACTORY_REVIEW.deploy_cycle_timings((mixed_review,))
         self.assertEqual(mixed_values["Code review"].runs, 0)
+        self.assertEqual(mixed_values["Coverage"].runs, 1)
+        self.assertEqual(mixed_values["Runtime blackbox"].runs, 1)
         self.assertEqual(
-            mixed_values[FACTORY_REVIEW.HISTORICAL_UNSPLIT_LABEL].runs, 1
+            mixed_values[FACTORY_REVIEW.HISTORICAL_UNSPLIT_LABEL].runs, 0
         )
+
+    def test_uninstrumented_pr_activity_is_not_invented_as_review_time(self) -> None:
+        invocations = tuple(
+            FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                command,
+                "",
+                started,
+                started + 1.0,
+                False,
+            )
+            for identifier, command, started in (
+                ("push", "git push origin HEAD", 0.0),
+                ("view", "gh pr view 123 --json statusCheckRollup", 600.0),
+                ("checks", "gh pr checks 123 --watch", 1200.0),
+                (
+                    "comments",
+                    "gh api repos/example/repo/pulls/123/comments",
+                    1800.0,
+                ),
+            )
+        )
+
+        values = FACTORY_REVIEW.deploy_cycle_timings(invocations)
+
+        self.assertEqual(values["Code review"].runs, 0)
+        self.assertEqual(values["Code review"].wall_seconds, 0.0)
+        self.assertTrue(values["Code review"].incomplete)
+        turn = FACTORY_REVIEW.Turn(
+            "deploy",
+            "fixture-workspace",
+            "session",
+            "uninstrumented-review",
+            "2026-07-12T00:00:00Z",
+            1801.0,
+            "completed",
+            "completed",
+            invocations,
+        )
+        review_row = next(
+            row
+            for row in FACTORY_REVIEW.deploy_metrics((turn,))["steps"]
+            if row["step"] == "Code review"
+        )
+        self.assertTrue(review_row["unavailable"])
+
+    def test_historical_production_time_is_anchored_to_merge_and_verified_signals(
+        self,
+    ) -> None:
+        def invocation(
+            identifier: str,
+            command: str,
+            started: float,
+            ended: float,
+            result: str = "",
+        ) -> object:
+            return FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                command,
+                result,
+                started,
+                ended,
+                False,
+            )
+
+        invocations = (
+            invocation(
+                "premerge-static-read",
+                "sed -n '1,120p' back-end/scripts/prod-endpoint-smoke.ts",
+                0.0,
+                1.0,
+            ),
+            invocation(
+                "premerge-review-watch",
+                "gh run watch 100",
+                600.0,
+                900.0,
+                "Claude Code Review Fallback",
+            ),
+            invocation("merge", "gh pr merge 123 --merge", 1200.0, 1202.0),
+            invocation(
+                "vercel",
+                "gh api 'repos/example/repo/deployments?sha=abc'",
+                1210.0,
+                1211.0,
+            ),
+            invocation(
+                "fly-watch",
+                "gh run watch 200 --exit-status",
+                1220.0,
+                1280.0,
+                "Deploy Agents to Fly.io",
+            ),
+            invocation(
+                "rollover",
+                "git switch --create next origin/main",
+                1290.0,
+                1291.0,
+            ),
+            invocation(
+                "semantic-finish",
+                "gh run view 300 --json conclusion",
+                1300.0,
+                1301.0,
+                "Production Semantic Frontend Gate success",
+            ),
+            invocation(
+                "late-review-watch",
+                "gh run watch 400",
+                2000.0,
+                2600.0,
+                "Claude Code Review Fallback",
+            ),
+            invocation("rename", "/rename next task", 3000.0, 3001.0),
+        )
+
+        timing = FACTORY_REVIEW.historical_production_timing(invocations)
+
+        self.assertEqual(timing.runs, 1)
+        self.assertEqual(timing.durations, (101.0,))
+        self.assertEqual(timing.wall_seconds, 101.0)
+        self.assertFalse(timing.incomplete)
 
     def test_parallel_group_wall_clock_unions_member_envelopes(self) -> None:
         aligned = {
@@ -911,6 +1075,50 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(values["Runtime blackbox"].durations, (30.0,))
         self.assertEqual(FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented")
 
+    def test_instrumented_deploy_does_not_require_historical_review_duration(
+        self,
+    ) -> None:
+        def invocation(
+            identifier: str, event: str, value: str, started: float
+        ) -> object:
+            return FACTORY_REVIEW.Invocation(
+                identifier,
+                "Bash",
+                "python3 scripts/record_factory_event.py deploy " f"{event} {value}",
+                factory_event_output("deploy", event, value),
+                started,
+                started + 0.1,
+                False,
+            )
+
+        invocations = (
+            invocation("review-start", "stage-start", "code-review", 1.0),
+            invocation("review-finish", "stage-finish", "code-review", 2.0),
+            invocation("production-start", "stage-start", "production-verify", 3.0),
+            invocation("production-finish", "stage-finish", "production-verify", 4.0),
+            invocation("outcome", "outcome", "completed", 5.0),
+        )
+        turn = FACTORY_REVIEW.Turn(
+            "deploy",
+            "fixture-workspace",
+            "session",
+            "instrumented-deploy-without-review-duration",
+            "2026-07-12T00:00:00Z",
+            6.0,
+            "completed",
+            "completed",
+            invocations,
+        )
+        values = FACTORY_REVIEW.deploy_cycle_timings(invocations)
+        values["Code review"] = FACTORY_REVIEW.StepTiming(
+            0, (), 0.0, incomplete=True
+        )
+
+        with patch.object(FACTORY_REVIEW, "deploy_cycle_timings", return_value=values):
+            self.assertEqual(
+                FACTORY_REVIEW.deploy_measurement_mode(turn), "instrumented"
+            )
+
     def test_factory_event_parser_rejects_searches_and_failed_writers(self) -> None:
         self.assertIsNone(
             FACTORY_REVIEW.parse_factory_event_command(
@@ -1081,6 +1289,24 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(event["value"], "evidence-trace")
         self.assertIn("recorded_at", event)
 
+        production_result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/record_factory_event.py"),
+                "deploy",
+                "production-start",
+                "semantic",
+            ],
+            cwd=ROOT,
+            env={"FACTORY_EVENT_LOG": str(event_log)},
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(production_result.returncode, 0, production_result.stderr)
+        production_event = json.loads(event_log.read_text().splitlines()[-1])
+        self.assertEqual(production_event["event"], "production-start")
+        self.assertEqual(production_event["value"], "semantic")
+
         descend_log = Path(self.temp_dir.name) / "descend-events.jsonl"
         descend = subprocess.run(
             [
@@ -1192,6 +1418,116 @@ class ApprovalLifecycleTest(unittest.TestCase):
         self.assertEqual(payload["descend"]["steps"][0]["step"], "RUN_SLICE")
         self.assertIn("/descend", FACTORY_REVIEW.render_html(payload))
 
+    def test_descend_compares_completed_main_lane_windows(self) -> None:
+        records: list[dict[str, object]] = []
+        base_epoch = 1_753_056_000.0
+        step_durations = (10.0, 12.0, 8.0, 6.0)
+        run_durations = (100.0, 120.0, 90.0, 60.0)
+        for index, (step_duration, run_duration) in enumerate(
+            zip(step_durations, run_durations, strict=True)
+        ):
+            run_id = f"run-{index}"
+            started = base_epoch + index * 1_000
+            records.extend(
+                [
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"start-{index}",
+                        "workflow": "descend",
+                        "event": "stage-start",
+                        "value": "RUN_SLICE",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:00:00Z",
+                        "recorded_epoch": started,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                    },
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"finish-{index}",
+                        "workflow": "descend",
+                        "event": "stage-finish",
+                        "value": "RUN_SLICE",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:00:10Z",
+                        "recorded_epoch": started + step_duration,
+                        "duration_seconds": step_duration,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                        "status": "completed",
+                    },
+                    {
+                        "record_type": "factory_event",
+                        "record_id": f"outcome-{index}",
+                        "workflow": "descend",
+                        "event": "outcome",
+                        "value": "completed",
+                        "recorded_at": f"2026-07-{index + 1:02d}T00:02:00Z",
+                        "recorded_epoch": started + run_duration,
+                        "run_id": run_id,
+                        "slice": "daily",
+                        "lane": "main",
+                    },
+                ]
+            )
+        records.extend(
+            [
+                {
+                    "record_type": "factory_event",
+                    "record_id": "failed-main",
+                    "workflow": "descend",
+                    "event": "stage-finish",
+                    "value": "RUN_SLICE",
+                    "recorded_epoch": base_epoch + 10_000,
+                    "duration_seconds": 1.0,
+                    "run_id": "failed",
+                    "lane": "main",
+                    "status": "failed",
+                },
+                {
+                    "record_type": "factory_event",
+                    "record_id": "completed-worker",
+                    "workflow": "descend",
+                    "event": "stage-finish",
+                    "value": "RCA_INFRA_FIX",
+                    "recorded_epoch": base_epoch + 11_000,
+                    "duration_seconds": 1.0,
+                    "run_id": "worker",
+                    "lane": "rca-I-01",
+                    "status": "completed",
+                },
+            ]
+        )
+
+        metrics = FACTORY_REVIEW.descend_metrics(records, window=2)
+
+        self.assertEqual(metrics["step_records"], 4)
+        self.assertEqual(metrics["run_wall_clock"]["completed_runs"], 4)
+        self.assertEqual(metrics["run_wall_clock"]["previous_median_seconds"], 110.0)
+        self.assertEqual(metrics["run_wall_clock"]["recent_median_seconds"], 75.0)
+        self.assertEqual(metrics["run_wall_clock"]["change_percent"], -31.8)
+        self.assertEqual(len(metrics["steps"]), 1)
+        run_slice = metrics["steps"][0]
+        self.assertEqual(run_slice["step"], "RUN_SLICE")
+        self.assertEqual(run_slice["previous_median_seconds"], 11.0)
+        self.assertEqual(run_slice["recent_median_seconds"], 7.0)
+        self.assertEqual(run_slice["change_percent"], -36.4)
+        rendered = FACTORY_REVIEW.render_descend_table(metrics)
+        self.assertIn("Negative change is faster", rendered)
+        self.assertIn("Previous median", rendered)
+        self.assertIn("-36.4%", rendered)
+
+    def test_factory_step_copy_matches_current_optimized_workflows(self) -> None:
+        descriptions = FACTORY_REVIEW.STEP_DESCRIPTIONS
+
+        self.assertIn("Amplitude", descriptions["deploy"]["Runtime blackbox"])
+        self.assertIn("three cycles", descriptions["deploy"]["Code review"])
+        self.assertIn("first-bad boundary", descriptions["rca"]["Evidence + trace"])
+        self.assertIn("cement", descriptions["rca"]["Verify + handoff"])
+        factory_instructions = (ROOT / "CLAUDE.md").read_text()
+        for workflow in ("/deploy", "/RCA", "/descend"):
+            self.assertIn(workflow, factory_instructions)
+
     def test_workflow_commands_require_structured_collection_hooks(self) -> None:
         deploy_command = (ROOT / ".claude/commands/deploy.md").read_text()
         rca_command = (ROOT / ".claude/commands/rca.md").read_text()
@@ -1206,6 +1542,20 @@ class ApprovalLifecycleTest(unittest.TestCase):
             "deploy stage-finish code-review",
             "deploy stage-start production-verify",
             "deploy stage-finish production-verify",
+            "deploy production-start vercel",
+            "deploy production-finish vercel",
+            "deploy production-start render",
+            "deploy production-finish render",
+            "deploy production-start fly",
+            "deploy production-finish fly",
+            "deploy production-start mac-release",
+            "deploy production-finish mac-release",
+            "deploy production-start backend-probes",
+            "deploy production-finish backend-probes",
+            "deploy production-start semantic",
+            "deploy production-finish semantic",
+            "deploy production-start agentcard",
+            "deploy production-finish agentcard",
             "deploy outcome completed",
         ):
             self.assertIn(marker, deploy_command)

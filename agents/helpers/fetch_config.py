@@ -67,6 +67,7 @@ async def fetch_agent_config(agent_id: str) -> Dict:
             "model": agent["model"],
             "reasoning_max_tokens": agent.get("reasoning_max_tokens", 256),
             "status": agent["status"],
+            "price_limit_cents": agent.get("price_limit_cents", agent.get("priceLimitCents")),
             "tool_ids": [tool["id"] for tool in agent["tools"]],
             "parent_agent_id": agent.get("parentAgentId"),  # None if top-level agent
             "response_schema": agent.get("response_schema"),  # Structured output schema

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import (
@@ -14,12 +15,14 @@ from _test_utils import (
 
 
 def _setup():
-    setup_mock({
-        "/status": {
-            "status": 200,
-            "json": {"success": True},
-        },
-    })
+    setup_mock(
+        {
+            "/status": {
+                "status": 200,
+                "json": {"success": True},
+            },
+        }
+    )
 
 
 async def test_happy_path():
@@ -45,6 +48,32 @@ async def test_happy_path():
         method="PATCH",
         header_present="X-API-Key",
     )
+
+
+async def test_workflow_generation_header():
+    """Status writes identify the exact Temporal workflow generation producing them."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch(
+            "temporalio.activity.info",
+            return_value=SimpleNamespace(workflow_id="agent-1:replacement:generation-2"),
+        ),
+    ):
+        from helpers.update_status import update_agent_status
+
+        await update_agent_status(
+            agent_id="agent-1",
+            status="ACTIVE",
+            progress=0.5,
+            status_message="Processing",
+            token_count=1000,
+            context_size=5000,
+            message_count=10,
+        )
+
+    call = assert_captured_call(url_contains="/api/agents/agent-1/status", method="PATCH")
+    assert call["requestHeaders"]["x-agent-workflow-generation"] == ("agent-1:replacement:generation-2")
 
 
 async def test_boundary():
@@ -111,6 +140,7 @@ async def run_all_tests():
     print("update-status blackbox tests:")
     r = BlackboxResult()
     await r.record_async("happy_path", test_happy_path)
+    await r.record_async("workflow_generation_header", test_workflow_generation_header)
     await r.record_async("boundary", test_boundary)
     await r.record_async("structured_response_passthrough", test_structured_response_passthrough)
     teardown_mock()
@@ -118,4 +148,4 @@ async def run_all_tests():
 
 
 if __name__ == "__main__":
-    asyncio.run(run_all_tests())
+    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)

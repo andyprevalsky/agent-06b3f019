@@ -293,6 +293,15 @@ async def test_poll_and_update_context_filters_subagent_work_and_advances_cursor
 
 from temporalio import activity
 
+WORKFLOW_ENV_ACTIVITY_COUNTS: Dict[str, Dict[str, int]] = {}
+
+
+def _record_workflow_env_activity(agent_id: Optional[str], activity_name: str) -> None:
+    if not agent_id:
+        return
+    counts = WORKFLOW_ENV_ACTIVITY_COUNTS.setdefault(agent_id, {})
+    counts[activity_name] = counts.get(activity_name, 0) + 1
+
 
 @activity.defn(name="get_model_context_window")
 async def mock_get_model_context_window(model: str) -> int:
@@ -311,8 +320,33 @@ async def mock_update_agent_status(
     tokens_in: int = 0,
     tokens_out: int = 0,
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> None:
+    _record_workflow_env_activity(agent_id, "update_agent_status")
     return None
+
+
+@activity.defn(name="acknowledge_workflow_replacement_bootstrap")
+async def mock_acknowledge_workflow_replacement_bootstrap(agent_id: str) -> Dict[str, Any]:
+    _record_workflow_env_activity(agent_id, "acknowledge_workflow_replacement_bootstrap")
+    return {"acknowledged": True, "already_acknowledged": False}
+
+
+@activity.defn(name="finalize_workflow_replacement_bootstrap")
+async def mock_finalize_workflow_replacement_bootstrap(
+    agent_id: str,
+    status: str,
+    progress: float,
+    status_message: str,
+    token_count: int,
+    context_size: int,
+    message_count: int,
+    tokens_in: int,
+    tokens_out: int,
+    iteration_offset: int,
+) -> Dict[str, Any]:
+    _record_workflow_env_activity(agent_id, "finalize_workflow_replacement_bootstrap")
+    return {"acknowledged": True, "already_acknowledged": False, "status": status}
 
 
 @activity.defn(name="get_agent_source")
@@ -393,11 +427,13 @@ async def mock_post_agent_message(
     metadata: Optional[Dict[str, Any]] = None,
     file_pointer: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _record_workflow_env_activity(agent_id, "post_agent_message")
     return {"id": "msg-mock-1", "message": text, "role": role, "metadata": metadata}
 
 
 @activity.defn(name="poll_new_messages")
 async def mock_poll_new_messages(agent_id: str, last_checked: datetime) -> List[Dict[str, Any]]:
+    _record_workflow_env_activity(agent_id, "poll_new_messages")
     return []
 
 
@@ -407,7 +443,13 @@ async def mock_check_user_usage(user_id: str) -> dict:
 
 
 @activity.defn(name="save_tool_usage")
-async def mock_save_tool_usage(agent_id: str, user_id: str, tool_name: str, usage_items: list) -> None:
+async def mock_save_tool_usage(
+    agent_id: str,
+    user_id: str,
+    tool_name: str,
+    usage_items: list,
+    accounting_checkpoint: Optional[Dict[str, Any]] = None,
+) -> None:
     return None
 
 
@@ -454,6 +496,7 @@ async def mock_mark_finished(
     tokens_out: int = 0,
     summary: str = "",
     structured_response: Optional[Dict] = None,
+    iteration_offset: Optional[int] = None,
 ) -> Dict:
     return {"summary": summary or "Done", "status": "completed"}
 
@@ -469,11 +512,6 @@ async def mock_compress_context(
 
 @activity.defn(name="update_agent_tree_cost_activity")
 async def mock_update_agent_tree_cost_activity(agent_id: str, tree_cost_cents: int, own_cost_cents: float = 0) -> None:
-    return None
-
-
-@activity.defn(name="update_agent_tokens_activity")
-async def mock_update_agent_tokens_activity(agent_id: str, tokens_in: int, tokens_out: int) -> None:
     return None
 
 
@@ -525,6 +563,8 @@ async def mock_call_llm_activity(
     When called for DAG param population (extra_user_message set), returns
     the required_tool so the DAG executor can extract params.
     """
+    activity_agent_id = agent_id or (messages_or_agent_id if isinstance(messages_or_agent_id, str) else None)
+    _record_workflow_env_activity(activity_agent_id, "call_llm_activity")
     if agent_id:
         FAST_MODE_GOAL_CAPTURE.setdefault(agent_id, []).append(fast_mode_goal)
     if extra_user_message and required_tool:
@@ -574,6 +614,7 @@ async def mock_check_progress(
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
+    *additional_args: Any,
 ) -> Dict[str, Any]:
     return {
         "score": 1.0,
@@ -681,6 +722,8 @@ async def mock_send_direct_sms_activity(user_id: str, message: str) -> Dict:
 MOCK_ACTIVITIES = [
     mock_get_model_context_window,
     mock_update_agent_status,
+    mock_acknowledge_workflow_replacement_bootstrap,
+    mock_finalize_workflow_replacement_bootstrap,
     mock_get_agent_source,
     mock_notify_sms_event_activity,
     mock_get_user_context,
@@ -700,7 +743,6 @@ MOCK_ACTIVITIES = [
     mock_mark_finished,
     mock_compress_context,
     mock_update_agent_tree_cost_activity,
-    mock_update_agent_tokens_activity,
     mock_call_llm_activity,
     mock_check_progress,
     mock_call_planner_llm_activity,
@@ -747,14 +789,13 @@ DEFAULT_WF_ARGS: list = [
 
 TASK_QUEUE = "test-workflow-queue"
 
-# Monotonic counter to generate unique workflow IDs across tests
-_wf_counter = 0
+# Mutable holder avoids rebinding module state across tests.
+_wf_counter = [0]
 
 
 def _next_wf_id(prefix: str = "test") -> str:
-    global _wf_counter
-    _wf_counter += 1
-    return f"{prefix}-wf-{_wf_counter}"
+    _wf_counter[0] += 1
+    return f"{prefix}-wf-{_wf_counter[0]}"
 
 
 async def _cancel_workflow(handle) -> None:
@@ -793,6 +834,82 @@ async def _run_all_workflow_tests() -> List[tuple]:
             activities=MOCK_ACTIVITIES,
             workflow_runner=_WORKFLOW_RUNNER,
         ):
+            # --- test: deployment-restored cold states use a signal-only wait ---
+            name = "wf_deployment_cold_states_do_not_poll"
+            cold_handles = []
+            try:
+                for prior_status in ("PAUSED", "COST_LIMIT_REACHED", "OUT_OF_CREDITS"):
+                    cold_agent_id = f"agent-cold-{prior_status.lower()}"
+                    WORKFLOW_ENV_ACTIVITY_COUNTS.pop(cold_agent_id, None)
+                    resume_state = _deployment_resume_fixture(prior_status)
+                    handle = await env.client.start_workflow(
+                        AgentWorkflow.run,
+                        args=[
+                            cold_agent_id,
+                            "user-test-1",
+                            "Wait without polling",
+                            "rose-labs/rose-1-lite",
+                            256,
+                            {"type": "FLOAT_LLM_JUDGE"},
+                            None,
+                            None,
+                            None,
+                            0,
+                            None,
+                            "resume",
+                            37,
+                            250,
+                            None,
+                            False,
+                            resume_state,
+                        ],
+                        id=_next_wf_id(f"cold-{prior_status.lower()}"),
+                        task_queue=TASK_QUEUE,
+                    )
+                    cold_handles.append(handle)
+
+                    for _ in range(40):
+                        counts = WORKFLOW_ENV_ACTIVITY_COUNTS.get(cold_agent_id, {})
+                        if counts.get("finalize_workflow_replacement_bootstrap") == 1:
+                            break
+                        await asyncio.sleep(0.05)
+
+                    paused = await handle.query(AgentWorkflow.is_paused_query)
+                    assert paused is True, f"{prior_status} candidate was not cold"
+                    before = dict(WORKFLOW_ENV_ACTIVITY_COUNTS.get(cold_agent_id, {}))
+                    assert before.get("finalize_workflow_replacement_bootstrap") == 1
+                    assert before.get("update_agent_status", 0) == 0
+                    assert before.get("poll_new_messages", 0) == 0
+                    assert before.get("call_llm_activity", 0) == 0
+                    assert before.get("post_agent_message", 0) == 0
+
+                    # A real wall-clock interval proves the workflow remains on
+                    # the signal-only wait instead of time-skipping a polling timer.
+                    await asyncio.sleep(0.25)
+                    assert WORKFLOW_ENV_ACTIVITY_COUNTS.get(cold_agent_id, {}) == before
+
+                    if prior_status == "COST_LIMIT_REACHED":
+                        await handle.signal(AgentWorkflow.price_limit_increased, {"new_limit_cents": 500})
+                    else:
+                        await handle.signal(AgentWorkflow.resume)
+
+                    # The valid signal crosses continue-as-new and the continued
+                    # execution reaches its normal durable message poll.
+                    for _ in range(80):
+                        if WORKFLOW_ENV_ACTIVITY_COUNTS.get(cold_agent_id, {}).get("poll_new_messages", 0) > 0:
+                            break
+                        await asyncio.sleep(0.05)
+                    assert WORKFLOW_ENV_ACTIVITY_COUNTS.get(cold_agent_id, {}).get("poll_new_messages", 0) > 0, (
+                        f"{prior_status} did not continue after a valid resume"
+                    )
+                    await _cancel_workflow(handle)
+
+                results.append((name, None))
+            except Exception as e:
+                for handle in cold_handles:
+                    await _cancel_workflow(handle)
+                results.append((name, e))
+
             # --- test: pause/resume ---
             name = "wf_pause_resume"
             try:
@@ -1037,6 +1154,254 @@ def _bare_workflow_instance():
     return AgentWorkflow()
 
 
+def _deployment_resume_fixture(prior_status: str = "ACTIVE") -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "kind": "deployment",
+        "prior_status": prior_status,
+        "prior_status_message": "Paused by user" if prior_status == "PAUSED" else None,
+        "progress": 0.4,
+        "token_count": 950,
+        "tokens_in": 680,
+        "tokens_out": 270,
+        "tree_tokens_in": 900,
+        "tree_tokens_out": 350,
+        "context_size": 42_000,
+        "message_count": 73,
+        "own_cost_cents": 17.25,
+        "subtree_cost_cents": 29,
+        "children_cost_cents": {"child-1": 12},
+        "children_tokens_in": {"child-1": 220},
+        "children_tokens_out": {"child-1": 80},
+        "child_tool_counts": {"web_search": 4},
+        "child_last_tokens": {
+            "child-1": {"tokens_in": 220, "tokens_out": 80, "token_count": 300},
+        },
+        "iteration_offset": 6,
+        "max_iterations": 37,
+        "context_gates": {"network": False, "recent_communications": True},
+    }
+
+
+def test_workflow_restore_deployment_state_preserves_all_durable_counters():
+    wf = _bare_workflow_instance()
+    wf._restore_deployment_state(_deployment_resume_fixture())
+
+    assert wf._deployment_resume is True
+    assert wf._resume_prior_status == "ACTIVE"
+    assert wf._resume_progress == 0.4
+    assert (wf.token_count, wf.tokens_in, wf.tokens_out) == (950, 680, 270)
+    assert (wf.tree_tokens_in, wf.tree_tokens_out) == (900, 350)
+    assert (wf.context_size, wf.message_count) == (42_000, 73)
+    assert (wf.own_cost_cents, wf.subtree_cost_cents) == (17.25, 29)
+    assert wf.children_cost_cents == {"child-1": 12}
+    assert wf.children_tokens_in == {"child-1": 220}
+    assert wf.children_tokens_out == {"child-1": 80}
+    assert wf.child_tool_counts == {"web_search": 4}
+    assert wf.child_last_tokens["child-1"]["token_count"] == 300
+    assert (wf.iteration_offset, wf.max_iterations) == (6, 37)
+    assert wf.context_gates == {"network": False, "recent_communications": True}
+    assert wf.is_paused is False
+    assert wf._cost_limit_reached is False
+
+
+def test_workflow_restore_deployment_state_preserves_pause_modes():
+    paused = _bare_workflow_instance()
+    paused._restore_deployment_state(_deployment_resume_fixture("PAUSED"))
+    assert paused.is_paused is True
+    assert paused._cost_limit_reached is False
+    assert paused._resume_status_message == "Paused by user"
+
+    limited = _bare_workflow_instance()
+    limited._restore_deployment_state(_deployment_resume_fixture("COST_LIMIT_REACHED"))
+    assert limited.is_paused is True
+    assert limited._cost_limit_reached is True
+
+    out_of_credits = _bare_workflow_instance()
+    out_of_credits._restore_deployment_state(_deployment_resume_fixture("OUT_OF_CREDITS"))
+    assert out_of_credits.is_paused is True
+    assert out_of_credits._has_credits is False
+    assert out_of_credits._cost_limit_reached is False
+
+
+def test_workflow_restore_deployment_state_rejects_unknown_contract():
+    wf = _bare_workflow_instance()
+    try:
+        wf._restore_deployment_state({"version": 2, "kind": "deployment"})
+        raise AssertionError("unknown resume versions must fail closed")
+    except ValueError as exc:
+        assert "Unsupported workflow resume state" in str(exc)
+
+
+def test_workflow_restore_candidate_validation_stops_before_llm():
+    state = _deployment_resume_fixture()
+    state["kind"] = "validation"
+    state["workflow_started_at"] = "2025-01-01T10:00:00+00:00"
+    state["runtime_state"] = {"deployment_validation": True}
+    wf = _bare_workflow_instance()
+    wf._restore_deployment_state(state)
+
+    assert wf._deployment_resume is True
+    assert wf._deployment_validation is True
+    assert wf.start_time == datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+
+
+def test_workflow_continuation_state_round_trips_complete_runtime():
+    """A continue-as-new boundary preserves runtime state but never credentials."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-continuation"
+    wf.user_id = "user-continuation"
+    wf.goal = "continue"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 512
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.parent_workflow_id = "parent-workflow"
+    wf.parent_agent_id = "parent-agent"
+    wf.depth = 2
+    wf.bus_id = "root-bus"
+    wf.max_iterations = None
+    wf.price_limit_cents = 500
+    wf.context_gates = {"network": False}
+    wf.fast_mode_cache_enabled = True
+    wf.token_count = 950
+    wf.tokens_in = 680
+    wf.tokens_out = 270
+    wf.tree_tokens_in = 900
+    wf.tree_tokens_out = 350
+    wf.context_size = 42_000
+    wf.message_count = 73
+    wf.own_cost_cents = 17.25
+    wf.subtree_cost_cents = 29
+    wf.children_cost_cents = {"child-1": 12}
+    wf.children_tokens_in = {"child-1": 220}
+    wf.children_tokens_out = {"child-1": 80}
+    wf.child_last_tokens = {"child-1": {"tokens_in": 220, "tokens_out": 80, "token_count": 300}}
+    wf.iteration_offset = 41
+    wf._signal_responses = {"approval-1": "APPROVED"}
+    wf._last_signal_response = "continue"
+    wf._has_new_messages = True
+    wf._response_schema_feedback = ["add total"]
+    wf._response_schema_revision = 3
+    wf._response_schema_applied_revision = 2
+    wf._response_schema_initialized = True
+    wf._response_schema_internal_signal_keys = {"schema-key"}
+    wf._has_credits = False
+    wf._last_credit_check = 40
+    wf.write_lock_enabled = False
+    wf._signup_completed = True
+    wf.pending_children = {"child-1"}
+    wf.child_tool_ids = {"child-1": "tc-child"}
+    wf.child_tool_counts = {"web_search": 4}
+    wf.child_results = {"child-1": {"status": "running"}}
+    wf.child_workflow_ids = {"child-1": "child-workflow"}
+    wf.tools_in_use = {"web_search"}
+    wf.output_schema = {"fields": [{"name": "total"}]}
+    wf.start_time = datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc)
+    wf._last_tree_cost_emit_at = datetime(2025, 1, 1, 10, 1, tzinfo=timezone.utc)
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "cached-token"
+    wf.gpt_code_account_id = "account-1"
+    wf.gpt_code_token_source = "pool"
+    wf.gpt_code_token_pool_id = "pool-1"
+    wf.compute_token_lineage_key = "lineage-1"
+    wf.compute_token_fast_cache_affinity_key = "affinity-1"
+    wf.compute_token_fetched_at = datetime(2025, 1, 1, 10, 2, tzinfo=timezone.utc)
+    wf.model_pricing_cache = {"model": {"input_cents_per_1k": 1.0}}
+    wf.input_cents_per_1k = 1.25
+    wf.output_cents_per_1k = 5.0
+    wf.actual_model = "actual-model"
+    wf.system_name = "Navi"
+    wf.custom_system_prompt = "Be concise"
+    wf.agent_source = "SMS"
+    wf.user_context_section = "cached user context"
+    wf.fast_cache_goal = "stable persisted goal"
+    context = [{"role": "USER", "text": "durable context"}]
+
+    args = wf._continuation_args(context)
+    state = args[16]
+    restored = _bare_workflow_instance()
+    restored.max_iterations = args[12]
+    restored._restore_deployment_state(state)
+
+    assert len(args) == 17
+    assert args[6] == context
+    assert args[11] == "execute_continued"
+    assert args[12] is None
+    assert state["kind"] == "continuation"
+    assert restored.iteration_offset == 41
+    assert restored.max_iterations is None
+    assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (950, 680, 270)
+    assert (restored.tree_tokens_in, restored.tree_tokens_out) == (900, 350)
+    assert restored._signal_responses == {"approval-1": "APPROVED"}
+    assert restored._response_schema_revision == 3
+    assert restored.pending_children == {"child-1"}
+    assert restored.child_workflow_ids == {"child-1": "child-workflow"}
+    assert "gpt_code_token" not in state["runtime_state"]
+    assert "claude_max_token" not in state["runtime_state"]
+    assert restored.compute_token_provider is None
+    assert restored.gpt_code_token is None
+    assert restored.compute_token_fetched_at is None
+    assert restored.start_time == wf.start_time
+    assert restored.user_context_section == "cached user context"
+    assert restored.context == context
+    assert restored._continuation_resume_state(context) == state
+    wf.world_model_mode = "simulate"
+    simulated_args = wf._continuation_args(context)
+    assert len(simulated_args) == 18
+    assert simulated_args[16]["kind"] == "continuation"
+    assert simulated_args[17] == "simulate"
+    state_with_historical_counts = {
+        **state,
+        "child_tool_counts": {"web_search": 1, "web_fetch": 2},
+    }
+    merged = _bare_workflow_instance()
+    merged._restore_deployment_state(state_with_historical_counts)
+    assert merged.child_tool_counts == {"web_search": 4, "web_fetch": 2}
+    assert restored._iteration_resume_kwargs() == {
+        "iteration_offset": 41,
+        "fast_cache_position_offset": 41,
+    }
+    restored.max_iterations = 80
+    assert restored._iteration_resume_kwargs()["max_iterations"] == 80
+
+
+def test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication():
+    from helpers.summarize import _restart_safe_child_tool_counts
+
+    context = [
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-1",
+                "childToolCounts": {"web_search": 2},
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-1",
+                "childToolCounts": {"web_search": 2},
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolStatus": "FINISHED",
+                "toolCallId": "spawn-2",
+                "childToolCounts": {"web_search": 1, "web_fetch": 3},
+            },
+        },
+    ]
+
+    assert _restart_safe_child_tool_counts(context, {}) == {"web_search": 3, "web_fetch": 3}
+    assert _restart_safe_child_tool_counts(context, {"web_search": 3, "web_fetch": 3}) == {
+        "web_search": 3,
+        "web_fetch": 3,
+    }
+
+
 def test_workflow_get_pending_child_workflow_ids_empty():
     wf = _bare_workflow_instance()
     assert wf._get_pending_child_workflow_ids() == []
@@ -1069,7 +1434,17 @@ def test_workflow_get_status_query():
     wf.goal = "test goal"
     wf.token_count = 500
     status = wf.get_status()
-    assert status == {"agent_id": "agent-1", "goal": "test goal", "tokens": 500}
+    assert status == {
+        "agent_id": "agent-1",
+        "goal": "test goal",
+        "tokens": 500,
+        "tokens_in": 0,
+        "tokens_out": 0,
+        "context_size": 0,
+        "message_count": 0,
+        "iteration_offset": 0,
+        "workflow_started_at": None,
+    }
 
 
 def test_workflow_is_paused_query_default_false():
@@ -1396,7 +1771,7 @@ class _FakeExternalHandle:
 class _FakeWorkflowModule:
     """Stand-in for temporalio.workflow inside a workflow method. Captures activities + signals."""
 
-    def __init__(self, *, patched: bool = True):
+    def __init__(self):
         self.logger = _FakeWorkflowLogger()
         self.activity_calls: List[tuple] = []  # (fn_name, args)
         self.signal_calls: List[tuple] = []  # (wf_id, name, data)
@@ -1404,7 +1779,6 @@ class _FakeWorkflowModule:
         self.activity_returns: Dict[str, Any] = {}  # fn_name -> return value override
         self.activity_blockers: Dict[str, asyncio.Event] = {}
         self.now_value = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        self._patched = patched
 
     async def execute_activity(self, fn, args=None, **kwargs):
         fn_name = getattr(fn, "__name__", str(fn))
@@ -1429,9 +1803,6 @@ class _FakeWorkflowModule:
 
     def uuid4(self):
         return "00000000-0000-0000-0000-000000000001"
-
-    def patched(self, patch_id):
-        return self._patched
 
 
 def _patch_workflow(fake: _FakeWorkflowModule):
@@ -1498,6 +1869,28 @@ async def test_workflow_signal_resume_clears_paused_flag():
         await wf.resume()
         assert wf.is_paused is False
         assert wf._paused_by_parent is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_out_of_credits_resume_requires_fresh_credits():
+    """A migrated credit pause resumes only after the backend confirms new credit."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-credit-cold"
+    wf.user_id = "user-credit-cold"
+    wf._restore_deployment_state(_deployment_resume_fixture("OUT_OF_CREDITS"))
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["check_user_usage"] = {"has_credits": False}
+    original = _patch_workflow(fake)
+    try:
+        await wf.resume()
+        assert wf.is_paused is True
+        assert wf._has_credits is False
+
+        fake.activity_returns["check_user_usage"] = {"has_credits": True}
+        await wf.resume()
+        assert wf.is_paused is False
+        assert wf._has_credits is True
     finally:
         _restore_workflow(original)
 
@@ -1961,9 +2354,15 @@ async def test_workflow_signal_child_cost_update_aggregates():
         _restore_workflow(original)
 
 
-async def test_workflow_signal_child_progress_tracks_deltas():
+async def test_workflow_signal_child_progress_keeps_parent_usage_own_only():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
+    wf.user_id = "user-1"
+    wf.tokens_in = 40
+    wf.tokens_out = 10
+    wf.token_count = 50
+    wf.max_iterations = 25
+    wf.context_gates = {}
     wf.child_tool_ids = {"child-1": "tool-call-1"}
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
@@ -1978,11 +2377,14 @@ async def test_workflow_signal_child_progress_tracks_deltas():
                 "goal": "subtask",
             }
         )
-        assert wf.tokens_in == 100
-        assert wf.tokens_out == 50
-        assert wf.token_count == 150
+        assert (wf.tokens_in, wf.tokens_out, wf.token_count) == (40, 10, 50)
+        assert wf.child_last_tokens["child-1"] == {
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "token_count": 150,
+        }
 
-        # Second progress update with higher cumulative — deltas should apply
+        # A later cumulative observation replaces only the child's bookkeeping.
         await wf.child_progress(
             {
                 "child_agent_id": "child-1",
@@ -1993,9 +2395,48 @@ async def test_workflow_signal_child_progress_tracks_deltas():
                 "goal": "subtask",
             }
         )
-        assert wf.tokens_in == 250
-        assert wf.tokens_out == 120
-        assert wf.token_count == 370
+        assert (wf.tokens_in, wf.tokens_out, wf.token_count) == (40, 10, 50)
+        assert wf.child_last_tokens["child-1"] == {
+            "tokens_in": 250,
+            "tokens_out": 120,
+            "token_count": 370,
+        }
+
+        # The next parent LLM write checkpoints only the parent's own counters.
+        await wf._on_tokens(
+            tokens_in_delta=20,
+            tokens_out_delta=5,
+            call_site="execute_loop",
+            iteration=3,
+        )
+        save_call = next(call for call in fake.activity_calls if call[0] == "save_tool_usage")
+        assert save_call[1][4] == {
+            "token_count": 75,
+            "tokens_in": 60,
+            "tokens_out": 15,
+            "own_cost_cents": 0.0,
+        }
+        assert (wf.tree_tokens_in, wf.tree_tokens_out) == (60, 15)
+
+        # Child subtree counters remain separate and produce the tree-only view.
+        await wf.child_cost_update(
+            {
+                "child_agent_id": "child-1",
+                "subtree_cost_cents": 0,
+                "subtree_tokens_in": 250,
+                "subtree_tokens_out": 120,
+            }
+        )
+        assert (wf.tree_tokens_in, wf.tree_tokens_out) == (310, 135)
+
+        # Continue-as-new preserves both views without folding the tree into own.
+        state = wf._continuation_resume_state([])
+        restored = _bare_workflow_instance()
+        restored._restore_deployment_state(state)
+        assert (restored.token_count, restored.tokens_in, restored.tokens_out) == (75, 60, 15)
+        assert (restored.tree_tokens_in, restored.tree_tokens_out) == (310, 135)
+        assert restored.children_tokens_in == {"child-1": 250}
+        assert restored.children_tokens_out == {"child-1": 120}
     finally:
         _restore_workflow(original)
 
@@ -2538,13 +2979,25 @@ async def test_workflow_on_tokens_calculates_cost_with_pricing():
             actual_model=None,
             cache_read_input_tokens=0,
             cache_creation_input_tokens=0,
-            call_site="test",
+            call_site="execute_loop",
+            iteration=7,
         )
         assert wf.tokens_in == 1000
         assert wf.tokens_out == 500
+        assert wf.iteration_offset == 7
         assert wf.own_cost_cents > 0
         activity_names = [c[0] for c in fake.activity_calls]
         assert "save_tool_usage" in activity_names
+        save_call = next(call for call in fake.activity_calls if call[0] == "save_tool_usage")
+        assert save_call[1][3][0]["iteration"] == 7
+        await wf._on_tokens(
+            tokens_in_delta=0,
+            tokens_out_delta=0,
+            actual_model=None,
+            call_site="plan_loop",
+            iteration=99,
+        )
+        assert wf.iteration_offset == 7, "PLAN iterations must not consume the EXECUTE budget"
     finally:
         _restore_workflow(original)
 
@@ -2708,6 +3161,118 @@ async def test_workflow_mark_failed_no_parent_no_signal():
         # No child_completed signal (no parent)
         signal_names = [s[1] for s in fake.signal_calls]
         assert "child_completed" not in signal_names
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_paused_continue_as_new_preserves_deployment_state():
+    """Manual and cost pauses retain the deployment snapshot after resuming."""
+    for prior_status in ("PAUSED", "COST_LIMIT_REACHED"):
+        wf = _bare_workflow_instance()
+        wf.agent_id = f"agent-{prior_status.lower()}"
+        wf.user_id = "user-1"
+        wf.goal = "continue safely"
+        wf.model = "rose-labs/rose-1-ultra"
+        wf.reasoning_max_tokens = 512
+        wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+        wf.max_iterations = None
+        wf.price_limit_cents = 250
+        wf.context_gates = {"network": False}
+        wf.fast_mode_cache_enabled = True
+        state = _deployment_resume_fixture(prior_status)
+        state["max_iterations"] = None
+        wf._restore_deployment_state(state)
+        wf.iteration_offset = 19
+        wf.compute_token_provider = "claude"
+        wf.claude_max_token = "cached-claude"
+        wf.compute_token_fetched_at = datetime(2025, 1, 1, 11, 55, tzinfo=timezone.utc)
+        wf.pending_children = {"child-1"}
+        wf.child_workflow_ids = {"child-1": "child-workflow"}
+
+        fake = _FakeWorkflowModule()
+        continued = []
+
+        async def fake_wait_condition(condition, _wf=wf, **_kwargs):
+            assert condition() is False
+            _wf.is_paused = False
+            _wf._cost_limit_reached = False
+
+        def fake_continue_as_new(*, args, _continued=continued):
+            _continued.append(args)
+
+        async def wait_for_refresh():
+            return None
+
+        fake.wait_condition = fake_wait_condition
+        fake.continue_as_new = fake_continue_as_new
+        wf._wait_for_response_schema_refresh = wait_for_refresh
+        original = _patch_workflow(fake)
+        try:
+            context = [{"role": "USER", "text": f"resume {prior_status}"}]
+            result = await wf._handle_incomplete(
+                {"status": "paused", "context": context},
+                phase="EXECUTE",
+            )
+            assert result["status"] == "paused"
+            assert len(continued) == 1
+            args = continued[0]
+            resume_state = args[16]
+            assert len(args) == 17
+            assert args[6] == context
+            assert args[11] == "execute_continued"
+            assert args[12] is None
+            assert resume_state["prior_status"] == "ACTIVE"
+            assert resume_state["token_count"] == 950
+            assert resume_state["own_cost_cents"] == 17.25
+            assert resume_state["iteration_offset"] == 19
+            assert "claude_max_token" not in resume_state["runtime_state"]
+            assert "gpt_code_token" not in resume_state["runtime_state"]
+            assert resume_state["runtime_state"]["pending_children"] == ["child-1"]
+        finally:
+            _restore_workflow(original)
+
+
+async def test_workflow_context_overflow_uses_complete_continuation_contract():
+    """Context compaction carries the same runtime snapshot as pause/resume."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "agent-overflow"
+    wf.user_id = "user-1"
+    wf.goal = "continue after compaction"
+    wf.model = "rose-labs/rose-1-ultra"
+    wf.reasoning_max_tokens = 256
+    wf.verifier = {"type": "FLOAT_LLM_JUDGE"}
+    wf.max_iterations = None
+    wf.price_limit_cents = 100
+    wf.context_gates = {}
+    wf.iteration_offset = 27
+    wf.token_count = 500
+    wf.tokens_in = 350
+    wf.tokens_out = 150
+    wf.compute_token_provider = "gpt"
+    wf.gpt_code_token = "cached-gpt"
+    fake = _FakeWorkflowModule()
+    continued = []
+
+    def fake_continue_as_new(*, args):
+        continued.append(args)
+
+    async def wait_for_refresh():
+        return None
+
+    fake.continue_as_new = fake_continue_as_new
+    wf._wait_for_response_schema_refresh = wait_for_refresh
+    original = _patch_workflow(fake)
+    try:
+        compressed = [{"role": "SYSTEM", "text": "compressed"}]
+        await wf._handle_context_overflow(compressed)
+        assert len(continued) == 1
+        args = continued[0]
+        assert args[6] == compressed
+        assert args[12] is None
+        assert args[16]["iteration_offset"] == 27
+        assert args[16]["token_count"] == 500
+        assert "gpt_code_token" not in args[16]["runtime_state"]
+        assert "claude_max_token" not in args[16]["runtime_state"]
     finally:
         _restore_workflow(original)
 
@@ -3176,6 +3741,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         assert len(run_agent_calls) == 2
         assert run_agent_calls[0]["is_plan_loop"] is True
         assert run_agent_calls[1]["skip_blueprint_query"] is True
+        assert all(call["check_aborted"] == wf._check_orphaned for call in run_agent_calls)
         assert wf.compute_token_provider == "gpt"
         assert wf.gpt_code_token == "gpt-token"
         assert wf.output_schema == {"fields": [{"name": "answer", "type": "string"}]}
@@ -3204,6 +3770,140 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
         assert init_posts[0][1][3]["toolStatus"] == "IN_PROGRESS"
         assert init_posts[1][1][3]["toolCallId"] == "tc-agent-init"
         assert init_posts[1][1][3]["toolStatus"] == "FINISHED"
+    finally:
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_run_deployment_resume_skips_startup_replay_and_restores_iteration():
+    """A deployment replacement resumes the LLM loop without replaying startup, PLAN, or DAG."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [
+                {
+                    "role": "TOOL",
+                    "text": "Historical plan",
+                    "metadata": {
+                        "toolName": "set_plan",
+                        "toolStatus": "FINISHED",
+                        "data": {
+                            "tasks": [{"goal": "must not replay", "tool_name": "web_search"}],
+                            "dependencies": {},
+                            "join": "all",
+                        },
+                    },
+                }
+            ],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "SMS",
+            "get_user_context": "remembered context",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": "Do not inject this twice.",
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": {"fields": []},
+                "write_lock_enabled": True,
+            },
+            "finalize_workflow_replacement_bootstrap": {
+                "acknowledged": True,
+                "already_acknowledged": False,
+                "status": "ACTIVE",
+            },
+            "generate_completion_summary": {
+                "summary": "Resumed and finished.",
+                "tool_counts": {},
+                "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            },
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+    run_agent_calls = []
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        return {
+            "status": "completed",
+            "context": [{"role": "ASSISTANT", "text": "done", "metadata": None}],
+            "structured_response": None,
+            "token_count": 0,
+            "context_size": 42_000,
+        }
+
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "agent-resume-1",
+            "user-run-1",
+            "Continue the task",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            None,
+            None,
+            0,
+            "agent-resume-1",
+            "resume",
+            37,
+            250,
+            {"network": True},
+            False,
+            _deployment_resume_fixture(),
+        )
+
+        assert result == {"status": "completed", "goal": "Continue the task"}
+        assert len(run_agent_calls) == 1
+        assert run_agent_calls[0]["iteration_offset"] == 6
+        assert run_agent_calls[0]["max_iterations"] == 37
+        assert run_agent_calls[0]["check_aborted"] == wf._check_orphaned
+        assert "is_plan_loop" not in run_agent_calls[0]
+
+        activity_names = [call[0] for call in fake.activity_calls]
+        assert activity_names[:2] == [
+            "fetch_agent_config",
+            "finalize_workflow_replacement_bootstrap",
+        ]
+        started_sms = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "notify_sms_event_activity" and call[1][1] == "agent_started"
+        ]
+        init_posts = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "post_agent_message" and (call[1][3] or {}).get("toolName") == "agent_init"
+        ]
+        hidden_prompt_posts = [
+            call
+            for call in fake.activity_calls
+            if call[0] == "post_agent_message" and (call[1][3] or {}).get("isCustomSystemPrompt")
+        ]
+        startup_status = next(
+            call
+            for call in fake.activity_calls
+            if call[0] == "finalize_workflow_replacement_bootstrap"
+        )
+        persisted_startup = next(
+            call
+            for call in fake.activity_calls
+            if call[0] == "update_agent_status"
+        )
+        assert startup_status[1][1] == "ACTIVE"
+        assert startup_status[1][2] == 0.4
+        assert startup_status[1][4:9] == [950, 42_000, 73, 680, 270]
+        assert persisted_startup[1][4:9] == [950, 42_000, 73, 680, 270]
+        assert started_sms == []
+        assert init_posts == []
+        assert hidden_prompt_posts == []
+        assert "set_response_schema_activity" not in activity_names
+        assert wf.context_gates == {"network": False, "recent_communications": True}
+        assert wf.own_cost_cents == 17.25
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)
@@ -3274,6 +3974,68 @@ async def test_workflow_run_skips_response_schema_generation_for_subagent():
         activity_names = [c[0] for c in fake.activity_calls]
         assert "fetch_agent_config" in activity_names
         assert "set_response_schema_activity" not in activity_names
+    finally:
+        workflow_module.run_agent = original_run_agent
+        _restore_workflow(original_workflow)
+
+
+async def test_workflow_run_missing_parent_stops_before_agent_loop():
+    """A child whose parent is already gone fails locally without LLM or tool work."""
+    wf = _bare_workflow_instance()
+    fake = _FakeWorkflowModule()
+    fake.activity_returns.update(
+        {
+            "poll_new_messages": [],
+            "get_model_context_window": 200_000,
+            "get_agent_source": "WEB",
+            "get_user_context": "",
+            "get_user_system_name": "Navi",
+            "get_user_custom_system_prompt": None,
+            "fetch_compute_token_activity": None,
+            "fetch_agent_config": {
+                "response_schema": None,
+                "parent_agent_id": "dead-parent-agent",
+                "write_lock_enabled": True,
+            },
+            "query_parent_state_activity": {"parent_missing": True},
+        }
+    )
+
+    import workflows.agent_workflow as workflow_module
+
+    original_workflow = _patch_workflow(fake)
+    original_run_agent = workflow_module.run_agent
+    run_agent_calls = []
+
+    async def fake_run_agent(**kwargs):
+        run_agent_calls.append(kwargs)
+        raise AssertionError("orphan must stop before run_agent")
+
+    workflow_module.run_agent = fake_run_agent
+    try:
+        result = await wf.run(
+            "orphan-child",
+            "user-run-1",
+            "Must not continue",
+            "anthropic/claude-sonnet-4.5",
+            256,
+            {"type": "FLOAT_LLM_JUDGE"},
+            None,
+            "dead-parent-workflow",
+            "dead-parent-agent",
+            1,
+            None,
+            "execute",
+            25,
+            250,
+            {},
+        )
+
+        assert result == {"status": "failed", "reason": "orphaned", "goal": "Must not continue"}
+        assert wf._orphaned is True
+        assert wf._is_finished is True
+        assert run_agent_calls == []
+        assert fake.signal_calls == []
     finally:
         workflow_module.run_agent = original_run_agent
         _restore_workflow(original_workflow)
@@ -3673,9 +4435,8 @@ async def test_workflow_check_parent_state_parent_missing_orphans_child():
         _restore_workflow(original)
 
 
-async def test_workflow_check_parent_state_parent_missing_ignores_manual_pause():
-    """parent_missing must NOT abort a child that paused for its own reasons
-    (user/credits) — only one that inherited its pause from the parent."""
+async def test_workflow_check_parent_state_parent_missing_orphans_manual_pause():
+    """A manually paused child must also stop once its parent is confirmed gone."""
     wf = _bare_workflow_instance()
     wf.parent_workflow_id = "parent-wf"
     wf.agent_id = "child"
@@ -3694,8 +4455,55 @@ async def test_workflow_check_parent_state_parent_missing_ignores_manual_pause()
     original = _patch_workflow(fake)
     try:
         await wf._check_parent_state()
-        assert wf._orphaned is False
-        assert wf.is_paused is True  # left as-is
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_check_parent_state_parent_missing_orphans_active_child():
+    """An active descendant cannot keep spending after root replacement."""
+    wf = _bare_workflow_instance()
+    wf.parent_workflow_id = "parent-wf"
+    wf.agent_id = "active-child"
+    wf.bus_id = "bus-1"
+    wf.goal = "g"
+    wf.is_paused = False
+    fake = _FakeWorkflowModule()
+
+    async def fake_exec(fn, args=None, **kwargs):
+        if getattr(fn, "__name__", "") == "query_parent_state_activity":
+            return {"parent_missing": True}
+        return None
+
+    fake.execute_activity = fake_exec
+    original = _patch_workflow(fake)
+    try:
+        await wf._check_parent_state()
+        assert wf._orphaned is True
+        assert wf.is_paused is False
+        assert await wf._check_orphaned() is True
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_orphan_failure_never_signals_dead_parent():
+    """Terminal orphan bookkeeping is local; the dead root receives no completion signal."""
+    wf = _bare_workflow_instance()
+    wf.agent_id = "orphan-child"
+    wf.user_id = "user-1"
+    wf.goal = "orphaned work"
+    wf.parent_workflow_id = "dead-parent"
+    wf._orphaned = True
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_failed(
+            context=[],
+            reason="orphaned",
+            message="Parent agent ended; orphaned sub-agent stopped.",
+        )
+        assert fake.signal_calls == []
     finally:
         _restore_workflow(original)
 
@@ -3921,7 +4729,7 @@ async def test_workflow_execute_tool_unknown_tool_returns_error():
     async def fake_handle(event, tool_call_id, tool_name):
         handle_calls.append((event, tool_call_id, tool_name))
 
-    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    setattr(wf, "_handle_tool_event", fake_handle)
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -3979,7 +4787,7 @@ async def test_workflow_execute_tool_invalid_params_returns_error_and_posts_tool
     async def fake_handle(event, tool_call_id, tool_name):
         handle_calls.append((event, tool_call_id, tool_name))
 
-    wf._handle_tool_event = fake_handle  # type: ignore[assignment]
+    setattr(wf, "_handle_tool_event", fake_handle)
     fake = _FakeWorkflowModule()
     original = _patch_workflow(fake)
     try:
@@ -4351,56 +5159,6 @@ async def test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execut
         _restore_workflow(original_workflow)
 
 
-async def test_workflow_pre_patch_replay_skips_new_jit_command():
-    """Old Temporal histories replay their original approval -> executor command order."""
-    wf = _bare_workflow_instance()
-    wf.agent_id = "agent-legacy-replay"
-    wf.user_id = "user-1"
-    wf.current_phase = "EXECUTE"
-    tool_args = {
-        "to": "+15555550123",
-        "system_prompt": "Book dinner at the proposed time.",
-        "output_schema": {
-            "fields": [
-                {
-                    "name": "status",
-                    "type": "str",
-                    "required": True,
-                    "description": "Booking status",
-                }
-            ]
-        },
-    }
-    executor_calls: List[Dict[str, Any]] = []
-
-    import workflows.agent_workflow as workflow_module
-
-    async def fake_approval(workflow_instance, question, metadata=None, **kwargs):
-        return {"response": "its 1:45pm local time", "question": question}
-
-    async def fake_call_executor(**kwargs):
-        executor_calls.append(kwargs)
-        return {"result": {"status": "queued"}}
-
-    fake = _FakeWorkflowModule(patched=False)
-    original_workflow = _patch_workflow(fake)
-    original_approval = workflow_module.request_user_approval_direct
-    original_executor = workflow_module.TOOL_EXECUTORS["call_phone_number"]
-    workflow_module.request_user_approval_direct = fake_approval
-    workflow_module.TOOL_EXECUTORS["call_phone_number"] = fake_call_executor
-    try:
-        result = await wf._execute_tool("call_phone_number", tool_args, "tc-legacy-replay")
-
-        assert result["success"] is True
-        assert len(executor_calls) == 1
-        assert executor_calls[0]["tool_call"] == {"tool": "call_phone_number", **tool_args}
-        assert not any(call[0] == "call_llm_activity" for call in fake.activity_calls)
-    finally:
-        workflow_module.request_user_approval_direct = original_approval
-        workflow_module.TOOL_EXECUTORS["call_phone_number"] = original_executor
-        _restore_workflow(original_workflow)
-
-
 async def test_workflow_refresh_claude_token_missing_fetches_and_sets():
     wf = _bare_workflow_instance()
     wf.claude_max_token = None
@@ -4724,6 +5482,21 @@ async def run_all_tests():
     r.record("usage_model_unknown_fallback", test_usage_model_falls_back_when_cache_provenance_is_unknown)
 
     # AgentWorkflow pure-method tests
+    r.record("wf_restore_deploy_state", test_workflow_restore_deployment_state_preserves_all_durable_counters)
+    r.record("wf_restore_deploy_pause", test_workflow_restore_deployment_state_preserves_pause_modes)
+    r.record("wf_restore_deploy_version", test_workflow_restore_deployment_state_rejects_unknown_contract)
+    r.record(
+        "wf_restore_candidate_validation",
+        test_workflow_restore_candidate_validation_stops_before_llm,
+    )
+    r.record(
+        "wf_continuation_state_round_trip",
+        test_workflow_continuation_state_round_trips_complete_runtime,
+    )
+    r.record(
+        "wf_restart_safe_child_counts",
+        test_restart_safe_child_tool_counts_survive_memory_loss_without_duplication,
+    )
     r.record("wf_pending_children_empty", test_workflow_get_pending_child_workflow_ids_empty)
     r.record("wf_pending_children_populated", test_workflow_get_pending_child_workflow_ids_populated)
     r.record("wf_children_tokens_empty", test_workflow_get_children_tokens_empty)
@@ -4764,6 +5537,10 @@ async def run_all_tests():
     await r.record_async("wf_signal_pause", test_workflow_signal_pause_sets_paused_flag)
     await r.record_async("wf_signal_pause_cascade", test_workflow_signal_pause_cascades_to_children)
     await r.record_async("wf_signal_resume", test_workflow_signal_resume_clears_paused_flag)
+    await r.record_async(
+        "wf_out_of_credits_resume_requires_fresh_credits",
+        test_workflow_out_of_credits_resume_requires_fresh_credits,
+    )
     await r.record_async("wf_signal_recv_user_plain", test_workflow_signal_receive_user_response_plain_string)
     await r.record_async("wf_signal_recv_user_req_id", test_workflow_signal_receive_user_response_with_request_id)
     await r.record_async(
@@ -4811,7 +5588,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_signal_signup", test_workflow_signal_signup_completed_and_dismissed)
     await r.record_async("wf_signal_child_cost_update", test_workflow_signal_child_cost_update_aggregates)
-    await r.record_async("wf_signal_child_progress", test_workflow_signal_child_progress_tracks_deltas)
+    await r.record_async(
+        "wf_signal_child_progress",
+        test_workflow_signal_child_progress_keeps_parent_usage_own_only,
+    )
     await r.record_async("wf_signal_child_completed_success", test_workflow_signal_child_completed_success)
     await r.record_async("wf_signal_child_completed_failure", test_workflow_signal_child_completed_failure)
     await r.record_async(
@@ -4859,6 +5639,14 @@ async def run_all_tests():
     await r.record_async("wf_get_model_pricing_cache", test_workflow_get_model_pricing_uses_cache)
     await r.record_async("wf_mark_failed_signals_parent", test_workflow_mark_failed_signals_parent_with_context)
     await r.record_async("wf_mark_failed_no_parent", test_workflow_mark_failed_no_parent_no_signal)
+    await r.record_async(
+        "wf_paused_continuation_preserves_state",
+        test_workflow_paused_continue_as_new_preserves_deployment_state,
+    )
+    await r.record_async(
+        "wf_context_overflow_continuation_preserves_state",
+        test_workflow_context_overflow_uses_complete_continuation_contract,
+    )
     await r.record_async("wf_handle_incomplete_max_iterations", test_workflow_handle_incomplete_max_iterations)
     await r.record_async("wf_handle_incomplete_error", test_workflow_handle_incomplete_error)
     await r.record_async("wf_handle_incomplete_unknown", test_workflow_handle_incomplete_unknown_passthrough)
@@ -4881,8 +5669,16 @@ async def run_all_tests():
     await r.record_async("wf_missing_cloud_agent_tool", test_workflow_caches_missing_cloud_agent_tool)
     await r.record_async("wf_run_startup_completion", test_workflow_run_covers_chat_agent_startup_and_completion)
     await r.record_async(
+        "wf_run_deployment_resume",
+        test_workflow_run_deployment_resume_skips_startup_replay_and_restores_iteration,
+    )
+    await r.record_async(
         "wf_run_skips_response_schema_for_subagent",
         test_workflow_run_skips_response_schema_generation_for_subagent,
+    )
+    await r.record_async(
+        "wf_run_missing_parent_stops_before_agent_loop",
+        test_workflow_run_missing_parent_stops_before_agent_loop,
     )
     await r.record_async(
         "wf_dag_failure_recovers_via_run_agent",
@@ -4904,7 +5700,16 @@ async def run_all_tests():
         "wf_check_parent_missing_orphans", test_workflow_check_parent_state_parent_missing_orphans_child
     )
     await r.record_async(
-        "wf_check_parent_missing_ignores_manual", test_workflow_check_parent_state_parent_missing_ignores_manual_pause
+        "wf_check_parent_missing_orphans_manual",
+        test_workflow_check_parent_state_parent_missing_orphans_manual_pause,
+    )
+    await r.record_async(
+        "wf_check_parent_missing_orphans_active",
+        test_workflow_check_parent_state_parent_missing_orphans_active_child,
+    )
+    await r.record_async(
+        "wf_orphan_never_signals_dead_parent",
+        test_workflow_orphan_failure_never_signals_dead_parent,
     )
     await r.record_async(
         "wf_check_parent_transient_backstop", test_workflow_check_parent_state_transient_failure_backstop_orphans
@@ -4950,10 +5755,6 @@ async def run_all_tests():
     await r.record_async(
         "wf_rejection_fails_with_feedback",
         test_workflow_rejection_fails_tool_with_feedback_without_jit_or_execution,
-    )
-    await r.record_async(
-        "wf_pre_patch_replay_skips_jit",
-        test_workflow_pre_patch_replay_skips_new_jit_command,
     )
     await r.record_async("wf_refresh_claude_token_missing", test_workflow_refresh_claude_token_missing_fetches_and_sets)
     await r.record_async(

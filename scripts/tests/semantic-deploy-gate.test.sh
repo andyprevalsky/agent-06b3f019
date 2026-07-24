@@ -7,8 +7,21 @@ RUN_SH="$ROOT_DIR/scripts/run.sh"
 HELPERS="$ROOT_DIR/front-end/tests-e2e/helpers.ts"
 LIFECYCLE_SPEC="$ROOT_DIR/front-end/tests-e2e/chat-lifecycle-latency.spec.ts"
 WORKFLOW="$ROOT_DIR/.github/workflows/chat-lifecycle-ratchet.yml"
+FRONTEND_LOCK="$ROOT_DIR/front-end/package-lock.json"
+PROD_SESSION_GENERATOR="$ROOT_DIR/front-end/scripts/generate-prod-test-session.mjs"
+PROD_SESSION_TEST="$ROOT_DIR/scripts/tests/prod-semantic-session.test.mjs"
 DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
+CODERABBIT_CONFIG="$ROOT_DIR/.coderabbit.yaml"
+REVIEW_WAITER="$ROOT_DIR/scripts/wait_for_code_review.py"
+REVIEW_CYCLES="$ROOT_DIR/scripts/deploy_review_cycle.py"
 DEPLOY_ENV="$ROOT_DIR/scripts/lib/deploy-local-env.sh"
+DEPLOY_STRUCTURAL_RUNNER="$ROOT_DIR/scripts/run-deploy-structural-gates.py"
+DEPLOY_STRUCTURAL_RUNNER_TEST="$ROOT_DIR/scripts/tests/run-deploy-structural-gates.test.py"
+DEPLOY_LIVE_PROBE_RUNNER="$ROOT_DIR/scripts/run_deploy_live_probes.py"
+RUN_PREDEPLOY_LOCAL="$ROOT_DIR/scripts/run-predeploy-local"
+RUN_PREDEPLOY_CLOUD="$ROOT_DIR/scripts/run-predeploy-cloud"
+RUN_BENCH_CLOUD="$ROOT_DIR/scripts/run-bench-cloud"
+CLOUDBENCH_RUN="$ROOT_DIR/scripts/cloudbench-run.sh"
 DESCEND_COMMAND_TEST="$ROOT_DIR/scripts/tests/descend-command.test.sh"
 AUTO_RCA_WORKFLOW_TEST="$ROOT_DIR/scripts/tests/auto-rca-workflow.test.sh"
 AGENTCARD_LIFECYCLE_SCRIPT="$ROOT_DIR/scripts/run-agentcard-lifecycle-task.sh"
@@ -25,7 +38,17 @@ require_text() {
   grep -Fq -- "$text" "$file" || fail "$description"
 }
 
-for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$DEPLOY_COMMAND" "$DEPLOY_ENV" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
+require_count() {
+  local file="$1"
+  local text="$2"
+  local expected="$3"
+  local description="$4"
+  local actual
+  actual=$(grep -Fc -- "$text" "$file" || true)
+  [ "$actual" = "$expected" ] || fail "$description (expected $expected, found $actual)"
+}
+
+for file in "$RUNNER" "$RUN_SH" "$HELPERS" "$LIFECYCLE_SPEC" "$WORKFLOW" "$FRONTEND_LOCK" "$PROD_SESSION_GENERATOR" "$PROD_SESSION_TEST" "$DEPLOY_COMMAND" "$CODERABBIT_CONFIG" "$REVIEW_WAITER" "$REVIEW_CYCLES" "$DEPLOY_ENV" "$DEPLOY_STRUCTURAL_RUNNER" "$DEPLOY_STRUCTURAL_RUNNER_TEST" "$DEPLOY_LIVE_PROBE_RUNNER" "$RUN_PREDEPLOY_LOCAL" "$RUN_PREDEPLOY_CLOUD" "$RUN_BENCH_CLOUD" "$CLOUDBENCH_RUN" "$DESCEND_COMMAND_TEST" "$AUTO_RCA_WORKFLOW_TEST" "$AGENTCARD_LIFECYCLE_SCRIPT"; do
   [ -f "$file" ] || fail "required semantic deploy gate file is missing: $file"
 done
 
@@ -37,7 +60,8 @@ require_text "$RUN_SH" 'resolve_temporal_task_queue "$CONDUCTOR_WORKSPACE_NAME"'
 require_text "$RUN_SH" 'export BACKEND_LOG_FILE="${BACKEND_LOG_FILE:-$PWD/back-end/backend-logs.log}"' "semantic stack must retain backend evidence"
 require_text "$RUN_SH" 'export FRONTEND_LOG_FILE="${FRONTEND_LOG_FILE:-$PWD/front-end/frontend-logs.log}"' "semantic stack must retain frontend evidence"
 require_text "$RUN_SH" 'Building bundled frontend before starting runtime services' "bundled frontend must build before memory-heavy runtime services start"
-require_text "$RUN_SH" 'npx vite preview --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve the completed production build"
+require_text "$RUN_SH" 'npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir' "each bundled frontend build must own its output directory"
+require_text "$RUN_SH" 'npx vite preview --outDir "$FRONTEND_DIST_DIR" --host 0.0.0.0 --port $FRONTEND_PORT --strictPort >> "$FRONTEND_LOG_FILE"' "bundled frontend service must only serve its completed production build"
 require_text "$RUN_SH" 'for _ in $(seq 1 25); do' "Docker health detection must tolerate a busy Desktop daemon before falling back to the shared system database"
 require_text "$RUN_SH" 'docker ps --filter "name=^${DB_CONTAINER}$"' "deploy-prestarted workspace database must bypass a slow broad Docker health probe"
 require_text "$RUN_SH" 'workspace_db_container_owns_port &&' "deploy-prestarted database reuse must verify the exact workspace container owns the configured port"
@@ -59,7 +83,21 @@ require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle termin
 # become part of the product latency measurement.
 require_text "$WORKFLOW" "workflow_dispatch:" "production semantic gate must support /deploy dispatch"
 require_text "$WORKFLOW" "github.event.deployment.production_environment == true" "automatic semantic runs must be gated to production Vercel deploys"
-require_text "$WORKFLOW" "npm install --ignore-scripts --no-package-lock" "semantic workflow must install without the intentionally untracked package lock"
+require_text "$WORKFLOW" "hashFiles('front-end/package-lock.json')" "semantic workflow cache must follow the committed frontend lockfile"
+require_count "$WORKFLOW" "working-directory: front-end" "4" "semantic workflow dependency and browser steps must run from the frontend package"
+require_text "$WORKFLOW" "npm ci --ignore-scripts --workspaces=false" "semantic workflow must install locked frontend dependencies without resolving the root workspace"
+require_text "$WORKFLOW" "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830" "semantic workflow must pin npm caching to an immutable action SHA"
+LOCK_TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/semantic-lock.XXXXXX")
+trap 'rm -rf "$LOCK_TEST_DIR"' EXIT
+cp "$ROOT_DIR/front-end/package.json" "$FRONTEND_LOCK" "$LOCK_TEST_DIR/"
+# Match the workflow's working-directory install; npm --prefix can substitute the
+# temporary directory basename as the isolated root package identity.
+(cd "$LOCK_TEST_DIR" && npm ci --dry-run --ignore-scripts --no-audit --no-fund >/dev/null) ||
+  fail "frontend lockfile must support a standalone clean install"
+if grep -Fq -- "--no-package-lock" "$WORKFLOW"; then
+  fail "production semantic installs must not bypass the workspace lockfile"
+fi
+require_text "$RUNNER" 'node scripts/generate-prod-test-session.mjs' "production semantics must not install backend dependencies only to generate auth"
 require_text "$WORKFLOW" "SEMANTIC_WORKERS: 4" "production semantic gate must use four concurrent workers"
 require_text "$WORKFLOW" "bash front-end/scripts/run-semantic-tests.sh --prod" "production gate must run every semantic spec"
 require_text "$WORKFLOW" "SEMANTIC_GREP_INVERT: chat full-lifecycle latency" "UI semantic job must exclude the separately gated latency spec"
@@ -91,9 +129,29 @@ require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/workspace-env.sh"' "
 require_text "$DEPLOY_COMMAND" '. "$DEPLOY_ROOT/scripts/lib/deploy-local-env.sh"' "/deploy must load the tested local environment boundary"
 require_text "$DEPLOY_COMMAND" 'configure_deploy_local_env' "/deploy must normalize identity before resolving local resources"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/workspace-env.test.sh' "/deploy must run the behavioral workspace identity regression"
+require_text "$DEPLOY_COMMAND" 'bash scripts/tests/deploy-worktree-preflight.test.sh' "/deploy must cement isolated deploy-worktree preparation"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/semantic-deploy-gate.test.sh' "/deploy must keep its command invariants in the static gate"
 require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/factory-review.test.py' "/deploy must protect factory-review telemetry collection"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/wait-for-code-review.test.py' "/deploy must protect exact-HEAD reviewer waiting"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-review-cycle.test.py' "/deploy must protect the bounded reviewer state machine"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/run-deploy-stage.test.sh' "/deploy must protect deploy-stage telemetry collection"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py' "/deploy must protect concurrent live-probe scheduling"
+require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=len(GATES)' "command-structural runner must default to full independent-suite concurrency"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
+require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
+require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
+require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
+require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py start --reset --kind initial' "/deploy must initialize a bounded review ledger"
+require_text "$DEPLOY_COMMAND" 'deploy_review_cycle.py require-mergeable --head' "/deploy must reject an unreviewed merge HEAD"
+require_text "$REVIEW_CYCLES" 'MAX_REVIEW_CYCLES = 3' "review cycle enforcement must hard-cap each deploy at three"
+require_text "$REVIEW_WAITER" 'actual_head != expected_head' "review waiter must reject stale or changed PR heads"
+if grep -Fq 'gh pr checks <PR_NUMBER> --watch' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not wait on every PR check"
+fi
+if grep -Fq 'gh api "repos/<OWNER>/<REPO>/pulls/<PR_NUMBER>"' "$DEPLOY_COMMAND"; then
+  fail "/deploy must not request GraphQL-only statusCheckRollup from the REST PR endpoint"
+fi
 require_text "$DEPLOY_ENV" 'normalize_conductor_workspace_env' "/deploy environment must normalize stale workspace identity"
 require_text "$DEPLOY_ENV" 'export TEMPORAL_TASK_QUEUE="navi-agent-tasks-${SEMANTIC_QUEUE_WORKSPACE}-deploy-' "/deploy must mint a unique Temporal queue from normalized identity"
 require_text "$DEPLOY_ENV" 'export DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME:-local}"' "/deploy DB container must use normalized identity"
@@ -102,12 +160,18 @@ require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/depl
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
-require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false npx vite build' "bundled local frontends must not request production-only private realtime authorization"
+require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false \' "bundled local frontends must not request production-only private realtime authorization"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"
 require_text "$DEPLOY_COMMAND" 'TRACE_ARCHIVE_ENABLED=0' "/deploy lifecycle measurements must disable the out-of-band trace recorder"
 require_text "$DEPLOY_COMMAND" 'deploy stage-start runtime-blackbox' "/deploy must record the shared runtime-blackbox start boundary"
 require_text "$DEPLOY_COMMAND" 'deploy stage-finish runtime-blackbox' "/deploy must record the shared runtime-blackbox finish boundary"
+require_text "$DEPLOY_COMMAND" 'Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only' "/deploy must document the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "local predeploy smoke must wire the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_PREDEPLOY_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "cloud predeploy smoke must request the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_BENCH_CLOUD" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=${BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY:-}' "cloud benchmark controller must pass the Claude Code cache-ratchet skip into benchmark machines"
+require_text "$CLOUDBENCH_RUN" 'STACK_ENV+=("BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY")' "cloud benchmark stack must inherit the Claude Code cache-ratchet skip"
+require_text "$CLOUDBENCH_RUN" "export BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY='\$BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY'" "cloud benchmark driver must pass the Claude Code cache-ratchet skip into run_benchmark.py"
 require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=4' "/deploy must cap backend blackbox workers when agents coverage also runs"
 require_text "$DEPLOY_COMMAND" 'BACKEND_BLACKBOX_WORKERS=5' "/deploy must use the measured backend blackbox width in the all-repo batch"
 require_text "$DEPLOY_COMMAND" 'BACKEND_UNIT_WORKERS=2' "/deploy must retain the measured all-repo backend unit width"
@@ -118,12 +182,13 @@ require_text "$DEPLOY_COMMAND" 'BLACKBOX_TEST_CONCURRENCY="$BACKEND_BLACKBOX_WOR
 require_text "$DEPLOY_COMMAND" 'AGENTS_COVERAGE_CONCURRENCY="$AGENTS_COVERAGE_WORKERS"' "/deploy must apply the computed agents worker budget"
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$FRONTEND_COVERAGE_WORKERS"' "/deploy must apply the computed frontend worker budget"
 require_text "$DEPLOY_COMMAND" '--maxWorkers="$MAC_COVERAGE_WORKERS"' "/deploy must apply the computed Mac worker budget"
-require_text "$DEPLOY_COMMAND" 'run-deploy-stage amplitude-live' "/deploy must retain the focused live Amplitude probe"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"amplitude-live"' "/deploy must retain the focused live Amplitude probe"
 require_text "$DEPLOY_COMMAND" 'ADMIN_HEALTH_LIVE_ONLY=1' "/deploy live Amplitude probe must run only the strict weekly endpoint case"
 require_text "$DEPLOY_COMMAND" 'Missing credentials fail closed' "/deploy must document fail-closed live Amplitude credentials"
 require_text "$DEPLOY_COMMAND" "scripts/run-bench-hub-poller\$" "/deploy must classify poller-only changes into backend coverage"
 require_text "$ROOT_DIR/back-end/scripts/run-coverage.sh" 'integration-health"' "backend coverage must isolate live credential health from deterministic coverage"
 require_text "$DEPLOY_COMMAND" 'Step 4c: Credential health check (runs unless explicitly overridden)' "/deploy must retain one focused credential probe unless the user explicitly overrides it"
+require_text "$DEPLOY_LIVE_PROBE_RUNNER" '"credential-health"' "/deploy must record the focused credential probe"
 require_text "$DEPLOY_COMMAND" 'run-deploy-stage credential-health' "/deploy must record the focused credential probe"
 require_text "$DEPLOY_COMMAND" 'create-worktree-patch\.sh' "/deploy must classify worktree patch controller changes into cloudbench coverage"
 require_text "$DEPLOY_COMMAND" 'cloud_patch_includes_tracked_and_untracked_changes' "/deploy must gate the cloud patch base-ref contract"
@@ -168,6 +233,8 @@ if grep -Fq 'bash scripts/run-agentcard-lifecycle-task.sh' "$DEPLOY_COMMAND"; th
 fi
 require_text "$DEPLOY_COMMAND" "gh workflow run chat-lifecycle-ratchet.yml" "/deploy must dispatch the production semantic gate"
 require_text "$DEPLOY_COMMAND" 'gh run watch "$SEMANTIC_RUN_ID" --exit-status' "/deploy must block on production semantic success"
+require_text "$DEPLOY_COMMAND" "Start every applicable provider lane concurrently" "/deploy must not serialize independent production providers"
+require_text "$DEPLOY_COMMAND" "Do not wait for the independent Mac release lane" "production semantics must overlap Mac release work"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export BENCHMARK_SKIP_WMH_BUILD=1' "AgentCard lifecycle stacks must skip unrelated WMH build/refresh before readiness"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1' "AgentCard lifecycle helper must not block on Claude credentials"
 require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt' "AgentCard lifecycle helper must pass GPT-only seed policy into run.sh"
@@ -176,5 +243,6 @@ require_text "$AGENTCARD_LIFECYCLE_SCRIPT" 'export SEED_REQUIRE_COMPUTE_TOKEN_TY
 # parallel deploy handoff, sorting, and rendered response contract cemented.
 bash "$DESCEND_COMMAND_TEST"
 bash "$AUTO_RCA_WORKFLOW_TEST"
+node --test "$PROD_SESSION_TEST"
 
 echo "All semantic deploy gate checks passed."

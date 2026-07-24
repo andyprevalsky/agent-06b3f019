@@ -71,7 +71,7 @@ export const ResponseSchemaSchema = z.object({
 });
 
 // Validation schemas
-export const createAgentSchema = z.object({
+const createAgentBaseSchema = z.object({
   // Optional caller-supplied agent id. When set, the row is created with this
   // exact id (instead of randomUUID()) so the caller's batch retry is
   // idempotent. Used by the spawn_sub_agents_batch worker activity, which
@@ -123,6 +123,28 @@ export const createAgentSchema = z.object({
   world_model_mode: z.enum(['real', 'simulate', 'shadow']).optional(),
 });
 
+function validateParentWorkflowPair(
+  body: { parent_agent_id?: string; parent_workflow_id?: string },
+  ctx: z.RefinementCtx
+): void {
+  if (body.parent_agent_id !== undefined && body.parent_workflow_id === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'parent_workflow_id is required for sub-agents',
+      path: ['parent_workflow_id'],
+    });
+  }
+  if (body.parent_agent_id === undefined && body.parent_workflow_id !== undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'parent_agent_id is required with parent_workflow_id',
+      path: ['parent_agent_id'],
+    });
+  }
+}
+
+export const createAgentSchema = createAgentBaseSchema.superRefine(validateParentWorkflowPair);
+
 export const postMessageSchema = z.object({
   message: z.string().min(0), // Actual message content (tool result, assistant response, etc)
   role: z.enum(['USER', 'ASSISTANT', 'TOOL', 'SYSTEM']).optional(),
@@ -148,6 +170,7 @@ export const updateStatusSchema = z.object({
   tokensOut: z.number().int().min(0).optional().default(0),
   contextSize: z.number().int().min(0),
   messageCount: z.number().int().min(0),
+  iterationOffset: z.number().int().min(0).optional(),
   structuredResponse: z.record(z.unknown()).optional(),
 });
 
@@ -186,7 +209,11 @@ export const generateSchemaRequestSchema = z.object({
 export const BATCH_CREATE_MAX = 200;
 export const batchCreateAgentsSchema = z.object({
   agents: z
-    .array(createAgentSchema.extend({ agent_id: z.string().uuid() }))
+    .array(
+      createAgentBaseSchema
+        .extend({ agent_id: z.string().uuid() })
+        .superRefine(validateParentWorkflowPair)
+    )
     .min(1)
     .max(BATCH_CREATE_MAX),
 });

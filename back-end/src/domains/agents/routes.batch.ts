@@ -14,6 +14,7 @@ import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { getClientIP } from '../../providers/geoip';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
+import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import * as batchService from './agentBatchService';
 import { batchCreateAgentsSchema } from './types';
 import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
@@ -25,6 +26,10 @@ const auth = asyncHandler<HybridAuthRequest>(hybridAuth);
 function handleRouteError(res: Response, error: unknown, msg: string): void {
   if (error instanceof z.ZodError) {
     res.status(400).json({ error: 'Invalid request body', details: error.issues });
+    return;
+  }
+  if (error instanceof StaleParentWorkflowGenerationError) {
+    res.status(409).json({ error: error.message });
     return;
   }
   log.error(msg, { error: error instanceof Error ? error.message : String(error) });

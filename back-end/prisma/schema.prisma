@@ -9,58 +9,93 @@ datasource db {
 }
 
 model Agent {
-  id                        String          @id @default(uuid())
-  userId                    String
-  goal                      String
-  progress                  Float           @default(0.0)
-  status                    AgentStatus     @default(STARTING_UP)
-  statusMessage             String?
-  deletedAt                 DateTime?
-  createdAt                 DateTime        @default(now())
-  updatedAt                 DateTime        @updatedAt
-  temporalWorkflowId        String?
-  model                     String          @default("rose-labs/rose-1-ultra")
-  contextSize               Int             @default(0)
-  messageCount              Int             @default(0)
-  tokenCount                Int             @default(0)
-  tokensIn                  Int             @default(0)
-  tokensOut                 Int             @default(0)
-  parentAgentId             String?
-  tokenInPriceMicrodollars  Int?
-  tokenOutPriceMicrodollars Int?
-  source                    AgentSource     @default(WEB)
-  depth                     Int             @default(0)
-  parentWorkflowId          String?
-  reasoningMaxTokens        Int             @default(2048)
-  responseSchema            Json?
-  busId                     String?
-  toolsInUse                String[]        @default([])
-  structuredResponse        Json?
-  proxyCity                 String?
-  proxyCountry              String?
-  proxyState                String?
-  priceLimitCents           Int             @default(100)
-  treeCostCents             Int             @default(0)
-  ownCostCents              Float           @default(0)
-  writeLockEnabled          Boolean         @default(true)
-  fastModeCacheEnabled      Boolean         @default(false)
-  worldModelMode            String          @default("real")
-  isBenchmark               Boolean         @default(false)
-  githubRepoUrl             String?
-  parent                    Agent?          @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
-  children                  Agent[]         @relation("AgentHierarchy")
-  tools                     AgentTool[]
-  messages                  Message[]
-  toolUsages                ToolUsage[]
-  purchaseSpends            PurchaseSpend[]
-  verifier                  Verifier?
+  id                               String                    @id @default(uuid())
+  userId                           String
+  goal                             String
+  progress                         Float                     @default(0.0)
+  status                           AgentStatus               @default(STARTING_UP)
+  statusMessage                    String?
+  deletedAt                        DateTime?
+  createdAt                        DateTime                  @default(now())
+  updatedAt                        DateTime                  @updatedAt
+  temporalWorkflowId               String?
+  temporalFirstExecutionRunId      String?
+  workflowReplacementToken         String?
+  workflowReplacementState         Json?
+  staleTemporalWorkflowId          String?
+  staleTemporalFirstExecutionRunId String?
+  temporalWorkflowStartPending     Boolean                   @default(false)
+  temporalWorkflowStartLeaseUntil  DateTime?
+  temporalCleanupPending           Boolean                   @default(false)
+  workflowIterationOffset          Int                       @default(0)
+  workflowMaxIterations            Int?
+  workflowContextGates             Json?
+  workflowStartPhase               String?
+  workflowTaskQueue                String?
+  model                            String                    @default("rose-labs/rose-1-ultra")
+  contextSize                      Int                       @default(0)
+  messageCount                     Int                       @default(0)
+  tokenCount                       Int                       @default(0)
+  tokensIn                         Int                       @default(0)
+  tokensOut                        Int                       @default(0)
+  parentAgentId                    String?
+  tokenInPriceMicrodollars         Int?
+  tokenOutPriceMicrodollars        Int?
+  source                           AgentSource               @default(WEB)
+  depth                            Int                       @default(0)
+  parentWorkflowId                 String?
+  reasoningMaxTokens               Int                       @default(2048)
+  responseSchema                   Json?
+  busId                            String?
+  toolsInUse                       String[]                  @default([])
+  structuredResponse               Json?
+  proxyCity                        String?
+  proxyCountry                     String?
+  proxyState                       String?
+  priceLimitCents                  Int                       @default(100)
+  treeCostCents                    Int                       @default(0)
+  ownCostCents                     Float                     @default(0)
+  writeLockEnabled                 Boolean                   @default(true)
+  fastModeCacheEnabled             Boolean                   @default(false)
+  worldModelMode                   String                    @default("real")
+  isBenchmark                      Boolean                   @default(false)
+  githubRepoUrl                    String?
+  parent                           Agent?                    @relation("AgentHierarchy", fields: [parentAgentId], references: [id])
+  children                         Agent[]                   @relation("AgentHierarchy")
+  tools                            AgentTool[]
+  messages                         Message[]
+  toolUsages                       ToolUsage[]
+  temporalWorkflowCleanups         TemporalWorkflowCleanup[]
+  purchaseSpends                   PurchaseSpend[]
+  verifier                         Verifier?
 
   @@index([userId, deletedAt])
   @@index([createdAt])
   @@index([temporalWorkflowId])
+  @@index([workflowReplacementToken])
+  @@index([temporalWorkflowStartPending])
+  @@index([temporalCleanupPending, id])
   @@index([parentAgentId])
   @@index([parentAgentId, createdAt])
   @@index([busId])
+}
+
+model TemporalWorkflowCleanup {
+  agentId             String
+  workflowId          String
+  firstExecutionRunId String?
+  notBefore           DateTime
+  leaseToken          String?
+  leaseUntil          DateTime?
+  attemptCount        Int       @default(0)
+  lastError           String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  agent               Agent     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@id([agentId, workflowId])
+  @@index([notBefore, agentId, workflowId])
+  @@index([leaseUntil])
 }
 
 model Tool {
@@ -110,17 +145,19 @@ model Verifier {
 }
 
 model Message {
-  id          String      @id @default(uuid())
-  agentId     String
-  timestamp   DateTime    @default(now())
-  text        String
-  role        MessageRole
-  createdAt   DateTime    @default(now())
-  metadata    Json?
-  filePointer Json?
-  agent       Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id                 String      @id @default(uuid())
+  agentId            String
+  workflowGeneration String?
+  timestamp          DateTime    @default(now())
+  text               String
+  role               MessageRole
+  createdAt          DateTime    @default(now())
+  metadata           Json?
+  filePointer        Json?
+  agent              Agent       @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([agentId, timestamp])
+  @@index([agentId, workflowGeneration, timestamp])
   @@index([createdAt])
 }
 
@@ -187,14 +224,19 @@ model ModelPricingCache {
 }
 
 model ToolUsage {
-  id             String   @id @default(uuid())
-  agentId        String?
-  toolName       String
-  totalCostCents Int
-  usageItems     Json
-  createdAt      DateTime @default(now())
-  userId         String
-  agent          Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  id                     String   @id @default(uuid())
+  operationKey           String?  @unique
+  agentId                String?
+  toolName               String
+  totalCostCents         Int
+  usageItems             Json
+  tokenCountCheckpoint   Int?
+  tokensInCheckpoint     Int?
+  tokensOutCheckpoint    Int?
+  ownCostCheckpointCents Float?
+  createdAt              DateTime @default(now())
+  userId                 String
+  agent                  Agent?   @relation(fields: [agentId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([agentId])

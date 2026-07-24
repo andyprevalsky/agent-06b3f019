@@ -222,6 +222,7 @@ test('sub-agents inherit Simulator mode from their parent', () => {
   const body = createAgentSchema.parse({
     goal: 'x',
     parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: '00000000-0000-4000-8000-000000000001',
   });
   applyWorldModelModeInheritance(body, 'simulate');
   assert.strictEqual(body.world_model_mode, 'simulate');
@@ -271,6 +272,7 @@ test('sub-agents do not use account default Fast Mode', () => {
   const body = createAgentSchema.parse({
     goal: 'x',
     parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: 'workflow-parent',
   });
   applyFastModeDefault(body, '1f85ff25-6e29-4c1b-8739-f917bd101a30');
   assert.strictEqual(body.fast_mode_cache_enabled, undefined);
@@ -280,6 +282,7 @@ test('sub-agents inherit Fast Mode read flag from parent when absent', () => {
   const body = createAgentSchema.parse({
     goal: 'x',
     parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: 'workflow-parent',
   });
   applyFastModeInheritance(body, true);
   assert.strictEqual(body.fast_mode_cache_enabled, true);
@@ -289,6 +292,7 @@ test('explicit sub-agent Fast Mode off is not overwritten by inheritance', () =>
   const body = createAgentSchema.parse({
     goal: 'x',
     parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: 'workflow-parent',
     fast_mode_cache_enabled: false,
   });
   applyFastModeInheritance(body, true);

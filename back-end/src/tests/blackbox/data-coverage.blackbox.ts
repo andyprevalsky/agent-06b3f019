@@ -357,13 +357,25 @@ async function testGrep_agentNetworkMultiLevelTree() {
   );
 
   try {
+    await prisma.agent.update({
+      where: { id: rootId },
+      data: { temporalWorkflowId: rootId },
+    });
     const childId = await createAgentWithRetry(
       { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-      { goal: 'multi-level tree child', parent_agent_id: rootId }
+      {
+        goal: 'multi-level tree child',
+        parent_agent_id: rootId,
+        parent_workflow_id: rootId,
+      }
     );
     const grandchildId = await createAgentWithRetry(
       { ...apiKeyHeaders(), 'X-User-Id': ctx.userId! },
-      { goal: 'multi-level tree grandchild', parent_agent_id: childId }
+      {
+        goal: 'multi-level tree grandchild',
+        parent_agent_id: childId,
+        parent_workflow_id: childId,
+      }
     );
 
     try {

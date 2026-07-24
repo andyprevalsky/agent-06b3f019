@@ -91,6 +91,9 @@ async function main(): Promise<void> {
           status: 'created',
           cardId: 'card-instant',
           last4: '8633',
+          funding: {
+            id: 'funding-is-not-a-transfer',
+          },
         });
       }
       if (name === 'get_card_details') {
@@ -226,6 +229,93 @@ async function main(): Promise<void> {
       'details' in error &&
       error.details.transferId === 'owt-provider-snake' &&
       error.details.retryAfterSeconds === 3
+  );
+
+  const nestedFundingGateProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    if (name === 'create_card') {
+      return toolResult({
+        status: 'funding_in_progress',
+        funding: {
+          transfer: {
+            id: 'owt-nested-transfer',
+          },
+        },
+        retryAfterSeconds: 4,
+      });
+    }
+    throw new Error(`unexpected nested funding-gate tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      nestedFundingGateProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:nested-funding-gate',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.transferId === 'owt-nested-transfer' &&
+      error.details.retryAfterSeconds === 4
+  );
+
+  const transferlessFundingGateProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name) => {
+      if (name === 'create_card') {
+        return toolResult({
+          status: 'funding_in_progress',
+          message: 'Company funding is still settling',
+          retryAfterSeconds: 5,
+        });
+      }
+      throw new Error(`unexpected transferless funding-gate tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      transferlessFundingGateProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:transferless-funding-gate',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.transferId === undefined &&
+      error.details.retryAfterSeconds === 5
+  );
+
+  const textFundingGateProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    if (name === 'create_card') {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: 'status: funding_in_progress\nCompany Transfer ID: owt-text-transfer',
+          },
+        ],
+      };
+    }
+    throw new Error(`unexpected text funding-gate tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      textFundingGateProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:text-funding-gate',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.transferId === 'owt-text-transfer'
   );
 
   // An MCP error with no textual content must still surface the fallback message rather than an

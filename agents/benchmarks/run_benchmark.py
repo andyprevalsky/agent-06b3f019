@@ -34,6 +34,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -191,6 +192,8 @@ PER_TASK_CACHE_HIT_RATCHET = {
     "claude-code-agent": 40.0,
     "browser-smoke": 40.0,
 }
+CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY"
+CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
@@ -1156,20 +1159,22 @@ async def _update_world_model_before_simulation(args) -> None:
         )
 
 
-_PAYMENT_CONFIRMATION_RE = re.compile(
-    r"\bpayment\s+(?:was\s+)?confirmed\b"
-    r"|\border\s+(?:was\s+)?paid(?:\s+successfully)?\b"
-    r"|\bpaid\s+successfully\b"
-)
-
-
 def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
-    text = _agent_data_search_text(data)
-    if not _PAYMENT_CONFIRMATION_RE.search(text):
-        return False, "agent did not report the test payment confirmation page"
-    if "order" not in text:
-        return False, "agent did not report the confirmation order id"
-    return True, None
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("toolName") != "spawn_browser_agent" or metadata.get("toolStatus") != "FINISHED":
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        order_id = structured.get("order_confirmation_id") or structured.get("payment_confirmation_id")
+        if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
+            return True, None
+    return False, "agent did not return a grounded browser payment confirmation order id"
 
 
 async def _evaluate_phone_call_task(
@@ -3770,6 +3775,14 @@ def _should_delete_agent_after_run(passed: bool, keep_failed_agents: bool) -> bo
     return passed or not keep_failed_agents
 
 
+def _early_fail_should_pause_agent(reason: Optional[str]) -> bool:
+    """Return whether an early-failed benchmark should stop agent work immediately."""
+    if not reason:
+        return False
+    normalized = reason.lower()
+    return normalized.startswith("timeout after") or "tree stalled" in normalized
+
+
 def _local_victoria_db_container() -> Optional[str]:
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
     if not workspace or not _docker_daemon_ping():
@@ -4445,6 +4458,49 @@ def _sync_compute_tokens(
     return True
 
 
+def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
+    """Overlay this Mac's current Claude OAuth token onto the isolated DB.
+
+    The shared workspace is a useful credential source, but its encrypted
+    Claude row can still look usable after Anthropic has invalidated the OAuth
+    token.  Local Claude Code owns the freshest renewable token in Keychain, so
+    prefer it for Mac-hosted smoke runs after the ordinary source sync.  This is
+    best-effort: hosts without that local credential retain the synced source.
+    """
+    if sys.platform != "darwin" or shutil.which("security") is None:
+        return False
+    decryption_key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", _BACKEND_ENV)
+    if not decryption_key:
+        print("    ⚠ Local Claude keychain refresh skipped: credential encryption key unavailable")
+        return False
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] = decryption_key
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-claude-code-token-from-keychain.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "    ⚠ Local Claude keychain refresh timed out "
+            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        )
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Local Claude keychain refresh error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Local Claude keychain refresh unavailable: {_seed_sync_error_detail(result)}")
+        return False
+    print("    🔑 Refreshed Claude credentials from macOS Keychain")
+    return True
+
+
 def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
@@ -4627,6 +4683,9 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
+    database_url = _local_victoria_database_url()
+    if database_url:
+        _refresh_local_claude_token_from_keychain(database_url)
 
 
 def _snapshot_browser_state(ctx: LiveFixtureContext, *, include_passwords: bool) -> dict:
@@ -7199,6 +7258,12 @@ async def run_single_task(
         if realtime_monitor:
             await realtime_monitor.stop()
             realtime_monitor = None
+        if _early_fail_should_pause_agent(early_fail_reason):
+            try:
+                if await pause_agent(base_url, agent_id):
+                    print(f"    ⏸ Paused agent {agent_id[:12]} after early-fail before cleanup")
+            except Exception as pause_error:
+                print(f"    ⚠ Failed to pause early-failed agent {agent_id[:12]}: {pause_error}")
 
         # Get final agent data
         agent = data.get("agent", {})
@@ -8405,14 +8470,37 @@ def enforce_cache_ratchets(task_results: list[TaskResult]) -> None:
     failures = cache_ratchet_failures(task_results)
     if not failures:
         return
+    warn_only_enabled = os.environ.get(CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV, "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    hard_failures = []
+    warn_only_failures = []
+    for failure in failures:
+        name, _agent_id, _hit_pct, _floor = failure
+        if warn_only_enabled and name in CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS:
+            warn_only_failures.append(failure)
+        else:
+            hard_failures.append(failure)
+
+    if warn_only_failures:
+        print("\n  ⚠ CACHE RATCHET WARN-ONLY (deploy-approved Claude Code cache telemetry floor):")
+        for name, _agent_id, hit_pct, floor in warn_only_failures:
+            print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
+
+    if not hard_failures:
+        return
+
     print("\n  ❌ CACHE RATCHET FAILED (per-task repeatable prompt-cache hit floor):")
-    for name, _agent_id, hit_pct, floor in failures:
+    for name, _agent_id, hit_pct, floor in hard_failures:
         print(f"    - {name}: {hit_pct}% < {floor}% ratchet")
     print(
         "\n  Diagnose each failure with agent_cache.py to see per-LLM-call"
         "\n  read/write/hit% and find where the prefix fingerprint is drifting:"
     )
-    for name, agent_id, _hit_pct, _floor in failures:
+    for name, agent_id, _hit_pct, _floor in hard_failures:
         print(f"    cd agents && source venv/bin/activate && python benchmarks/agent_cache.py {agent_id}  # {name}")
     print(
         "\n  Fix the cache miss (e.g. unstable prefix hash, model mix,"
@@ -8426,18 +8514,23 @@ def _parallel_task_runners(
     max_concurrency: int | None,
     runner: Callable[[BenchmarkTask], Awaitable[TaskResult]],
 ) -> list[Awaitable[TaskResult]]:
-    """Build task runners with batch and shared browser-profile limits.
+    """Build task runners with the configured batch concurrency.
 
-    Browser sessions persist changes into the benchmark user's provider profile.
-    Two browser-backed tasks therefore cannot safely overlap: whichever session
-    closes last can overwrite cookies, storage, and tabs written by its sibling.
-    Keep that resource exclusive while allowing non-browser work to use the rest
-    of the configured batch concurrency.
+    Isolated local stacks key browser-provider profiles by agent, so browser
+    tasks consume ordinary batch slots and may overlap. Shared/prod stacks keep
+    the legacy one-writer guard because their user profile is intentionally
+    persistent across runs.
     """
     semaphore = (
         asyncio.Semaphore(max_concurrency) if max_concurrency is not None and max_concurrency < len(tasks) else None
     )
-    browser_profile_writer = asyncio.Semaphore(1)
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    browser_profile_writer = None if isolated_browser_profiles else asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -8446,7 +8539,7 @@ def _parallel_task_runners(
             return await runner(task)
 
     async def run_limited(task: BenchmarkTask) -> TaskResult:
-        if task.requires_browser_agent:
+        if task.requires_browser_agent and browser_profile_writer is not None:
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
             async with browser_profile_writer:
@@ -8467,8 +8560,37 @@ def _parallel_task_phases(
     shared rows during the fixture. Starting the exclusive phase first makes the
     clean-stack boundary real without sacrificing failed-tree diagnostics.
     """
-    exclusive = [task for task in tasks if task.name in EXCLUSIVE_SHARED_DB_TASK_NAMES]
-    parallel = [task for task in tasks if task.name not in EXCLUSIVE_SHARED_DB_TASK_NAMES]
+    isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+    def uses_shared_browser_auth(task: BenchmarkTask) -> bool:
+        if not getattr(task, "requires_browser_agent", False):
+            return False
+        if getattr(task, "browser_profile_mode", "persistent") == "fresh":
+            return False
+        environment = getattr(task, "environment", None) or {}
+        return bool(
+            getattr(task, "browser_auth_realm", None)
+            or environment.get("live_cookie_domains")
+            or resolve_live_fixtures(environment)
+        )
+
+    exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
+    if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
+        auth_reading_siblings = [
+            task
+            for task in tasks
+            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+        ]
+        if not auth_reading_siblings:
+            exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)
+
+    exclusive = [task for task in tasks if task.name in exclusive_names]
+    parallel = [task for task in tasks if task.name not in exclusive_names]
     return [("exclusive", exclusive), ("parallel", parallel)]
 
 

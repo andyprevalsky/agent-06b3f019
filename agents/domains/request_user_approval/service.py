@@ -16,7 +16,6 @@ from temporalio.common import RetryPolicy
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
 
 from .config import (
-    APPROVAL_SIGNAL_PARAM_REFRESH_PATCH,
     CREATE_REQUEST_MAX_ATTEMPTS,
     CREATE_REQUEST_TIMEOUT_SECONDS,
     REJECTION_SENTINEL,
@@ -311,22 +310,9 @@ async def request_user_approval_direct(
 
         raise UserRejectedError("User rejected the approval request", rejection_message=rejection_text)
 
-    if workflow.patched(APPROVAL_SIGNAL_PARAM_REFRESH_PATCH):
-        # Approval responses are request-scoped signal data. Reading trailing
-        # chat messages here loses text entered in the approval UI because that
-        # text is persisted on the attention request and signal, not as a normal
-        # USER row.
-        response_text = signal_response.strip() if signal_response else ""
-    else:
-        # Replay compatibility for histories created before request-scoped
-        # approval text was consumed directly from the signal.
-        await workflow_instance._poll_messages(datetime.fromtimestamp(0, tz=timezone.utc))
-        user_messages: list[str] = []
-        for message in reversed(workflow_instance.context):
-            if message.get("role") != "USER":
-                break
-            user_messages.insert(0, message.get("text", ""))
-        response_text = "\n\n".join(user_messages)
+    # Every deployment replaces old workflow histories before candidate workers
+    # activate, so fresh histories always consume request-scoped signal data.
+    response_text = signal_response.strip() if signal_response else ""
 
     logger.info(
         "User approval response received",

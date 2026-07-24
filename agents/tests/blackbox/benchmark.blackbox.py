@@ -10,6 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 import time
 
 from _test_utils import BlackboxResult
@@ -151,26 +152,27 @@ def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
 
 
 def test_agent_payment_evaluator_accepts_confirmed_paid_order_language():
-    """Payment tasks should pass when the agent reports a paid order confirmation."""
+    """Alternate confirmation wording still requires grounded browser evidence."""
     from benchmarks.run_benchmark import _evaluate_agent_payment_result
 
     passed, reason = _evaluate_agent_payment_result(
         {
             "messages": [
                 {
+                    "role": "TOOL",
                     "message": (
                         "The payment was confirmed. The confirmation page shows: "
                         "Order ID: tp_c5053b1b. Total charged: $43.96. "
                         "The order was placed successfully."
-                    )
-                },
-                {
-                    "message": (
-                        "A completed child task returned a grounded structured response "
-                        "covering required fields: order_confirmation_id, total_price_paid. "
-                        "Extracted Output: Order Confirmation Id: tp_c5053b1b, "
-                        "Total Price Paid: 43.96"
-                    )
+                    ),
+                    "metadata": {
+                        "toolName": "spawn_browser_agent",
+                        "toolStatus": "FINISHED",
+                        "structured_response": {
+                            "order_confirmation_id": "tp_c5053b1b",
+                            "total_price_paid": 43.96,
+                        },
+                    },
                 },
             ]
         }
@@ -467,8 +469,8 @@ def test_parallel_tool_calls_smoke_cap_allows_recent_fanout_tail():
     assert get_smoke_cap("parallel-tool-calls") == 600
 
 
-async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers():
-    """Two browser benchmarks must never write the same persistent profile concurrently."""
+async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles():
+    """Per-agent browser profiles let local browser benchmarks use the full batch width."""
     from benchmarks.run_benchmark import _parallel_task_runners
 
     class Task:
@@ -502,33 +504,94 @@ async def test_parallel_benchmark_scheduler_serializes_browser_profile_writers()
         Task("browser-biometrics-webdecoy", True),
         Task("chat-mode", False),
     ]
-    await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
+    with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
+        await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
+
+    assert max_active_browser_tasks == 2, f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
+
+
+async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles():
+    """Shared/prod stacks retain one-writer protection for the user's saved profile."""
+    from benchmarks.run_benchmark import _parallel_task_runners
+
+    class Task:
+        def __init__(self, name: str, requires_browser_agent: bool):
+            self.name = name
+            self.requires_browser_agent = requires_browser_agent
+
+    active_browser_tasks = 0
+    max_active_browser_tasks = 0
+
+    async def runner(task):
+        nonlocal active_browser_tasks, max_active_browser_tasks
+        if task.requires_browser_agent:
+            active_browser_tasks += 1
+            max_active_browser_tasks = max(max_active_browser_tasks, active_browser_tasks)
+        await asyncio.sleep(0.01)
+        if task.requires_browser_agent:
+            active_browser_tasks -= 1
+        return task.name
+
+    tasks = [Task("browser-smoke", True), Task("browser-biometrics-webdecoy", True)]
+    with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "false"}):
+        await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
     assert max_active_browser_tasks == 1, (
-        "browser-backed tasks overlapped as persistent profile writers; "
+        "shared browser profiles lost one-writer protection; "
         f"observed concurrency={max_active_browser_tasks}"
     )
 
 
-def test_destructive_db_fixtures_run_before_parallel_agent_trees():
-    """A retained failed tree must not outlive the boundary for destructive fixtures."""
+def test_auth_independent_biometrics_fixture_joins_isolated_parallel_batch():
+    """WebDecoy can overlap tasks that neither read nor inject saved browser auth."""
     from benchmarks import run_benchmark as bench
 
     class Task:
-        def __init__(self, name: str):
+        def __init__(self, name: str, *, requires_browser_agent: bool = False, browser_auth_realm=None):
             self.name = name
+            self.requires_browser_agent = requires_browser_agent
+            self.browser_auth_realm = browser_auth_realm
+            self.browser_profile_mode = "fresh" if name == "browser-biometrics-webdecoy" else "persistent"
+            self.environment = {}
 
-    phases = bench._parallel_task_phases(
-        [
-            Task("claude-code-agent"),
-            Task("browser-biometrics-webdecoy"),
-            Task("chat-mode"),
-        ]
-    )
+    with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
+        phases = bench._parallel_task_phases(
+            [
+                Task("claude-code-agent"),
+                Task("browser-biometrics-webdecoy", requires_browser_agent=True, browser_auth_realm="webdecoy.com"),
+                Task("chat-mode"),
+            ]
+        )
+
+    assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
+        ("exclusive", []),
+        ("parallel", ["claude-code-agent", "browser-biometrics-webdecoy", "chat-mode"]),
+    ]
+
+
+def test_biometrics_fixture_stays_exclusive_beside_shared_auth_task():
+    """A saved-auth benchmark must not observe WebDecoy's temporary DB clearing."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        def __init__(self, name: str, *, realm=None, profile_mode="persistent"):
+            self.name = name
+            self.requires_browser_agent = realm is not None
+            self.browser_auth_realm = realm
+            self.browser_profile_mode = profile_mode
+            self.environment = {}
+
+    with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
+        phases = bench._parallel_task_phases(
+            [
+                Task("browser-biometrics-webdecoy", realm="webdecoy.com", profile_mode="fresh"),
+                Task("browser-agent-amazon", realm="amazon.com"),
+            ]
+        )
 
     assert [(mode, [task.name for task in tasks]) for mode, tasks in phases] == [
         ("exclusive", ["browser-biometrics-webdecoy"]),
-        ("parallel", ["claude-code-agent", "chat-mode"]),
+        ("parallel", ["browser-agent-amazon"]),
     ]
 
 
@@ -869,6 +932,58 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         )
 
 
+def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
+    """A legacy sk_* key must fail before the expensive lifecycle stack starts."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text('AGENTCARD_API_KEY="sk_test_retired"\n')
+    with pytest.raises(RuntimeError, match=r"API keys \(sk_\*\) are retired"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"],
+            env={},
+            env_path=env_path,
+        )
+
+
+def test_payment_benchmark_rejects_retired_direct_or_user_credentials(tmp_path):
+    """Only explicit, non-retired organization credentials may start the gate."""
+    import pytest
+
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'AGENTCARD_ORG_MCP_ACCESS_TOKEN="sk_test_retired"\n'
+        'AGENTCARD_OAUTH_CLIENT_ID="user-client"\n'
+        'AGENTCARD_OAUTH_CLIENT_SECRET="user-secret"\n'
+    )
+    with pytest.raises(RuntimeError, match=r"API keys \(sk_\*\) are retired"):
+        local.validate_agentcard_org_credentials(
+            ["agent-payment-test-shop"],
+            env={},
+            env_path=env_path,
+        )
+
+
+def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
+    """Conductor's shared backend dotenv supplies the lifecycle OAuth client."""
+    from benchmarks import local
+
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        'AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\n'
+        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n'
+    )
+    local.validate_agentcard_org_credentials(
+        ["agent-payment-test-shop"],
+        env={},
+        env_path=env_path,
+    )
+
+
 def test_isolated_benchmark_services_allow_slow_first_sync():
     """System-Postgres fallback must outlive a cold production-data sync."""
     from benchmarks import local
@@ -1005,6 +1120,25 @@ def test_success_on_payment_card_request_passes_before_agent_completion():
     }
 
     assert evaluate_task(task, data, approvals_triggered=1) == (True, None)
+
+
+def test_timeout_early_fail_pauses_agent_before_payment_cleanup():
+    """Timed-out prod benchmarks must stop agent work before long cleanup polling."""
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    source = inspect.getsource(bench.run_single_task)
+    poll_index = source.index("await poll_agent(")
+    cleanup_index = source.index("ensure_payment_lifecycle_cleanup", poll_index)
+    pause_index = source.index("pause_agent(base_url, agent_id)", poll_index)
+
+    assert "_early_fail_should_pause_agent" in source[poll_index:cleanup_index]
+    assert pause_index < cleanup_index
+    assert bench._early_fail_should_pause_agent("Timeout after 900s (dynamic cap=900s)")
+    assert bench._early_fail_should_pause_agent("Tree stalled after 240s")
+    assert not bench._early_fail_should_pause_agent(None)
+    assert not bench._early_fail_should_pause_agent("Expected validated payment-card request")
 
 
 def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
@@ -1358,6 +1492,63 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
         "agent-payment-abandonment",
     ]
     assert "?benchmark=agentcard-abandonment" in abandonment.prompt
+
+
+def test_agent_payment_accepts_grounded_structured_browser_confirmation():
+    """A verified browser result must not depend on one exact prose inflection."""
+    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+
+    data = {
+        "agent": {
+            "status": "COMPLETED",
+            "structured_output": {"order_confirmation_id": "tp_6faab326"},
+        },
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "The final DOM shows the payment was confirmed.",
+                "metadata": {
+                    "phase": "EXECUTE",
+                    "title": "Browser automation complete",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "structured_response": {"order_confirmation_id": "tp_6faab326"},
+                },
+            }
+        ],
+    }
+
+    assert _evaluate_agent_payment_result(data) == (True, None)
+
+
+def test_agent_payment_accepts_current_payment_confirmation_schema_key():
+    """The browser payment task currently asks for payment_confirmation_id."""
+    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "The final DOM shows Payment confirmed with order ID tp_058813d0.",
+                "metadata": {
+                    "phase": "EXECUTE",
+                    "title": "Browser automation complete",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "structured_response": {
+                        "payment_confirmation_id": "tp_058813d0",
+                        "purchased_product_names": [
+                            "Aurora Notebook",
+                            "Ceramic Mug",
+                            "Canvas Tote",
+                        ],
+                    },
+                },
+            }
+        ],
+    }
+
+    assert _evaluate_agent_payment_result(data) == (True, None)
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():
@@ -6490,13 +6681,20 @@ def test_local_start_services_releases_port_reservation_after_readiness():
 
 def test_run_sh_seed_dump_targets_isolated_database_atomically():
     """System-Postgres isolated runs must restore/dump their per-run DB safely."""
-    run_script = (Path(__file__).resolve().parents[3] / "scripts" / "run.sh").read_text()
+    scripts = Path(__file__).resolve().parents[3] / "scripts"
+    run_script = (scripts / "run.sh").read_text()
+    save_helper = (scripts / "save-seed-dump.sh").read_text()
 
     assert "bash scripts/restore-seed-dump.sh" in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null' in run_script
     assert '"$_SEED_RESTORE_CONTAINER" >/dev/null 2>&1' not in run_script
-    assert 'pg_dump -h localhost -p "$LOCAL_DB_ACTUAL_PORT" -U postgres -Fc "$LOCAL_DB_NAME"' in run_script
-    assert 'mv "$_SEED_DUMP_TMP" "$_SEED_DUMP"' in run_script
+    assert '_SEED_DUMP_CONTAINER="$DB_CONTAINER"' in run_script
+    assert '"$_SEED_DUMP_CONTAINER"; then' in run_script
+    assert '"$LOCAL_DB_NAME"' in run_script
+    assert 'docker exec "$DB_CONTAINER" pg_dump' in save_helper
+    assert '-Fc "$DB_NAME"' in save_helper
+    assert 'mv "$DUMP_TMP" "$DUMP_PATH"' in save_helper
+    assert 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"' in run_script
     required_guard = run_script.index('if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]')
     cold_sync = run_script.index('echo "🌱 Syncing production data to local database (first run)..."')
     assert required_guard < cold_sync
@@ -9669,12 +9867,20 @@ async def run_all_tests():
         test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls,
     )
     await r.record_async(
-        "parallel_scheduler_serializes_browser_profiles",
-        test_parallel_benchmark_scheduler_serializes_browser_profile_writers,
+        "parallel_scheduler_overlaps_isolated_browser_profiles",
+        test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles,
+    )
+    await r.record_async(
+        "parallel_scheduler_serializes_shared_browser_profiles",
+        test_parallel_benchmark_scheduler_serializes_shared_browser_profiles,
     )
     r.record(
-        "destructive_fixtures_precede_parallel_trees",
-        test_destructive_db_fixtures_run_before_parallel_agent_trees,
+        "auth_independent_biometrics_joins_parallel_batch",
+        test_auth_independent_biometrics_fixture_joins_isolated_parallel_batch,
+    )
+    r.record(
+        "biometrics_fixture_exclusive_with_shared_auth",
+        test_biometrics_fixture_stays_exclusive_beside_shared_auth_task,
     )
     r.record(
         "browser_agent_cookie_bundle_bootstrap_local_only",
@@ -10043,6 +10249,14 @@ async def run_all_tests():
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
     )
     r.record(
+        "agent_payment_grounded_structured_confirmation",
+        test_agent_payment_accepts_grounded_structured_browser_confirmation,
+    )
+    r.record(
+        "agent_payment_current_payment_confirmation_key",
+        test_agent_payment_accepts_current_payment_confirmation_schema_key,
+    )
+    r.record(
         "production_payment_rejects_sandbox_target",
         test_production_payment_lifecycle_refuses_sandbox_target,
     )
@@ -10224,6 +10438,10 @@ async def run_all_tests():
     r.record(
         "payment_abandonment_two_step_trajectory",
         test_payment_abandonment_accepts_captured_two_step_trajectory,
+    )
+    r.record(
+        "timeout_early_fail_pauses_before_payment_cleanup",
+        test_timeout_early_fail_pauses_agent_before_payment_cleanup,
     )
     r.record(
         "production_payment_abandonment_two_step_trajectory",

@@ -2,8 +2,21 @@
  * Agents domain repo mutations — create, update, delete operations.
  */
 
-import type { Prisma, AgentSource, AgentStatus, VerifierType } from '@prisma/client';
-import { prisma, runTransactionWithRetry } from '../../providers/database';
+import type { Prisma, AgentSource, VerifierType } from '@prisma/client';
+import { runTransactionWithRetry } from '../../providers/database';
+import { assertCurrentParentWorkflowGenerations } from './repoParentWorkflowFence';
+
+export {
+  clearWorkflowForTerminalAgent,
+  createAgentTools,
+  createGithubRepoAccess,
+  deleteAgentTools,
+  deleteAttentionRequests,
+  failAgentIfStillActive,
+  replaceAgentTools,
+  softDeleteAgent,
+  updateAgent,
+} from './repoAgentMutations';
 
 // ---------------------------------------------------------------------------
 // Agent mutations
@@ -16,6 +29,10 @@ import { prisma, runTransactionWithRetry } from '../../providers/database';
  */
 function optionalAgentCreateFields(params: {
   temporalWorkflowId?: string | null;
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
   priceLimitCents?: number;
   writeLockEnabled?: boolean;
   fastModeCacheEnabled?: boolean;
@@ -25,6 +42,18 @@ function optionalAgentCreateFields(params: {
   return {
     ...(params.temporalWorkflowId !== undefined && params.temporalWorkflowId !== null
       ? { temporalWorkflowId: params.temporalWorkflowId }
+      : {}),
+    ...(params.workflowMaxIterations !== undefined
+      ? { workflowMaxIterations: params.workflowMaxIterations }
+      : {}),
+    ...(params.workflowContextGates !== undefined
+      ? { workflowContextGates: params.workflowContextGates }
+      : {}),
+    ...(params.workflowStartPhase !== undefined
+      ? { workflowStartPhase: params.workflowStartPhase }
+      : {}),
+    ...(params.workflowTaskQueue !== undefined
+      ? { workflowTaskQueue: params.workflowTaskQueue }
       : {}),
     ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
       ? { priceLimitCents: params.priceLimitCents }
@@ -56,8 +85,7 @@ async function createAttachmentMessages(
   }
 }
 
-/** Create an agent with verifier and goal message in a transaction. */
-export async function createAgentTransaction(params: {
+export interface CreateAgentParams {
   agentId: string;
   userId: string;
   parentAgentId: string | null;
@@ -83,7 +111,14 @@ export async function createAgentTransaction(params: {
   isBenchmark?: boolean;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId?: string | null;
-}) {
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
+}
+
+/** Create an agent with verifier and goal message in a transaction. */
+export async function createAgentTransaction(params: CreateAgentParams) {
   // runTransactionWithRetry (not raw prisma.$transaction): interactive
   // transactions bypass the client's per-query retry extension, so a momentary
   // pool-pressure "Unable to start a transaction" (P2028) would 500 the whole
@@ -91,6 +126,12 @@ export async function createAgentTransaction(params: {
   // the chat-lifecycle ratchet) — retrying the side-effect-free start makes it
   // resilient to transient pool saturation.
   return runTransactionWithRetry(async (tx) => {
+    await assertCurrentParentWorkflowGenerations(tx, [params]);
+    const tracksDescendantStart =
+      params.parentAgentId !== null &&
+      params.parentWorkflowId !== null &&
+      params.temporalWorkflowId !== undefined &&
+      params.temporalWorkflowId !== null;
     const newAgent = await tx.agent.create({
       data: {
         id: params.agentId,
@@ -111,6 +152,7 @@ export async function createAgentTransaction(params: {
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
+        temporalWorkflowStartPending: tracksDescendantStart,
         ...optionalAgentCreateFields(params),
       },
     });
@@ -164,6 +206,10 @@ export interface BatchCreateAgentParams {
   verifierType: string;
   attachments?: Array<Record<string, unknown>>;
   temporalWorkflowId: string;
+  workflowMaxIterations?: number;
+  workflowContextGates?: Record<string, boolean>;
+  workflowStartPhase?: string;
+  workflowTaskQueue?: string;
 }
 
 /** Create N agents (each with verifier + goal message) in a single transaction.
@@ -174,6 +220,7 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
   // Same rationale as createAgentTransaction: a batch fan-out is exactly when
   // the pool is most contended, so guard the interactive-transaction start.
   return runTransactionWithRetry(async (tx) => {
+    await assertCurrentParentWorkflowGenerations(tx, items);
     const goalMessageTimestamp = new Date();
     await tx.agent.createMany({
       data: items.map((params) => ({
@@ -195,17 +242,9 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
         proxyCountry: params.proxyCountry,
         proxyState: params.proxyState,
         proxyCity: params.proxyCity,
-        temporalWorkflowId: params.temporalWorkflowId,
-        ...(params.priceLimitCents !== undefined && params.priceLimitCents !== 0
-          ? { priceLimitCents: params.priceLimitCents }
-          : {}),
-        ...(params.writeLockEnabled !== undefined
-          ? { writeLockEnabled: params.writeLockEnabled }
-          : {}),
-        ...(params.fastModeCacheEnabled !== undefined
-          ? { fastModeCacheEnabled: params.fastModeCacheEnabled }
-          : {}),
-        ...(params.worldModelMode !== undefined ? { worldModelMode: params.worldModelMode } : {}),
+        temporalWorkflowStartPending:
+          params.parentAgentId !== null && params.parentWorkflowId !== null,
+        ...optionalAgentCreateFields(params),
       })),
     });
 
@@ -243,93 +282,5 @@ export async function createAgentBatchTransaction(items: BatchCreateAgentParams[
     });
     const createdById = new Map(createdAgents.map((agent) => [agent.id, agent]));
     return items.map((params) => ({ agent: createdById.get(params.agentId)! }));
-  });
-}
-
-/** Update an agent's fields. */
-export async function updateAgent(agentId: string, data: Record<string, unknown>) {
-  return prisma.agent.update({
-    where: { id: agentId },
-    data,
-  });
-}
-
-/** Mark an agent as FAILED only if it's still in a pre-terminal, non-paused state.
- *  Prevents background error handlers from overwriting user-initiated status changes. */
-export async function failAgentIfStillActive(agentId: string, statusMessage: string) {
-  return prisma.agent.updateMany({
-    where: {
-      id: agentId,
-      status: { in: ['STARTING_UP', 'ACTIVE'] },
-    },
-    data: { status: 'FAILED', statusMessage },
-  });
-}
-
-/** Reactivate a terminal agent for chat by clearing its ended workflow — but ONLY
- *  if the row is still in the exact observed terminal status AND workflow id. If a
- *  concurrent reactivation already changed either, 0 rows update and the caller
- *  reloads instead of clobbering the newer workflow. Returns the update count. */
-export async function clearWorkflowForTerminalAgent(
-  agentId: string,
-  observedStatus: AgentStatus,
-  observedWorkflowId: string
-) {
-  return prisma.agent.updateMany({
-    where: {
-      id: agentId,
-      status: observedStatus,
-      temporalWorkflowId: observedWorkflowId,
-    },
-    data: { temporalWorkflowId: null, status: 'ACTIVE' },
-  });
-}
-
-/** Soft-delete an agent. */
-export async function softDeleteAgent(agentId: string) {
-  return prisma.agent.update({
-    where: { id: agentId },
-    data: { deletedAt: new Date() },
-  });
-}
-
-/** Delete all attention requests for an agent. */
-export async function deleteAttentionRequests(agentId: string) {
-  return prisma.agentAttentionRequest.deleteMany({
-    where: { agentId },
-  });
-}
-
-/** Create a GitHub repo access record. */
-export async function createGithubRepoAccess(userId: string, repoUrl: string) {
-  return prisma.githubRepoAccess.create({
-    data: { userId, repoUrl },
-  });
-}
-
-/** Delete all tool assignments for an agent. */
-export async function deleteAgentTools(agentId: string) {
-  return prisma.agentTool.deleteMany({
-    where: { agentId },
-  });
-}
-
-/** Create tool assignments for an agent. */
-export async function createAgentTools(agentId: string, toolIds: string[]) {
-  return prisma.agentTool.createMany({
-    data: toolIds.map((toolId) => ({
-      agentId,
-      toolId,
-    })),
-  });
-}
-
-/** Replace tool assignments atomically — delete old, create new in one transaction. */
-export async function replaceAgentTools(agentId: string, toolIds: string[]) {
-  return prisma.$transaction(async (tx) => {
-    await tx.agentTool.deleteMany({ where: { agentId } });
-    await tx.agentTool.createMany({
-      data: toolIds.map((toolId) => ({ agentId, toolId })),
-    });
   });
 }

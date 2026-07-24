@@ -1,9 +1,139 @@
-import { Connection, Client } from '@temporalio/client';
+import {
+  Connection,
+  Client,
+  defaultPayloadConverter,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
+} from '@temporalio/client';
 import { createLogger } from './logger';
+import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
 
 const log = createLogger('Temporal');
 
 let client: Client | null = null;
+export const TEMPORAL_CONTROL_RPC_TIMEOUT_MS = 15_000;
+export const WORKER_DEPLOYMENT_ACTIVATION_PREFIX = 'navi-worker-deployment-activation:';
+export const WORKER_DEPLOYMENT_ACTIVATION_TASK_QUEUE = 'navi-worker-deployment-markers';
+export const DESCENDANT_START_TOMBSTONE_TASK_QUEUE = 'navi-deployment-descendant-start-tombstones';
+const WORKER_DEPLOYMENT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+
+export function withTemporalControlDeadline<T>(
+  temporalClient: Pick<Client, 'withDeadline'>,
+  operation: () => Promise<T>,
+  deadlineAtMs?: number
+): Promise<T> {
+  const rpcDeadline = Date.now() + TEMPORAL_CONTROL_RPC_TIMEOUT_MS;
+  return temporalClient.withDeadline(
+    deadlineAtMs === undefined ? rpcDeadline : Math.min(rpcDeadline, deadlineAtMs),
+    operation
+  );
+}
+
+export function workerDeploymentActivationWorkflowId(
+  buildId: string,
+  deploymentToken: string
+): string {
+  if (!/^[0-9a-f]{40}$/.test(buildId)) {
+    throw new Error('Temporal worker build ID must be a lowercase 40-character Git SHA');
+  }
+  if (!WORKER_DEPLOYMENT_TOKEN_PATTERN.test(deploymentToken)) {
+    throw new Error('Temporal worker deployment token must be 1-80 safe ID characters');
+  }
+  return `${WORKER_DEPLOYMENT_ACTIVATION_PREFIX}${buildId}:${deploymentToken}`;
+}
+
+export async function activateTemporalWorkerBuildWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  buildId: string,
+  deploymentToken: string,
+  deadlineAtMs?: number
+): Promise<string> {
+  const workflowId = workerDeploymentActivationWorkflowId(buildId, deploymentToken);
+  try {
+    const description = await withTemporalControlDeadline(
+      temporalClient,
+      () => temporalClient.workflow.getHandle(workflowId).describe(),
+      deadlineAtMs
+    );
+    if (description.status.name !== 'RUNNING') {
+      throw new Error(
+        `Temporal worker activation marker ${workflowId} is ${description.status.name}`
+      );
+    }
+    return workflowId;
+  } catch (error) {
+    if (!(error instanceof WorkflowNotFoundError)) throw error;
+  }
+
+  try {
+    await withTemporalControlDeadline(
+      temporalClient,
+      () =>
+        temporalClient.workflow.start('RoseWorkerDeploymentActivationMarker', {
+          taskQueue: WORKER_DEPLOYMENT_ACTIVATION_TASK_QUEUE,
+          workflowId,
+          args: [buildId, deploymentToken],
+        }),
+      deadlineAtMs
+    );
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+  }
+  return workflowId;
+}
+
+export async function activateTemporalWorkerBuild(
+  buildId: string,
+  deploymentToken: string,
+  deadlineAtMs?: number
+): Promise<string> {
+  return activateTemporalWorkerBuildWithClient(
+    await getTemporalClient(),
+    buildId,
+    deploymentToken,
+    deadlineAtMs
+  );
+}
+
+export async function cleanupSupersededWorkerActivationMarkersWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  currentMarkerWorkflowId: string,
+  deadlineAtMs = Date.now() + 120_000
+): Promise<number> {
+  let terminated = 0;
+  await temporalClient.withDeadline(deadlineAtMs, async () => {
+    for await (const execution of temporalClient.workflow.list({
+      query: 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"',
+    })) {
+      if (
+        execution.workflowId === currentMarkerWorkflowId ||
+        !execution.workflowId.startsWith(WORKER_DEPLOYMENT_ACTIVATION_PREFIX)
+      ) {
+        continue;
+      }
+      try {
+        await temporalClient.workflow
+          .getHandle(execution.workflowId, execution.runId)
+          .terminate('Superseded worker deployment activation marker');
+        terminated += 1;
+      } catch (error) {
+        if (!(error instanceof WorkflowNotFoundError)) throw error;
+      }
+    }
+  });
+  return terminated;
+}
+
+export async function cleanupSupersededWorkerActivationMarkers(
+  currentMarkerWorkflowId: string,
+  deadlineAtMs?: number
+): Promise<number> {
+  return cleanupSupersededWorkerActivationMarkersWithClient(
+    await getTemporalClient(),
+    currentMarkerWorkflowId,
+    deadlineAtMs
+  );
+}
 
 /**
  * Get or create a Temporal client connected to Temporal Cloud
@@ -46,10 +176,12 @@ export async function getTemporalClient(): Promise<Client> {
   return client;
 }
 
-/**
- * Start an agent workflow
- */
-export async function startAgentWorkflow(params: {
+export interface TemporalWorkflowExecutionRef {
+  workflowId: string;
+  firstExecutionRunId: string;
+}
+
+export interface StartAgentWorkflowParams {
   agentId: string;
   userId: string;
   goal: string;
@@ -63,7 +195,7 @@ export async function startAgentWorkflow(params: {
   parentAgentId?: string; // Optional: parent agent ID for tree structure
   depth?: number; // Optional: nesting depth
   busId?: string; // Optional: shared bus channel ID for sub-agent tree updates
-  startPhase?: 'plan' | 'execute'; // Optional: 'plan' (default) runs PLAN→EXECUTE, 'execute' skips PLAN
+  startPhase?: 'plan' | 'execute' | 'resume'; // 'resume' is internal deployment recovery
   maxIterations?: number; // Optional: step limit for execute phase (sub-agents use 25)
   priceLimitCents?: number; // Optional: price limit in cents (default 100)
   contextGates?: {
@@ -78,8 +210,193 @@ export async function startAgentWorkflow(params: {
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
   worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
-}): Promise<string> {
-  const client = await getTemporalClient();
+  workflowId?: string; // Optional preclaimed generation-specific workflow ID
+  resumeState?: WorkflowResumeState; // Durable state captured before deployment replacement
+  rejectDuplicateWorkflowId?: boolean; // Durable child-start outbox uses one immutable ID.
+}
+
+function parseContextGates(value: unknown): Record<string, boolean> | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Historical workflow context gates are malformed');
+  }
+  const entries = Object.entries(value);
+  if (!entries.every((entry): entry is [string, boolean] => typeof entry[1] === 'boolean')) {
+    throw new Error('Historical workflow context gates are malformed');
+  }
+  return Object.fromEntries(entries);
+}
+
+/** Extract only the two launch inputs that were not historically persisted in Postgres. */
+export function parseAgentWorkflowLaunchConfig(args: unknown[]): WorkflowLaunchConfig {
+  const maxIterations = args[12];
+  if (
+    maxIterations !== null &&
+    maxIterations !== undefined &&
+    (!Number.isInteger(maxIterations) || Number(maxIterations) < 1)
+  ) {
+    throw new Error('Historical workflow max iterations are malformed');
+  }
+  return {
+    maxIterations:
+      maxIterations === null || maxIterations === undefined ? null : Number(maxIterations),
+    contextGates: parseContextGates(args[14]),
+  };
+}
+
+export function buildAgentWorkflowStartHistoryRequest(namespace: string, workflowId: string) {
+  return {
+    namespace,
+    execution: { workflowId },
+    maximumPageSize: 1,
+    waitNewEvent: false,
+    skipArchival: true,
+  } as const;
+}
+
+/** Read one start event; this does not fetch or replay the workflow's history. */
+export async function readAgentWorkflowLaunchConfig(
+  workflowId: string,
+  deadlineAtMs?: number
+): Promise<WorkflowLaunchConfig> {
+  const temporalClient = await getTemporalClient();
+  let response;
+  try {
+    response = await temporalClient.withDeadline(
+      Math.min(Date.now() + 10_000, deadlineAtMs ?? Number.POSITIVE_INFINITY),
+      () =>
+        temporalClient.workflowService.getWorkflowExecutionHistory(
+          buildAgentWorkflowStartHistoryRequest(temporalClient.options.namespace, workflowId)
+        )
+    );
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 5) {
+      throw new WorkflowNotFoundError('Workflow history was not found', workflowId, undefined);
+    }
+    throw error;
+  }
+  const started = response.history?.events?.[0]?.workflowExecutionStartedEventAttributes;
+  if (started === null || started === undefined) {
+    throw new Error(`Temporal did not return the start event for ${workflowId}`);
+  }
+  const args = (started.input?.payloads ?? []).map((payload) =>
+    defaultPayloadConverter.fromPayload(payload)
+  );
+  return parseAgentWorkflowLaunchConfig(args);
+}
+
+export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknown[] {
+  const args: unknown[] = [
+    params.agentId,
+    params.userId,
+    params.goal,
+    params.model,
+    params.reasoningMaxTokens,
+    { type: params.verifier.type },
+    [],
+    params.parentWorkflowId || null,
+    params.parentAgentId || null,
+    params.depth || 0,
+    params.busId || null,
+    params.startPhase || 'plan',
+    params.maxIterations || null,
+    params.priceLimitCents || 100,
+    params.contextGates || null,
+    params.fastModeCacheEnabled ?? false,
+  ];
+  // Keep ordinary real-mode starts compatible with the previous 16-argument
+  // worker. Deployment state remains #17; Simulator mode uses #18 so it does
+  // not change the durable replacement contract.
+  if (params.resumeState !== undefined || params.worldModelMode !== undefined) {
+    args.push(params.resumeState ?? null);
+  }
+  if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {
+    args.push(params.worldModelMode);
+  }
+  return args;
+}
+
+/** Resolve the immutable chain identity for an already-started workflow. */
+export async function resolveTemporalWorkflowExecutionRefWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  workflowId: string,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  const description = await withTemporalControlDeadline(
+    temporalClient,
+    () => temporalClient.workflow.getHandle(workflowId).describe(),
+    deadlineAtMs
+  );
+  const firstExecutionRunId = description.raw.workflowExecutionInfo?.firstRunId;
+  if (typeof firstExecutionRunId !== 'string' || firstExecutionRunId.length === 0) {
+    throw new Error(`Temporal did not return a first execution run ID for ${workflowId}`);
+  }
+  return { workflowId, firstExecutionRunId };
+}
+
+export async function resolveTemporalWorkflowExecutionRef(
+  workflowId: string,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  return resolveTemporalWorkflowExecutionRefWithClient(
+    await getTemporalClient(),
+    workflowId,
+    deadlineAtMs
+  );
+}
+
+/**
+ * Resolve an ambiguous descendant start without ever assuming a timed-out RPC
+ * was rejected. Starting an unserved tombstone under the same immutable
+ * Workflow ID makes the race total: either the original AgentWorkflow won, or
+ * this inert execution did. The caller then terminates the exact winning chain
+ * before clearing its durable outbox row.
+ */
+export async function claimTemporalWorkflowIdForTerminationWithClient(
+  temporalClient: Pick<Client, 'withDeadline' | 'workflow'>,
+  workflowId: string,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  try {
+    const handle = await withTemporalControlDeadline(
+      temporalClient,
+      () =>
+        temporalClient.workflow.start('RoseDescendantWorkflowStartTombstone', {
+          taskQueue: DESCENDANT_START_TOMBSTONE_TASK_QUEUE,
+          workflowId,
+          args: [workflowId],
+          workflowIdReusePolicy: 'REJECT_DUPLICATE',
+          workflowIdConflictPolicy: 'FAIL',
+        }),
+      deadlineAtMs
+    );
+    return {
+      workflowId: handle.workflowId,
+      firstExecutionRunId: handle.firstExecutionRunId,
+    };
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+    return resolveTemporalWorkflowExecutionRefWithClient(temporalClient, workflowId, deadlineAtMs);
+  }
+}
+
+export async function claimTemporalWorkflowIdForTermination(
+  workflowId: string,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  return claimTemporalWorkflowIdForTerminationWithClient(
+    await getTemporalClient(),
+    workflowId,
+    deadlineAtMs
+  );
+}
+
+/** Start an agent workflow and retain its immutable Temporal chain identity. */
+export async function startAgentWorkflowExecutionWithClient(
+  client: Pick<Client, 'withDeadline' | 'workflow'>,
+  params: StartAgentWorkflowParams,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
   // Use provided task queue or default to environment-specific queue
   const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
   if (!taskQueue) {
@@ -87,47 +404,62 @@ export async function startAgentWorkflow(params: {
       'TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME'
     );
   }
-  const workflowId = params.agentId;
+  const workflowId = params.workflowId ?? params.agentId;
 
   log.info('Starting agent workflow', {
     workflowId,
     taskQueue,
   });
 
-  const handle = await client.workflow.start('AgentWorkflow', {
-    taskQueue,
-    workflowId,
-    args: [
-      params.agentId,
-      params.userId,
-      params.goal,
-      params.model,
-      params.reasoningMaxTokens,
-      {
-        type: params.verifier.type,
-      },
-      [], // Start with empty context, workflow will poll for goal message
-      params.parentWorkflowId || null, // Parent workflow ID for signaling
-      params.parentAgentId || null, // Parent agent ID for tree structure
-      params.depth || 0, // Nesting depth
-      params.busId || null, // Shared bus channel ID for tree updates
-      params.startPhase || 'plan', // Starting phase: 'plan' runs PLAN→EXECUTE, 'execute' skips PLAN
-      params.maxIterations || null, // Step limit for execute phase (sub-agents use 25)
-      params.priceLimitCents || 100, // Price limit in cents (default $1.00)
-      params.contextGates || null, // Context gates: which user context sections to include
-      params.fastModeCacheEnabled ?? false, // Fast Mode aggressive cache flag
-      ...(params.worldModelMode !== undefined && params.worldModelMode !== 'real'
-        ? [params.worldModelMode]
-        : []),
-    ],
-  });
+  let execution: TemporalWorkflowExecutionRef;
+  try {
+    const handle = await withTemporalControlDeadline(
+      client,
+      () =>
+        client.workflow.start('AgentWorkflow', {
+          taskQueue,
+          workflowId,
+          args: buildAgentWorkflowArgs(params),
+          ...(params.rejectDuplicateWorkflowId === true
+            ? {
+                workflowIdReusePolicy: 'REJECT_DUPLICATE' as const,
+                workflowIdConflictPolicy: 'FAIL' as const,
+              }
+            : {}),
+        }),
+      deadlineAtMs
+    );
+    execution = {
+      workflowId: handle.workflowId,
+      firstExecutionRunId: handle.firstExecutionRunId,
+    };
+  } catch (error) {
+    if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+    execution = await resolveTemporalWorkflowExecutionRefWithClient(
+      client,
+      workflowId,
+      deadlineAtMs
+    );
+  }
 
   log.info('Workflow started', {
-    workflowId: handle.workflowId,
-    runId: handle.firstExecutionRunId,
+    workflowId: execution.workflowId,
+    runId: execution.firstExecutionRunId,
   });
 
-  return handle.workflowId;
+  return execution;
+}
+
+export async function startAgentWorkflowExecution(
+  params: StartAgentWorkflowParams,
+  deadlineAtMs?: number
+): Promise<TemporalWorkflowExecutionRef> {
+  return startAgentWorkflowExecutionWithClient(await getTemporalClient(), params, deadlineAtMs);
+}
+
+/** Backwards-compatible helper for callers that only expose Workflow ID. */
+export async function startAgentWorkflow(params: StartAgentWorkflowParams): Promise<string> {
+  return (await startAgentWorkflowExecution(params)).workflowId;
 }
 
 /* c8 ignore start -- getWorkflowStatus requires live Temporal server */

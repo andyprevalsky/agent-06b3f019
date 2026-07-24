@@ -254,7 +254,7 @@ def build_for_each_goal(base_goal: str, item: Any) -> str:
 
 @activity.defn
 @traced("spawn_explore_agent_activity")
-async def spawn_explore_agent_activity(  # noqa: C901
+async def spawn_explore_agent_activity(
     agent_id: str,
     user_id: str,
     goal: str,
@@ -334,6 +334,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
         gpt_token_rotated: bool = False,
         compute_token_used: Optional[Dict[str, Any]] = None,
         from_fast_cache: bool = False,
+        iteration: Optional[int] = None,
         cache_sequence_id: Optional[str] = None,
     ):
         """Track each LLM call's tokens with the actual model used."""
@@ -347,6 +348,7 @@ async def spawn_explore_agent_activity(  # noqa: C901
                 "cache_read_input_tokens": cache_read_input_tokens,
                 "cache_creation_input_tokens": cache_creation_input_tokens,
                 "from_fast_cache": from_fast_cache,
+                "iteration": iteration,
                 "cache_sequence_id": cache_sequence_id or explore_cache_sequence_id,
             }
         )

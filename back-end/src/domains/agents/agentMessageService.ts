@@ -4,7 +4,7 @@
 
 import { getTemporalClient } from '../../providers/temporal';
 import { handleChatMessage } from '../../providers/chat';
-import { createMessage } from '../../providers/messages';
+import { createMessage, createWorkflowMessageGroup } from '../../providers/messages';
 import {
   type FilePointer,
   processUploadedFile,
@@ -85,7 +85,8 @@ async function routeUserMessage(agentId: string, messageText: string): Promise<v
     const { count } = await repo.clearWorkflowForTerminalAgent(
       agentId,
       agentForChat.status,
-      agentForChat.temporalWorkflowId
+      agentForChat.temporalWorkflowId,
+      agentForChat.temporalFirstExecutionRunId
     );
     if (count > 0) {
       agentForChat.temporalWorkflowId = null;
@@ -158,7 +159,8 @@ export async function postMessage(
   agentId: string,
   body: PostMessageBody,
   isInternal: boolean,
-  userId?: string
+  userId?: string,
+  workflowGeneration?: string
 ) {
   // Determine role based on auth type
   const roleResult = resolveRole(body, isInternal);
@@ -192,24 +194,46 @@ export async function postMessage(
     }
   }
 
-  // Create the text message (optionally with file_pointer for single-file messages)
-  const message = await createMessage({
+  const messageParams = {
     agentId,
     text: body.message,
     role,
     metadata: body.metadata,
     filePointer: body.file_pointer as Record<string, unknown> | undefined,
-  });
-
-  // Create separate messages for each file attachment (OAI-style)
-  if (body.attachments !== undefined && body.attachments.length > 0) {
-    for (const attachment of body.attachments) {
-      await createMessage({
-        agentId,
-        text: '',
-        role,
-        filePointer: attachment as Record<string, unknown>,
-      });
+  };
+  let message;
+  if (isInternal) {
+    const generation = workflowGeneration ?? agentId;
+    const result = await createWorkflowMessageGroup(
+      messageParams,
+      (body.attachments ?? []) as Array<Record<string, unknown>>,
+      generation
+    );
+    if (result.message === null) {
+      return {
+        error: 'Workflow generation is no longer current',
+        status: 409,
+      };
+    }
+    // A stale TOOL lifecycle write is not accepted as the worker's requested
+    // transition, but the generation fence returns its canonical terminal row.
+    // Return that row to the stale worker so the LLM observes the deployment
+    // interruption and decides whether to retry. Non-TOOL stale writes have no
+    // canonical row and still take the 409 path above.
+    message = result.message;
+  } else {
+    message = await createMessage(messageParams);
+    // User attachment rows are external writes and deliberately remain outside
+    // the worker-generation fence.
+    if (body.attachments !== undefined && body.attachments.length > 0) {
+      for (const attachment of body.attachments) {
+        await createMessage({
+          agentId,
+          text: '',
+          role,
+          filePointer: attachment as Record<string, unknown>,
+        });
+      }
     }
   }
 

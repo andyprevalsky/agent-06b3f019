@@ -51,7 +51,7 @@ export async function findPausedAgents(userId: string) {
   return prisma.agent.findMany({
     where: {
       userId,
-      status: 'PAUSED',
+      status: { in: ['PAUSED', 'OUT_OF_CREDITS'] },
       deletedAt: null,
     },
   });

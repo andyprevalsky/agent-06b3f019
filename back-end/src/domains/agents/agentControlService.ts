@@ -2,23 +2,27 @@
  * Agent control service — pause, resume, restart, update status, update config, signals.
  */
 
-import { getTemporalClient, startAgentWorkflow } from '../../providers/temporal';
-import { broadcastAgentUpdate, broadcastAgentModeStarted } from '../../providers/chat';
+import {
+  getTemporalClient,
+  startAgentWorkflow,
+  type StartAgentWorkflowParams,
+} from '../../providers/temporal';
+import { broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
-import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
-import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
-import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
-import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 import { normalizeWorldModelMode } from './agentExecutionMode';
 
 export { updateAgentConfig } from './agentConfigService';
+export { updateAgentStatus } from './agentStatusService';
+export {
+  acknowledgeWorkflowReplacementBootstrap,
+  finalizeWorkflowReplacementBootstrap,
+  restartAgent,
+  type RestartAgentOptions,
+} from './agentRestartService';
 
 const log = createLogger('Agents');
-const TERMINAL_STATUSES = new Set(['COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED']);
-const IRREVERSIBLE_STATUSES = TERMINAL_STATUSES;
-const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 // ---------------------------------------------------------------------------
 // Pause / Resume
@@ -26,24 +30,18 @@ const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 /** Pause a single agent. Children discover parent's paused state via pull-based queries. */
 export async function pauseAgent(agentId: string): Promise<void> {
-  const agent = await repo.findAgentById(agentId);
-
-  if (!agent) {
+  const paused = await repo.pauseAgentUnderWorkflowLock(agentId);
+  if (paused === null) return;
+  if (!paused.paused) {
+    log.info('Skipping pause - already terminal', { agent_id: agentId, status: paused.status });
     return;
   }
-
-  if (agent.status === 'COMPLETED' || agent.status === 'FAILED') {
-    log.info('Skipping pause - already terminal', { agent_id: agentId, status: agent.status });
-    return;
-  }
-
-  await repo.updateAgent(agentId, { status: 'PAUSED' });
 
   /* c8 ignore start -- Temporal signal requires live Temporal server */
-  if (agent.temporalWorkflowId !== null) {
+  if (paused.temporalWorkflowId !== null) {
     try {
       const client = await getTemporalClient();
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      const handle = client.workflow.getHandle(paused.temporalWorkflowId);
       await handle.signal('pause');
     } catch (error) {
       log.warn('Pause signal failed, DB updated. Workflow will sync next iteration', {
@@ -134,6 +132,12 @@ export async function startAgentMode(agentId: string, userId: string) {
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
     worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
+    ...(agent.workflowMaxIterations !== null ? { maxIterations: agent.workflowMaxIterations } : {}),
+    ...(agent.workflowContextGates !== null
+      ? {
+          contextGates: agent.workflowContextGates as StartAgentWorkflowParams['contextGates'],
+        }
+      : {}),
   });
 
   await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
@@ -149,209 +153,6 @@ export async function startAgentMode(agentId: string, userId: string) {
     agent_id: agentId,
     workflow_id: workflowId,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Restart
-// ---------------------------------------------------------------------------
-
-/** Restart an agent's workflow. */
-export async function restartAgent(agentId: string, userId?: string) {
-  const agent = await repo.findAgentWithVerifier(agentId, userId);
-
-  if (!agent) {
-    return { error: 'Agent not found', status: 404 };
-  }
-
-  if (agent.verifier === null) {
-    return { error: 'Agent has no verifier configured', status: 400 };
-  }
-
-  if (agent.temporalWorkflowId !== null) {
-    const client = await getTemporalClient();
-    try {
-      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
-      await handle.terminate('Restarting with new worker code');
-      log.info('Terminated workflow for restart', {
-        agent_id: agentId,
-        workflow_id: agent.temporalWorkflowId,
-      });
-    } catch (e: unknown) {
-      const isNotFound = e instanceof Error && e.name === 'WorkflowNotFoundError';
-      if (isNotFound) {
-        log.info('Workflow already terminated/not found, proceeding with restart', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-        });
-      } else {
-        log.error('Failed to terminate workflow for restart, aborting to prevent duplicates', {
-          agent_id: agentId,
-          workflow_id: agent.temporalWorkflowId,
-          error: e instanceof Error ? e.message : String(e),
-        });
-        return { error: 'Failed to terminate existing workflow', status: 500 };
-      }
-    }
-  }
-
-  await new Promise((resolve) => setTimeout(resolve, 500));
-
-  await repo.updateAgent(agentId, { status: 'ACTIVE', statusMessage: null });
-
-  const workflowId = await startAgentWorkflow({
-    agentId: agent.id,
-    userId: agent.userId,
-    goal: agent.goal,
-    model: agent.model,
-    reasoningMaxTokens: agent.reasoningMaxTokens,
-    verifier: {
-      type: agent.verifier.type,
-    },
-    ...(agent.parentWorkflowId !== null ? { parentWorkflowId: agent.parentWorkflowId } : {}),
-    depth: agent.depth,
-    priceLimitCents: agent.priceLimitCents,
-    fastModeCacheEnabled: agent.fastModeCacheEnabled,
-    worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
-  });
-
-  await repo.updateAgent(agentId, { temporalWorkflowId: workflowId });
-
-  log.info('Restarted agent', { agent_id: agentId, workflow_id: workflowId });
-
-  return {
-    success: true,
-    agent_id: agentId,
-    workflow_id: workflowId,
-    message: 'Workflow restarted - will continue from existing context',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Update status (internal/worker)
-// ---------------------------------------------------------------------------
-
-/** Agent fields relevant for status broadcast. */
-interface AgentStatusFields {
-  progress: number;
-  status: string;
-  statusMessage: string | null;
-  tokenCount: number;
-  tokensIn: number;
-  tokensOut: number;
-  contextSize: number;
-  messageCount: number;
-}
-
-interface UpdateAgentStatusDependencies {
-  cleanupPurchaseCards?: (agentId: string) => Promise<void>;
-}
-
-/** Best-effort cleanup fired once a root agent reaches a terminal status. */
-async function runTerminalAgentCleanup(
-  agentId: string,
-  status: string,
-  dependencies: UpdateAgentStatusDependencies
-): Promise<void> {
-  try {
-    await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
-  } catch (error) {
-    log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
-      agent_id: agentId,
-      status,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  try {
-    await finalizeAgent({ rootAgentId: agentId });
-  } catch (error) {
-    log.warn('Trace archive finalization unavailable', {
-      agent_id: agentId,
-      status,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
-
-export async function updateAgentStatus(
-  agentId: string,
-  body: UpdateStatusBody,
-  dependencies: UpdateAgentStatusDependencies = {}
-) {
-  const agent = await repo.findAgentById(agentId);
-
-  if (!agent) {
-    return null;
-  }
-
-  if (IRREVERSIBLE_STATUSES.has(agent.status) && NON_TERMINAL_STATUSES.has(body.status)) {
-    log.info('Ignoring stale non-terminal status update for terminal agent', {
-      agent_id: agentId,
-      current_status: agent.status,
-      attempted_status: body.status,
-      attempted_progress: body.progress,
-    });
-    return agent;
-  }
-
-  const updated = await repo.updateAgent(agentId, {
-    status: body.status,
-    statusMessage: body.statusMessage,
-    progress: body.progress,
-    tokenCount: body.tokenCount,
-    tokensIn: body.tokensIn,
-    tokensOut: body.tokensOut,
-    contextSize: body.contextSize,
-    messageCount: body.messageCount,
-    ...(body.structuredResponse !== undefined && {
-      structuredResponse: body.structuredResponse as Prisma.InputJsonValue,
-    }),
-    updatedAt: new Date(),
-  });
-
-  const fields = updated as unknown as AgentStatusFields;
-  let failureSurface: { rawError?: string; failureReason?: string | null } = {};
-  if (TERMINAL_STATUSES.has(fields.status) && fields.status !== 'COMPLETED') {
-    failureSurface = {
-      rawError: body.statusMessage ?? fields.statusMessage ?? undefined,
-      failureReason: null,
-    };
-    try {
-      const decision = await classifyAgentFailureForSurface(agentId);
-      failureSurface.failureReason = decision?.failureReason ?? null;
-      failureSurface.rawError = decision?.rawError ?? failureSurface.rawError;
-    } catch (error) {
-      log.warn('Failure classification unavailable for terminal status broadcast', {
-        agent_id: agentId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  const broadcastPayload: Parameters<typeof broadcastAgentUpdate>[1] & {
-    rawError?: string;
-    failureReason?: string | null;
-  } = {
-    progress: fields.progress,
-    status: fields.status,
-    statusMessage: fields.statusMessage ?? undefined,
-    tokenCount: fields.tokenCount,
-    tokensIn: fields.tokensIn,
-    tokensOut: fields.tokensOut,
-    contextSize: fields.contextSize,
-    messageCount: fields.messageCount,
-    ...failureSurface,
-  };
-
-  await broadcastAgentUpdate(agentId, broadcastPayload);
-  // Fire cleanup only on the FIRST terminal transition (`agent` is the pre-update
-  // row): re-running it on repeated terminal updates could race a second pass
-  // against the same still-HELD purchase (double close/reclaim/refund).
-  const wasAlreadyTerminal = IRREVERSIBLE_STATUSES.has(agent.status);
-  if (TERMINAL_STATUSES.has(fields.status) && agent.parentAgentId === null && !wasAlreadyTerminal) {
-    await runTerminalAgentCleanup(agentId, fields.status, dependencies);
-  }
-
-  return updated;
 }
 
 // ---------------------------------------------------------------------------

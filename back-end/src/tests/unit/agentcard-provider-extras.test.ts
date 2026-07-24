@@ -17,6 +17,8 @@ import { prisma } from '../../providers/database';
 import {
   ensureAgentCardSandboxFloat,
   loadAgentCardBenchmarkAdmin,
+  selectAgentCardBenchmarkAdminToken,
+  selectAgentCardBenchmarkWalletToken,
 } from '../../providers/agentcard/benchmark-float';
 import {
   createAgentCardOrgWalletAlertStore,
@@ -91,6 +93,38 @@ async function main(): Promise<void> {
     assert.equal(result.addedCents, 40_000);
     assert.equal(result.balanceCents, 50_000);
     assert.deepEqual(bodies[0], { amountCents: 40_000 });
+  });
+
+  await test('ensureAgentCardSandboxFloat uses the member wallet token for company wallet routes', async () => {
+    const authorizations: Array<string | null> = [];
+    const result = await ensureAgentCardSandboxFloat(
+      { ...ADMIN, walletToken: 'member-wallet-token' },
+      'org-1',
+      50_000,
+      (async (_url: string, init: RequestInit) => {
+        authorizations.push(new Headers(init.headers).get('authorization'));
+        if (init.method === 'POST') return jsonResponse(200, { sandboxWalletBalanceCents: 50_000 });
+        return jsonResponse(200, { settings: { sandbox_balance_cents: 28_020 } });
+      }) as typeof fetch
+    );
+
+    assert.deepEqual(result, { previousCents: 28_020, balanceCents: 50_000, addedCents: 21_980 });
+    assert.deepEqual(authorizations, ['Bearer member-wallet-token', 'Bearer member-wallet-token']);
+  });
+
+  await test('ensureAgentCardSandboxFloat keeps using the primary token without a wallet token', async () => {
+    const authorizations: Array<string | null> = [];
+    const result = await ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async (
+      _url: string,
+      init: RequestInit
+    ) => {
+      authorizations.push(new Headers(init.headers).get('authorization'));
+      if (init.method === 'POST') return jsonResponse(200, { sandboxWalletBalanceCents: 50_000 });
+      return jsonResponse(200, { settings: { sandbox_balance_cents: 40_000 } });
+    }) as typeof fetch);
+
+    assert.deepEqual(result, { previousCents: 40_000, balanceCents: 50_000, addedCents: 10_000 });
+    assert.deepEqual(authorizations, ['Bearer jwt-token', 'Bearer jwt-token']);
   });
 
   await test('ensureAgentCardSandboxFloat rejects malformed wallet responses', async () => {
@@ -181,6 +215,36 @@ async function main(): Promise<void> {
       else process.env.ADMIN_API_URL = previous.adminUrl;
       await rm(homeDirectory, { recursive: true, force: true });
     }
+  });
+
+  await test('benchmark admin token prefers active stored API key over stale file JWT', () => {
+    const token = selectAgentCardBenchmarkAdminToken(
+      {
+        jwt: 'stale-jwt',
+        lastApiKey: 'last-api-key',
+        activeKeyId: 'active-key-id',
+        storedKeys: [
+          { id: 'old-key-id', key: 'old-api-key' },
+          { id: 'active-key-id', key: 'active-api-key' },
+        ],
+      },
+      {}
+    );
+    assert.equal(token, 'active-api-key');
+  });
+
+  await test('benchmark wallet token prefers the user CLI session over admin API keys', () => {
+    const token = selectAgentCardBenchmarkWalletToken(
+      { jwt: 'cli-member-jwt' },
+      {
+        jwt: 'stale-admin-jwt',
+        lastApiKey: 'last-api-key',
+        activeKeyId: 'active-key-id',
+        storedKeys: [{ id: 'active-key-id', key: 'active-api-key' }],
+      },
+      {}
+    );
+    assert.equal(token, 'cli-member-jwt');
   });
 
   // ── org-wallet-monitor extraction + message ──

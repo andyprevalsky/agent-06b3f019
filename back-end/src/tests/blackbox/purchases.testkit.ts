@@ -351,7 +351,13 @@ export async function withFakeStripe<T>(
   paymentIntents.retrieve = async (id: string) => {
     calls.retrieves.push(id);
     if (opts.retrievePaymentIntent !== undefined) return opts.retrievePaymentIntent(id);
-    return { id, status: 'requires_capture', amount_capturable: 1000 };
+    const captured = calls.captures.includes(id);
+    return {
+      id,
+      status: captured ? 'succeeded' : 'requires_capture',
+      amount_capturable: captured ? 0 : 1000,
+      amount_received: captured ? 1000 : 0,
+    };
   };
   refunds.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
     if (opts.refundError !== undefined) throw opts.refundError;

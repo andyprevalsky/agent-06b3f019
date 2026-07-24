@@ -7703,6 +7703,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
                     from tools.request_payment_card import (
+                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
                         build_payment_question,
                         normalize_payment_payload,
                     )
@@ -7783,7 +7784,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return await workflow.execute_activity(
                             "mint_purchase_card_activity",
                             args=activity_args,
-                            start_to_close_timeout=timedelta(seconds=90),
+                            start_to_close_timeout=timedelta(
+                                seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+                            ),
                             retry_policy=RetryPolicy(maximum_attempts=1),
                         )
 
