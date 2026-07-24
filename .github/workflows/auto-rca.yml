@@ -410,13 +410,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
-          npm install --no-audit --no-fund
-          npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts
-          python -m venv agents/venv
-          agents/venv/bin/python -m pip install --disable-pip-version-check --no-cache-dir -q -r agents/requirements.txt
-          (cd back-end && npx prisma generate)
+          hydrate_stage() {
+            local label="$1"
+            shift
+            printf '::rca-stage::%s\n' "$label"
+            "$@" || {
+              RCA_TIMELINE_DETAIL="$label" \
+                /usr/local/bin/rose-auto-rca-tool timeline-detail
+              return 1
+            }
+          }
+          hydrate_stage "system package index" sudo apt-get update -qq
+          hydrate_stage "PostgreSQL client" sudo apt-get install -y -qq postgresql-client
+          hydrate_stage "root-only Node dependencies" \
+            npm install --workspaces=false --no-audit --no-fund --ignore-scripts --package-lock=false
+          hydrate_stage "frontend locked Node dependencies" \
+            npm ci --prefix front-end --no-audit --no-fund --ignore-scripts
+          hydrate_stage "backend locked Node dependencies" \
+            npm ci --prefix back-end --no-audit --no-fund --ignore-scripts
+          hydrate_stage "mac-app Node dependencies" \
+            npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts
+          hydrate_stage "agent Python virtual environment" python -m venv agents/venv
+          hydrate_stage "agent locked Python dependencies" \
+            agents/venv/bin/python -m pip install --disable-pip-version-check \
+              --no-cache-dir -q -r agents/requirements.txt
+          hydrate_stage "Prisma client generation" bash -c 'cd back-end && npx prisma generate'
           npm cache clean --force
           sudo apt-get clean
           df -h /
