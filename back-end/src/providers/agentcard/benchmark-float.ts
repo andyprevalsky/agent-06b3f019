@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,7 @@ import path from 'node:path';
 const DEFAULT_ADMIN_API_URL = 'https://api.agentcard.sh';
 const DEFAULT_SANDBOX_FLOAT_CENTS = 50_000;
 const ADMIN_CONFIG_PATH = path.join(homedir(), '.agent-cards-admin.json');
+const USER_CONFIG_PATH = path.join(homedir(), '.agent-cards/config.json');
 
 type FetchLike = typeof fetch;
 
@@ -21,6 +23,7 @@ interface AdminConfig {
 interface UserConfig {
   apiUrl?: string;
   accessToken?: string;
+  refreshToken?: string;
   jwt?: string;
 }
 
@@ -41,6 +44,8 @@ export interface AgentCardBenchmarkAdmin {
   persistTokens?: (accessToken: string, refreshToken: string) => Promise<void>;
   walletApiUrl?: string;
   walletToken?: string;
+  walletRefreshToken?: string;
+  walletPersistTokens?: (accessToken: string, refreshToken: string) => Promise<void>;
 }
 
 class AgentCardSandboxFloatRequestError extends Error {
@@ -92,6 +97,27 @@ function asWalletResponse(value: unknown): WalletResponse {
 
 function asRefreshResponse(value: unknown): RefreshResponse {
   return typeof value === 'object' && value !== null ? (value as RefreshResponse) : {};
+}
+
+async function persistSessionTokens<T extends AdminConfig | UserConfig>(
+  configPath: string,
+  snapshot: T,
+  accessToken: string,
+  refreshToken: string
+): Promise<T> {
+  let latest = snapshot;
+  try {
+    latest = JSON.parse(await readFile(configPath, 'utf8')) as T;
+  } catch {
+    // Preserve the successfully loaded snapshot if a concurrent read fails.
+  }
+  const next = { ...latest, accessToken, refreshToken };
+  delete next.jwt;
+  const temporaryPath = `${configPath}.tmp-${process.pid}-${randomUUID()}`;
+  await writeFile(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporaryPath, configPath);
+  await chmod(configPath, 0o600);
+  return next as T;
 }
 
 async function refreshAdminSession(
@@ -152,22 +178,25 @@ async function adminRequest(
 
 export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkAdmin> {
   let adminConfig: AdminConfig = {};
-  let configLoaded = false;
+  let adminConfigLoaded = false;
   try {
     adminConfig = JSON.parse(await readFile(ADMIN_CONFIG_PATH, 'utf8')) as AdminConfig;
-    configLoaded = true;
+    adminConfigLoaded = true;
   } catch {
     // The env token below supports CI and fresh developer machines.
   }
   let userConfig: UserConfig = {};
+  let userConfigLoaded = false;
   try {
-    userConfig = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards/config.json'), 'utf8')
-    ) as UserConfig;
+    userConfig = JSON.parse(await readFile(USER_CONFIG_PATH, 'utf8')) as UserConfig;
+    userConfigLoaded = true;
   } catch {
     // The legacy admin config remains enough for older local setups.
   }
   const walletToken = selectAgentCardBenchmarkWalletToken(userConfig, adminConfig);
+  const walletUsesUserSession =
+    walletToken !== undefined &&
+    (walletToken === userConfig.accessToken?.trim() || walletToken === userConfig.jwt?.trim());
   const token = selectAgentCardBenchmarkAdminToken(adminConfig) || walletToken;
   if (!token) {
     throw new Error('AgentCard admin login required; run npx agent-cards login');
@@ -178,21 +207,14 @@ export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkA
     token,
     refreshToken:
       process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN?.trim() || adminConfig.refreshToken?.trim(),
-    ...(configLoaded && {
+    ...(adminConfigLoaded && {
       persistTokens: async (accessToken: string, refreshToken: string) => {
-        let latest = adminConfig;
-        try {
-          latest = JSON.parse(await readFile(ADMIN_CONFIG_PATH, 'utf8')) as AdminConfig;
-        } catch {
-          // Preserve the successfully loaded snapshot if a concurrent read fails.
-        }
-        const next: AdminConfig = { ...latest, accessToken, refreshToken };
-        delete next.jwt;
-        const temporaryPath = `${ADMIN_CONFIG_PATH}.tmp-${process.pid}`;
-        await writeFile(temporaryPath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-        await rename(temporaryPath, ADMIN_CONFIG_PATH);
-        await chmod(ADMIN_CONFIG_PATH, 0o600);
-        adminConfig = next;
+        adminConfig = await persistSessionTokens(
+          ADMIN_CONFIG_PATH,
+          adminConfig,
+          accessToken,
+          refreshToken
+        );
       },
     }),
     walletApiUrl:
@@ -202,6 +224,20 @@ export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkA
       adminConfig.apiUrl?.trim() ||
       DEFAULT_ADMIN_API_URL,
     walletToken,
+    walletRefreshToken:
+      process.env.AGENT_CARDS_REFRESH_TOKEN?.trim() ||
+      (walletUsesUserSession ? userConfig.refreshToken?.trim() : undefined),
+    ...(userConfigLoaded &&
+      walletUsesUserSession && {
+        walletPersistTokens: async (accessToken: string, refreshToken: string) => {
+          userConfig = await persistSessionTokens(
+            USER_CONFIG_PATH,
+            userConfig,
+            accessToken,
+            refreshToken
+          );
+        },
+      }),
   };
 }
 
@@ -215,7 +251,7 @@ export async function ensureAgentCardSandboxFloat(
   const walletAdmin: AgentCardBenchmarkAdmin = {
     apiUrl: admin.walletApiUrl ?? admin.apiUrl,
     token: admin.walletToken ?? admin.token,
-    refreshToken: walletUsesPrimarySession ? admin.refreshToken : undefined,
+    refreshToken: walletUsesPrimarySession ? admin.refreshToken : admin.walletRefreshToken,
     persistTokens: walletUsesPrimarySession
       ? async (accessToken, refreshToken) => {
           admin.token = accessToken;
@@ -223,7 +259,13 @@ export async function ensureAgentCardSandboxFloat(
           admin.refreshToken = refreshToken;
           await admin.persistTokens?.(accessToken, refreshToken);
         }
-      : undefined,
+      : admin.walletPersistTokens
+        ? async (accessToken, refreshToken) => {
+            admin.walletToken = accessToken;
+            admin.walletRefreshToken = refreshToken;
+            await admin.walletPersistTokens?.(accessToken, refreshToken);
+          }
+        : undefined,
   };
   const wallet = await adminRequest(walletAdmin, `/orgs/${orgId}/wallet`, {}, fetchImpl);
   const previousCents = wallet.settings?.sandbox_balance_cents;

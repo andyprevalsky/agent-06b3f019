@@ -183,6 +183,45 @@ async function main(): Promise<void> {
     assert.equal(admin.refreshToken, 'refresh-new');
   });
 
+  await test('ensureAgentCardSandboxFloat refreshes the distinct member wallet session', async () => {
+    const authorizations: string[] = [];
+    const persisted: string[][] = [];
+    const admin = {
+      ...ADMIN,
+      token: 'admin-access',
+      refreshToken: 'admin-refresh',
+      walletToken: 'wallet-access-old',
+      walletRefreshToken: 'wallet-refresh-old',
+      walletPersistTokens: async (accessToken: string, refreshToken: string) => {
+        persisted.push([accessToken, refreshToken]);
+      },
+    };
+    const result = await ensureAgentCardSandboxFloat(admin, 'org-1', 50_000, (async (
+      url: string,
+      init: RequestInit
+    ) => {
+      if (url.endsWith('/auth/refresh')) {
+        assert.deepEqual(JSON.parse(String(init.body)), {
+          refreshToken: 'wallet-refresh-old',
+        });
+        return jsonResponse(200, {
+          accessToken: 'wallet-access-new',
+          refreshToken: 'wallet-refresh-new',
+        });
+      }
+      authorizations.push(String((init.headers as Record<string, string>).authorization));
+      if (authorizations.length === 1) return jsonResponse(401, {});
+      return jsonResponse(200, { settings: { sandbox_balance_cents: 50_000 } });
+    }) as typeof fetch);
+    assert.equal(result.balanceCents, 50_000);
+    assert.deepEqual(authorizations, ['Bearer wallet-access-old', 'Bearer wallet-access-new']);
+    assert.deepEqual(persisted, [['wallet-access-new', 'wallet-refresh-new']]);
+    assert.equal(admin.token, 'admin-access');
+    assert.equal(admin.refreshToken, 'admin-refresh');
+    assert.equal(admin.walletToken, 'wallet-access-new');
+    assert.equal(admin.walletRefreshToken, 'wallet-refresh-new');
+  });
+
   await test('loadAgentCardBenchmarkAdmin reads the env JWT + API url override', async () => {
     const prevJwt = process.env.AGENT_CARDS_ADMIN_JWT;
     const prevRefresh = process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN;
