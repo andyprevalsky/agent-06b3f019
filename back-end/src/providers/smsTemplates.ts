@@ -52,8 +52,10 @@ export const SMS_TEMPLATES = {
   agentCardSetup: (_prefix: string, setupUrl: string) =>
     `One Time Agent Payment Setup needed before I can issue this payment card.\nOpen: ${setupUrl || ROSE_LABS_URL}`,
 
-  agentCompleted: (_prefix: string, summary: string, url: string) =>
-    `Done: ${summary}\n\nView agent: ${url || ROSE_LABS_URL}`,
+  agentCompleted: (_prefix: string, summary: string, url: string, outputLines: string[] = []) =>
+    [`Done: ${summary}`, ...outputLines.slice(0, 6), `View agent: ${url || ROSE_LABS_URL}`].join(
+      '\n'
+    ),
 
   costLimit: (_prefix: string, taskLabel: string, costCents: number, limitCents: number) =>
     `I hit the $${(limitCents / 100).toFixed(2)} budget limit for "${taskLabel}". Reply with the amount to add if you want me to continue.`,

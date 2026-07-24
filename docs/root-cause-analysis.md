@@ -150,17 +150,37 @@ Unavailable external state does not waive the local-reproduction requirement. Re
 
 Do not classify an LLM issue as "model/provider timeout" and stop there. Treat the LLM request as data: preserve it, replay it, diff it against nearby successful calls, and identify whether the failing condition is in our prompt/context/schema/config, our provider-routing/auth code, or a third-party service state.
 
+### Model-intelligence proof protocol
+
+**Model intelligence limitation** is a valid classification only when a
+controlled replay proves that model capability is the causal variable:
+
+1. Reconstruct the exact failing call from the evidence required above.
+2. Run it through the same local client path with the original model and
+   reproduce the failure.
+3. Change only the model selection, keeping the messages, system prompt, tools,
+   response schema, generation config, provider path, and client code fixed.
+4. Show that the upgraded model passes the unchanged acceptance assertion.
+5. When output is nondeterministic, report repeated trial counts for both models
+   and show a clear separation; one failure followed by one success may be luck.
+
+For example, the same captured call failing on Opus 4.8 and passing on Fable 5
+can prove this classification. A simultaneous prompt, schema, tool, context,
+routing, or generation-config change cannot: reduce the comparison until all
+non-model variables are held constant.
+
 ## Step 4: Classify the failure
 
 Not all errors are bugs in our code. Before writing a fix, classify:
 
-| Classification                                                      | Example                                               | Correct response                                                                         |
-| ------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| **Our bug** — our code produces wrong output given valid input      | JSON parse error on well-formed LLM response          | Fix our code                                                                             |
-| **Third-party failure** — external service returns an error         | 402 out of credits, 429 rate limited, provider outage | Surface the error clearly to the user; do NOT add fallbacks that mask it                 |
-| **Input error** — bad data entered the system                       | Malformed user goal, missing required field           | Validate at the system boundary where the input enters; do NOT patch downstream handlers |
-| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token  | Report the specific missing config; do NOT add "works without it" fallbacks              |
-| **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change      | Fix the test, not the production code                                                    |
+| Classification                                                      | Example                                                                  | Correct response                                                                                     |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| **Our bug** — our code produces wrong output given valid input      | JSON parse error on well-formed LLM response                             | Fix our code                                                                                         |
+| **Third-party failure** — external service returns an error         | 402 out of credits, 429 rate limited, provider outage                    | Surface the error clearly to the user; do NOT add fallbacks that mask it                             |
+| **Input error** — bad data entered the system                       | Malformed user goal, missing required field                              | Validate at the system boundary where the input enters; do NOT patch downstream handlers             |
+| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token                     | Report the specific missing config; do NOT add "works without it" fallbacks                          |
+| **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change                         | Fix the test, not the production code                                                                |
+| **Model intelligence limitation**                                   | The unchanged captured call fails on the original model and passes on a more capable model | Upgrade the minimum capable model or model-selection policy and preserve the controlled replay as a regression |
 
 **The critical rule:** Third-party failures and configuration errors are NOT bugs in our code. Never write code to "handle" a 402 by falling back to a different provider silently. Never write code to "handle" a missing env var by using a default. These mask real problems. Surface them to the user.
 
@@ -208,6 +228,7 @@ For benchmark failures, attach the diagnosis to one of the problem buckets below
 | **Concurrency inefficiency**                           | Correct work becomes slow or flaky because parallel execution amplifies CPU, memory, connection-pool, event-loop, worker-slot, provider-rate-limit, or shared-service contention. Evidence must compare per-unit work with concurrent-run behavior.                                        | A single agent/task is slow for reasons unrelated to load, a provider is down, or the benchmark prompt asks for unnecessary work.                                                                   | Fix scheduling/resource ownership: bounded concurrency, batching, coalescing, per-run isolation, shared expensive sampling, task partitioning, or explicit load-test isolation.                                     |
 | **Fixture/environment/data mismatch**                  | The benchmark run used the wrong seed data, stale local/prod DB state, missing env var, wrong public URL, wrong task queue, wrong user/account identity, or a fixture that does not match the task's assertions.                                                                           | The data is correct but the agent lacks instructions/capability, or an external service returned a legitimate error.                                                                                | Make the fixture declarative and validated before launch: base image, deltas, env checks, URL/task-queue injection, identity mapping, and preflight assertions.                                                     |
 | **Observability/trace capture gap**                    | The failure cannot be diagnosed or replayed because the benchmark did not preserve the raw request, spans, tool inputs/outputs, screenshots, active tab state, logs, or evaluator artifacts needed to compare source to sink.                                                              | Evidence exists but was not read, or the fix is only to make logs prettier after the root cause is already proven.                                                                                  | Capture the missing evidence at the source boundary and persist it with the run record so future RCAs can replay the same class of failure.                                                                         |
+| **Model intelligence limitation**                      | The exact captured LLM call reproducibly fails on the original model and passes on an upgraded model with all non-model variables held constant. For nondeterministic behavior, repeated trials must show a clear separation.                                                            | The prompt or contract is inconsistent, input/context is missing, a tool capability is absent, the provider errors or times out, any non-model input changed, or the evidence is a single lucky model flip. | Upgrade the minimum capable model or the owned model-selection policy for this class of calls, and preserve the controlled old-model/new-model replay as a permanent regression.                                      |
 | **Other**                                              | Only after proving none of the buckets above fits.                                                                                                                                                                                                                                         | Any case that can reasonably fit a specific bucket.                                                                                                                                                 | Name the missing bucket candidate in the RCA so this taxonomy can be tightened later.                                                                                                                               |
 
 The bucket is the **problem**, not the solution. Do not classify "add popup auto-dismiss" as the problem when the general failure is that screenshot/observation support omits active popups. The general fix is to improve the observation channel so every caller sees the popup state; auto-dismiss is a point workaround unless the product requirement is specifically to dismiss that class of popup.

@@ -69,7 +69,7 @@ failure
   → /RCA evidence → unchanged local repro → fix
   → automated /deploy offline + smoke gates
   → blocked (exact failed step) | ready for review
-  → formal APPROVED review of the exact verified HEAD
+  → formal APPROVED review or maintainer `/deploy` PR comment on the exact verified HEAD
   → immediate merge → shipped
 ```
 
@@ -88,9 +88,11 @@ included in the next batch. The agent answers in the original Slack thread;
 feedback is marked consumed only after trusted finalization and the thread reply.
 
 Chat feedback never authorizes a merge. Automated `/deploy` work proceeds without
-a chat approval pause, but the exact PR HEAD still requires a formal GitHub
-APPROVED review. That review also satisfies any prompt or recovery-behavior human
-gate deferred by the automated run. A changed HEAD makes the approval stale.
+a chat approval pause. The exact ready PR HEAD can be approved either by a formal
+GitHub APPROVED review or, for a one-engineer repository where the author cannot
+review their own PR, an exact `/deploy` top-level PR comment from a maintainer.
+Both paths satisfy deferred prompt or recovery-behavior gates and fail closed if
+the HEAD changes.
 
 ## Verification (automated)
 

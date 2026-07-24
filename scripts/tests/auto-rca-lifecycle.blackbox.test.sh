@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Each fixture below opts into its own lifecycle state. A real Auto-RCA workflow
+# exports its card handle globally, so clear it before testing the no-handle
+# branch that must create a new card.
+unset SLACK_TS SLACK_CHANNEL
+unset AUTO_RCA_GATE_STATE_DIR RCA_PIPELINE_STEP_OVERRIDE
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RCA_TOOL="$ROOT_DIR/scripts/auto-rca-tool"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-rca-lifecycle.XXXXXX")"
@@ -22,14 +28,24 @@ set -euo pipefail
 args=" $* "
 case "$args" in
   *" branch --show-current "*) printf '%s\n' "$RCA_BRANCH" ;;
-  *" status --porcelain --untracked-files=normal "*) ;;
+  *" status --porcelain --untracked-files=normal "*) printf '%s' "${FAKE_GIT_STATUS:-}" ;;
   *" diff --name-only --diff-filter=U "*) ;;
+  *" diff --cached --quiet "*)
+    [ "${FAKE_GIT_CACHED_DIRTY:-false}" != true ]
+    ;;
   *" rev-list --count origin/main..HEAD "*) printf '%s\n' "${FAKE_REV_COUNT:-1}" ;;
   *" rev-parse HEAD "*) printf '0123456789abcdef0123456789abcdef01234567\n' ;;
+  *" cat-file -e "*) ;;
   *" remote set-url origin "*) ;;
-  *" push --set-upstream origin "*) ;;
-  *" add "*) ;;
-  *" commit "*) ;;
+  *" push --set-upstream origin "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'push %s\n' "$*" >> "$GIT_CALLS"
+    ;;
+  *" add "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'add %s\n' "$*" >> "$GIT_CALLS"
+    ;;
+  *" commit "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'commit %s\n' "$*" >> "$GIT_CALLS"
+    ;;
   *) printf 'unexpected fake git invocation: %s\n' "$*" | tee -a "$UNEXPECTED_CALLS" >&2; exit 90 ;;
 esac
 SH
@@ -105,6 +121,9 @@ case "${1:-}" in
   chmod)
     exit 0
     ;;
+  chown)
+    exit 0
+    ;;
   install)
     source="${@: -2:1}"
     target="${@: -1}"
@@ -118,8 +137,31 @@ cat > "$FAKE_BIN/curl" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >> "$CURL_CALLS"
+if [[ "$*" == *"/api/agents/"* ]]; then
+  body_file=''
+  while [ "$#" -gt 0 ]; do
+    if [ "$1" = '-o' ]; then
+      body_file="$2"
+      break
+    fi
+    shift
+  done
+  [ -n "$body_file" ] || exit 92
+  printf '%s\n' '{"message":"Agent not found"}' > "$body_file"
+  printf '404'
+  exit 0
+fi
+if [[ "$*" == *"clickhouse.test"* ]]; then
+  printf '%s\n' '{"timestamp":"2026-07-23 18:00:00","raw":"retained agent failure"}'
+  exit 0
+fi
 if [[ "$*" == *"conversations.history"* ]] && [ -n "${FAKE_HISTORY_TS:-}" ]; then
   printf '{"ok":true,"messages":[{"ts":"%s","metadata":{"event_type":"rose_auto_rca","event_payload":{"agent_id":"d29e631e-b78a-40dd-8f0b-732d1143a854"}}}]}\n' "$FAKE_HISTORY_TS"
+  exit 0
+fi
+if [[ "$*" == *"conversations.replies"* ]] && [ -n "${FAKE_REPLY_TEXT:-}" ]; then
+  jq -n --arg ts "${FAKE_SLACK_TS:-1784617220.480779}" --arg text "$FAKE_REPLY_TEXT" \
+    '{ok:true,messages:[{ts:$ts,text:$text}]}'
   exit 0
 fi
 if [ "${FAKE_SLACK_RATE_LIMIT_ONCE:-false}" = true ]; then
@@ -139,6 +181,126 @@ fi
 SH
 
 chmod +x "$FAKE_BIN/git" "$FAKE_BIN/gh" "$FAKE_BIN/sudo" "$FAKE_BIN/curl"
+
+ZERO_TURN_EXECUTION="$TEST_ROOT/zero-turn-execution.json"
+SUCCESSFUL_EXECUTION="$TEST_ROOT/successful-execution.json"
+MAX_TURN_EXECUTION="$TEST_ROOT/max-turn-execution.json"
+ONE_TURN_ERROR_EXECUTION="$TEST_ROOT/one-turn-error-execution.json"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":0}]' > "$ZERO_TURN_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":1}]' > "$SUCCESSFUL_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":81}]' > "$MAX_TURN_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":true,"num_turns":1,"total_cost_usd":0}]' > "$ONE_TURN_ERROR_EXECUTION"
+if RCA_INVESTIGATOR_EXECUTION_FILE="$ZERO_TURN_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
+  echo "FAIL: a zero-turn Claude execution passed the investigator invariant" >&2
+  exit 1
+fi
+if RCA_INVESTIGATOR_EXECUTION_FILE="$ONE_TURN_ERROR_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
+  echo "FAIL: a one-turn errored Claude execution passed the investigator invariant" >&2
+  exit 1
+fi
+RCA_INVESTIGATOR_EXECUTION_FILE="$SUCCESSFUL_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null
+RCA_INVESTIGATOR_EXECUTION_FILE="$MAX_TURN_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null
+
+CHECKPOINT_GIT_CALLS="$TEST_ROOT/checkpoint-git-calls.txt"
+: > "$CHECKPOINT_GIT_CALLS"
+PATH="$FAKE_BIN:$PATH" \
+UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+GIT_CALLS="$CHECKPOINT_GIT_CALLS" \
+FAKE_GIT_STATUS=' M fix.py' \
+FAKE_GIT_CACHED_DIRTY=true \
+GH_TOKEN='test-github-token' \
+AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+RCA_BRANCH="auto-rca/d29e631eb78a-123" \
+AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+AUTO_RCA_CONTEXT_DIR="$CONTEXT" \
+GITHUB_REPOSITORY="Rose-Ai-Labs/rose" \
+  "$RCA_TOOL" checkpoint-draft >/dev/null
+grep -Fq 'auto-RCA: checkpoint production agent d29e631e-b78a-40dd-8f0b-732d1143a854' \
+  "$CHECKPOINT_GIT_CALLS" || {
+    echo 'FAIL: max-turn investigator work was not committed before trusted gates' >&2
+    exit 1
+  }
+grep -Fq 'push --set-upstream origin auto-rca/d29e631eb78a-123' \
+  "$CHECKPOINT_GIT_CALLS" || {
+    echo 'FAIL: investigator checkpoint was not pushed before trusted gates' >&2
+    exit 1
+  }
+
+: > "$TEST_ROOT/curl-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CURL_CALLS="$TEST_ROOT/curl-calls.txt" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+PROD_BACKEND_URL='https://backend.test' \
+BACKEND_API_KEY='test-backend-key' \
+CLICKHOUSE_ENDPOINT='https://clickhouse.test' \
+CLICKHOUSE_USER='test-clickhouse-user' \
+CLICKHOUSE_PASSWORD='test-clickhouse-password' \
+  "$RCA_TOOL" collect-evidence >/dev/null
+grep -Fq '"unavailable":true' "$FAKE_GATE_ROOT/evidence.txt" || {
+  echo 'FAIL: expired backend agent record was not represented in trusted evidence' >&2
+  exit 1
+}
+grep -Fq 'retained agent failure' "$FAKE_GATE_ROOT/evidence.txt" || {
+  echo 'FAIL: retained worker logs were discarded when the backend agent record expired' >&2
+  exit 1
+}
+
+mkdir -p "$CHECKOUT/.test-logs/synthetic-failure"
+ln -sfn synthetic-failure "$CHECKOUT/.test-logs/latest"
+printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' > "$FAKE_GATE_ROOT/baseline.sha"
+printf '%s\n' 'FAIL: dependency preflight could not resolve test package' \
+  'credential=test-backend-key' \
+  > "$CHECKOUT/.test-logs/synthetic-failure/Dependency_Preflight.log"
+printf '%s\n' 'Dependency Preflight' \
+  > "$CHECKOUT/.test-logs/synthetic-failure/failed-suites.txt"
+printf '%s\n' 1 > "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.start"
+printf '%s\n' running > "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.status"
+cat > "$CHECKOUT/scripts/test.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$CHECKOUT/scripts/test.sh"
+if PATH="$FAKE_BIN:$PATH" \
+  UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+  AUTO_RCA_CONTEXT_DIR="$CONTEXT" \
+  BACKEND_API_KEY='test-backend-key' \
+    "$RCA_TOOL" offline-gates >/dev/null 2>&1; then
+  echo 'FAIL: a synthetic offline gate failure was accepted' >&2
+  exit 1
+fi
+gate_failure="$(
+  PATH="$FAKE_BIN:$PATH" \
+  FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+  AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+  AGENT_ID='d29e631e-b78a-40dd-8f0b-732d1143a854' \
+    "$RCA_TOOL" verification
+)"
+grep -Fq 'FAIL: dependency preflight could not resolve test package' <<< "$gate_failure" || {
+  echo 'FAIL: retry investigator did not receive the deploy failure detail' >&2
+  exit 1
+}
+grep -Fq '[REDACTED:BACKEND_API_KEY]' <<< "$gate_failure" || {
+  echo 'FAIL: deploy failure evidence did not redact workflow credentials' >&2
+  exit 1
+}
+if grep -Fq 'test-backend-key' <<< "$gate_failure"; then
+  echo 'FAIL: deploy failure evidence exposed a workflow credential' >&2
+  exit 1
+fi
+[ "$(cat "$FAKE_GATE_ROOT/timeline.deploy-primary-offline.detail")" = \
+  'Dependency Preflight' ] || {
+  echo 'FAIL: offline failure did not record its exact failing suite' >&2
+  exit 1
+}
 
 assert_dispatch_plan() {
   local expected="$1" actual
@@ -179,6 +341,7 @@ run_approved_deploy_plan() {
     REVIEW_COMMIT_SHA="$APPROVED_HEAD" \
     PR_HEAD_REF="auto-rca/$APPROVED_AGENT" \
     PR_HEAD_REPO=Rose-Ai-Labs/rose \
+    PR_BASE_REF=main \
     PR_DRAFT=false \
     PR_TITLE="auto-RCA: Production agent failure $APPROVED_AGENT" \
     PR_BODY="$APPROVED_BODY" \
@@ -189,6 +352,15 @@ approved_output="$TEST_ROOT/approved-output.txt"
 GITHUB_OUTPUT="$approved_output" run_approved_deploy_plan >/dev/null
 grep -Fq "agent_id=$APPROVED_AGENT" "$approved_output" || exit 1
 grep -Fq "run_id=$APPROVED_RUN" "$approved_output" || exit 1
+
+: > "$approved_output"
+encoded_approved_body="$(printf '%s' "$APPROVED_BODY" | base64 | tr -d '\n')"
+GITHUB_OUTPUT="$approved_output" run_approved_deploy_plan \
+  PR_BODY='' PR_BODY_B64="$encoded_approved_body" >/dev/null
+grep -Fq "agent_id=$APPROVED_AGENT" "$approved_output" || {
+  echo 'FAIL: exact-head deploy rejected the encoded PR body used by comment approval' >&2
+  exit 1
+}
 
 if run_approved_deploy_plan REVIEW_COMMIT_SHA=ffffffffffffffffffffffffffffffffffffffff \
   >/dev/null 2>&1; then
@@ -201,6 +373,10 @@ if run_approved_deploy_plan PR_DRAFT=true >/dev/null 2>&1; then
 fi
 if run_approved_deploy_plan PR_HEAD_REPO=attacker/rose >/dev/null 2>&1; then
   echo 'FAIL: approved deploy accepted a fork PR' >&2
+  exit 1
+fi
+if run_approved_deploy_plan PR_BASE_REF=release >/dev/null 2>&1; then
+  echo 'FAIL: approved deploy accepted an Auto-RCA PR not targeting main' >&2
   exit 1
 fi
 if run_approved_deploy_plan \
@@ -298,9 +474,10 @@ feedback_batch="$(printf '%s' "$feedback_comments" | \
 plain_comments="$(printf '%s' "$feedback_comments" | jq \
   '.[0] += [
     {"id":104,"body":"Please make the retry fix general.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"},
-    {"id":105,"body":"Also cover the timeout boundary.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"}
+    {"id":105,"body":"Also cover the timeout boundary.","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"},
+    {"id":106,"body":"/deploy","user":{"login":"maintainer","type":"User"},"author_association":"MEMBER"}
   ]')"
-plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=105 "$RCA_TOOL" feedback-batch)"
+plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=106 "$RCA_TOOL" feedback-batch)"
 [ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 104))[0].text')" = \
   'Please make the retry fix general.' ] || {
   echo 'FAIL: an older queued ordinary PR comment was lost when a newer comment triggered the run' >&2
@@ -309,6 +486,10 @@ plain_batch="$(printf '%s' "$plain_comments" | TRIGGER_COMMENT_ID=105 "$RCA_TOOL
 [ "$(printf '%s' "$plain_batch" | jq -r 'map(select(.id == 105))[0].text')" = \
   'Also cover the timeout boundary.' ] || {
   echo 'FAIL: the triggering ordinary PR comment still requires a slash command' >&2
+  exit 1
+}
+[ "$(printf '%s' "$plain_batch" | jq 'map(select(.id == 106)) | length')" -eq 0 ] || {
+  echo 'FAIL: the exact deploy approval command was queued as revision feedback' >&2
   exit 1
 }
 
@@ -631,6 +812,13 @@ timeline_event() {
 }
 timeline_event timeline-start rca-evidence 100
 timeline_event timeline-finish rca-evidence 112 passed
+timeline_event timeline-start rca-environment 112
+PATH="$FAKE_BIN:$PATH" \
+FAKE_GATE_ROOT="$FAKE_GATE_ROOT" \
+AUTO_RCA_GATE_STATE_DIR='/var/lib/rose-auto-rca/123' \
+RCA_TIMELINE_DETAIL='frontend locked Node dependencies' \
+  "$RCA_TOOL" timeline-detail >/dev/null
+timeline_event timeline-finish rca-environment 132 failed
 timeline_event timeline-start rca-primary-investigation 112
 timeline_event timeline-finish rca-primary-investigation 634 passed
 timeline_event timeline-start rca-primary-reproduction 634
@@ -639,6 +827,8 @@ timeline_event timeline-start deploy-primary-offline 653
 timeline_event timeline-finish deploy-primary-offline 718 passed
 timeline_event timeline-start deploy-primary-smoke 718
 timeline_event timeline-finish deploy-primary-smoke 909 failed
+printf '%s\n' 'Benchmark Hub cloud fleet execution' \
+  > "$FAKE_GATE_ROOT/timeline.deploy-primary-smoke.detail"
 
 waterfall_message="$(
   PATH="$FAKE_BIN:$PATH" \
@@ -653,16 +843,17 @@ waterfall_message="$(
   RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
     "$RCA_TOOL" slack-message
 )"
-grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' <<< "$waterfall_message" || {
+grep -Fq '*Pipeline step:* /deploy · smoke gates · Benchmark Hub cloud fleet execution — failed' <<< "$waterfall_message" || {
   echo 'FAIL: Slack did not identify the exact failed deploy phase' >&2
   exit 1
 }
 expected_waterfall='*Step waterfall:*
 ✅ /RCA · production evidence — 12s
+❌ /RCA · test environment setup · frontend locked Node dependencies — 20s
 ✅ /RCA · primary investigation — 8m 42s
 ✅ /RCA · unchanged local reproduction — 19s
 ✅ /deploy · offline gates — 1m 5s
-❌ /deploy · smoke gates — 3m 11s'
+❌ /deploy · smoke gates · Benchmark Hub cloud fleet execution — 3m 11s'
 grep -Fq "$expected_waterfall" <<< "$waterfall_message" || {
   echo 'FAIL: Slack duration waterfall is not human-readable or ordered' >&2
   exit 1
@@ -688,7 +879,7 @@ grep -Fq '## Automated /RCA → /deploy waterfall' "$CAPTURED_BODY" || {
   echo 'FAIL: final trusted duration waterfall was not persisted on the PR' >&2
   exit 1
 }
-grep -Fq '*Pipeline step:* /deploy · smoke gates — failed' "$CAPTURED_BODY" || exit 1
+grep -Fq '*Pipeline step:* /deploy · smoke gates · Benchmark Hub cloud fleet execution — failed' "$CAPTURED_BODY" || exit 1
 if timeline_event timeline-finish deploy-primary-smoke 910 invented 2>/dev/null; then
   echo 'FAIL: untrusted timeline status was accepted' >&2
   exit 1
@@ -802,6 +993,30 @@ if grep -Fq 'chat.postMessage' "$TEST_ROOT/curl-calls.txt"; then
   echo "FAIL: recovered lifecycle duplicated an existing Slack card" >&2
   exit 1
 fi
+
+: > "$TEST_ROOT/curl-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CURL_CALLS="$TEST_ROOT/curl-calls.txt" \
+FAKE_REPLY_TEXT='*Affected user:* Ada Lovelace
+*Current state:* 🔴 RCA blocked — draft needs attention' \
+AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+AFFECTED_USER_NAME='Affected user unavailable' \
+RCA_STATE=revising \
+RCA_FE_URL='https://roselabs.ai/?agent-id=d29e631e-b78a-40dd-8f0b-732d1143a854' \
+RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
+RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
+SLACK_BOT_TOKEN='test-slack-token' \
+SLACK_CHANNEL='C0BE1B87882' \
+SLACK_TS='1784617220.480779' \
+"$RCA_TOOL" slack-update
+grep -Fq 'conversations.replies' "$TEST_ROOT/curl-calls.txt" || {
+  echo "FAIL: revision did not read the existing lifecycle card before degrading its affected user" >&2
+  exit 1
+}
+grep -Fq '*Affected user:* Ada Lovelace' "$TEST_ROOT/curl-calls.txt" || {
+  echo "FAIL: revision replaced a known affected user with an unavailable placeholder" >&2
+  exit 1
+}
 
 : > "$TEST_ROOT/curl-calls.txt"
 : > "$TEST_ROOT/curl-count.txt"
