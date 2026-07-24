@@ -66,10 +66,8 @@ jobs:
             sudo useradd --system --create-home --shell /bin/bash rose-auto-rca
           fi
           sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
-          sudo install -o root -g root -m 0555 scripts/auto-rca-claude-wrapper /usr/local/bin/rose-auto-rca-claude-wrapper
           sudo install -o root -g root -m 0444 .github/auto-rca-prompt.txt /usr/local/share/rose-auto-rca-prompt.txt
           sudo install -d -o root -g rose-auto-rca -m 0750 "$AUTO_RCA_GATE_STATE_DIR"
-          sudo install -d -o rose-auto-rca -g rose-auto-rca -m 0700 /home/rose-auto-rca/tmp
 
       - name: Resolve and validate lifecycle context
         shell: bash
@@ -259,8 +257,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git config user.name "rose-auto-rca[bot]"
-          git config user.email "auto-rca@roselabs.ai"
+          [[ "$GITHUB_ACTOR_ID" =~ ^[0-9]+$ ]] || {
+            echo 'GitHub actor ID is required for an attributable RCA commit.' >&2
+            exit 1
+          }
+          git config user.name "$GITHUB_ACTOR"
+          git config user.email "${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.github.com"
           if [ "$RCA_MODE" = initial ]; then
             git checkout -b "$RCA_BRANCH"
           else
@@ -391,43 +393,16 @@ jobs:
           RCA_TIMELINE_STEP: rca-primary-investigation
         run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
-      - name: Prepare unprivileged primary coding environment
-        id: prepare_primary
-        if: env.RCA_NOOP != 'true'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          install_claude() {
-            local attempt
-            for attempt in 1 2 3; do
-              if sudo -n -u rose-auto-rca env HOME=/home/rose-auto-rca DISABLE_AUTOUPDATER=1 \
-                bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.216'; then
-                return
-              fi
-              sleep "$((attempt * 5))"
-            done
-            return 1
-          }
-          install_claude
-          if sudo -n -u rose-auto-rca sudo -n true >/dev/null 2>&1; then
-            echo 'The RCA coding user unexpectedly has sudo access.' >&2
-            exit 1
-          fi
-          runner_group="$(id -gn)"
-          sudo chown -R rose-auto-rca:"$runner_group" "$GITHUB_WORKSPACE"
-          sudo chmod -R u+rwX,g+rwX,o-rwx "$GITHUB_WORKSPACE"
-
       - name: Root-cause with dedicated Claude account
         id: investigator_primary
-        if: steps.prepare_primary.outcome == 'success'
+        if: env.RCA_NOOP != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
           claude_code_oauth_token: ${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          allowed_non_write_users: ${{ github.actor }}
-          path_to_claude_code_executable: /usr/local/bin/rose-auto-rca-claude-wrapper
+          bot_id: ${{ github.actor_id }}
+          bot_name: ${{ github.actor }}
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --model opus
@@ -435,29 +410,26 @@ jobs:
             --max-turns 80
             --permission-mode bypassPermissions
 
-      - name: Restore trusted ownership after primary attempt
-        id: restore_primary
+      - name: Require a real primary investigator turn
+        id: validate_primary
         if: always() && steps.investigator_primary.outcome != 'skipped'
         continue-on-error: true
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
-          sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
-          sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 \
-            "$AUTO_RCA_GATE_STATE_DIR/git-config" "$GITHUB_WORKSPACE/.git/config"
+        env:
+          RCA_INVESTIGATOR_EXECUTION_FILE: ${{ steps.investigator_primary.outputs.execution_file }}
+        run: /usr/local/bin/rose-auto-rca-tool verify-investigator-run
 
       - name: Timeline — finish primary investigation
         if: always() && steps.timeline_primary_investigation_start.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-primary-investigation
-          RCA_TIMELINE_STATUS: ${{ steps.prepare_primary.outcome == 'success' && steps.investigator_primary.outcome == 'success' && steps.restore_primary.outcome == 'success' && 'passed' || 'failed' }}
+          RCA_TIMELINE_STATUS: ${{ steps.investigator_primary.outcome == 'success' && steps.validate_primary.outcome == 'success' && 'passed' || 'failed' }}
         run: /usr/local/bin/rose-auto-rca-tool timeline-finish
 
       - name: Timeline — start primary reproduction
         id: timeline_primary_reproduction_start
-        if: always() && steps.restore_primary.outcome == 'success'
+        if: always() && steps.validate_primary.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-primary-reproduction
@@ -465,7 +437,7 @@ jobs:
 
       - name: Verify unchanged reproduction after primary attempt
         id: repro_primary
-        if: always() && steps.restore_primary.outcome == 'success'
+        if: always() && steps.validate_primary.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
@@ -540,43 +512,16 @@ jobs:
           RCA_TIMELINE_STEP: rca-retry-investigation
         run: /usr/local/bin/rose-auto-rca-tool timeline-start
 
-      - name: Prepare unprivileged retry coding environment
-        id: prepare_retry
-        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          install_claude() {
-            local attempt
-            for attempt in 1 2 3; do
-              if sudo -n -u rose-auto-rca env HOME=/home/rose-auto-rca DISABLE_AUTOUPDATER=1 \
-                bash -c 'set -o pipefail; curl -fsSL https://claude.ai/install.sh | bash -s -- 2.1.216'; then
-                return
-              fi
-              sleep "$((attempt * 5))"
-            done
-            return 1
-          }
-          install_claude
-          if sudo -n -u rose-auto-rca sudo -n true >/dev/null 2>&1; then
-            echo 'The RCA coding user unexpectedly has sudo access.' >&2
-            exit 1
-          fi
-          runner_group="$(id -gn)"
-          sudo chown -R rose-auto-rca:"$runner_group" "$GITHUB_WORKSPACE"
-          sudo chmod -R u+rwX,g+rwX,o-rwx "$GITHUB_WORKSPACE"
-
       - name: Retry incomplete RCA with secondary Claude account
         id: investigator_retry
-        if: always() && steps.prepare_retry.outcome == 'success'
+        if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'
         continue-on-error: true
         uses: anthropics/claude-code-action@b76a0776ae74036e77cd11018083743453d7ad35 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}
-          allowed_non_write_users: ${{ github.actor }}
-          path_to_claude_code_executable: /usr/local/bin/rose-auto-rca-claude-wrapper
+          bot_id: ${{ github.actor_id }}
+          bot_name: ${{ github.actor }}
           prompt: ${{ steps.prompt.outputs.prompt }}
           claude_args: |
             --model opus
@@ -584,29 +529,26 @@ jobs:
             --max-turns 80
             --permission-mode bypassPermissions
 
-      - name: Restore trusted ownership after retry
-        id: restore_retry
+      - name: Require a real retry investigator turn
+        id: validate_retry
         if: always() && steps.investigator_retry.outcome != 'skipped'
         continue-on-error: true
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
-          sudo chmod -R u+rwX,go-rwx "$GITHUB_WORKSPACE"
-          sudo install -o "$(id -u)" -g "$(id -g)" -m 0600 \
-            "$AUTO_RCA_GATE_STATE_DIR/git-config" "$GITHUB_WORKSPACE/.git/config"
+        env:
+          RCA_INVESTIGATOR_EXECUTION_FILE: ${{ steps.investigator_retry.outputs.execution_file }}
+        run: /usr/local/bin/rose-auto-rca-tool verify-investigator-run
 
       - name: Timeline — finish retry investigation
         if: always() && steps.timeline_retry_investigation_start.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-retry-investigation
-          RCA_TIMELINE_STATUS: ${{ steps.prepare_retry.outcome == 'success' && steps.investigator_retry.outcome == 'success' && steps.restore_retry.outcome == 'success' && 'passed' || 'failed' }}
+          RCA_TIMELINE_STATUS: ${{ steps.investigator_retry.outcome == 'success' && steps.validate_retry.outcome == 'success' && 'passed' || 'failed' }}
         run: /usr/local/bin/rose-auto-rca-tool timeline-finish
 
       - name: Timeline — start retry reproduction
         id: timeline_retry_reproduction_start
-        if: always() && steps.restore_retry.outcome == 'success'
+        if: always() && steps.validate_retry.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-retry-reproduction
@@ -614,7 +556,7 @@ jobs:
 
       - name: Verify unchanged reproduction after retry
         id: repro_retry
-        if: always() && steps.restore_retry.outcome == 'success'
+        if: always() && steps.validate_retry.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
@@ -690,8 +632,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
           AUTO_RCA_PR_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}
-          PRIMARY_INVESTIGATOR_OUTCOME: ${{ steps.investigator_primary.outcome }}
-          RETRY_INVESTIGATOR_OUTCOME: ${{ steps.investigator_retry.outcome }}
+          PRIMARY_INVESTIGATOR_OUTCOME: ${{ steps.validate_primary.outcome }}
+          RETRY_INVESTIGATOR_OUTCOME: ${{ steps.validate_retry.outcome }}
         run: /usr/local/bin/rose-auto-rca-tool ensure-draft
 
       - name: Timeline — finish trusted PR finalization
