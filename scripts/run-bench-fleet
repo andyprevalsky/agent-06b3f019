@@ -1570,14 +1570,185 @@ registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
+registry_record_is_stale_pre_volume_id() {  # <record-file>; 0 = old enough for provider absence proof
+    # Exact volume attribution was added after the first durable ownership
+    # registry format shipped. A dead controller can therefore leave a record
+    # with name+machine ID but no volume ID. If teardown already removed both,
+    # retaining that record forever blocks every successor fleet.
+    #
+    # Do not trust a fresh provider absence: a clone and its forked volume can
+    # still be crossing Fly's visibility boundary. The default matches the
+    # orphan-volume grace and is much longer than the exact lookup deadline.
+    local record="$1" ttl now mt
+    ttl="${CLOUDBENCH_LEGACY_VOLUME_RECORD_TTL_SECONDS:-${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}}"
+    case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
+    now="$(date +%s)"
+    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    [ $(( now - mt )) -ge "$ttl" ]
+}
+
+registry_retire_absent_stale_pre_volume_records() {  # <registry-dir>
+    local registry="$1" record clone_name id volume_id candidate=0 ttl confirm_seconds
+    local volumes_first machines_first volumes_second machines_second retired proof_status
+    for record in "$registry"/clones/*; do
+        [ -f "$record" ] || continue
+        id="$(registry_meta_value "$record" id)"
+        volume_id="$(registry_meta_value "$record" volume_id)"
+        if [ -n "$id" ] && [ -z "$volume_id" ] \
+            && registry_record_is_stale_pre_volume_id "$record"; then
+            candidate=1
+            break
+        fi
+    done
+    [ "$candidate" = "1" ] || return 0
+
+    # Read volumes before machines in each sample. If a machine disappears
+    # during the pair, a still-attached volume then points at an absent machine
+    # and blocks retirement. Reading in the opposite order could incorrectly
+    # treat that detach-propagation window as a healthy live neighbor.
+    volumes_first="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 2
+    machines_first="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    confirm_seconds="${CLOUDBENCH_LEGACY_ABSENCE_CONFIRM_SECONDS:-5}"
+    case "$confirm_seconds" in ''|*[!0-9]*) confirm_seconds=5 ;; esac
+    [ "$confirm_seconds" -gt 0 ] && sleep "$confirm_seconds"
+    volumes_second="$(FLY volumes list -a "$APP" --json 2>/dev/null)" || return 2
+    machines_second="$(FLY machines list -a "$APP" --json 2>/dev/null)" || return 2
+    ttl="${CLOUDBENCH_LEGACY_VOLUME_RECORD_TTL_SECONDS:-${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}}"
+    case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
+
+    retired="$(
+        python3 - "$registry" "$VOLUME_NAME" "${WARM_VOLUME_ID:-}" "$ttl" \
+            3< <(printf '%s' "$volumes_first") \
+            4< <(printf '%s' "$machines_first") \
+            5< <(printf '%s' "$volumes_second") \
+            6< <(printf '%s' "$machines_second") <<'PY'
+import json
+import os
+import re
+import sys
+import time
+
+registry, volume_name, warm_volume_id, ttl_raw = sys.argv[1:]
+ttl = int(ttl_raw)
+
+
+def load_list(fd):
+    try:
+        value = json.load(os.fdopen(fd, encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        raise SystemExit(2)
+    if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+        raise SystemExit(2)
+    return value
+
+
+def machine_identity(items):
+    ids = set()
+    names = set()
+    for item in items:
+        machine_id = item.get("id")
+        name = item.get("name")
+        if not isinstance(machine_id, str) or not machine_id:
+            raise SystemExit(2)
+        if not isinstance(name, str) or not name:
+            raise SystemExit(2)
+        ids.add(machine_id)
+        names.add(name)
+    return ids, names
+
+
+def unsafe_clone_volume_exists(items, live_machine_ids):
+    for item in items:
+        volume_id = item.get("id")
+        name = item.get("name")
+        attached = item.get("attached_machine_id")
+        if not isinstance(volume_id, str) or not volume_id:
+            raise SystemExit(2)
+        if not isinstance(name, str) or not name:
+            raise SystemExit(2)
+        if attached is not None and not isinstance(attached, str):
+            raise SystemExit(2)
+        if name != volume_name or volume_id == warm_volume_id:
+            continue
+        if not attached or attached not in live_machine_ids:
+            return True
+    return False
+
+
+volumes_first = load_list(3)
+machines_first = load_list(4)
+volumes_second = load_list(5)
+machines_second = load_list(6)
+machine_ids_first, machine_names_first = machine_identity(machines_first)
+machine_ids_second, machine_names_second = machine_identity(machines_second)
+if unsafe_clone_volume_exists(volumes_first, machine_ids_first):
+    raise SystemExit(3)
+if unsafe_clone_volume_exists(volumes_second, machine_ids_second):
+    raise SystemExit(3)
+
+now = time.time()
+for entry in sorted(os.scandir(os.path.join(registry, "clones")), key=lambda item: item.name):
+    if not entry.is_file(follow_symlinks=False):
+        continue
+    try:
+        fields = {}
+        with open(entry.path, encoding="utf-8") as handle:
+            for raw in handle:
+                key, separator, value = raw.rstrip("\n").partition("=")
+                if separator and key not in fields:
+                    fields[key] = value
+        clone_name = fields.get("name", "")
+        machine_id = fields.get("id", "")
+        volume_id = fields.get("volume_id", "")
+        age = now - entry.stat(follow_symlinks=False).st_mtime
+    except OSError:
+        raise SystemExit(2)
+    if volume_id or age < ttl:
+        continue
+    if not re.fullmatch(r"cloudbench-[A-Za-z0-9._-]+", clone_name):
+        continue
+    if not re.fullmatch(r"[0-9a-f]+", machine_id):
+        continue
+    if machine_id in machine_ids_first or machine_id in machine_ids_second:
+        continue
+    if clone_name in machine_names_first or clone_name in machine_names_second:
+        continue
+    try:
+        os.unlink(entry.path)
+    except OSError:
+        raise SystemExit(2)
+    print(clone_name)
+PY
+    )"
+    proof_status=$?
+    [ "$proof_status" -eq 3 ] && return 3
+    [ "$proof_status" -eq 0 ] || return 2
+    while IFS= read -r clone_name; do
+        [ -n "$clone_name" ] || continue
+        echo "🧹 retiring stale pre-volume-ID clone record '$clone_name' (two provider samples prove machine/name and orphan volume absent)"
+    done <<< "$retired"
+}
+
 reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|forced>
     local registry="${1%/}" root="${FLEET_OWNERSHIP_ROOT%/}" mode="$2"
     local record clone_name id volume_id resolved details detail_status state
     local actual_name runner_count unresolved=0
+    local legacy_batch_status=0
     [ "$registry" != "$root" ] \
         && [ "${registry%/*}" = "$root" ] \
         || { echo "❌ refusing non-child fleet registry cleanup path: $registry" >&2; return 1; }
     [ -d "$registry/clones" ] || return 0
+    if [ "$mode" = "stale" ]; then
+        if registry_retire_absent_stale_pre_volume_records "$registry"; then
+            legacy_batch_status=0
+        else
+            legacy_batch_status=$?
+        fi
+        if [ "$legacy_batch_status" -ne 0 ] && [ "$legacy_batch_status" -ne 3 ]; then
+            echo "❌ could not establish a safe batched pre-volume-ID absence proof; refusing to provision" >&2
+            return 1
+        fi
+    fi
     for record in "$registry"/clones/*; do
         [ -f "$record" ] || continue
         clone_name="$(registry_meta_value "$record" name)"
@@ -1632,6 +1803,12 @@ reap_registry_clones() {  # reap_registry_clones <registry-dir> <current|stale|f
         if [ -n "${WARM_ID:-}" ] && [ "$id" = "$WARM_ID" ]; then
             echo "❌ ownership registry points at warm source machine $id; refusing cleanup" >&2
             return 1
+        fi
+        if [ "$legacy_batch_status" -eq 3 ] && [ -z "$volume_id" ] \
+            && registry_record_is_stale_pre_volume_id "$record"; then
+            echo "❌ stale pre-volume-ID record '$clone_name' remains unresolved because a clone volume is unattached or points at an absent machine" >&2
+            unresolved=1
+            continue
         fi
         details="$(registry_machine_details "$id")"
         detail_status=$?

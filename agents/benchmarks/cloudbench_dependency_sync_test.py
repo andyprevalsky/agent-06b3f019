@@ -5316,6 +5316,179 @@ if grep -Fxq vol_exact "$VOLUMES"; then exit 30; fi
     assert "volumes destroy vol_neighbor" not in log
 
 
+def test_stale_pre_volume_id_registry_retires_after_authoritative_absence(
+    tmp_path: Path,
+) -> None:
+    """A dead-owner record written before exact volume attribution must not
+    block every future fleet forever after both its machine and forked volume
+    are gone. Recovery may retire it only after the exact machine and clone
+    name are absent and a strict provider read proves there are no unattached
+    clone-data volumes. Attached neighbors and other volume names are not
+    ownership candidates and must remain untouched."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers_start = fleet.index("registry_meta_value() {")
+    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
+    helpers = fleet[helpers_start:helpers_end]
+    ownership_root = tmp_path / "ownership"
+    registry = ownership_root / ("b" * 32)
+    clones = registry / "clones"
+    clones.mkdir(parents=True)
+    old = time.time() - 7200
+    for index in range(64):
+        clone_name = f"cloudbench-legacy-{index:03d}"
+        record = clones / clone_name
+        record.write_text(f"name={clone_name}\nid={index + 1:014x}\n")
+        os.utime(record, (old, old))
+    calls = tmp_path / "calls"
+
+    script = f"""set -uo pipefail
+APP=bench-app
+VOLUME_NAME=cloudbench_data
+WARM_ID=feedface000000
+WARM_VOLUME_ID=vol_warm
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+sleep() {{ :; }}
+    FLY() {{
+      printf '%s\n' "$*" >> "$CALLS"
+      case "$1 $2" in
+        "machines list")
+          printf '%s\n' '[{{"id":"facefeed000002","name":"cloudbench-neighbor","state":"started"}}]'
+          return 0 ;;
+    "volumes list")
+      printf '%s\n' '[{{"id":"vol_warm","name":"cloudbench_data","attached_machine_id":"feedface000000"}},{{"id":"vol_neighbor","name":"cloudbench_data","attached_machine_id":"facefeed000002"}},{{"id":"vol_captest","name":"captest","attached_machine_id":null}}]'
+      return 0 ;;
+  esac
+  return 99
+}}
+reap_volume() {{ echo "unexpected volume destroy: $1" >&2; return 99; }}
+reap_machine() {{ echo "unexpected machine destroy: $1" >&2; return 99; }}
+registry_runner_count() {{ echo "unexpected runner probe: $1" >&2; return 99; }}
+{helpers}
+reap_registry_clones "$REG" stale
+rc=$?
+[ "$rc" = "0" ] || exit "$rc"
+if find "$REG/clones" -type f | grep -q .; then exit 90; fi
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "retiring stale pre-volume-ID clone record" in result.stdout
+    log = calls.read_text()
+    assert log.count("machines list") == 2
+    assert log.count("volumes list") == 2
+    assert "destroy" not in log
+
+
+def test_stale_pre_volume_id_registry_fails_closed_without_complete_absence_proof(
+    tmp_path: Path,
+) -> None:
+    """A live exact name, an unattached clone-data volume, or malformed volume
+    inventory each invalidates the legacy-record absence proof."""
+    fleet = FLEET_SCRIPT.read_text()
+    helpers_start = fleet.index("registry_meta_value() {")
+    helpers_end = fleet.index("\nfleet_registry_remove_if_empty() {", helpers_start)
+    helpers = fleet[helpers_start:helpers_end]
+    cases = (
+        (
+            "live-name",
+            '[{"id":"facefeed000002","name":"cloudbench-legacy","state":"stopped"}]',
+            "[]",
+            1,
+            3,
+            2,
+        ),
+        (
+            "orphan-volume",
+            "[]",
+            '[{"id":"vol_orphan","name":"cloudbench_data","attached_machine_id":null}]',
+            64,
+            2,
+            2,
+        ),
+        (
+            "stale-attached-volume",
+            "[]",
+            '[{"id":"vol_legacy","name":"cloudbench_data","attached_machine_id":"deadbeef000001"}]',
+            64,
+            2,
+            2,
+        ),
+        ("malformed-volumes", "[]", "{}", 1, 2, 2),
+    )
+
+    for (
+        case_name,
+        machines_json,
+        volumes_json,
+        record_count,
+        expected_machine_reads,
+        expected_volume_reads,
+    ) in cases:
+        ownership_root = tmp_path / case_name / "ownership"
+        registry = ownership_root / ("c" * 32)
+        clones = registry / "clones"
+        clones.mkdir(parents=True)
+        old = time.time() - 7200
+        for index in range(record_count):
+            clone_name = "cloudbench-legacy" if record_count == 1 else f"cloudbench-legacy-{index:03d}"
+            record = clones / clone_name
+            record.write_text(f"name={clone_name}\nid={index + 1:014x}\n")
+            os.utime(record, (old, old))
+        calls = tmp_path / case_name / "calls"
+
+        script = f"""set -uo pipefail
+APP=bench-app
+VOLUME_NAME=cloudbench_data
+WARM_ID=feedface000000
+WARM_VOLUME_ID=vol_warm
+FLEET_OWNERSHIP_ROOT={shlex.quote(str(ownership_root))}
+REG={shlex.quote(str(registry))}
+CALLS={shlex.quote(str(calls))}
+MACHINES_JSON={shlex.quote(machines_json)}
+VOLUMES_JSON={shlex.quote(volumes_json)}
+CLOUDBENCH_CLONE_LOOKUP_SECONDS=0
+sleep() {{ :; }}
+FLY() {{
+  printf '%s\n' "$*" >> "$CALLS"
+  case "$1 $2" in
+    "machines list") printf '%s\n' "$MACHINES_JSON"; return 0 ;;
+    "volumes list") printf '%s\n' "$VOLUMES_JSON"; return 0 ;;
+  esac
+  return 99
+}}
+reap_volume() {{ echo "unexpected volume destroy: $1" >&2; return 99; }}
+reap_machine() {{ echo "unexpected machine destroy: $1" >&2; return 99; }}
+registry_runner_count() {{ echo "unexpected runner probe: $1" >&2; return 99; }}
+{helpers}
+reap_registry_clones "$REG" stale
+rc=$?
+[ "$rc" = "1" ] || exit 91
+[ "$(find "$REG/clones" -type f | wc -l | tr -d ' ')" = {record_count} ] || exit 92
+"""
+        result = subprocess.run(
+            ["bash", "-c", script],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=10,
+        )
+
+        assert result.returncode == 0, f"{case_name}:\n{result.stderr}{result.stdout}"
+        log = calls.read_text()
+        assert log.count("machines list") == expected_machine_reads
+        assert log.count("volumes list") == expected_volume_reads
+        assert "destroy" not in log
+
+
 def test_orphan_volume_sweep_reaps_only_aged_unattached_clone_volumes(tmp_path: Path) -> None:
     """The fleet-start sweep self-heals volumes leaked by killed runs. It must
     destroy ONLY unattached cloudbench_data volumes older than the grace period
@@ -7262,6 +7435,8 @@ def test_stale_name_only_registry_survives_provider_visibility_gap(tmp_path: Pat
             "registry_meta_value() {",
             "registry_resolve_name() {",
             "registry_machine_details() {",
+            "registry_record_is_stale_pre_volume_id() {",
+            "registry_retire_absent_stale_pre_volume_records() {",
             "reap_registry_clones() {",
         )
     )
