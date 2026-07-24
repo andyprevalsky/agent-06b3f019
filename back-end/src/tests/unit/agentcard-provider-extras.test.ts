@@ -8,10 +8,17 @@
  */
 
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, stat, unlink, utimes, writeFile } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
+import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import {
+  agentCardCredentialRefreshLockBudgets,
   ensureAgentCardSandboxFloat,
   loadAgentCardBenchmarkAdmin,
   refreshAgentCardSession,
@@ -29,6 +36,7 @@ import { settleAgentCardSandboxPayment } from '../../providers/agentcard/sandbox
 
 const createdUserIds: string[] = [];
 const ALERT_OPERATION_KEY = 'agentcard-org-wallet-low-balance';
+const execFileAsync = promisify(execFile);
 let passed = 0;
 const failures: string[] = [];
 
@@ -157,19 +165,23 @@ async function main(): Promise<void> {
   });
 
   await test('loadAgentCardBenchmarkAdmin reads the env JWT + API url override', async () => {
-    const prevJwt = process.env.AGENT_CARDS_ADMIN_JWT;
-    const prevUrl = process.env.ADMIN_API_URL;
-    process.env.AGENT_CARDS_ADMIN_JWT = 'env-jwt';
-    process.env.ADMIN_API_URL = 'https://admin.override.test';
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-env-'));
     try {
-      const admin = await loadAgentCardBenchmarkAdmin();
+      const admin = await loadAgentCardBenchmarkAdmin({
+        adminConfigPath: path.join(configRoot, 'missing-admin.json'),
+        userConfigPath: path.join(configRoot, 'missing-user.json'),
+        env: {
+          AGENT_CARDS_ADMIN_JWT: 'env-jwt',
+          ADMIN_API_URL: 'https://admin.override.test',
+        },
+        fetchImpl: (async () => {
+          throw new Error('isolated env config must not call the network');
+        }) as typeof fetch,
+      });
       assert.equal(admin.token, 'env-jwt');
       assert.equal(admin.apiUrl, 'https://admin.override.test');
     } finally {
-      if (prevJwt === undefined) delete process.env.AGENT_CARDS_ADMIN_JWT;
-      else process.env.AGENT_CARDS_ADMIN_JWT = prevJwt;
-      if (prevUrl === undefined) delete process.env.ADMIN_API_URL;
-      else process.env.ADMIN_API_URL = prevUrl;
+      await rm(configRoot, { recursive: true, force: true });
     }
   });
 
@@ -275,6 +287,351 @@ async function main(): Promise<void> {
         jsonResponse(200, { accessToken: 'missing-rotated-refresh-token' })) as typeof fetch
     );
     assert.equal(malformed, undefined);
+  });
+
+  await test('benchmark session refresh is bounded by its abort timeout', async () => {
+    const startedAt = Date.now();
+    const result = await refreshAgentCardSession(
+      'https://api.agentcard.test',
+      'old-refresh-token',
+      ((_: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')), {
+            once: true,
+          });
+        })) as typeof fetch,
+      10
+    );
+    assert.equal(result, undefined);
+    assert.ok(Date.now() - startedAt < 1_000, 'refresh timeout must remain bounded');
+  });
+
+  await test('credential lock budget covers two complete refresh attempts', () => {
+    const budgets = agentCardCredentialRefreshLockBudgets(10_000);
+    assert.ok(budgets.waitMs >= 25_000);
+    assert.ok(budgets.staleMs > budgets.waitMs);
+  });
+
+  await test('benchmark loader refreshes near-expiry sessions once and persists atomically', async () => {
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-refresh-'));
+    const userDirectory = path.join(configRoot, '.agent-cards');
+    const adminConfigPath = path.join(configRoot, '.agent-cards-admin.json');
+    const userConfigPath = path.join(userDirectory, 'config.json');
+    await mkdir(userDirectory);
+    await writeFile(
+      userConfigPath,
+      JSON.stringify({
+        apiUrl: 'https://api.agentcard.test',
+        accessToken: jwtWithExpiration(Math.floor(Date.now() / 1000) + 30),
+        refreshToken: 'old-refresh-token',
+        unrelatedCliField: 'preserve-me',
+      })
+    );
+    let refreshCalls = 0;
+    const refreshedAccessToken = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    const fetchImpl = (async () => {
+      refreshCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return jsonResponse(200, {
+        accessToken: refreshedAccessToken,
+        refreshToken: 'new-refresh-token',
+      });
+    }) as typeof fetch;
+    try {
+      const options = {
+        adminConfigPath,
+        userConfigPath,
+        refreshLockPath: path.join(configRoot, 'refresh.lock'),
+        env: {},
+        fetchImpl,
+      };
+      const [first, second] = await Promise.all([
+        loadAgentCardBenchmarkAdmin(options),
+        loadAgentCardBenchmarkAdmin(options),
+      ]);
+      assert.equal(first.walletToken, refreshedAccessToken);
+      assert.equal(second.walletToken, refreshedAccessToken);
+      assert.equal(refreshCalls, 1, 'same-process loads share one rotating refresh');
+      const persisted = JSON.parse(await readFile(userConfigPath, 'utf8')) as Record<
+        string,
+        unknown
+      >;
+      assert.equal(persisted.accessToken, refreshedAccessToken);
+      assert.equal(persisted.refreshToken, 'new-refresh-token');
+      assert.equal(persisted.unrelatedCliField, 'preserve-me');
+      assert.equal((await stat(userConfigPath)).mode & 0o777, 0o600);
+    } finally {
+      await rm(configRoot, { recursive: true, force: true });
+    }
+  });
+
+  await test('benchmark loader rotates a shared legacy session once across both config files', async () => {
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-shared-'));
+    const userDirectory = path.join(configRoot, '.agent-cards');
+    const adminConfigPath = path.join(configRoot, '.agent-cards-admin.json');
+    const userConfigPath = path.join(userDirectory, 'config.json');
+    const expired = jwtWithExpiration(Math.floor(Date.now() / 1000) - 1);
+    await mkdir(userDirectory);
+    await Promise.all([
+      writeFile(
+        adminConfigPath,
+        JSON.stringify({
+          apiUrl: 'https://api.agentcard.test',
+          accessToken: expired,
+          refreshToken: 'shared-refresh-token',
+          adminOnly: 'preserved',
+        })
+      ),
+      writeFile(
+        userConfigPath,
+        JSON.stringify({
+          apiUrl: 'https://api.agentcard.test',
+          accessToken: expired,
+          refreshToken: 'shared-refresh-token',
+          userOnly: 'preserved',
+        })
+      ),
+    ]);
+    let refreshCalls = 0;
+    const refreshedAccessToken = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    try {
+      const loaded = await loadAgentCardBenchmarkAdmin({
+        adminConfigPath,
+        userConfigPath,
+        refreshLockPath: path.join(configRoot, 'refresh.lock'),
+        env: {},
+        fetchImpl: (async () => {
+          refreshCalls += 1;
+          return jsonResponse(200, {
+            accessToken: refreshedAccessToken,
+            refreshToken: 'rotated-shared-refresh-token',
+          });
+        }) as typeof fetch,
+      });
+      assert.equal(refreshCalls, 1);
+      assert.equal(loaded.token, refreshedAccessToken);
+      assert.equal(loaded.walletToken, refreshedAccessToken);
+      const [adminPersisted, userPersisted] = await Promise.all([
+        readFile(adminConfigPath, 'utf8').then(
+          (value) => JSON.parse(value) as Record<string, unknown>
+        ),
+        readFile(userConfigPath, 'utf8').then(
+          (value) => JSON.parse(value) as Record<string, unknown>
+        ),
+      ]);
+      assert.equal(adminPersisted.refreshToken, 'rotated-shared-refresh-token');
+      assert.equal(userPersisted.refreshToken, 'rotated-shared-refresh-token');
+      assert.equal(adminPersisted.adminOnly, 'preserved');
+      assert.equal(userPersisted.userOnly, 'preserved');
+    } finally {
+      await rm(configRoot, { recursive: true, force: true });
+    }
+  });
+
+  await test('shared refresh failure adopts credentials rotated by an external CLI', async () => {
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-external-winner-'));
+    const userDirectory = path.join(configRoot, '.agent-cards');
+    const adminConfigPath = path.join(configRoot, '.agent-cards-admin.json');
+    const userConfigPath = path.join(userDirectory, 'config.json');
+    const refreshLockPath = path.join(configRoot, 'refresh.lock');
+    const expired = jwtWithExpiration(Math.floor(Date.now() / 1000) - 1);
+    const externalAccess = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    await mkdir(userDirectory);
+    await Promise.all([
+      writeFile(
+        adminConfigPath,
+        JSON.stringify({
+          apiUrl: 'https://api.agentcard.test',
+          accessToken: expired,
+          refreshToken: 'shared-refresh-token',
+        })
+      ),
+      writeFile(
+        userConfigPath,
+        JSON.stringify({
+          apiUrl: 'https://api.agentcard.test',
+          accessToken: expired,
+          refreshToken: 'shared-refresh-token',
+        })
+      ),
+    ]);
+    try {
+      const loaded = await loadAgentCardBenchmarkAdmin({
+        adminConfigPath,
+        userConfigPath,
+        refreshLockPath,
+        env: {},
+        fetchImpl: (async () => {
+          await Promise.all([
+            writeFile(
+              adminConfigPath,
+              JSON.stringify({
+                apiUrl: 'https://api.agentcard.test',
+                accessToken: externalAccess,
+                refreshToken: 'external-refresh-token',
+              })
+            ),
+            writeFile(
+              userConfigPath,
+              JSON.stringify({
+                apiUrl: 'https://api.agentcard.test',
+                accessToken: externalAccess,
+                refreshToken: 'external-refresh-token',
+              })
+            ),
+          ]);
+          return jsonResponse(401, { error: 'rotation already consumed' });
+        }) as typeof fetch,
+      });
+      assert.equal(loaded.token, externalAccess);
+      assert.equal(loaded.walletToken, externalAccess);
+    } finally {
+      await rm(configRoot, { recursive: true, force: true });
+    }
+  });
+
+  await test('credential lock recovers a dead stale owner without deleting a replacement owner', async () => {
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-lock-owner-'));
+    const userDirectory = path.join(configRoot, '.agent-cards');
+    const adminConfigPath = path.join(configRoot, '.agent-cards-admin.json');
+    const userConfigPath = path.join(userDirectory, 'config.json');
+    const refreshLockPath = path.join(configRoot, 'refresh.lock');
+    const expired = jwtWithExpiration(Math.floor(Date.now() / 1000) - 1);
+    const refreshedAccess = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    const replacementOwner = {
+      pid: process.pid,
+      hostname: hostname(),
+      nonce: `replacement-${randomUUID()}`,
+    };
+    await mkdir(userDirectory);
+    await writeFile(
+      userConfigPath,
+      JSON.stringify({
+        apiUrl: 'https://api.agentcard.test',
+        accessToken: expired,
+        refreshToken: 'old-refresh-token',
+      })
+    );
+    await writeFile(
+      refreshLockPath,
+      JSON.stringify({
+        pid: 2_147_483_647,
+        hostname: hostname(),
+        nonce: `dead-${randomUUID()}`,
+      })
+    );
+    const old = new Date(Date.now() - 120_000);
+    await utimes(refreshLockPath, old, old);
+    try {
+      const loaded = await loadAgentCardBenchmarkAdmin({
+        adminConfigPath,
+        userConfigPath,
+        refreshLockPath,
+        env: {},
+        fetchImpl: (async () => {
+          await unlink(refreshLockPath);
+          await writeFile(refreshLockPath, JSON.stringify(replacementOwner));
+          return jsonResponse(200, {
+            accessToken: refreshedAccess,
+            refreshToken: 'new-refresh-token',
+          });
+        }) as typeof fetch,
+      });
+      assert.equal(loaded.walletToken, refreshedAccess);
+      assert.deepEqual(JSON.parse(await readFile(refreshLockPath, 'utf8')), replacementOwner);
+    } finally {
+      await rm(configRoot, { recursive: true, force: true });
+    }
+  });
+
+  await test('credential refresh and stale recovery are single-flight across Node processes', async () => {
+    const configRoot = await mkdtemp(path.join(tmpdir(), 'agentcard-loader-process-lock-'));
+    const userDirectory = path.join(configRoot, '.agent-cards');
+    const adminConfigPath = path.join(configRoot, '.agent-cards-admin.json');
+    const userConfigPath = path.join(userDirectory, 'config.json');
+    const refreshLockPath = path.join(configRoot, 'refresh.lock');
+    const callLogPath = path.join(configRoot, 'refresh-calls.log');
+    const expired = jwtWithExpiration(Math.floor(Date.now() / 1000) - 1);
+    const refreshedAccess = jwtWithExpiration(Math.floor(Date.now() / 1000) + 300);
+    const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+    const tsxPath = path.resolve(testDirectory, '../../../../node_modules/.bin/tsx');
+    const providerUrl = pathToFileURL(
+      path.resolve(testDirectory, '../../providers/agentcard/benchmark-float.ts')
+    ).href;
+    await mkdir(userDirectory);
+    await writeFile(
+      userConfigPath,
+      JSON.stringify({
+        apiUrl: 'https://api.agentcard.test',
+        accessToken: expired,
+        refreshToken: 'old-refresh-token',
+      })
+    );
+    const childSource = `
+      import { appendFile } from 'node:fs/promises';
+      import { loadAgentCardBenchmarkAdmin } from ${JSON.stringify(providerUrl)};
+      (async () => {
+        await loadAgentCardBenchmarkAdmin({
+          adminConfigPath: ${JSON.stringify(adminConfigPath)},
+          userConfigPath: ${JSON.stringify(userConfigPath)},
+          refreshLockPath: ${JSON.stringify(refreshLockPath)},
+          env: {},
+          fetchImpl: async () => {
+            await appendFile(${JSON.stringify(callLogPath)}, 'refresh\\n');
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                accessToken: ${JSON.stringify(refreshedAccess)},
+                refreshToken: 'new-refresh-token',
+              }),
+            };
+          },
+        });
+      })().catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+    `;
+    try {
+      await Promise.all([
+        execFileAsync(tsxPath, ['-e', childSource]),
+        execFileAsync(tsxPath, ['-e', childSource]),
+      ]);
+      const calls = (await readFile(callLogPath, 'utf8')).trim().split('\n');
+      assert.equal(calls.length, 1);
+
+      await Promise.all([
+        writeFile(
+          userConfigPath,
+          JSON.stringify({
+            apiUrl: 'https://api.agentcard.test',
+            accessToken: expired,
+            refreshToken: 'old-refresh-token',
+          })
+        ),
+        unlink(callLogPath),
+      ]);
+      await writeFile(
+        refreshLockPath,
+        JSON.stringify({
+          pid: 2_147_483_647,
+          hostname: hostname(),
+          nonce: `dead-${randomUUID()}`,
+        })
+      );
+      const old = new Date(Date.now() - 120_000);
+      await utimes(refreshLockPath, old, old);
+      await Promise.all([
+        execFileAsync(tsxPath, ['-e', childSource]),
+        execFileAsync(tsxPath, ['-e', childSource]),
+      ]);
+      const staleRecoveryCalls = (await readFile(callLogPath, 'utf8')).trim().split('\n');
+      assert.equal(staleRecoveryCalls.length, 1);
+    } finally {
+      await rm(configRoot, { recursive: true, force: true });
+    }
   });
 
   // ── org-wallet-monitor extraction + message ──
