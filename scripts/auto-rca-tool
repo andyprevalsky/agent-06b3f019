@@ -798,6 +798,26 @@ PY
   printf 'Credential-scrubbed investigator reproduction failed before and passed after.\n'
 }
 
+verify_investigator_run() {
+  local execution_file="${RCA_INVESTIGATOR_EXECUTION_FILE:-}"
+  [ -n "$execution_file" ] || fail "investigator execution output is missing"
+  [ -f "$execution_file" ] || fail "investigator execution output does not exist"
+  [ ! -L "$execution_file" ] || fail "investigator execution output must not be a symlink"
+  if ! jq -e '
+    type == "array" and
+    any(.[];
+      .type == "result" and
+      .subtype == "success" and
+      .is_error == false and
+      ((.num_turns // 0) | type == "number") and
+      (.num_turns >= 1)
+    )
+  ' "$execution_file" >/dev/null; then
+    fail "investigator completed without a successful Claude turn"
+  fi
+  printf 'Investigator completed at least one successful Claude turn.\n'
+}
+
 verify_repro() {
   local test_path base head test_hash temp_root base_dir head_dir
   local before_log after_log before_status after_status result_file
@@ -1390,17 +1410,49 @@ find_slack_lifecycle_ts() {
     | head -1
 }
 
+existing_slack_message_text() {
+  local payload response
+  if [[ "${SLACK_TS:-}" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
+    payload="$(jq -n --arg c "$SLACK_CHANNEL" --arg ts "$SLACK_TS" \
+      '{channel:$c,ts:$ts,limit:1,include_all_metadata:true}')"
+    response="$(slack_api conversations.replies "$payload" 2>/dev/null)" || return 1
+    printf '%s' "$response" | jq -r '.messages[0].text // empty'
+    return
+  fi
+  payload="$(jq -n --arg c "$SLACK_CHANNEL" \
+    '{channel:$c,limit:200,include_all_metadata:true}')"
+  response="$(slack_api conversations.history "$payload" 2>/dev/null)" || return 1
+  printf '%s' "$response" | jq -r --arg agent "$AGENT_ID" \
+    '.messages[]? | select(.metadata.event_type == "rose_auto_rca" and .metadata.event_payload.agent_id == $agent) | .text // empty' \
+    | head -1
+}
+
+preserve_reconciled_affected_user() {
+  local existing_text preserved
+  [ "${RCA_RECONCILE_SLACK:-false}" = true ] || return 0
+  [ "${AFFECTED_USER_NAME:-}" = 'Affected user unavailable' ] || return 0
+  existing_text="$(existing_slack_message_text || true)"
+  preserved="$(printf '%s\n' "$existing_text" | \
+    sed -n 's/^\*Affected user:\* //p' | head -1 | cut -c1-160)"
+  [ -n "$preserved" ] || return 0
+  [ "$preserved" != 'Affected user unavailable' ] || return 0
+  [[ "$preserved" != *$'\r'* && "$preserved" != *$'\n'* ]] || return 0
+  AFFECTED_USER_NAME="$preserved"
+  export AFFECTED_USER_NAME
+}
+
 slack_update() {
   local text response resolved_ts payload existing_ts
   [ -n "${SLACK_BOT_TOKEN:-}" ] || fail "SLACK_BOT_TOKEN is required"
   [[ "${SLACK_CHANNEL:-}" =~ ^[A-Z0-9]{9,32}$ ]] || fail "SLACK_CHANNEL is invalid"
-  text="$(slack_message)"
   if [ -z "${SLACK_TS:-}" ] && [ "${RCA_RECONCILE_SLACK:-false}" = true ]; then
     existing_ts="$(find_slack_lifecycle_ts || true)"
     if [[ "$existing_ts" =~ ^[0-9]{10,}\.[0-9]{6}$ ]]; then
       SLACK_TS="$existing_ts"
     fi
   fi
+  preserve_reconciled_affected_user
+  text="$(slack_message)"
   if [ -n "${SLACK_TS:-}" ]; then
     [[ "$SLACK_TS" =~ ^[0-9]{10,}\.[0-9]{6}$ ]] || fail "SLACK_TS is invalid"
     payload="$(jq -n --arg c "$SLACK_CHANNEL" --arg ts "$SLACK_TS" --arg t "$text" \
@@ -1435,6 +1487,7 @@ case "${1:-}" in
   verification) [ "$#" -eq 1 ] || fail "verification takes no arguments"; verification ;;
   pin-baseline) [ "$#" -eq 1 ] || fail "pin-baseline takes no arguments"; pin_baseline ;;
   investigator-repro) [ "$#" -eq 1 ] || fail "investigator-repro takes no arguments"; investigator_repro ;;
+  verify-investigator-run) [ "$#" -eq 1 ] || fail "verify-investigator-run takes no arguments"; verify_investigator_run ;;
   benchmark) [ "$#" -eq 1 ] || fail "benchmark takes no arguments"; benchmark ;;
   verify-repro) [ "$#" -eq 1 ] || fail "verify-repro takes no arguments"; verify_repro ;;
   offline-gates) [ "$#" -eq 1 ] || fail "offline-gates takes no arguments"; offline_gates ;;
@@ -1453,5 +1506,5 @@ case "${1:-}" in
   slack-message) [ "$#" -eq 1 ] || fail "slack-message takes no arguments"; slack_message ;;
   slack-update) [ "$#" -eq 1 ] || fail "slack-update takes no arguments"; slack_update ;;
   slack-reply) [ "$#" -eq 1 ] || fail "slack-reply takes no arguments"; slack_reply ;;
-  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
+  *) fail "usage: scripts/auto-rca-tool {dispatch-plan|approved-deploy-plan|reconcile-plan|select-agent-prs|select-slack-prs|feedback-batch|collect-evidence|evidence|verification|pin-baseline|investigator-repro|verify-investigator-run|verify-repro|offline-gates|smoke-gates|publish-draft|begin-draft|bind-slack|completion-status|require-complete|ensure-draft|sync-waterfall|mark-ready|timeline-start|timeline-finish|timeline-waterfall|slack-message|slack-update|slack-reply}" ;;
 esac

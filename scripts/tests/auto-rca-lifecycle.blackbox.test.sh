@@ -122,6 +122,11 @@ if [[ "$*" == *"conversations.history"* ]] && [ -n "${FAKE_HISTORY_TS:-}" ]; the
   printf '{"ok":true,"messages":[{"ts":"%s","metadata":{"event_type":"rose_auto_rca","event_payload":{"agent_id":"d29e631e-b78a-40dd-8f0b-732d1143a854"}}}]}\n' "$FAKE_HISTORY_TS"
   exit 0
 fi
+if [[ "$*" == *"conversations.replies"* ]] && [ -n "${FAKE_REPLY_TEXT:-}" ]; then
+  jq -n --arg ts "${FAKE_SLACK_TS:-1784617220.480779}" --arg text "$FAKE_REPLY_TEXT" \
+    '{ok:true,messages:[{ts:$ts,text:$text}]}'
+  exit 0
+fi
 if [ "${FAKE_SLACK_RATE_LIMIT_ONCE:-false}" = true ]; then
   count="$(cat "$FAKE_CURL_COUNT" 2>/dev/null || printf 0)"
   [ -n "$count" ] || count=0
@@ -139,6 +144,18 @@ fi
 SH
 
 chmod +x "$FAKE_BIN/git" "$FAKE_BIN/gh" "$FAKE_BIN/sudo" "$FAKE_BIN/curl"
+
+ZERO_TURN_EXECUTION="$TEST_ROOT/zero-turn-execution.json"
+SUCCESSFUL_EXECUTION="$TEST_ROOT/successful-execution.json"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":0}]' > "$ZERO_TURN_EXECUTION"
+printf '%s\n' '[{"type":"system","subtype":"init"},{"type":"result","subtype":"success","is_error":false,"num_turns":1}]' > "$SUCCESSFUL_EXECUTION"
+if RCA_INVESTIGATOR_EXECUTION_FILE="$ZERO_TURN_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null 2>&1; then
+  echo "FAIL: a zero-turn Claude execution passed the investigator invariant" >&2
+  exit 1
+fi
+RCA_INVESTIGATOR_EXECUTION_FILE="$SUCCESSFUL_EXECUTION" \
+  "$RCA_TOOL" verify-investigator-run >/dev/null
 
 assert_dispatch_plan() {
   local expected="$1" actual
@@ -802,6 +819,31 @@ if grep -Fq 'chat.postMessage' "$TEST_ROOT/curl-calls.txt"; then
   echo "FAIL: recovered lifecycle duplicated an existing Slack card" >&2
   exit 1
 fi
+
+: > "$TEST_ROOT/curl-calls.txt"
+PATH="$FAKE_BIN:$PATH" \
+CURL_CALLS="$TEST_ROOT/curl-calls.txt" \
+FAKE_REPLY_TEXT='*Affected user:* Ada Lovelace
+*Current state:* 🔴 RCA blocked — draft needs attention' \
+AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+AFFECTED_USER_NAME='Affected user unavailable' \
+RCA_STATE=blocked \
+RCA_RECONCILE_SLACK=true \
+RCA_FE_URL='https://roselabs.ai/?agent-id=d29e631e-b78a-40dd-8f0b-732d1143a854' \
+RCA_PR_URL='https://github.com/Rose-Ai-Labs/rose/pull/999' \
+RCA_RUN_URL='https://github.com/Rose-Ai-Labs/rose/actions/runs/123' \
+SLACK_BOT_TOKEN='test-slack-token' \
+SLACK_CHANNEL='C0BE1B87882' \
+SLACK_TS='1784617220.480779' \
+"$RCA_TOOL" slack-update
+grep -Fq 'conversations.replies' "$TEST_ROOT/curl-calls.txt" || {
+  echo "FAIL: reconciler did not read the existing lifecycle card before degrading its affected user" >&2
+  exit 1
+}
+grep -Fq '*Affected user:* Ada Lovelace' "$TEST_ROOT/curl-calls.txt" || {
+  echo "FAIL: reconciler replaced a known affected user with an unavailable placeholder" >&2
+  exit 1
+}
 
 : > "$TEST_ROOT/curl-calls.txt"
 : > "$TEST_ROOT/curl-count.txt"
