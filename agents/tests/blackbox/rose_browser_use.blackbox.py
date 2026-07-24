@@ -74,7 +74,8 @@ def test_generate_tool_descriptions_filters_and_includes_params():
     assert "- click:" in out
     assert "index=integer" in out
     assert "- scroll:" in out
-    assert "down=boolean" in out
+    assert "direction=string" in out
+    assert "amount=integer" in out
     # Filtered out
     assert "unknown_action" not in out
 
@@ -248,10 +249,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     click = tools[0]
     assert click["description"] == BROWSER_USE_TOOLS["click"]["description"]
-    assert (
-        click["input_schema"]["properties"]["index"]["description"]
-        == (BROWSER_USE_TOOLS["click"]["params"]["index"]["description"])
-    )
+    assert click["input_schema"]["properties"]["index"]["type"] == "integer"
+    assert "Element index" in click["input_schema"]["properties"]["index"]["description"]
     assert click["input_schema"]["required"] == ["index"]
 
     auth_help = tools[1]
@@ -303,6 +302,26 @@ def test_build_browser_use_tools_emits_valid_required_keywords():
                 assert isinstance(schema_node["required"], list), (
                     f"{tool['name']} emitted a non-array JSON Schema required keyword: {schema_node}"
                 )
+
+
+def test_provider_tool_schemas_follow_browser_pydantic_models():
+    from browser_tools.schemas import BROWSER_TOOL_MODELS
+
+    generated = {tool["name"]: tool for tool in build_browser_use_tools(list(BROWSER_TOOL_MODELS))}
+
+    assert set(generated) == set(BROWSER_TOOL_MODELS)
+    for tool_name, model in BROWSER_TOOL_MODELS.items():
+        schema_fields = set(generated[tool_name]["input_schema"]["properties"])
+        model_fields = set(model.model_fields) - {"tool"}
+        assert schema_fields == model_fields, (
+            f"{tool_name} provider schema drifted from its Pydantic model: "
+            f"provider={sorted(schema_fields)}, model={sorted(model_fields)}"
+        )
+
+    wait_schema = generated["wait"]["input_schema"]
+    assert wait_schema["required"] == ["time_ms"]
+    assert wait_schema["properties"]["time_ms"]["type"] == "integer"
+    assert wait_schema["properties"]["time_ms"]["maximum"] == 60_000
 
 
 def test_write_lock_notification_tool_is_stable_internal_action_schema():
@@ -604,7 +623,15 @@ def test_normalize_write_lock_notification_tool_call_preserves_params():
                         "url": "https://www.amazon.com/gp/buy/spc",
                     },
                     "purchase": {
-                        "items": [{"title": "Beanie", "price": "$19.99"}],
+                        "items": [
+                            {
+                                "title": "Beanie",
+                                "price": "$19.99",
+                                "rating": "4.8 stars",
+                                "review_count": "312 reviews",
+                                "product_url": "https://www.amazon.com/dp/beanie",
+                            }
+                        ],
                         "totals": {"total": "$21.74"},
                     },
                 }
@@ -1035,6 +1062,35 @@ def test_normalize_provider_tool_call():
     assert out["action"] == "click"
     assert out["index"] == 4
     assert out["thinking"] == "saw submit button"
+
+
+def test_normalize_provider_tool_call_uses_pydantic_coercion():
+    out = normalize_browser_use_tool_call(
+        {
+            "id": "call_wait",
+            "name": "wait",
+            "arguments": '{"time_ms": "8000"}',
+        }
+    )
+
+    assert out["action"] == "wait"
+    assert out["params"]["time_ms"] == 8000
+    assert isinstance(out["params"]["time_ms"], int)
+
+
+def test_normalize_provider_tool_call_rejects_invalid_arguments():
+    try:
+        normalize_browser_use_tool_call(
+            {
+                "id": "call_wait",
+                "name": "wait",
+                "arguments": '{"time_ms": "later"}',
+            }
+        )
+    except ValueError as error:
+        assert "time_ms" in str(error)
+    else:
+        raise AssertionError("browser tool validation accepted a non-numeric wait")
 
 
 def test_normalize_prefers_thinking_over_next_goal():
@@ -1641,6 +1697,10 @@ async def run_all_tests():
     )
     r.record("native_tool_schemas_preserve_catalog", test_build_browser_use_tools_preserves_catalog_descriptions)
     r.record("native_tool_schemas_valid_required_keywords", test_build_browser_use_tools_emits_valid_required_keywords)
+    r.record(
+        "native_tool_schemas_follow_pydantic",
+        test_provider_tool_schemas_follow_browser_pydantic_models,
+    )
     r.record("write_lock_notification_schema", test_write_lock_notification_tool_is_stable_internal_action_schema)
     r.record(
         "autocomplete_indicates_payment_token_match",
@@ -1695,6 +1755,14 @@ async def run_all_tests():
     r.record("normalize_input_text_remap", test_normalize_input_text_remap)
     r.record("normalize_request_auth_assistance", test_normalize_request_user_assistance)
     r.record("normalize_provider_tool_call", test_normalize_provider_tool_call)
+    r.record(
+        "normalize_provider_tool_call_coercion",
+        test_normalize_provider_tool_call_uses_pydantic_coercion,
+    )
+    r.record(
+        "normalize_provider_tool_call_invalid_args",
+        test_normalize_provider_tool_call_rejects_invalid_arguments,
+    )
     r.record(
         "normalize_write_lock_notification_tool_call",
         test_normalize_write_lock_notification_tool_call_preserves_params,

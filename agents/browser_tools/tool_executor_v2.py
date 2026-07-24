@@ -27,6 +27,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from browser_tools.dom_service import DOMService, ActionHistory
+from browser_tools.schemas import normalize_browser_wait_ms
 
 logger = logging.getLogger(__name__)
 
@@ -575,7 +576,7 @@ async def _execute_scroll(dom_service: DOMService, args: Dict[str, Any]) -> Dict
 
 async def _execute_wait(args: Dict[str, Any]) -> Dict[str, Any]:
     """Wait for specified time. Could use WaitEvent but simpler to just sleep."""
-    time_ms = args.get("time_ms", 1000)
+    time_ms = normalize_browser_wait_ms(args.get("time_ms"), default=1000)
     await asyncio.sleep(time_ms / 1000)
     return {"success": True, "waited_ms": time_ms}
 

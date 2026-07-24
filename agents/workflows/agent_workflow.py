@@ -4109,6 +4109,7 @@ class AgentWorkflow:
             # summary is already observable.
             # Suppress the automatic tree broadcast here; otherwise _post_message
             # would emit its default ACTIVE state after we latched _is_finished.
+            formatted_outputs = self._format_outputs(structured_response)
             await self._post_message(
                 "",
                 "TOOL",
@@ -4120,7 +4121,7 @@ class AgentWorkflow:
                     "title": "✅ Task Complete",
                     "completionSummary": {
                         "summary": summary,
-                        "outputs": self._format_outputs(structured_response),
+                        "outputs": formatted_outputs,
                         "toolUsage": tool_usage,
                         "totalToolCalls": total_tool_calls,
                         "durationSeconds": duration_seconds,
@@ -4153,14 +4154,15 @@ class AgentWorkflow:
             # (output_schema is already cached from startup and included in all broadcasts)
             await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
 
-            # Send completion SMS notification (root + SMS-source only)
-            if not self.parent_workflow_id and summary and self.agent_source == "SMS":
+            # Completion lifecycle SMS is root-only. Sub-agents report to their
+            # parent; notifying per child would fan out at tree scale.
+            if not self.parent_workflow_id and summary:
                 try:
                     notification_args = [
                         self.user_id,
                         "completion",
                         self.agent_id,
-                        {"summary": summary},
+                        {"summary": summary, "outputs": formatted_outputs},
                     ]
                     if self.world_model_mode != "real":
                         notification_args.append(self.world_model_mode)

@@ -645,6 +645,79 @@ async def test_generate_completion_summary_no_structured_response():
     assert "Summary." in out["summary"]
 
 
+async def test_generate_completion_summary_retries_length_truncation():
+    """A reasoning model can spend a tiny output budget before visible text.
+
+    The Blue Bottle incident returned finish_reason=length with 196 completion
+    tokens but only the visible text ``Your order for a 1``. Completion summaries
+    must retry with enough headroom instead of persisting that partial sentence.
+    """
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    calls = []
+
+    async def fake_llm(messages, **kwargs):
+        calls.append(kwargs["max_tokens"])
+        if len(calls) == 1:
+            return {
+                "content": "Your order for a 1",
+                "finish_reason": "length",
+                "usage": {"total_tokens": 200, "prompt_tokens": 4, "completion_tokens": 196},
+            }
+        return {
+            "content": "Your Blue Bottle order was placed and is ready for pickup at 7:41 AM.",
+            "finish_reason": "stop",
+            "usage": {"total_tokens": 80, "prompt_tokens": 40, "completion_tokens": 40},
+        }
+
+    def fake_convert(context, include_system=False, include_assistant=True):
+        return []
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(llm_mod, "convert_context_to_messages", fake_convert):
+                out = await summarize.generate_completion_summary(
+                    context=[],
+                    goal="Order coffee",
+                    model="m",
+                )
+
+    assert calls == [1024, 4096]
+    assert out["summary"].endswith("7:41 AM.")
+    assert out["usage"]["prompt_tokens"] == 44
+    assert out["usage"]["completion_tokens"] == 236
+    assert out["usage"]["total_tokens"] == 280
+
+
+async def test_generate_completion_summary_uses_complete_fallback_after_two_truncations():
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    calls = []
+
+    async def fake_llm(messages, **kwargs):
+        calls.append(kwargs["max_tokens"])
+        return {
+            "content": "Still an incomplete",
+            "finish_reason": "length",
+            "usage": {"total_tokens": 10, "prompt_tokens": 4, "completion_tokens": 6},
+        }
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(llm_mod, "convert_context_to_messages", lambda *args, **kwargs: []):
+                out = await summarize.generate_completion_summary(
+                    context=[],
+                    goal="Order coffee",
+                    model="m",
+                )
+
+    assert calls == [1024, 4096]
+    assert out["summary"] == "The task completed successfully; verified results are included below."
+    assert out["usage"]["total_tokens"] == 20
+
+
 async def run_all_tests():
     print("summarize blackbox tests:")
     r = BlackboxResult()
@@ -682,6 +755,14 @@ async def run_all_tests():
     )
     await r.record_async("generate_completion_summary_error", test_generate_completion_summary_on_error)
     await r.record_async("generate_completion_summary_no_structured", test_generate_completion_summary_no_structured_response)
+    await r.record_async(
+        "generate_completion_summary_retries_length",
+        test_generate_completion_summary_retries_length_truncation,
+    )
+    await r.record_async(
+        "generate_completion_summary_fallback_after_two_truncations",
+        test_generate_completion_summary_uses_complete_fallback_after_two_truncations,
+    )
     teardown_mock()
     return r.all_passed
 

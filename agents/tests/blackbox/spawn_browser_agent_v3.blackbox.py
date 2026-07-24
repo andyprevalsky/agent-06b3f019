@@ -197,6 +197,24 @@ def test_verifier_activity_timeout_allows_llm_call():
     assert VERIFIER_ULTRA_TIMEOUT_SECONDS == STANDARD_LLM_ACTIVITY_TIMEOUT_SECONDS
 
 
+def test_stateful_browser_activity_has_one_thirty_minute_attempt():
+    """Stateful browser writes get a full window but no from-scratch Temporal retry."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3.config import (
+        ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
+        MAX_ACTIVITY_ATTEMPTS,
+    )
+    from domains.spawn_browser_agent_v3.handler import SpawnBrowserAgentManagerV3
+
+    assert ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES == 30
+    assert MAX_ACTIVITY_ATTEMPTS == 1
+
+    execute_source = inspect.getsource(SpawnBrowserAgentManagerV3.execute_tool)
+    assert "timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES)" in execute_source
+    assert "RetryPolicy(maximum_attempts=MAX_ACTIVITY_ATTEMPTS)" in execute_source
+
+
 def test_transient_session_init_failure_classification():
     """RCA (agent 53feac08): the first two browser spawns died on Kernel's
     `400 Proxy is marked unavailable from the last health check` because
@@ -1657,7 +1675,7 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
             self.release = asyncio.Event()
             self.include_steel_media = None
 
-        async def close(self, *, include_steel_media=True):
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
             self.include_steel_media = include_steel_media
             await self.release.wait()
             self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1709,6 +1727,106 @@ async def test_browser_recording_finalizer_uploads_frame_replay_after_cancellati
         assert metadata["browser_session_metadata"] == {"provider": "steel"}
 
 
+async def test_browser_recording_finalizer_persists_before_trace_archive():
+    """FE persistence is the critical path; the trace copy is background work.
+
+    Production generated the replay locally, then spent >45s archiving hundreds
+    of frame/network files before it could upload the HTML or save its pointer.
+    """
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_recording_for_fe_resilient
+
+    class ArchiveBlockingRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.close_archive_artifacts = None
+            self.archive_scheduled = False
+
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
+            self.close_archive_artifacts = archive_artifacts
+            if archive_artifacts:
+                await asyncio.Event().wait()
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            path = self.output_dir / "index.html"
+            path.write_text("<html>recording</html>", encoding="utf-8")
+            return path
+
+        def export_inline_html_bytes(self):
+            return b"<html>inline frame replay</html>"
+
+        def archive_recording_artifacts_in_background(self, *, cleanup_after=False):
+            self.archive_scheduled = True
+            return True
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = ArchiveBlockingRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={"id": "file-pointer-1"},
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            result = await _finalize_browser_recording_for_fe_resilient(
+                browser_recorder=recorder,
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+                browser_session_metadata={"provider": "steel"},
+                timeout_seconds=0.1,
+            )
+
+        assert result is not None
+        assert result["recording_file_pointer"] == {"id": "file-pointer-1"}
+        assert recorder.close_archive_artifacts is False
+        assert recorder.archive_scheduled is True
+        upload_mock.assert_awaited_once()
+        save_mock.assert_awaited_once()
+
+
+async def test_browser_recording_background_archive_keeps_event_loop_responsive():
+    """Real recorder directory reads must run outside the worker event loop."""
+    import tempfile
+
+    import domains.spawn_browser_agent_v3.recording as recording
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = recording.BrowserAgentRecorder(
+            page=MagicMock(),
+            agent_id="agent-responsive",
+            task_id="task-responsive",
+            session_id="session-responsive",
+            browser_url="https://example.com",
+        )
+        recorder.output_dir = Path(tmp)
+        for index in range(3):
+            (recorder.output_dir / f"frame-{index}.png").write_bytes(b"frame")
+
+        original_read_bytes = Path.read_bytes
+
+        def slow_read_bytes(path):
+            time_module.sleep(0.05)
+            return original_read_bytes(path)
+
+        with (
+            patch.object(recording, "archive_enabled", return_value=True),
+            patch.object(recording, "archive_bytes", return_value={"ref": "archive-ref"}),
+            patch.object(Path, "read_bytes", slow_read_bytes),
+        ):
+            assert recorder.archive_recording_artifacts_in_background() is True
+            started = time_module.monotonic()
+            await asyncio.sleep(0.01)
+            elapsed = time_module.monotonic() - started
+            assert elapsed < 0.12, f"recording archive blocked the event loop for {elapsed:.3f}s"
+            await asyncio.gather(*list(recording._BACKGROUND_RECORDING_ARCHIVE_TASKS))
+
+
 async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails():
     import shutil
     import tempfile
@@ -1720,7 +1838,7 @@ async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fai
             self.output_dir = Path(output_dir)
             self.cleanup_persisted = None
 
-        async def close(self, *, include_steel_media=True):
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
             self.output_dir.mkdir(parents=True, exist_ok=True)
             path = self.output_dir / "index.html"
             path.write_text("<html>recording</html>", encoding="utf-8")
@@ -1780,7 +1898,7 @@ async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalizatio
             self.release = asyncio.Event()
             self.cleanup_called = False
 
-        async def close(self, *, include_steel_media=True):
+        async def close(self, *, include_steel_media=True, archive_artifacts=True):
             await self.release.wait()
             self.output_dir.mkdir(parents=True, exist_ok=True)
             path = self.output_dir / "index.html"
@@ -7609,6 +7727,40 @@ async def test_execute_action_wait():
     assert out == {"success": True, "message": ""}
 
 
+async def test_execute_action_wait_coerces_numeric_string():
+    """LLM tool arguments can encode numeric fields as strings."""
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    out = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": "500"}})
+
+    assert out == {"success": True, "message": ""}
+    ah.record_action.assert_awaited_once()
+    assert ah.record_action.await_args.kwargs["params"] == {"time_ms": 500}
+
+
+async def test_execute_action_wait_rejects_invalid_and_clamps_huge_values():
+    from domains.spawn_browser_agent_v3.service_actions import execute_action
+
+    dom = MagicMock()
+    dom.session = _fake_session_with_event_bus()
+    dom.selector_map = {}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    invalid = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": "forever"}})
+    assert invalid == {"success": False, "error": "wait time_ms must be numeric"}
+
+    huge = await execute_action(dom, ah, {"action": "wait", "params": {"time_ms": "999999999"}})
+    assert huge == {"success": True, "message": ""}
+    assert ah.record_action.await_args.kwargs["params"] == {"time_ms": 60_000}
+
+
 async def test_execute_action_dropdown_options_with_element():
     """Patch the dropdown event class to avoid pydantic node validation."""
     from domains.spawn_browser_agent_v3.service_actions import execute_action
@@ -12515,6 +12667,10 @@ async def run_all_tests():
     )
     r.record("browser_progress_title", test_browser_progress_title_describes_active_agent)
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
+    r.record(
+        "stateful_browser_activity_one_thirty_minute_attempt",
+        test_stateful_browser_activity_has_one_thirty_minute_attempt,
+    )
     r.record("max_steps_best_effort_prefers_last_reasoning", test_max_steps_best_effort_prefers_last_reasoning)
     r.record("max_steps_best_effort_skips_blank_reasoning", test_max_steps_best_effort_skips_blank_reasoning)
     r.record("max_steps_best_effort_falls_back", test_max_steps_best_effort_falls_back_to_actions_then_url)
@@ -13085,6 +13241,14 @@ async def run_all_tests():
     await r.record_async("execute_action_navback", test_execute_action_navback)
     await r.record_async("execute_action_wait", test_execute_action_wait)
     await r.record_async(
+        "execute_action_wait_coerces_numeric_string",
+        test_execute_action_wait_coerces_numeric_string,
+    )
+    await r.record_async(
+        "execute_action_wait_rejects_invalid_and_clamps_huge",
+        test_execute_action_wait_rejects_invalid_and_clamps_huge_values,
+    )
+    await r.record_async(
         "execute_action_dropdown_options_with_el",
         test_execute_action_dropdown_options_with_element,
     )
@@ -13355,6 +13519,14 @@ async def run_all_tests():
     await r.record_async(
         "browser_recording_finalizer_cancel_resilient",
         test_browser_recording_finalizer_uploads_frame_replay_after_cancellation,
+    )
+    await r.record_async(
+        "browser_recording_finalizer_persists_before_trace_archive",
+        test_browser_recording_finalizer_persists_before_trace_archive,
+    )
+    await r.record_async(
+        "browser_recording_background_archive_responsive",
+        test_browser_recording_background_archive_keeps_event_loop_responsive,
     )
     await r.record_async(
         "browser_recording_finalizer_keeps_local_artifacts_when_upload_fails",

@@ -19,6 +19,10 @@ on:
         description: Failing agent ID to RCA
         required: true
         type: string
+      affected_user_name:
+        description: Affected user name for a retained alert whose agent record expired
+        required: false
+        type: string
   issue_comment:
     types: [created]
 
@@ -44,6 +48,7 @@ jobs:
 
     env:
       INITIAL_AGENT_ID: ${{ github.event.client_payload.agent_id || inputs.agent_id }}
+      DISPATCH_AFFECTED_USER_NAME: ${{ github.event.client_payload.affected_user_name || inputs.affected_user_name }}
       DISPATCH_SLACK_TS: ${{ github.event.client_payload.slack_ts }}
       DISPATCH_SLACK_CHANNEL: ${{ github.event.client_payload.slack_channel }}
       PROD_BACKEND_URL: https://navi-j9a9.onrender.com
@@ -228,6 +233,7 @@ jobs:
             "$PROD_BACKEND_URL/api/agents/$AGENT_ID/alert-context" \
             -H "X-API-Key: $BACKEND_API_KEY" 2>/dev/null || true)"
           affected_user_name="$(printf '%s' "$response" | jq -r '.affected_user_name // empty' 2>/dev/null || true)"
+          [ -n "$affected_user_name" ] || affected_user_name="${DISPATCH_AFFECTED_USER_NAME:-}"
           affected_user_name="$(printf '%s' "$affected_user_name" | tr '\r\n\t' '   ' | tr -s ' ' \
             | sed 's/^ *//; s/ *$//; s/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' | cut -c1-160)"
           [ -n "$affected_user_name" ] || affected_user_name='Affected user unavailable'
@@ -410,6 +416,13 @@ jobs:
             --max-turns 80
             --permission-mode bypassPermissions
 
+      - name: Checkpoint primary investigator work
+        id: checkpoint_primary
+        if: always() && steps.investigator_primary.outcome != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool checkpoint-draft
+
       - name: Require a real primary investigator turn
         id: validate_primary
         if: always() && steps.investigator_primary.outcome != 'skipped'
@@ -424,12 +437,12 @@ jobs:
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-primary-investigation
-          RCA_TIMELINE_STATUS: ${{ steps.investigator_primary.outcome == 'success' && steps.validate_primary.outcome == 'success' && 'passed' || 'failed' }}
+          RCA_TIMELINE_STATUS: ${{ steps.checkpoint_primary.outcome == 'success' && steps.validate_primary.outcome == 'success' && 'passed' || 'failed' }}
         run: /usr/local/bin/rose-auto-rca-tool timeline-finish
 
       - name: Timeline — start primary reproduction
         id: timeline_primary_reproduction_start
-        if: always() && steps.validate_primary.outcome == 'success'
+        if: always() && steps.checkpoint_primary.outcome == 'success' && steps.validate_primary.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-primary-reproduction
@@ -437,7 +450,7 @@ jobs:
 
       - name: Verify unchanged reproduction after primary attempt
         id: repro_primary
-        if: always() && steps.validate_primary.outcome == 'success'
+        if: always() && steps.checkpoint_primary.outcome == 'success' && steps.validate_primary.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
@@ -529,6 +542,13 @@ jobs:
             --max-turns 80
             --permission-mode bypassPermissions
 
+      - name: Checkpoint retry investigator work
+        id: checkpoint_retry
+        if: always() && steps.investigator_retry.outcome != 'skipped'
+        continue-on-error: true
+        shell: bash
+        run: /usr/local/bin/rose-auto-rca-tool checkpoint-draft
+
       - name: Require a real retry investigator turn
         id: validate_retry
         if: always() && steps.investigator_retry.outcome != 'skipped'
@@ -543,12 +563,12 @@ jobs:
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-retry-investigation
-          RCA_TIMELINE_STATUS: ${{ steps.investigator_retry.outcome == 'success' && steps.validate_retry.outcome == 'success' && 'passed' || 'failed' }}
+          RCA_TIMELINE_STATUS: ${{ steps.checkpoint_retry.outcome == 'success' && steps.validate_retry.outcome == 'success' && 'passed' || 'failed' }}
         run: /usr/local/bin/rose-auto-rca-tool timeline-finish
 
       - name: Timeline — start retry reproduction
         id: timeline_retry_reproduction_start
-        if: always() && steps.validate_retry.outcome == 'success'
+        if: always() && steps.checkpoint_retry.outcome == 'success' && steps.validate_retry.outcome == 'success'
         shell: bash
         env:
           RCA_TIMELINE_STEP: rca-retry-reproduction
@@ -556,7 +576,7 @@ jobs:
 
       - name: Verify unchanged reproduction after retry
         id: repro_retry
-        if: always() && steps.validate_retry.outcome == 'success'
+        if: always() && steps.checkpoint_retry.outcome == 'success' && steps.validate_retry.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: /usr/local/bin/rose-auto-rca-tool verify-repro
