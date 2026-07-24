@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The production lifecycle intentionally exports these for every later workflow
+# step. Contract fixtures must not inherit a live run's timeline or Slack card.
+unset AUTO_RCA_GATE_STATE_DIR RCA_PIPELINE_STEP_OVERRIDE
+unset SLACK_TS SLACK_CHANNEL
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca.yml"
 SHIPPED_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-shipped.yml"
@@ -92,11 +97,17 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-reply' "the ag
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool bind-slack' "the Slack handle must be durably bound to the PR"
 require_text "$SHIPPED_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-update' "shipped transition must use the shared broker"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'pull_request_review:' "approved deploy must be driven by a GitHub PR review"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'issue_comment:' "one-engineer approved deploy must accept an exact PR command"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.state == 'approved'" "only an APPROVED review may authorize deploy"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.comment.body == '/deploy'" "only the exact maintainer deploy command may use comment approval"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.user.type == 'User'" "bot reviews must not authorize deploy"
+require_text "$WORKFLOW" "github.event.comment.body != '/deploy'" "the deploy approval command must not be treated as revision feedback"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'admin|maintain|write)' "the approving human must have repository write permission"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "printf 'PR_BASE_REF=%s" "comment approval must resolve the fresh PR base"
 require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool approved-deploy-plan' "approved deploy must use the executable lifecycle reducer"
 require_text "$RCA_TOOL" 'approval is stale: it does not cover the current PR head' "approval reducer must bind review to the exact RCA head"
+require_text "$RCA_TOOL" 'approved deploy requires a PR targeting main' "approved deploy must fail closed outside main"
+require_text "$RCA_TOOL" 'body.strip() != "/deploy"' "deploy approval comments must not remain queued as reviewer feedback"
 require_text "$RCA_TOOL" 'trusted verification marker is missing or duplicated' "approval reducer must require exactly one trusted marker"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}workflow\" = 'Auto RCA' ]" "approved deploy must wait for the trusted workflow"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}conclusion\" = success ]" "approved deploy must require a green RCA workflow"
@@ -160,6 +171,11 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "trust
 require_text "$WORKFLOW" 'name: Require complete evidence-backed RCA' "workflow must enforce the completion postcondition"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool require-complete' "incomplete RCA must make the workflow red through the trusted contract"
 require_text "$RCA_TOOL" 'keep the PR draft, Slack blocked, and the workflow red' "failure state must be explicit"
+require_absent "$RCA_TOOL" "trap 'rm -f \"\$raw_file\" \"\$scrubbed_file\"' RETURN" "gate failure cleanup must not leak a RETURN trap into its caller"
+require_text "$RCA_TOOL" 'record_running_timeline_detail "$detail"' "failed deploy gates must identify their exact failing substep"
+require_text "$RCA_TOOL" 'AUTO_RCA_SKIP_CLOUD_CONTROLLER_REGRESSION="$skip_controller_regression"' "runtime-only RCA smoke must skip unrelated controller regressions"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" '::rca-stage::' "cloud smoke must publish an exact active substep"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" 'cloud multi-workstream concurrency regression' "normal deploy must retain its controller concurrency regression"
 require_text "$WORKFLOW" "RCA_STATE: \${{ steps.finalize.outputs.state || 'blocked' }}" "finalizer failure must still move Slack to blocked"
 
 # Claude uses the action's native executable path. The custom sudo wrapper
@@ -313,7 +329,7 @@ expected_slack_message="*Affected user:* Ada Lovelace
 *Pipeline step:* /RCA · investigation — needs attention
 *Links:* <https://roselabs.ai/?agent-id=550e8400-e29b-41d4-a716-446655440000|FE View> · <https://github.com/Rose-Ai-Labs/rose/pull/999|PR> · <https://github.com/Rose-Ai-Labs/rose/actions/runs/123|GH Action RCA Run>
 *Agent ID:* \`550e8400-e29b-41d4-a716-446655440000\`
-*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment."
+*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment. When ready, a maintainer can approve the exact PR head with a \`/deploy\` PR comment."
 actual_slack_message="$(
   AGENT_ID=550e8400-e29b-41d4-a716-446655440000 \
   AFFECTED_USER_NAME='Ada Lovelace' \

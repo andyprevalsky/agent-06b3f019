@@ -20,6 +20,7 @@ set -euo pipefail
 #   bash scripts/test.sh front-end                     # frontend tests only
 #   bash scripts/test.sh mac-app                       # mac-app tests only
 #   bash scripts/test.sh mac-app onboarding            # mac-app blackbox: onboarding domain
+#   bash scripts/test.sh --auto-rca-changed-from=<sha> # trusted diff-scoped Auto-RCA offline gate
 #   bash scripts/test.sh --list                        # list available repos/domains
 #   bash scripts/test.sh -v                            # verbose — show all output
 
@@ -41,6 +42,7 @@ VERBOSE=false
 PROMPT_HUMAN_APPROVAL_RETRIEVED=false
 AGENT_BEHAVIOR_APPROVAL_RETRIEVED=false
 DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=false
+AUTO_RCA_BASE_SHA=""
 FULL_MAX_CONCURRENCY="${BENCHMARK_PROD_MAX_CONCURRENCY:-5}"
 
 for arg in "$@"; do
@@ -65,6 +67,9 @@ for arg in "$@"; do
     defer-human-approval-to-exact-head-pr-review=true|--defer-human-approval-to-exact-head-pr-review=true)
       DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW=true
       ;;
+    --auto-rca-changed-from=*)
+      AUTO_RCA_BASE_SHA="${arg#--auto-rca-changed-from=}"
+      ;;
     -*)
       echo "Unknown flag: $arg"
       echo "Usage: bash scripts/test.sh [repo] [domain] [--full] [--no-smoke] [--port=N] [--list] [-v] [--mandatory-human-approval-retrieved=true] [--agent-behavior-approval-retrieved=true]"
@@ -79,6 +84,28 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+AUTO_RCA_MODE=false
+AUTO_RCA_CHANGED=""
+if [ -n "$AUTO_RCA_BASE_SHA" ]; then
+  [[ "$AUTO_RCA_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "ERROR: --auto-rca-changed-from requires a full commit SHA."
+    exit 1
+  }
+  git cat-file -e "$AUTO_RCA_BASE_SHA^{commit}" || {
+    echo "ERROR: Auto-RCA baseline commit is unavailable: $AUTO_RCA_BASE_SHA"
+    exit 1
+  }
+  AUTO_RCA_MODE=true
+  SMOKE=false
+  AUTO_RCA_CHANGED="$(git diff --name-only "$AUTO_RCA_BASE_SHA" HEAD)"
+  [ -n "$AUTO_RCA_CHANGED" ] || {
+    echo "ERROR: Auto-RCA offline gate requires a non-empty baseline diff."
+    exit 1
+  }
+  echo "Auto-RCA changed paths:"
+  printf '%s\n' "$AUTO_RCA_CHANGED" | sed 's/^/  - /'
+fi
 
 # ── List mode ──
 if $LIST; then
@@ -237,7 +264,16 @@ collect_bg_suites() {
 # ── Run suites ──
 
 should_run() {
+  if $AUTO_RCA_MODE; then
+    printf '%s\n' "$AUTO_RCA_CHANGED" | grep -Eq "^$1/"
+    return
+  fi
   [ -z "$REPO" ] || [ "$REPO" = "$1" ]
+}
+
+auto_rca_changed() {
+  local pattern="$1"
+  ! $AUTO_RCA_MODE || printf '%s\n' "$AUTO_RCA_CHANGED" | grep -Eq "$pattern"
 }
 
 if $DEFER_APPROVAL_TO_EXACT_HEAD_REVIEW; then
@@ -271,18 +307,24 @@ run_suite "Auto RCA Lifecycle Blackbox" bash scripts/tests/auto-rca-lifecycle.bl
 run_suite "Semantic Deploy Gate" bash scripts/tests/semantic-deploy-gate.test.sh
 run_suite "Descend Command" bash scripts/tests/descend-command.test.sh
 run_suite "Existing Backend Replay Gate" bash scripts/tests/blackbox-existing-replay-gate.test.sh
-run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
-run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
-run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
-run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
-run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
-run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
-run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
-run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
-run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
-run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
-run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
-run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
+if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)'; then
+  run_suite "Cloud Benchmark Environment" bash scripts/tests/cloudbench-env.test.sh
+  run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
+  run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
+  run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+  run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
+  run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
+  run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
+  run_suite "Cloud Benchmark Restore Readiness" bash scripts/tests/cloudbench-restore-readiness.test.sh
+  run_suite "Cloud Benchmark Orphan-Proxy Reaper" bash scripts/tests/fleet-orphan-proxy-reaper.test.sh
+fi
+if auto_rca_changed '^(scripts/(seed-|setup-db|cloud-build)|back-end/(prisma/|scripts/seed))'; then
+  run_suite "Seed-Dump Cache Decision" bash scripts/tests/seed-cache-decision.test.sh
+  run_suite "Seed-Dump Toolchain Compatibility" bash scripts/tests/seed-dump-toolchain.test.sh
+fi
+if auto_rca_changed '^(scripts/(run\.sh|setup-db|seed-|fast-mode)|back-end/)'; then
+  run_suite "Fast-Mode Cache Schema Retry" bash scripts/tests/fast-mode-cache-schema-retry.test.sh
+fi
 run_suite "Workspace Dependency Preflight" bash scripts/tests/workspace-dependencies.test.sh
 
 # ── Build checks (run in parallel with blackbox tests) ──
@@ -304,9 +346,10 @@ cleanup_bg() {
 }
 trap cleanup_bg EXIT
 
-if should_run "front-end" && ! $SMOKE; then
+if should_run "front-end" && ! $SMOKE && ! $AUTO_RCA_MODE; then
   FE_BUILD_LOG="$TMPDIR_BASE/fe_build.log"
-  bash -c "cd front-end && npx vite build" > "$FE_BUILD_LOG" 2>&1 &
+  NODE_OPTIONS="${NODE_OPTIONS:---max-old-space-size=4096}" \
+    bash -c "cd front-end && npx vite build" > "$FE_BUILD_LOG" 2>&1 &
   BUILD_PIDS+=($!)
   BUILD_NAMES+=("Frontend Build")
   BUILD_LOGS+=("$FE_BUILD_LOG")
@@ -323,42 +366,61 @@ fi
 # ── Blackbox tests (parallel) ──
 
 if should_run "agents"; then
-  bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
-
-  if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
-    bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
+  if $AUTO_RCA_MODE; then
+    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+    run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
   else
-    bg_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
+    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+
+    if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
+      bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"
+    else
+      bg_suite "Agents Blackbox" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py"
+    fi
   fi
 fi
 
 if should_run "back-end"; then
-  bg_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
-
-  if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
-    bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  if $AUTO_RCA_MODE; then
+    run_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+    run_suite "Backend Coverage and Blackbox" bash -c "cd back-end && npm run test:coverage"
   else
-    bg_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
+    bg_suite "Backend Structural" bash -c "cd back-end && npx tsx src/tests/structural/layer-deps.test.ts"
+
+    if [ -n "$DOMAIN" ] && [ "$REPO" = "back-end" ]; then
+      bg_suite "Backend Blackbox ($DOMAIN)" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+    else
+      bg_suite "Backend Blackbox" bash -c "cd back-end && bash scripts/run-blackbox-tests.sh"
+    fi
   fi
 fi
 
 if should_run "front-end"; then
-  bg_suite "Frontend Structural" bash -c "cd front-end && npx vitest run src/tests/structural"
-
-  if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
-    bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  if $AUTO_RCA_MODE; then
+    run_suite "Frontend Coverage and Blackbox" bash -c "cd front-end && npm run test:coverage -- --maxWorkers=2"
+    run_suite "Frontend Build" bash -c "cd front-end && NODE_OPTIONS=--max-old-space-size=4096 npx vite build"
   else
-    bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
+    bg_suite "Frontend Structural" bash -c "cd front-end && npx vitest run src/tests/structural"
+
+    if [ -n "$DOMAIN" ] && [ "$REPO" = "front-end" ]; then
+      bg_suite "Frontend Blackbox ($DOMAIN)" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh $DOMAIN"
+    else
+      bg_suite "Frontend Blackbox" bash -c "cd front-end && bash scripts/run-blackbox-tests.sh"
+    fi
   fi
 fi
 
 if should_run "mac-app"; then
-  bg_suite "Mac App Structural" bash -c "cd mac-app && npm run test:structural"
-
-  if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
-    bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
+  if $AUTO_RCA_MODE; then
+    run_suite "Mac App Coverage and Blackbox" bash -c "cd mac-app && npm run test:coverage -- --maxWorkers=1"
   else
-    bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
+    bg_suite "Mac App Structural" bash -c "cd mac-app && npm run test:structural"
+
+    if [ -n "$DOMAIN" ] && [ "$REPO" = "mac-app" ]; then
+      bg_suite "Mac App Blackbox ($DOMAIN)" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh $DOMAIN"
+    else
+      bg_suite "Mac App Blackbox" bash -c "cd mac-app && bash scripts/run-blackbox-tests.sh"
+    fi
   fi
 fi
 
@@ -434,9 +496,11 @@ echo "════════════════════════�
 
 # ── Show failure details ──
 if [ $FAIL_COUNT -gt 0 ]; then
+  : > "$TMPDIR_BASE/failed-suites.txt"
   echo ""
   for i in "${!SUITE_NAMES[@]}"; do
     if [ "${SUITE_STATUSES[$i]}" = "fail" ]; then
+      printf '%s\n' "${SUITE_NAMES[$i]}" >> "$TMPDIR_BASE/failed-suites.txt"
       echo "── ${SUITE_NAMES[$i]} failures ──"
       # Extract failure summaries: ❌ lines, FAIL lines, assertion diffs (no stack traces)
       grep -Ei '❌|^--- FAIL|^  FAIL|^FAILURES|^FAIL:|Expected.*got|Received|assert.*failed|(^|[[:space:]])error:' "${SUITE_LOGS[$i]}" | head -40 || true

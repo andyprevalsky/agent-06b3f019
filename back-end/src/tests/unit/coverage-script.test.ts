@@ -44,6 +44,7 @@ for (const variable of [
   'SLACK_BOT_TOKEN',
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
+  'STRIPE_SECRET_KEY',
 ]) {
   assert.match(
     autoRcaEnv,

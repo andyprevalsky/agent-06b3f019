@@ -163,8 +163,25 @@ timeline_finish() {
   printf 'Finished %s: %s.\n' "$(timeline_label "$step")" "$status"
 }
 
+record_running_timeline_detail() {
+  local detail="$1" step status
+  [ -n "$detail" ] || return
+  [ "${#detail}" -le 180 ] || detail="${detail:0:177}..."
+  [[ "$detail" != *$'\n'* && "$detail" != *$'\r'* ]] || \
+    fail "timeline detail must be one line"
+  for step in \
+    deploy-primary-offline deploy-primary-smoke \
+    deploy-retry-offline deploy-retry-smoke; do
+    status="$(read_state "timeline.${step}.status" 2>/dev/null || true)"
+    if [ "$status" = running ]; then
+      record_state "timeline.${step}.detail" "$detail"
+      return
+    fi
+  done
+}
+
 timeline_waterfall_from_state() {
-  local now step label start end status seconds duration icon
+  local now step label detail rendered_label start end status seconds duration icon
   local rows='' failed_label='' running_label='' last_label=''
   now="$(timeline_now)"
   while IFS='|' read -r step label; do
@@ -172,21 +189,24 @@ timeline_waterfall_from_state() {
     status="$(read_state "timeline.${step}.status" 2>/dev/null || true)"
     [ -n "$start" ] || continue
     [[ "$start" =~ ^[0-9]+$ ]] || fail "timeline start is corrupt"
+    detail="$(read_state "timeline.${step}.detail" 2>/dev/null || true)"
+    rendered_label="$label"
+    [ -z "$detail" ] || rendered_label="$label · $detail"
     case "$status" in
       running)
         end="$now"
         icon='⏳'
-        running_label="$label — in progress"
+        running_label="$rendered_label — in progress"
         ;;
       passed)
         end="$(read_state "timeline.${step}.end")"
         icon='✅'
-        last_label="$label — passed"
+        last_label="$rendered_label — passed"
         ;;
       failed)
         end="$(read_state "timeline.${step}.end")"
         icon='❌'
-        failed_label="$label — failed"
+        failed_label="$rendered_label — failed"
         ;;
       skipped)
         continue
@@ -203,7 +223,7 @@ timeline_waterfall_from_state() {
     else
       duration="${seconds}s"
     fi
-    rows+="${icon} ${label} — ${duration}"$'\n'
+    rows+="${icon} ${rendered_label} — ${duration}"$'\n'
   done < <(timeline_steps)
 
   [ -n "$rows" ] || return 1
@@ -297,6 +317,7 @@ approved_deploy_plan() {
   local result agent_id run_id
   require_repo
   result="$(python3 <<'PY'
+import base64
 import os
 import re
 
@@ -306,8 +327,13 @@ head = os.environ.get("PR_HEAD_SHA", "")
 review_head = os.environ.get("REVIEW_COMMIT_SHA", "")
 head_ref = os.environ.get("PR_HEAD_REF", "")
 head_repo = os.environ.get("PR_HEAD_REPO", "")
+base_ref = os.environ.get("PR_BASE_REF", "")
 title = os.environ.get("PR_TITLE", "")
-body = os.environ.get("PR_BODY", "")
+body_b64 = os.environ.get("PR_BODY_B64", "")
+try:
+    body = base64.b64decode(body_b64, validate=True).decode() if body_b64 else os.environ.get("PR_BODY", "")
+except (ValueError, UnicodeDecodeError) as error:
+    raise SystemExit("invalid encoded PR body") from error
 draft = os.environ.get("PR_DRAFT", "")
 
 uuid = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}"
@@ -319,6 +345,8 @@ if review_head != head:
     raise SystemExit("approval is stale: it does not cover the current PR head")
 if head_repo != repository:
     raise SystemExit("fork RCA PRs cannot use approved deploy")
+if base_ref != "main":
+    raise SystemExit("approved deploy requires a PR targeting main")
 if draft != "false":
     raise SystemExit("approved deploy requires a ready non-draft PR")
 
@@ -574,7 +602,7 @@ for comment in comments:
             "slack_user": slack_user,
         })
         continue
-    if not consumed_re.fullmatch(body.strip()):
+    if not consumed_re.fullmatch(body.strip()) and body.strip() != "/deploy":
         text = body.strip()
         if text and len(text) <= 8000:
             pending.append({
@@ -943,12 +971,11 @@ PY
 }
 
 capture_gate_failure() {
-  local gate_name="$1" log_root="$2" raw_file scrubbed_file
+  local gate_name="$1" log_root="$2" raw_file scrubbed_file detail stage
   require_gate_state_dir
   mkdir -p "$CONTEXT_DIR"
   raw_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-gate-failure.XXXXXX")"
   scrubbed_file="$(mktemp "${RUNNER_TEMP:-/tmp}/rose-auto-rca-gate-failure-scrubbed.XXXXXX")"
-  trap 'rm -f "$raw_file" "$scrubbed_file"' RETURN
   {
     printf 'Trusted /deploy failure: %s\n' "$gate_name"
     printf 'Full per-suite logs remain in: %s\n\n' "$log_root"
@@ -984,14 +1011,25 @@ pathlib.Path(target).write_text(text[-240_000:], encoding="utf-8")
 PY
   sudo install -o root -g rose-auto-rca -m 0440 \
     "$scrubbed_file" "$GATE_STATE_DIR/verification.txt"
+  detail="$gate_name"
+  if [ "$gate_name" = "offline gates" ] && [ -s "$log_root/failed-suites.txt" ]; then
+    detail="$(paste -sd ',' "$log_root/failed-suites.txt" | sed 's/,/, /g')"
+  elif [ "$gate_name" = "smoke gates" ] && [ -s "$CONTEXT_DIR/smoke-gates.log" ]; then
+    stage="$(sed -n 's/^::rca-stage:://p' "$CONTEXT_DIR/smoke-gates.log" | tail -1)"
+    [ -z "$stage" ] || detail="$stage"
+  fi
+  record_running_timeline_detail "$detail"
+  rm -f "$raw_file" "$scrubbed_file"
 }
 
 offline_gates() {
-  local status
+  local base status
   require_clean_checkout
+  base="$(trusted_baseline)"
   set +e
   AUTO_RCA_EXACT_HEAD_APPROVAL_DEFERRED=true \
     bash "$ROOT_DIR/scripts/test.sh" --no-smoke \
+      "--auto-rca-changed-from=$base" \
       --defer-human-approval-to-exact-head-pr-review=true
   status=$?
   set -e
@@ -1003,12 +1041,26 @@ offline_gates() {
 }
 
 smoke_gates() {
-  local log_file status
+  local base changed log_file skip_controller_regression status
   require_clean_checkout
+  base="$(trusted_baseline)"
+  changed="$(git -C "$ROOT_DIR" diff --name-only "$base" HEAD)"
+  if ! printf '%s\n' "$changed" | grep -Eq \
+    '^(back-end/src/.*\.ts$|back-end/prisma/(schema\.prisma|migrations/)|agents/(activities|helpers|loop|workflows|tools|domains|browser_tools)/|agents/(worker|config|health_server)\.py$|agents/(requirements\.txt|pyproject\.toml|Dockerfile|fly\.toml|deploy\.sh)$|scripts/run\.sh$|back-end/\.env\.example$)'; then
+    printf 'Smoke gate skipped: the trusted diff does not affect the agent runtime.\n'
+    record_gate smoke-gates
+    return
+  fi
+  skip_controller_regression=false
+  if ! printf '%s\n' "$changed" | grep -Eq \
+    '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)'; then
+    skip_controller_regression=true
+  fi
   log_file="$CONTEXT_DIR/smoke-gates.log"
   mkdir -p "$CONTEXT_DIR"
   set +e
-  "$ROOT_DIR/scripts/run-predeploy-cloud" > "$log_file" 2>&1
+  AUTO_RCA_SKIP_CLOUD_CONTROLLER_REGRESSION="$skip_controller_regression" \
+    "$ROOT_DIR/scripts/run-predeploy-cloud" > "$log_file" 2>&1
   status=$?
   set -e
   if [ "$status" -ne 0 ]; then
@@ -1481,7 +1533,7 @@ slack_message() {
   printf '*Links:* <%s|FE View> · <%s|PR> · <%s|GH Action RCA Run>\n' "$fe_url" "$pr_url" "$run_url"
   printf '%s\n' "*Agent ID:* \`$AGENT_ID\`"
   if [ "$state" != shipped ] && [ "$state" != cancelled ]; then
-    printf '%s\n' "*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment."
+    printf '%s\n' "*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment. When ready, a maintainer can approve the exact PR head with a \`/deploy\` PR comment."
   fi
 }
 
