@@ -26,12 +26,61 @@ import {
 const log = createLogger('OutboundEvents');
 const MAX_MMS_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MMS_ATTACHMENT_SIGNED_URL_TTL_SECONDS = 24 * 60 * 60;
+const MAX_COMPLETION_OUTPUT_LINES = 6;
 
 function extensionFromMimeType(mimeType: string): string {
   if (mimeType === 'image/png') return 'png';
   if (mimeType === 'image/gif') return 'gif';
   if (mimeType === 'image/webp') return 'webp';
   return 'jpg';
+}
+
+function completionOutputLines(outputs: unknown): string[] {
+  if (!Array.isArray(outputs)) return [];
+
+  return outputs
+    .flatMap((entry): string[] => {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return [];
+      const output = entry as Record<string, unknown>;
+      if (typeof output.key !== 'string' || output.key.trim() === '') return [];
+
+      const labelSource =
+        typeof output.label === 'string' && output.label.trim() !== '' ? output.label : output.key;
+      const label = labelSource
+        .trim()
+        .replace(/[_-]+/g, ' ')
+        .replace(/\b\w/g, (character) => character.toUpperCase());
+      let value: string;
+      if (typeof output.value === 'string') {
+        value = output.value;
+      } else if (
+        typeof output.value === 'number' ||
+        typeof output.value === 'boolean' ||
+        typeof output.value === 'bigint'
+      ) {
+        value = String(output.value);
+      } else {
+        try {
+          value = JSON.stringify(output.value) ?? String(output.value);
+        } catch {
+          value = String(output.value);
+        }
+      }
+      const oneLineValue = truncateText(value.replace(/\s+/g, ' ').trim(), 160);
+      return oneLineValue ? [`${label}: ${oneLineValue}`] : [];
+    })
+    .slice(0, MAX_COMPLETION_OUTPUT_LINES);
+}
+
+export function buildCompletionSmsBody(
+  agentId: string,
+  summary: string,
+  outputs?: unknown
+): string {
+  const prefix = agentId.substring(0, 6);
+  const url = getAgentUrl(agentId);
+  const oneLineSummary = summary.replace(/\s+/g, ' ').trim();
+  return SMS_TEMPLATES.agentCompleted(prefix, oneLineSummary, url, completionOutputLines(outputs));
 }
 
 async function rehostMmsAttachmentUrl(userId: string, mediaUrl: string): Promise<string | null> {
@@ -330,8 +379,15 @@ export async function notifyAgentCardSetup(
 export async function notifyCompletion(
   userId: string,
   agent: { id: string },
-  summary: string
-): Promise<void> {
+  summary: string,
+  outputs?: unknown
+): Promise<{
+  success: boolean;
+  messageSid?: string;
+  error?: string;
+  definitiveFailure?: boolean;
+  skipped?: boolean;
+}> {
   const startTime = Date.now();
 
   log.info('notifyCompletion', {
@@ -343,12 +399,11 @@ export async function notifyCompletion(
   const phone = await getUserPhone(userId);
   if (!phone) {
     log.info('No phone for user, skipping', { userId });
-    return;
+    return { success: true, skipped: true };
   }
 
   const prefix = agent.id.substring(0, 6);
-  const url = getAgentUrl(agent.id);
-  const message = SMS_TEMPLATES.agentCompleted(prefix, summary, url);
+  const message = buildCompletionSmsBody(agent.id, summary, outputs);
 
   const result = await sendSms(phone, message, {
     archiveRootAgentId: agent.id,
@@ -362,6 +417,7 @@ export async function notifyCompletion(
     messageSid: result.messageSid,
     durationMs: Date.now() - startTime,
   });
+  return result;
 }
 
 /**

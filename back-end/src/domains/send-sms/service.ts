@@ -3,17 +3,25 @@ import { sendSms, getUserPhone } from '../../providers/smsQueue';
 import { createLogger } from '../../providers/logger';
 import { SURGE_API_KEY, SURGE_ACCOUNT_ID } from './config';
 import {
+  claimToolSideEffect,
+  markToolSideEffectFailed,
+  markToolSideEffectSucceeded,
+  type ToolSideEffectJson,
+} from '../../providers/toolSideEffects';
+import {
   notifyAgentStarted,
   notifyPlannerMessage,
   notifyWriteLock,
   notifyAgentCardSetup,
   notifyCompletion,
   notifyCostLimit,
+  buildCompletionSmsBody,
 } from '../../providers/smsSupervisor/outboundEvents';
 import * as repo from './repo';
 import type { NotifyInput } from './types';
 
 const log = createLogger('SendSMS');
+const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
 
 // ── Surge direct send ────────────────────────────────────────────────
 
@@ -124,6 +132,7 @@ export interface NotifyResult {
   success: true;
   skipped?: boolean;
   reason?: string;
+  messagePreview?: string;
 }
 
 /**
@@ -155,19 +164,32 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     });
     return { success: true, skipped: true, reason: 'agent_deleted' };
   }
+  const payload = data.payload ?? {};
+
   // Benchmark/eval runs create real root agents under the operator's own phone.
   // Lifecycle SMS (agent_started, write_lock, completion, …) fire on any source
   // now, so without this central gate every benchmark run would text the
-  // operator. Suppress here so the workflow-side source guards can safely relax.
+  // operator. Completion still returns the production-formatted body so an eval
+  // can assert the full notification contract without crossing the SMS boundary.
   if (agent.isBenchmark) {
     log.info('Agent is a benchmark run, skipping SMS', {
       agentId: data.agent_id,
       eventType: data.event_type,
     });
-    return { success: true, skipped: true, reason: 'benchmark_agent' };
+    const messagePreview =
+      data.event_type === 'completion'
+        ? buildCompletionSmsBody(
+            data.agent_id,
+            (payload.summary as string | undefined) ?? '',
+            payload.outputs
+          )
+        : undefined;
+    return { success: true, skipped: true, reason: 'benchmark_agent', messagePreview };
   }
 
-  const payload = data.payload ?? {};
+  if (data.event_type === 'completion') {
+    return dispatchCompletionOnce(data, payload);
+  }
 
   await dispatchByEventType(data, payload, agent.goal);
 
@@ -178,6 +200,52 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   });
 
   return { success: true };
+}
+
+async function dispatchCompletionOnce(
+  data: NotifyInput,
+  payload: Record<string, unknown>
+): Promise<NotifyResult> {
+  const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
+  const claim = await claimToolSideEffect({
+    operationKey,
+    operationType: COMPLETION_SMS_OPERATION_TYPE,
+    request: {
+      user_id: data.user_id,
+      agent_id: data.agent_id,
+      event_type: data.event_type,
+    },
+  });
+  if (claim.status === 'existing') {
+    log.info('Completion SMS already claimed, skipping duplicate', {
+      agentId: data.agent_id,
+      status: claim.record.status,
+    });
+    return { success: true, skipped: true, reason: 'duplicate_completion' };
+  }
+
+  const delivery = await notifyCompletion(
+    data.user_id,
+    { id: data.agent_id },
+    (payload.summary as string | undefined) ?? '',
+    payload.outputs
+  );
+  if (!delivery.success) {
+    if (delivery.definitiveFailure === true) {
+      await markToolSideEffectFailed({
+        operationKey,
+        error: delivery.error ?? 'Completion SMS provider rejected the message',
+      });
+    }
+    throw new Error(delivery.error ?? 'Completion SMS delivery failed');
+  }
+
+  await markToolSideEffectSucceeded({
+    operationKey,
+    externalId: delivery.messageSid ?? `${data.agent_id}:no-phone`,
+    response: delivery as ToolSideEffectJson,
+  });
+  return { success: true, skipped: delivery.skipped };
 }
 
 /* c8 ignore start -- dispatchByEventType delegates to smsSupervisor outboundEvents (excluded from coverage) */
@@ -229,14 +297,6 @@ async function dispatchByEventType(
       await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl);
       break;
     }
-
-    case 'completion':
-      await notifyCompletion(
-        data.user_id,
-        { id: data.agent_id },
-        (payload.summary as string | undefined) ?? ''
-      );
-      break;
 
     case 'cost_limit':
       await notifyCostLimit(data.user_id, {

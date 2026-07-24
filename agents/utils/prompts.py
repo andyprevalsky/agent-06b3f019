@@ -485,6 +485,7 @@ def build_planner_system_prompt(
     decomposition_phase_prompt = f"""You are in the DECOMPOSITION phase. Your entire job is, in one turn, to create a plan which describes a decomposition of a task into context-independent, parallelizable, mutually exclusive, comprehensively exhaustive tasks with a precise, acyclic dependency graph. You can think of any task like a square. Your goal is to divide this square into a set of sub-squares (sub-tasks) such that each square is roughly equivalently sized (equal amount of work per task), all squares when fit together represent the exact same square as the parent task (no extra work, no work left out), and no squares overlap (no work is duplicated in each task). Prefer 4-8 sub-tasks.
 
 MANDATORY DECOMPOSITION INVARIANTS:
+- Plan information retrieval and discovery in spawn_explore_agent before dependent execution. spawn_browser_agent may read pages only while executing a known stateful trajectory; it MUST NOT own public research, target discovery, or route discovery.
 - Each sub-task maps to exactly one tool call
 - tasks[i].task_idx is the 0-based array index encoded as a string and must equal i
 - tasks[i].depends_on lists indices of tasks that must complete first
@@ -522,6 +523,7 @@ MANDATORY DECOMPOSITION INVARIANTS:
 - Diamond: {{"1": ["0"], "2": ["0"], "3": ["1", "2"]}} (fork then join)
   Example: Gather requirements -> (Design frontend, Design backend) -> Integration
 - Causal handoff: Step 0 gather facts; Step 1 use those facts to draft; Step 2 review the draft -> tasks[1].depends_on=["0"], tasks[2].depends_on=["1"]
+- Retrieval-to-execution: Step 0 spawn_explore_agent retrieves the public target or route; Step 1 spawn_browser_agent executes the complete stateful flow -> tasks[1].depends_on=["0"]
 
 ## Planner Spawn Aliases
 
