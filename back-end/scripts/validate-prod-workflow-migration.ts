@@ -1666,8 +1666,29 @@ async function main(): Promise<void> {
     } while (!visible && Date.now() < visibilityDeadline);
     assert(visible, 'validation activation marker was not visible in the cleanup query');
 
-    await cleanupSupersededWorkerActivationMarkers(currentMarkerId);
-    await assertTerminated(oldMarkerId);
+    // cleanupSupersededWorkerActivationMarkers enumerates markers via Temporal
+    // visibility (Elasticsearch), which is eventually consistent: a just-created
+    // marker that this test already confirmed "Running" can still be absent from
+    // a single subsequent visibility snapshot, so one cleanup pass may not see it
+    // to terminate it. Production activation runs cleanup on every deploy, so a
+    // straggler is retired on the next pass — the property under test is that a
+    // superseded same-SHA marker IS retired, within the visibility-consistency
+    // window, not that a single snapshot catches it. Retry the idempotent cleanup
+    // (bounded) until visibility catches up. The assertion is unchanged: the old
+    // marker must end TERMINATED and the exact current marker must stay RUNNING.
+    const retirementDeadline = Date.now() + 60_000;
+    let oldMarkerStatus = 'RUNNING';
+    do {
+      await cleanupSupersededWorkerActivationMarkers(currentMarkerId);
+      oldMarkerStatus = (await client.workflow.getHandle(oldMarkerId).describe()).status.name;
+      if (oldMarkerStatus === 'TERMINATED') break;
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    } while (Date.now() < retirementDeadline);
+    assert.strictEqual(
+      oldMarkerStatus,
+      'TERMINATED',
+      'superseded same-SHA marker was not retired within the visibility-consistency window'
+    );
     const current = await client.workflow.getHandle(currentMarkerId).describe();
     assert.strictEqual(current.status.name, 'RUNNING');
     return 'same-SHA old attempt marker retired while exact current deployment stayed active';
