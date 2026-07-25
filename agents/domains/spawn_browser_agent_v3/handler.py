@@ -14,6 +14,7 @@ import html as html_module
 import importlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -32,6 +33,10 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
 from config import load_config
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+)
+from domains.request_payment_card.handler import build_payment_question, normalize_payment_payload
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -151,6 +156,18 @@ def _normalize_payment_card_last4(value: Any) -> Optional[str]:
     if isinstance(value, str) and re.fullmatch(r"\d{4}", value):
         return value
     return None
+
+
+def _normalize_funding_retry_seconds(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 5.0
+    try:
+        retry_seconds = float(value)
+    except OverflowError:
+        return 5.0
+    if not math.isfinite(retry_seconds) or retry_seconds <= 0:
+        return 5.0
+    return min(max(retry_seconds, 1.0), 60.0)
 
 
 def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
@@ -7709,11 +7726,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_payment_card import (
-                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-                        build_payment_question,
-                        normalize_payment_payload,
-                    )
                     from tools.request_user_approval import (
                         request_user_approval_direct,
                         request_user_attention_direct,
@@ -7782,15 +7794,36 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             attention_request_id=approval_response.get("attention_request_id"),
                         )
 
+                    funding_retry_deadline = None
+
                     async def mint_payment_card() -> Dict[str, Any]:
-                        return await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(
-                                seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
-                            ),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        nonlocal funding_retry_deadline
+                        while True:
+                            minted_card = await workflow.execute_activity(
+                                "mint_purchase_card_activity",
+                                args=[workflow_instance.user_id or "", payment_payload],
+                                start_to_close_timeout=timedelta(
+                                    seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+                                ),
+                                retry_policy=RetryPolicy(maximum_attempts=1),
+                            )
+                            if minted_card.get("status") != "agentcard_company_funding_in_progress":
+                                return minted_card
+
+                            if funding_retry_deadline is None:
+                                funding_retry_deadline = workflow.now() + timedelta(minutes=10)
+                            retry_seconds = _normalize_funding_retry_seconds(
+                                minted_card.get("retryAfterSeconds", 5)
+                            )
+                            if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                                return minted_card
+                            logger.info(
+                                "AgentCard company funding pending; resuming same purchase",
+                                agent_id=workflow_instance.agent_id,
+                                task_id=result.get("task_id"),
+                                retry_seconds=retry_seconds,
+                            )
+                            await workflow.sleep(retry_seconds)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -8059,6 +8092,24 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             )
                             return
+
+                    if card.get("status") == "agentcard_company_funding_in_progress":
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Payment funding is delayed",
+                            message=(
+                                "AgentCard has not confirmed the company funding transfer yet. "
+                                "The approved purchase is preserved and can be retried without "
+                                "creating another charge."
+                            ),
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "purchase_funding_delayed",
+                            },
+                        )
+                        return
 
                     logger.info(
                         "Browser payment card minted",

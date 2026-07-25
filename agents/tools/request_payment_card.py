@@ -2,6 +2,11 @@
 
 from typing import TYPE_CHECKING
 
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
+    MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
+)
 from domains.request_payment_card.handler import (
     build_payment_fingerprint,
     build_payment_question,
@@ -10,9 +15,6 @@ from domains.request_payment_card.handler import (
 
 if TYPE_CHECKING:
     from domains.request_payment_card.repo import (
-        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-        MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
-        MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
         agentcard_status_activity,
         lookup_purchase_activity,
         mint_purchase_card_activity,
@@ -33,26 +35,17 @@ __all__ = [
 
 def __getattr__(name):
     if name in {
-        "MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS",
-        "MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS",
-        "MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS",
         "agentcard_status_activity",
         "lookup_purchase_activity",
         "mint_purchase_card_activity",
     }:
         from domains.request_payment_card.repo import (
-            MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-            MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
-            MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
             agentcard_status_activity,
             lookup_purchase_activity,
             mint_purchase_card_activity,
         )
 
         return {
-            "MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS": MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-            "MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS": MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
-            "MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS": MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
             "agentcard_status_activity": agentcard_status_activity,
             "lookup_purchase_activity": lookup_purchase_activity,
             "mint_purchase_card_activity": mint_purchase_card_activity,

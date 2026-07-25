@@ -3,6 +3,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const coverageScript = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
+const localRuntimeSqlHooks = readFileSync(
+  join(process.cwd(), 'scripts', 'apply-local-runtime-sql-hooks.sh'),
+  'utf8'
+);
 const blackboxScript = readFileSync(
   join(process.cwd(), 'scripts', 'run-blackbox-tests.sh'),
   'utf8'
@@ -172,6 +176,21 @@ assert.match(
   coverageScript,
   /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
   'coverage must isolate Fast Mode cache fixtures in the local test database'
+);
+assert.ok(
+  coverageScript.indexOf('npx prisma db push --skip-generate --accept-data-loss') <
+    coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"'),
+  'coverage must install migration-owned database triggers after Prisma schema sync'
+);
+assert.ok(
+  coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"') <
+    coverageScript.indexOf('node --import tsx src/bootstrap.ts'),
+  'coverage must install workflow cleanup triggers before backend and unit tests start'
+);
+assert.match(
+  localRuntimeSqlHooks,
+  /20260723000000_add_workflow_iteration_offset[\s\S]*20260724002500_temporal_cleanup_utc_grace/,
+  'the shared SQL-hook installer must retain both migration-owned trigger sources'
 );
 assert.doesNotMatch(
   coverageScript,
