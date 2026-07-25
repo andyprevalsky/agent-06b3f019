@@ -1,7 +1,6 @@
 #!/usr/bin/env tsx
 /**
  * Unit tests for the remaining AgentCard provider surfaces:
- *  - `benchmark-float.ts` — sandbox-float top-up math against an injected fetch.
  *  - `org-wallet-monitor.ts` — wallet extraction error branches, the fallback
  *    deposit-address message, the DB-backed alert store, and the disabled monitor.
  *  - `sandbox-settlement.ts` — the real markPurchaseCleared Postgres transaction.
@@ -11,12 +10,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import {
-  ensureAgentCardSandboxFloat,
-  loadAgentCardBenchmarkAdmin,
-  selectAgentCardBenchmarkAdminToken,
-  selectAgentCardBenchmarkWalletToken,
-} from '../../providers/agentcard/benchmark-float';
 import {
   createAgentCardOrgWalletAlertStore,
   extractAgentCardOrgWallet,
@@ -42,14 +35,6 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
   }
 }
 
-function jsonResponse(status: number, body: unknown): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-  } as unknown as Response;
-}
-
 async function seedUser(): Promise<string> {
   const userId = `agentcard-extras-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -57,222 +42,11 @@ async function seedUser(): Promise<string> {
   return userId;
 }
 
-const ADMIN = { apiUrl: 'https://api.agentcard.test', token: 'jwt-token' };
-
 async function main(): Promise<void> {
   process.stdout.write('Running AgentCard provider-extras unit tests...\n');
 
-  // ── benchmark-float ──
-  await test('ensureAgentCardSandboxFloat leaves an already-funded wallet untouched', async () => {
-    let calls = 0;
-    const result = await ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async () => {
-      calls += 1;
-      return jsonResponse(200, { settings: { sandbox_balance_cents: 50_000 } });
-    }) as typeof fetch);
-    assert.equal(result.addedCents, 0);
-    assert.equal(result.balanceCents, 50_000);
-    assert.equal(calls, 1, 'no test-fund call when the target is already met');
-  });
-
-  await test('ensureAgentCardSandboxFloat tops up a low wallet', async () => {
-    const bodies: unknown[] = [];
-    const result = await ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async (
-      _url: string,
-      init: RequestInit
-    ) => {
-      if (init.method === 'POST') {
-        bodies.push(JSON.parse(String(init.body)));
-        return jsonResponse(200, { sandboxWalletBalanceCents: 50_000 });
-      }
-      return jsonResponse(200, { settings: { sandbox_balance_cents: 10_000 } });
-    }) as typeof fetch);
-    assert.equal(result.previousCents, 10_000);
-    assert.equal(result.addedCents, 40_000);
-    assert.equal(result.balanceCents, 50_000);
-    assert.deepEqual(bodies[0], { amountCents: 40_000 });
-  });
-
-  await test('ensureAgentCardSandboxFloat uses the member wallet token for company wallet routes', async () => {
-    const authorizations: Array<string | null> = [];
-    const result = await ensureAgentCardSandboxFloat(
-      { ...ADMIN, walletToken: 'member-wallet-token' },
-      'org-1',
-      50_000,
-      (async (_url: string, init: RequestInit) => {
-        authorizations.push(new Headers(init.headers).get('authorization'));
-        if (init.method === 'POST') return jsonResponse(200, { sandboxWalletBalanceCents: 50_000 });
-        return jsonResponse(200, { settings: { sandbox_balance_cents: 28_020 } });
-      }) as typeof fetch
-    );
-
-    assert.deepEqual(result, { previousCents: 28_020, balanceCents: 50_000, addedCents: 21_980 });
-    assert.deepEqual(authorizations, ['Bearer member-wallet-token', 'Bearer member-wallet-token']);
-  });
-
-  await test('ensureAgentCardSandboxFloat keeps using the primary token without a wallet token', async () => {
-    const authorizations: Array<string | null> = [];
-    const result = await ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async (
-      _url: string,
-      init: RequestInit
-    ) => {
-      authorizations.push(new Headers(init.headers).get('authorization'));
-      if (init.method === 'POST') return jsonResponse(200, { sandboxWalletBalanceCents: 50_000 });
-      return jsonResponse(200, { settings: { sandbox_balance_cents: 40_000 } });
-    }) as typeof fetch);
-
-    assert.deepEqual(result, { previousCents: 40_000, balanceCents: 50_000, addedCents: 10_000 });
-    assert.deepEqual(authorizations, ['Bearer jwt-token', 'Bearer jwt-token']);
-  });
-
-  await test('ensureAgentCardSandboxFloat rejects malformed wallet responses', async () => {
-    await assert.rejects(
-      () =>
-        ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async () =>
-          jsonResponse(200, { settings: {} })) as typeof fetch),
-      /omitted sandbox balance/
-    );
-    await assert.rejects(
-      () =>
-        ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async (
-          _url: string,
-          init: RequestInit
-        ) =>
-          init.method === 'POST'
-            ? jsonResponse(200, {})
-            : jsonResponse(200, { settings: { sandbox_balance_cents: 10_000 } })) as typeof fetch),
-      /test-fund response omitted/
-    );
-    await assert.rejects(
-      () =>
-        ensureAgentCardSandboxFloat(ADMIN, 'org-1', 50_000, (async () =>
-          jsonResponse(500, {})) as typeof fetch),
-      /HTTP 500/
-    );
-  });
-
-  await test('ensureAgentCardSandboxFloat refreshes and retries an expired admin session', async () => {
-    const authorizations: string[] = [];
-    const persisted: string[][] = [];
-    const admin = {
-      ...ADMIN,
-      refreshToken: 'refresh-old',
-      persistTokens: async (accessToken: string, refreshToken: string) => {
-        persisted.push([accessToken, refreshToken]);
-      },
-    };
-    let calls = 0;
-    const result = await ensureAgentCardSandboxFloat(admin, 'org-1', 50_000, (async (
-      url: string,
-      init: RequestInit
-    ) => {
-      calls += 1;
-      if (url.endsWith('/auth/refresh')) {
-        assert.deepEqual(JSON.parse(String(init.body)), { refreshToken: 'refresh-old' });
-        return jsonResponse(200, {
-          accessToken: 'access-new',
-          refreshToken: 'refresh-new',
-        });
-      }
-      authorizations.push(String((init.headers as Record<string, string>).authorization));
-      if (calls === 1) return jsonResponse(401, {});
-      return jsonResponse(200, { settings: { sandbox_balance_cents: 50_000 } });
-    }) as typeof fetch);
-    assert.equal(result.balanceCents, 50_000);
-    assert.deepEqual(authorizations, ['Bearer jwt-token', 'Bearer access-new']);
-    assert.deepEqual(persisted, [['access-new', 'refresh-new']]);
-    assert.equal(admin.refreshToken, 'refresh-new');
-  });
-
-  await test('ensureAgentCardSandboxFloat refreshes the distinct member wallet session', async () => {
-    const authorizations: string[] = [];
-    const persisted: string[][] = [];
-    const admin = {
-      ...ADMIN,
-      token: 'admin-access',
-      refreshToken: 'admin-refresh',
-      walletToken: 'wallet-access-old',
-      walletRefreshToken: 'wallet-refresh-old',
-      walletPersistTokens: async (accessToken: string, refreshToken: string) => {
-        persisted.push([accessToken, refreshToken]);
-      },
-    };
-    const result = await ensureAgentCardSandboxFloat(admin, 'org-1', 50_000, (async (
-      url: string,
-      init: RequestInit
-    ) => {
-      if (url.endsWith('/auth/refresh')) {
-        assert.deepEqual(JSON.parse(String(init.body)), {
-          refreshToken: 'wallet-refresh-old',
-        });
-        return jsonResponse(200, {
-          accessToken: 'wallet-access-new',
-          refreshToken: 'wallet-refresh-new',
-        });
-      }
-      authorizations.push(String((init.headers as Record<string, string>).authorization));
-      if (authorizations.length === 1) return jsonResponse(401, {});
-      return jsonResponse(200, { settings: { sandbox_balance_cents: 50_000 } });
-    }) as typeof fetch);
-    assert.equal(result.balanceCents, 50_000);
-    assert.deepEqual(authorizations, ['Bearer wallet-access-old', 'Bearer wallet-access-new']);
-    assert.deepEqual(persisted, [['wallet-access-new', 'wallet-refresh-new']]);
-    assert.equal(admin.token, 'admin-access');
-    assert.equal(admin.refreshToken, 'admin-refresh');
-    assert.equal(admin.walletToken, 'wallet-access-new');
-    assert.equal(admin.walletRefreshToken, 'wallet-refresh-new');
-  });
-
-  await test('loadAgentCardBenchmarkAdmin reads the env JWT + API url override', async () => {
-    const prevJwt = process.env.AGENT_CARDS_ADMIN_JWT;
-    const prevRefresh = process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN;
-    const prevUrl = process.env.ADMIN_API_URL;
-    process.env.AGENT_CARDS_ADMIN_JWT = 'env-jwt';
-    process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN = 'env-refresh';
-    process.env.ADMIN_API_URL = 'https://admin.override.test';
-    try {
-      const admin = await loadAgentCardBenchmarkAdmin();
-      assert.equal(admin.token, 'env-jwt');
-      assert.equal(admin.refreshToken, 'env-refresh');
-      assert.equal(admin.apiUrl, 'https://admin.override.test');
-    } finally {
-      if (prevJwt === undefined) delete process.env.AGENT_CARDS_ADMIN_JWT;
-      else process.env.AGENT_CARDS_ADMIN_JWT = prevJwt;
-      if (prevRefresh === undefined) delete process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN;
-      else process.env.AGENT_CARDS_ADMIN_REFRESH_TOKEN = prevRefresh;
-      if (prevUrl === undefined) delete process.env.ADMIN_API_URL;
-      else process.env.ADMIN_API_URL = prevUrl;
-    }
-  });
-
-  await test('benchmark admin token prefers active stored API key over stale file JWT', () => {
-    const token = selectAgentCardBenchmarkAdminToken(
-      {
-        jwt: 'stale-jwt',
-        lastApiKey: 'last-api-key',
-        activeKeyId: 'active-key-id',
-        storedKeys: [
-          { id: 'old-key-id', key: 'old-api-key' },
-          { id: 'active-key-id', key: 'active-api-key' },
-        ],
-      },
-      {}
-    );
-    assert.equal(token, 'active-api-key');
-  });
-
-  await test('benchmark wallet token prefers the user CLI session over admin API keys', () => {
-    const token = selectAgentCardBenchmarkWalletToken(
-      { jwt: 'cli-member-jwt' },
-      {
-        jwt: 'stale-admin-jwt',
-        lastApiKey: 'last-api-key',
-        activeKeyId: 'active-key-id',
-        storedKeys: [{ id: 'active-key-id', key: 'active-api-key' }],
-      },
-      {}
-    );
-    assert.equal(token, 'cli-member-jwt');
-  });
+  // benchmark-float.ts is covered by agentcard-benchmark-float.test.ts
+  // (client-credential get_company_wallet float verification).
 
   // ── org-wallet-monitor extraction + message ──
   await test('extractAgentCardOrgWallet rejects missing wallet and missing numbers', () => {
