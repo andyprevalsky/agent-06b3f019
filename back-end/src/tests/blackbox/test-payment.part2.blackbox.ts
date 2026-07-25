@@ -81,6 +81,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     'lifecycle maps a purchase with no card or hold to empty cross-references',
     async () => {
       const result = await getTestPaymentLifecycle('agent-no-card', {
+        searchStripeHolds: async () => ({ data: [] }),
         findPurchase: async () =>
           ({
             id: 'purchase-no-card',
@@ -114,6 +115,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     'lifecycle parses an AgentCard transfer from a text-content MCP envelope',
     async () => {
       const result = await getTestPaymentLifecycle('agent-text-envelope', {
+        searchStripeHolds: async () => ({ data: [] }),
         findPurchase: async () =>
           ({
             id: 'purchase-text',
@@ -166,6 +168,7 @@ const tests: Array<[string, () => Promise<void>]> = [
       let threw = false;
       try {
         await getTestPaymentLifecycle('agent-bad-int', {
+          searchStripeHolds: async () => ({ data: [] }),
           findPurchase: async () =>
             ({
               id: 'purchase-bad-int',
@@ -211,6 +214,7 @@ const tests: Array<[string, () => Promise<void>]> = [
       let threw = false;
       try {
         await getTestPaymentLifecycle('agent-bad-str', {
+          searchStripeHolds: async () => ({ data: [] }),
           findPurchase: async () =>
             ({
               id: 'purchase-bad-str',

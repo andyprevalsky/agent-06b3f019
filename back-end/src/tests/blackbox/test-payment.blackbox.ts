@@ -226,6 +226,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       let transferReads = 0;
       const result = await getTestPaymentLifecycle('agent-lifecycle-1', {
+        searchStripeHolds: async () => ({ data: [] }),
         findPurchase: async () =>
           ({
             id: 'purchase-1',
