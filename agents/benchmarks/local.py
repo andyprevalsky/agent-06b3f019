@@ -844,6 +844,15 @@ def start_services(
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
+        # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
+        # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
+        # + compute-token fetch — it surfaces as a phantom "Can't reach database
+        # server" even though raw psql/TCP to the same host succeeds. Neutralize the
+        # proxy for every isolated-run subprocess (never disable the app itself).
+        env.setdefault("NO_PROXY", "*")
+        env.setdefault("no_proxy", "*")
+        for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(_proxy_var, None)
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
@@ -856,7 +865,18 @@ def start_services(
         seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
         seed_dump.parent.mkdir(parents=True, exist_ok=True)
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
-        env["BENCHMARK_REQUIRE_SEED_DUMP"] = "1"
+        # Default: require a schema-matched cached dump and refuse the slow prod
+        # cold-sync. But the very first local run on a fresh schema/day has no
+        # cached dump to restore, so allow an explicit opt-in
+        # (BENCHMARK_REQUIRE_SEED_DUMP=0) to bootstrap the cache via one cold-sync.
+        env["BENCHMARK_REQUIRE_SEED_DUMP"] = os.environ.get("BENCHMARK_REQUIRE_SEED_DUMP", "1")
+        if not simulate:
+            # Real-mode local benches never use the World Model Harness, so skip its
+            # slow R2-corpus + GEPA cold build. Left unset, that build runs
+            # synchronously during startup and can hang stack readiness (the manifest
+            # is never published → wait_for_services blocks forever). Mirrors the
+            # cloud-bench real-mode path, which sets the same flag for this reason.
+            env.setdefault("BENCHMARK_SKIP_WMH_BUILD", "1")
         if simulate:
             # Put the worker into simulate mode. run.sh forks the agents worker from this
             # env, so these must be set here (the worker's WMH adapter + fast-cache scope
