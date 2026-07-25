@@ -140,4 +140,25 @@ resolved_absolute_wmh_log="$(
 )"
 expect_eq "$resolved_absolute_wmh_log" "$run_context/absolute-wmh-serve-log.txt" "absolute run-context paths remain unchanged"
 
+# db_port_conflict_owner guards setup-db.sh from clobbering a sibling
+# workspace's DB when a foreign CONDUCTOR_PORT derives a colliding LOCAL_DB_PORT.
+ps_output="victoria-db-cape-town 0.0.0.0:55005->5432/tcp, [::]:55005->5432/tcp
+victoria-db-canberra 0.0.0.0:55015->5432/tcp, [::]:55015->5432/tcp"
+
+conflict_owner="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55005 \"\$1\"" _ "$ps_output"
+)"
+expect_eq "$conflict_owner" "victoria-db-cape-town" "db port conflict names the sibling container binding the target port"
+
+no_conflict="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55060 \"\$1\"" _ "$ps_output"
+)"
+expect_eq "$no_conflict" "" "db port with no running binder reports no conflict"
+
+self_only="victoria-db-lagos 0.0.0.0:55005->5432/tcp, [::]:55005->5432/tcp"
+self_conflict="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55005 \"\$1\"" _ "$self_only"
+)"
+expect_eq "$self_conflict" "" "the workspace's own container is never treated as a conflict"
+
 echo "All workspace env tests passed."
