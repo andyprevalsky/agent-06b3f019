@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The production lifecycle intentionally exports these for every later workflow
+# step. Contract fixtures must not inherit a live run's timeline or Slack card.
+unset AUTO_RCA_GATE_STATE_DIR RCA_PIPELINE_STEP_OVERRIDE
+unset SLACK_TS SLACK_CHANNEL
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca.yml"
 SHIPPED_WORKFLOW="$ROOT_DIR/.github/workflows/auto-rca-shipped.yml"
@@ -92,11 +97,17 @@ require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-reply' "the ag
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool bind-slack' "the Slack handle must be durably bound to the PR"
 require_text "$SHIPPED_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool slack-update' "shipped transition must use the shared broker"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'pull_request_review:' "approved deploy must be driven by a GitHub PR review"
+require_text "$APPROVED_DEPLOY_WORKFLOW" 'issue_comment:' "one-engineer approved deploy must accept an exact PR command"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.state == 'approved'" "only an APPROVED review may authorize deploy"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.comment.body == '/deploy'" "only the exact maintainer deploy command may use comment approval"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "github.event.review.user.type == 'User'" "bot reviews must not authorize deploy"
+require_text "$WORKFLOW" "github.event.comment.body != '/deploy'" "the deploy approval command must not be treated as revision feedback"
 require_text "$APPROVED_DEPLOY_WORKFLOW" 'admin|maintain|write)' "the approving human must have repository write permission"
+require_text "$APPROVED_DEPLOY_WORKFLOW" "printf 'PR_BASE_REF=%s" "comment approval must resolve the fresh PR base"
 require_text "$APPROVED_DEPLOY_WORKFLOW" '/usr/local/bin/rose-auto-rca-tool approved-deploy-plan' "approved deploy must use the executable lifecycle reducer"
 require_text "$RCA_TOOL" 'approval is stale: it does not cover the current PR head' "approval reducer must bind review to the exact RCA head"
+require_text "$RCA_TOOL" 'approved deploy requires a PR targeting main' "approved deploy must fail closed outside main"
+require_text "$RCA_TOOL" 'body.strip() != "/deploy"' "deploy approval comments must not remain queued as reviewer feedback"
 require_text "$RCA_TOOL" 'trusted verification marker is missing or duplicated' "approval reducer must require exactly one trusted marker"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}workflow\" = 'Auto RCA' ]" "approved deploy must wait for the trusted workflow"
 require_text "$APPROVED_DEPLOY_WORKFLOW" "[ \"${LITERAL_DOLLAR}conclusion\" = success ]" "approved deploy must require a green RCA workflow"
@@ -153,12 +164,19 @@ require_text "$WORKFLOW" 'id-token: write' "investigator actions must be able to
 require_text "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}" "primary attempt must use the dedicated RCA account"
 require_text "$WORKFLOW" 'id: investigator_retry' "incomplete primary attempts must retry"
 require_text "$WORKFLOW" "steps.primary_contract.outputs.complete != 'true'" "retry must derive from the completion contract"
-require_text "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "retry must use the independent secondary account"
+[ "$(grep -Fc "claude_code_oauth_token: \${{ secrets.RCA_CLAUDE_CODE_OAUTH_TOKEN }}" "$WORKFLOW")" -eq 2 ] || fail "both investigator attempts must use the working dedicated RCA account"
+require_absent "$WORKFLOW" "claude_code_oauth_token: \${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}" "retry must not silently switch to the broken generic Claude account"
 require_text "$WORKFLOW" 'name: Finalize PR from trusted completion contract' "trusted finalizer is required"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool ensure-draft' "trusted finalizer must own readiness"
 require_text "$WORKFLOW" 'name: Require complete evidence-backed RCA' "workflow must enforce the completion postcondition"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool require-complete' "incomplete RCA must make the workflow red through the trusted contract"
 require_text "$RCA_TOOL" 'keep the PR draft, Slack blocked, and the workflow red' "failure state must be explicit"
+require_absent "$RCA_TOOL" "trap 'rm -f \"\$raw_file\" \"\$scrubbed_file\"' RETURN" "gate failure cleanup must not leak a RETURN trap into its caller"
+require_text "$RCA_TOOL" 'record_running_timeline_detail "$detail"' "failed deploy gates must identify their exact failing substep"
+require_text "$RCA_TOOL" 'rca-environment' "dependency hydration must support exact failure-substep reporting"
+require_text "$RCA_TOOL" 'AUTO_RCA_SKIP_CLOUD_CONTROLLER_REGRESSION="$skip_controller_regression"' "runtime-only RCA smoke must skip unrelated controller regressions"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" '::rca-stage::' "cloud smoke must publish an exact active substep"
+require_text "$ROOT_DIR/scripts/run-predeploy-cloud" 'cloud multi-workstream concurrency regression' "normal deploy must retain its controller concurrency regression"
 require_text "$WORKFLOW" "RCA_STATE: \${{ steps.finalize.outputs.state || 'blocked' }}" "finalizer failure must still move Slack to blocked"
 
 # Claude uses the action's native executable path. The custom sudo wrapper
@@ -185,6 +203,9 @@ require_text "$WORKFLOW" '${GITHUB_ACTOR_ID}+${GITHUB_ACTOR}@users.noreply.githu
 require_absent "$WORKFLOW" 'auto-rca@roselabs.ai' "RCA commits must not use an unmapped Vercel identity"
 [ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool verify-investigator-run' "$WORKFLOW")" -eq 2 ] || fail "both investigators must prove that Claude completed a real turn"
 [ "$(grep -Fc '/usr/local/bin/rose-auto-rca-tool checkpoint-draft' "$WORKFLOW")" -eq 2 ] || fail "both investigators must preserve work before trusted verification"
+require_text "$RCA_TOOL" 'git_push_branch "$RCA_BRANCH"' "investigator checkpoints must survive a hosted-runner crash"
+checkpoint_env_count="$(grep -A8 -E 'name: Checkpoint (primary|retry) investigator work' "$WORKFLOW" | grep -Fc 'GH_TOKEN: ${{ secrets.GH_UPDATE_TOKEN }}')"
+[ "$checkpoint_env_count" -eq 2 ] || fail "both investigator checkpoints need the trusted branch-push credential"
 require_text "$RCA_TOOL" '.num_turns >= 1' "zero-turn Claude sessions must fail the trusted investigator invariant"
 primary_action_line="$(grep -nF 'name: Root-cause with dedicated Claude account' "$WORKFLOW" | cut -d: -f1)"
 primary_checkpoint_line="$(grep -nF 'name: Checkpoint primary investigator work' "$WORKFLOW" | cut -d: -f1)"
@@ -194,7 +215,7 @@ primary_verify_line="$(grep -nF 'name: Verify unchanged reproduction after prima
   [ "$primary_checkpoint_line" -lt "$primary_validate_line" ] &&
   [ "$primary_validate_line" -lt "$primary_verify_line" ] ||
   fail "primary action/checkpoint/turn-validation/reproduction order is unsafe"
-retry_action_line="$(grep -nF 'name: Retry incomplete RCA with secondary Claude account' "$WORKFLOW" | cut -d: -f1)"
+retry_action_line="$(grep -nF 'name: Continue incomplete RCA with dedicated Claude account' "$WORKFLOW" | cut -d: -f1)"
 retry_checkpoint_line="$(grep -nF 'name: Checkpoint retry investigator work' "$WORKFLOW" | cut -d: -f1)"
 retry_validate_line="$(grep -nF 'name: Require a real retry investigator turn' "$WORKFLOW" | cut -d: -f1)"
 retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' "$WORKFLOW" | cut -d: -f1)"
@@ -202,7 +223,7 @@ retry_verify_line="$(grep -nF 'name: Verify unchanged reproduction after retry' 
   [ "$retry_checkpoint_line" -lt "$retry_validate_line" ] &&
   [ "$retry_validate_line" -lt "$retry_verify_line" ] ||
   fail "retry action/checkpoint/turn-validation/reproduction order is unsafe"
-require_text "$WORKFLOW" "if: always() && env.RCA_NOOP != 'true' && steps.primary_contract.outputs.complete != 'true'" "retry must run even when the primary investigator never started"
+require_text "$WORKFLOW" "if: always() && env.RCA_NOOP != 'true' && steps.hydrate.outcome == 'success' && steps.primary_contract.outputs.complete != 'true'" "retry must run when the primary investigator never started after successful environment setup"
 require_text "$WORKFLOW" "steps.checkpoint_primary.outcome == 'success' && steps.validate_primary.outcome == 'success'" "primary reproduction must judge preserved investigator work"
 require_text "$WORKFLOW" "steps.checkpoint_retry.outcome == 'success' && steps.validate_retry.outcome == 'success'" "retry reproduction must judge preserved investigator work"
 job_env="$(sed -n '/^    env:/,/^    steps:/p' "$WORKFLOW")"
@@ -214,9 +235,32 @@ done
 require_text "$WORKFLOW" 'name: Collect production evidence outside the investigator process' "production evidence must be collected before the model runs"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool collect-evidence' "trusted evidence collection is required"
 require_text "$WORKFLOW" '/usr/local/bin/rose-auto-rca-tool pin-baseline' "trusted baseline must be pinned before the model runs"
+require_text "$WORKFLOW" 'image: postgres:16' "Auto RCA deploy gates require an isolated local Postgres service"
+require_text "$WORKFLOW" 'name: Hydrate Auto RCA test environment' "Auto RCA must hydrate dependencies before running investigators or deploy gates"
+require_text "$WORKFLOW" 'name: Reclaim hosted-runner disk for RCA workspace' "Auto RCA must reserve disk for two investigators and full deploy gates"
+require_text "$WORKFLOW" '/opt/hostedtoolcache/CodeQL' "Auto RCA must remove unused hosted-runner toolchains before hydrating dependencies"
+require_text "$WORKFLOW" 'npm install --workspaces=false --no-audit --no-fund --ignore-scripts --package-lock=false' "Auto RCA root hydration must not resolve unlocked workspace dependency ranges"
+require_text "$WORKFLOW" 'npm ci --prefix front-end --workspaces=false --no-audit --no-fund --ignore-scripts' "Auto RCA frontend hydration must honor its tracked lockfile locally"
+require_text "$WORKFLOW" 'npm ci --prefix back-end --workspaces=false --no-audit --no-fund --ignore-scripts' "Auto RCA backend hydration must honor its tracked lockfile locally"
+require_text "$WORKFLOW" 'npm install --prefix mac-app --no-audit --no-fund --force --ignore-scripts' "Linux Auto RCA must hydrate the mac-app test graph without executing Darwin-only native installation"
+require_text "$WORKFLOW" 'RCA_TIMELINE_DETAIL="$label"' "dependency hydration failures must identify their exact substage"
+require_text "$WORKFLOW" 'back-end/node_modules/.bin/prisma generate --schema back-end/prisma/schema.prisma' "Prisma generation must use the exact lockfile-installed CLI"
+require_absent "$WORKFLOW" "bash -c 'cd back-end && npx prisma generate'" "Prisma generation must never download a floating latest CLI"
+require_text "$WORKFLOW" 'agents/venv/bin/python -m pip install --disable-pip-version-check' "Auto RCA must install agent Python dependencies"
+require_text "$WORKFLOW" '--no-cache-dir -q -r agents/requirements.txt' "Auto RCA must not retain a duplicate Python wheel cache"
+require_text "$WORKFLOW" 'name: Reclaim download caches before RCA continuation' "Auto RCA must free transient download caches before its second long investigator"
+require_text "$WORKFLOW" 'df -h /' "Auto RCA must expose hosted-runner disk headroom in Actions logs"
+require_text "$WORKFLOW" "steps.hydrate.outcome == 'success'" "investigators must not run against a broken test environment"
+require_text "$RCA_TOOL" 'link_repro_dependencies "$base_dir"' "trusted baseline reproductions must use the hydrated dependency graph"
+require_text "$RCA_TOOL" 'link_repro_dependencies "$head_dir"' "trusted current-head reproductions must use the hydrated dependency graph"
+require_text "$RCA_TOOL" 'cat "$result_file"' "trusted reproduction failures must expose their baseline/current waterfall in Actions logs"
 require_text "$WORKFLOW" 'DISPATCH_AFFECTED_USER_NAME' "historical recovery must retain the known affected user"
 require_text "$RCA_TOOL" '{unavailable:true,http_status:$status}' "expired backend records must be represented without discarding retained logs"
 require_text "$RCA_TOOL" 'no retained production evidence exists for this expired agent' "expired agents must still fail closed when every evidence source is empty"
+require_text "$RCA_TOOL" 'Trusted /deploy failure:' "retry investigators must receive trusted deploy-gate failure details"
+require_text "$RCA_TOOL" 'read_state verification.txt' "retry investigators must read root-owned verification through the trusted broker"
+require_text "$TEST_RUNNER" "^FAIL:" "deploy summaries must expose ordinary shell-test failures in Actions logs"
+require_text "$TEST_RUNNER" 'head -40 || true' "one unmatched failure summary must not hide every later deploy failure"
 require_text "$RCA_TOOL" "base=\"${LITERAL_DOLLAR}(trusted_baseline)\"" "reproduction checks must use the root-owned baseline instead of mutable origin/main"
 require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}temp_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/evidence.txt\"" "investigator evidence must be read-only to the coding user"
 require_text "$RCA_TOOL" "sudo install -o root -g rose-auto-rca -m 0440 \"${LITERAL_DOLLAR}result_file\" \"${LITERAL_DOLLAR}GATE_STATE_DIR/verification.txt\"" "trusted verification must be read-only to the coding user"
@@ -292,7 +336,7 @@ expected_slack_message="*Affected user:* Ada Lovelace
 *Pipeline step:* /RCA · investigation — needs attention
 *Links:* <https://roselabs.ai/?agent-id=550e8400-e29b-41d4-a716-446655440000|FE View> · <https://github.com/Rose-Ai-Labs/rose/pull/999|PR> · <https://github.com/Rose-Ai-Labs/rose/actions/runs/123|GH Action RCA Run>
 *Agent ID:* \`550e8400-e29b-41d4-a716-446655440000\`
-*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment."
+*Feedback:* Reply normally in this Slack thread, or leave a normal top-level PR comment. When ready, a maintainer can approve the exact PR head with a \`/deploy\` PR comment."
 actual_slack_message="$(
   AGENT_ID=550e8400-e29b-41d4-a716-446655440000 \
   AFFECTED_USER_NAME='Ada Lovelace' \
