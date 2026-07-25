@@ -62,7 +62,7 @@ from providers.rose import (
     gpt_auth_from_token,
     pool_for_model,
 )
-from providers.rose.policy import anthropic_family_excluded
+from providers.rose.policy import anthropic_family_excluded, benchmark_compute_token_type
 from providers.rose.schema import (
     SYNTHETIC_OUTPUT_TOOL_NAME,
     build_openai_response_format,
@@ -5322,6 +5322,7 @@ async def fetch_compute_token_activity(
 ) -> Optional[Dict[str, Any]]:
     """Fetch one provider-typed compute token across Claude/GPT from the backend."""
     config = load_config()
+    pinned_benchmark_type = benchmark_compute_token_type()
     _safe_heartbeat("Fetching compute token")
 
     try:
@@ -5337,6 +5338,8 @@ async def fetch_compute_token_activity(
                 params["fastCacheAffinityKey"] = fast_cache_affinity_key
             if anthropic_family_excluded():
                 params["tokenType"] = "gpt"
+            elif pinned_benchmark_type:
+                params["tokenType"] = pinned_benchmark_type
             response = await client.get(
                 f"{config.backend.api_url}/api/integrations/compute-code/credentials/token",
                 headers={

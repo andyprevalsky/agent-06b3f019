@@ -43,6 +43,7 @@ export interface WorkflowReplacementSkip {
 
 export interface WorkflowReplacementClaimOptions {
   expectedWorkflowId: string;
+  deploymentAttempt?: string;
 }
 
 const EXCLUDED_CHILD_TOOL_COUNTS = new Set([
@@ -441,9 +442,31 @@ export async function claimWorkflowReplacement(
     const agent = await tx.agent.findUnique({ where: { id: agentId } });
     if (agent === null) throw new Error(`Agent ${agentId} was deleted during restart`);
 
+    const savedClaim =
+      agent.workflowReplacementToken === null
+        ? null
+        : savedResumeState(agent.workflowReplacementState);
+    const rotatesPriorDeployment =
+      savedClaim !== null &&
+      options?.deploymentAttempt !== undefined &&
+      savedClaim.deployment_attempt !== options.deploymentAttempt;
+    const failedSameDeployment =
+      agent.status === 'FAILED' &&
+      savedClaim !== null &&
+      options?.deploymentAttempt !== undefined &&
+      savedClaim.deployment_attempt === options.deploymentAttempt;
+
+    if (failedSameDeployment) {
+      throw new Error(
+        `Existing workflow replacement candidate failed before durable readiness for deployment attempt ${options.deploymentAttempt}`
+      );
+    }
+
     if (
       options !== undefined &&
-      (agent.deletedAt !== null || agent.status === 'COMPLETED' || agent.status === 'FAILED')
+      (agent.deletedAt !== null ||
+        agent.status === 'COMPLETED' ||
+        (agent.status === 'FAILED' && !rotatesPriorDeployment))
     ) {
       return {
         skipped: true,
@@ -469,7 +492,7 @@ export async function claimWorkflowReplacement(
       };
     }
 
-    if (agent.workflowReplacementToken !== null) {
+    if (agent.workflowReplacementToken !== null && !rotatesPriorDeployment) {
       if (agent.temporalWorkflowId === null) {
         throw new Error(`Agent ${agentId} has an incomplete workflow replacement claim`);
       }
@@ -479,11 +502,49 @@ export async function claimWorkflowReplacement(
         plannedWorkflowId: agent.temporalWorkflowId,
         staleWorkflowId: agent.staleTemporalWorkflowId,
         staleFirstExecutionRunId: agent.staleTemporalFirstExecutionRunId,
-        resumeState: savedResumeState(agent.workflowReplacementState),
+        resumeState: savedClaim!,
       };
     }
 
-    const resumeState = await buildResumeState(tx, agent, historicalLaunchConfig);
+    if (rotatesPriorDeployment) {
+      if (agent.temporalWorkflowId === null || savedClaim === null) {
+        throw new Error(`Agent ${agentId} has an incomplete workflow replacement claim`);
+      }
+      const token = randomUUID();
+      const plannedWorkflowId = `${agentId}:replacement:${token}`;
+      const resumeState = {
+        ...savedClaim,
+        deployment_attempt: options!.deploymentAttempt,
+      };
+      const updated = await tx.agent.update({
+        where: { id: agentId },
+        data: {
+          workflowReplacementToken: token,
+          workflowReplacementState: resumeState as unknown as Prisma.InputJsonObject,
+          staleTemporalWorkflowId: agent.temporalWorkflowId,
+          staleTemporalFirstExecutionRunId: agent.temporalFirstExecutionRunId,
+          temporalWorkflowId: plannedWorkflowId,
+          temporalFirstExecutionRunId: null,
+          toolsInUse: [],
+          status: 'STARTING_UP',
+          statusMessage: 'Updating agent code',
+        },
+      });
+      return {
+        agentId,
+        token,
+        plannedWorkflowId,
+        staleWorkflowId: updated.staleTemporalWorkflowId,
+        staleFirstExecutionRunId: updated.staleTemporalFirstExecutionRunId,
+        resumeState,
+      };
+    }
+
+    const builtResumeState = await buildResumeState(tx, agent, historicalLaunchConfig);
+    const resumeState =
+      options?.deploymentAttempt === undefined
+        ? builtResumeState
+        : { ...builtResumeState, deployment_attempt: options.deploymentAttempt };
     const token = randomUUID();
     const plannedWorkflowId = `${agentId}:replacement:${token}`;
     const updated = await tx.agent.update({
@@ -543,7 +604,7 @@ export async function refreshWorkflowReplacementResumeState(
     // Claiming temporarily writes STARTING_UP/Updating agent code. Preserve the
     // pre-claim user state unless a serialized pause/resume mutation won after
     // the claim and changed the Agent status to something else.
-    const resumeState: WorkflowResumeState =
+    const rebuiltResumeState: WorkflowResumeState =
       agent.status === 'STARTING_UP'
         ? {
             ...rebuilt,
@@ -551,6 +612,10 @@ export async function refreshWorkflowReplacementResumeState(
             prior_status_message: previous.prior_status_message,
           }
         : rebuilt;
+    const resumeState: WorkflowResumeState =
+      previous.deployment_attempt === undefined
+        ? rebuiltResumeState
+        : { ...rebuiltResumeState, deployment_attempt: previous.deployment_attempt };
     await tx.agent.update({
       where: { id: claim.agentId },
       data: {
