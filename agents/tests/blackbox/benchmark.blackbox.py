@@ -8183,35 +8183,46 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
     # The extractor judges the populated output schema, not free-text prose.
     assert "here is my summary" not in blob
 
-    fields = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
+    schema = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
+    # The expectation is a response_schema the verifier must POPULATE before scoring.
+    assert schema["fields"] and all("type" in f for f in schema["fields"])
 
-    # Judge PASSES (score 1.0) → no failure reason, even though keys differ from field names.
-    with patch(
-        "helpers.llm.check_progress",
-        new=AsyncMock(return_value={"score": 1.0, "reasoning": "all four rows recoverable"}),
-    ):
+    # The judge passes the expected schema to check_progress as response_schema (populate-first)
+    # and uses the standard verifier prompt — assert that wiring, not just the score.
+    def _assert_populate_then_score(**kwargs):
+        assert kwargs["response_schema"] == schema  # verifier must populate THIS schema
+        assert "grounded tool evidence" in kwargs["verifier_system_prompt"]  # approved verifier
+        return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
+
+    with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
         result = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, fields, "user-data-prod-grep")
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
         )
     assert result is None
 
-    # Judge FAILS (score 0.0) → the judge's reason surfaces as the failure.
+    # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
     with patch(
         "helpers.llm.check_progress",
-        new=AsyncMock(return_value={"score": 0.0, "reasoning": "could not recover obsidian_row"}),
+        new=AsyncMock(
+            return_value={
+                "score": 0.5,
+                "reasoning": "could not recover obsidian_evidence",
+                "output": {"obsidian_evidence": None},
+            }
+        ),
     ):
         failure = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, fields, "user-data-prod-grep")
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
         )
-    assert failure is not None and "obsidian_row" in failure
+    assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
 
     # No populated output → judged as missing without an LLM call.
     empty = asyncio.run(
-        _judge_output_recovers_expected_fields("agent-1", "{}", fields, "user-data-prod-grep")
+        _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
     )
     assert empty is not None and "no populated output schema" in empty
 
-    # REUSABLE / not overfitted: the same judge works for a totally different task's fields
+    # REUSABLE / not overfitted: the same judge works for a totally different task's schema
     # (receipt id + cost) with arbitrary agent key names — proving it isn't pinned to one task.
     receipt_messages = [
         {
@@ -8223,16 +8234,20 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
         }
     ]
     receipt_blob = _extract_agent_structured_output(receipt_messages, None)
-    receipt_fields = [
-        {"name": "receipt_id", "description": "the order/receipt/confirmation identifier"},
-        {"name": "cost", "description": "the total amount paid, any currency/key name"},
-    ]
+    receipt_schema = {
+        "fields": [
+            {"name": "receipt_id", "type": "str", "description": "order/receipt/confirmation id"},
+            {"name": "cost", "type": "float", "description": "total amount paid, any key name"},
+        ]
+    }
     with patch(
         "helpers.llm.check_progress",
-        new=AsyncMock(return_value={"score": 1.0, "reasoning": "receipt_id and cost both present"}),
+        new=AsyncMock(
+            return_value={"score": 1.0, "reasoning": "both present", "output": {"receipt_id": "tp_c505", "cost": 43.96}}
+        ),
     ):
         receipt_ok = asyncio.run(
-            _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_fields, "receipt-task")
+            _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_schema, "receipt-task")
         )
     assert receipt_ok is None
 

@@ -2122,26 +2122,27 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
 # output — matched by MEANING, not by key name. This replaces brittle per-task structured parses and
 # is reusable: e.g. "did the output contain a cost / a receipt id" without pinning the exact key.
 # Declare a task's fields in SEMANTIC_OUTPUT_EXPECTATIONS; the judge does the mapping.
-SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, List[Dict[str, str]]] = {
-    "user-data-prod-grep": [
-        {
-            "name": f"{provider}_row",
-            "description": (
-                f"A checklist row for provider '{provider}' that EITHER cites concrete synced-document "
-                f"evidence (a documents/{provider}/... path or an exact snippet) OR honestly states that "
-                f"no document evidence is currently synced for {provider}. An honest empty is correct; a "
-                f"row claiming verified evidence WITHOUT a documents source is fabricated and must fail."
-            ),
-        }
-        for provider in ("chatgpt", "claude", "apple_notes", "obsidian")
-    ],
+SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
+    # A response_schema ({"fields": [...]}) of REQUIRED output fields. The judge (the standard
+    # verifier) must populate every field from the agent's output before scoring; field descriptions
+    # carry the recovery rules and reach the verifier via build_verifier_prompt.
+    "user-data-prod-grep": {
+        "fields": [
+            {
+                "name": f"{provider}_evidence",
+                "type": "str",
+                "description": (
+                    f"Provider '{provider}': recover EITHER concrete synced-document evidence (a "
+                    f"documents/{provider}/... path or exact snippet) OR an honest statement that no "
+                    f"{provider} document evidence is currently synced. An honest empty IS populatable "
+                    f"(correct); a claim of verified evidence WITHOUT a documents source is fabricated "
+                    f"and NOT populatable. Match by meaning, ignore the agent's key names."
+                ),
+            }
+            for provider in ("chatgpt", "claude", "apple_notes", "obsidian")
+        ]
+    },
 }
-
-SEMANTIC_OUTPUT_JUDGE_PROMPT = """You are a strict benchmark output judge. You are given (1) a list of REQUIRED OUTPUT FIELDS, each with a description of what it must contain, and (2) an agent's POPULATED OUTPUT (the response schema it generated and the values it filled in).
-
-For EACH required field, decide whether you can recover a correct value for it from the agent's output — matching by MEANING, not by key name. The agent may use any key names, nesting, or wording; a field counts as recovered whenever its required information is present and correct (e.g. a required "cost" is satisfied by ANY key holding the correct total amount, whether named cost, total, amount, price, ...). When a field's description explicitly permits an honest negative (e.g. "or state that no data is synced"), that honest statement also counts as recovered.
-
-Score exactly 1.0 only if EVERY required field is recoverable. Score 0.0 if any required field is missing, unrecoverable, or contradicted (including evidence a field's description marks as fabricated). Give the score and a one-line reason naming the FIRST field you could not recover."""
 
 
 def _extract_agent_structured_output(messages: List[dict], root_agent_data: Optional[dict]) -> str:
@@ -2164,35 +2165,49 @@ def _extract_agent_structured_output(messages: List[dict], root_agent_data: Opti
 async def _judge_output_recovers_expected_fields(
     root_agent_id: str,
     agent_output_blob: str,
-    expected_fields: List[Dict[str, str]],
+    expected_schema: Dict[str, Any],
     task_label: str,
 ) -> Optional[str]:
-    """Reusable semantic output judge (see SEMANTIC_OUTPUT_EXPECTATIONS). Returns None on pass, or a
-    failure reason. Scores 1.0 only when every expected field is recoverable from the agent's
-    populated output, regardless of the key names the agent chose."""
+    """Reusable semantic output judge (see SEMANTIC_OUTPUT_EXPECTATIONS). The judge is the STANDARD
+    verifier pointed at the task's expected output schema and fed the agent's populated output as
+    evidence: per build_verifier_prompt / _build_verifier_json_schema it POPULATES every expected
+    field FIRST, then emits reasoning, then scores 1.0 iff each field is recoverable (by meaning, any
+    key name). Returns None on pass (score == 1.0), else a failure reason carrying the judge's
+    populated output + reasoning. No bespoke judge system prompt — reuses the approved verifier."""
     from helpers.llm import check_progress
+    from utils.prompts import build_verifier_prompt
 
     if not agent_output_blob.strip() or agent_output_blob.strip() in ("{}", "null"):
         return f"{task_label}: agent produced no populated output schema to judge."
-    if not expected_fields:
+    if not expected_schema.get("fields"):
         return None
 
-    fields_desc = "\n".join(f"- {f['name']}: {f['description']}" for f in expected_fields)
     judged = await check_progress(
         context=[
-            {"role": "USER", "text": f"REQUIRED OUTPUT FIELDS:\n{fields_desc}"},
+            {
+                "role": "USER",
+                "text": (
+                    "Populate each required output field from the agent's produced output below. A "
+                    "field is populatable when its value is recoverable by MEANING (any key name) or "
+                    "the output honestly reports no data for it."
+                ),
+            },
             {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
         ],
-        verifier_system_prompt=SEMANTIC_OUTPUT_JUDGE_PROMPT,
-        response_schema=None,
+        verifier_system_prompt=build_verifier_prompt(expected_schema),
+        response_schema=expected_schema,
         call_site="semantic_output_field_recovery_judge",
         agent_id=root_agent_id,
     )
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
         return None
+    populated = json.dumps(judged.get("output"), default=str)[:400]
     reasoning = str(judged.get("reasoning") or "no reasoning")
-    return f"{task_label}: semantic output judge failed (score={score}): {reasoning}"
+    return (
+        f"{task_label}: semantic output judge scored {score} (need 1.0). "
+        f"Populated output: {populated}. Reason: {reasoning}"
+    )
 
 
 async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: str) -> Optional[str]:
