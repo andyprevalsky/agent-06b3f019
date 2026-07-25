@@ -9,7 +9,7 @@ The DOM tree is serialized with indices like [1] button "Submit", [2] input[type
 
 from typing import Any, Dict, List, Literal, Optional, Type
 
-from pydantic import AliasChoices, BaseModel, Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from utils.purchase_approval import (
     validate_product_detail_url,
@@ -714,6 +714,40 @@ BROWSER_TOOL_MODELS = {
 }
 
 
+class BrowserToolArgsValidationError(ValueError):
+    """The model produced browser tool-call arguments that fail schema validation.
+
+    This is a MODEL-OUTPUT error, not a Rose transport/infra failure: the model chose
+    a real tool but supplied arguments the tool's schema rejects (e.g. a checkout URL
+    where a product-detail URL is required). It must be fed back to the model as a
+    normal tool-result observation so it can self-correct, exactly like an execution
+    error — never swallowed, hidden from the trajectory, or counted toward the
+    consecutive-API-failure abort budget.
+
+    Subclasses ``ValueError`` (as pydantic's own ``ValidationError`` does) so existing
+    ``except ValueError`` callers keep catching invalid tool args; the browser loop
+    still routes it via its earlier, more specific ``except`` clause.
+    """
+
+    def __init__(self, tool_name: str, tool_args: Dict[str, Any], validation_error: ValidationError):
+        self.tool_name = tool_name
+        self.tool_args = tool_args
+        self.validation_error = validation_error
+        self.thinking: Optional[str] = None
+        self.detail = _format_tool_validation_detail(validation_error)
+        super().__init__(f"{tool_name} arguments rejected: {self.detail}")
+
+
+def _format_tool_validation_detail(error: ValidationError) -> str:
+    """Render a Pydantic ValidationError as concise, model-readable feedback lines."""
+    lines: List[str] = []
+    for err in error.errors():
+        loc = ".".join(str(part) for part in err.get("loc", ()) if part != "tool")
+        message = err.get("msg", "invalid value")
+        lines.append(f"- {loc}: {message}" if loc else f"- {message}")
+    return "\n".join(lines) if lines else str(error)
+
+
 def validate_browser_tool_args(
     tool_name: str,
     tool_args: Dict[str, Any],
@@ -725,14 +759,21 @@ def validate_browser_tool_args(
     This mirrors the main-agent boundary: model output is parsed into the
     registered tool model and execution receives ``model_dump()`` rather than
     the original untyped dictionary.
+
+    A schema rejection is raised as :class:`BrowserToolArgsValidationError` (a
+    model-output error the loop feeds back to the model), never as a bare
+    ``ValidationError`` that the loop's infra-failure handler would swallow.
     """
     model = BROWSER_TOOL_MODELS.get(tool_name)
     if model is None:
         raise ValueError(f"Unknown browser tool: {tool_name}")
-    parsed = model.model_validate(
-        {"tool": tool_name, **tool_args},
-        context=context,
-    )
+    try:
+        parsed = model.model_validate(
+            {"tool": tool_name, **tool_args},
+            context=context,
+        )
+    except ValidationError as exc:
+        raise BrowserToolArgsValidationError(tool_name, tool_args, exc) from exc
     return parsed.model_dump(exclude={"tool"}, exclude_none=True)
 
 
@@ -790,6 +831,7 @@ __all__ = [
     "ScrollTool",
     "WaitTool",
     "validate_browser_tool_args",
+    "BrowserToolArgsValidationError",
     # Tab management
     "SwitchTabTool",
     "CloseTabTool",

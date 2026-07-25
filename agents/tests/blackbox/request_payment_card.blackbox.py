@@ -272,9 +272,10 @@ def test_fingerprint_ignores_display_only_review_formatting():
     localized_first["line_items"][0]["review_count"] = "١,٢٨٤ reviews"
     localized_second = _sample_tool_call()
     localized_second["line_items"][0]["review_count"] = "١٢٨٤ reviews"
-    assert normalize_payment_payload(
-        localized_first, "user-123"
-    )["fingerprint"] == normalize_payment_payload(localized_second, "user-123")["fingerprint"]
+    assert (
+        normalize_payment_payload(localized_first, "user-123")["fingerprint"]
+        == normalize_payment_payload(localized_second, "user-123")["fingerprint"]
+    )
 
 
 def test_fingerprint_keeps_material_receipt_changes_distinct():

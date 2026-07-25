@@ -12670,9 +12670,111 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     assert heartbeat.call_count == 2
 
 
+_TOAST_PAYMENT_CARD_ARGS = {
+    "merchant": "Nopa Fish Market",
+    "line_items": [
+        {
+            "name": "Fish & Chips",
+            "quantity": 1,
+            "unit_price_cents": 2500,
+            "line_total_cents": 2500,
+            # Toast is a single-URL food-ordering SPA: no product-detail page,
+            # no star rating, no reviews. This is the exact class of args prod
+            # agent 847adea5 produced and got rejected 5x on.
+            "product_url": "https://order.toasttab.com/online/nopafish/checkout/12345678-1234-4fab-8043-436e74cc34a9",
+            "rating": "No rating displayed on Toast ordering page",
+            "review_count": "No reviews displayed on Toast ordering page",
+        }
+    ],
+    "subtotal_cents": 2500,
+    "total_cents": 2851,
+}
+
+
+def test_payment_card_tool_args_raise_typed_validation_error():
+    """RCA repro (agent 847adea5): unsatisfiable request_payment_card args on a Toast
+    food-ordering page must surface as a typed BrowserToolArgsValidationError — a
+    model-output error the loop feeds back — not a bare pydantic ValidationError that
+    the loop's infra-failure handler would swallow into a mislabeled 'Max Steps'."""
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+
+    try:
+        validate_browser_tool_args("request_payment_card", _TOAST_PAYMENT_CARD_ARGS)
+        raise AssertionError("expected validation to reject the Toast checkout args")
+    except BrowserToolArgsValidationError as err:
+        assert err.tool_name == "request_payment_card"
+        assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
+        # The feedback the model receives must name all three unsatisfiable fields.
+        assert "product_url" in err.detail
+        assert "rating" in err.detail
+        assert "review_count" in err.detail
+        # It must be a distinct type, not a bare pydantic ValidationError.
+        assert not isinstance(err, ValidationError)
+
+
+async def test_browser_tool_validation_error_feeds_back_through_normal_path():
+    """A rejected tool call must be routed through the normal tool-result path:
+    recorded in action history, appended to the next-turn context so the model can
+    self-correct, and shown in the trajectory — never swallowed. Guards the RCA fix."""
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _feed_browser_tool_validation_error_back
+
+    try:
+        validate_browser_tool_args("request_payment_card", _TOAST_PAYMENT_CARD_ARGS)
+        raise AssertionError("expected BrowserToolArgsValidationError")
+    except BrowserToolArgsValidationError as err:
+        err.thinking = "I need a card to pay for the order."
+        validation_error = err
+
+    action_history = ActionHistory()
+    browser_turn_messages: list = []
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        new=AsyncMock(),
+    ) as save_mock:
+        await _feed_browser_tool_validation_error_back(
+            error=validation_error,
+            action_history=action_history,
+            browser_turn_messages=browser_turn_messages,
+            dom_service=MagicMock(),
+            browser_state={"url": "https://order.toasttab.com/online/nopafish/checkout/abc"},
+            task_prompt="order fish and chips",
+            iteration=12,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://order.toasttab.com/online/nopafish/checkout/abc",
+        )
+
+    # 1) Fed back to the model as a tool result in the next-turn context (not swallowed).
+    tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
+    assert tool_msgs, "validation error was not appended to browser_turn_messages"
+    tool_blob = json.dumps(tool_msgs[-1])
+    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    # 2) Recorded in action history as a failed attempt the model can see.
+    entries = action_history.get_entries()
+    assert entries and entries[-1]["action"] == "request_payment_card"
+    assert entries[-1]["result"]["success"] is False
+    # 3) Visible in the trajectory as its own row.
+    save_mock.assert_awaited_once()
+    assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+
+    r.record(
+        "payment_card_tool_args_raise_typed_validation_error",
+        test_payment_card_tool_args_raise_typed_validation_error,
+    )
+    await r.record_async(
+        "browser_tool_validation_error_feeds_back_through_normal_path",
+        test_browser_tool_validation_error_feeds_back_through_normal_path,
+    )
 
     r.record(
         "payment_card_verifier_evidence_only_last_four",

@@ -28,6 +28,13 @@ set -euo pipefail
 args=" $* "
 case "$args" in
   *" branch --show-current "*) printf '%s\n' "$RCA_BRANCH" ;;
+  *" status --porcelain --untracked-files=normal -- .github/workflows/ "*) printf '%s' "${FAKE_GIT_WORKFLOW_STATUS:-}" ;;
+  *" checkout -- .github/workflows/ "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'discard-workflows %s\n' "$*" >> "$GIT_CALLS"
+    ;;
+  *" clean -fd -- .github/workflows/ "*)
+    [ -z "${GIT_CALLS:-}" ] || printf 'clean-workflows %s\n' "$*" >> "$GIT_CALLS"
+    ;;
   *" status --porcelain --untracked-files=normal "*) printf '%s' "${FAKE_GIT_STATUS:-}" ;;
   *" diff --name-only --diff-filter=U "*) ;;
   *" diff --cached --quiet "*)
@@ -227,6 +234,40 @@ grep -Fq 'auto-RCA: checkpoint production agent d29e631e-b78a-40dd-8f0b-732d1143
 grep -Fq 'push --set-upstream origin auto-rca/d29e631eb78a-123' \
   "$CHECKPOINT_GIT_CALLS" || {
     echo 'FAIL: investigator checkpoint was not pushed before trusted gates' >&2
+    exit 1
+  }
+
+# A stray investigator edit to its own CI harness (.github/workflows/**) must be
+# discarded before the checkpoint commit — the RCA push token deliberately lacks
+# GitHub's `workflow` scope, so committing such an edit makes the push get
+# rejected ("refusing to allow a Personal Access Token to ... workflow ...
+# without `workflow` scope") and kills the whole run. Discard, then still push.
+WORKFLOW_DISCARD_GIT_CALLS="$TEST_ROOT/workflow-discard-git-calls.txt"
+: > "$WORKFLOW_DISCARD_GIT_CALLS"
+PATH="$FAKE_BIN:$PATH" \
+UNEXPECTED_CALLS="$UNEXPECTED_CALLS" \
+GIT_CALLS="$WORKFLOW_DISCARD_GIT_CALLS" \
+FAKE_GIT_STATUS=' M fix.py' \
+FAKE_GIT_WORKFLOW_STATUS=' M .github/workflows/auto-rca.yml' \
+FAKE_GIT_CACHED_DIRTY=true \
+GH_TOKEN='test-github-token' \
+AGENT_ID="d29e631e-b78a-40dd-8f0b-732d1143a854" \
+RCA_BRANCH="auto-rca/d29e631eb78a-123" \
+AUTO_RCA_ROOT_DIR="$CHECKOUT" \
+AUTO_RCA_CONTEXT_DIR="$CONTEXT" \
+GITHUB_REPOSITORY="Rose-Ai-Labs/rose" \
+  "$RCA_TOOL" checkpoint-draft >/dev/null
+grep -Fq 'discard-workflows' "$WORKFLOW_DISCARD_GIT_CALLS" || {
+    echo 'FAIL: investigator .github/workflows edits were not discarded before checkpoint' >&2
+    exit 1
+  }
+grep -Fq 'clean-workflows' "$WORKFLOW_DISCARD_GIT_CALLS" || {
+    echo 'FAIL: untracked .github/workflows edits were not cleaned before checkpoint' >&2
+    exit 1
+  }
+grep -Fq 'push --set-upstream origin auto-rca/d29e631eb78a-123' \
+  "$WORKFLOW_DISCARD_GIT_CALLS" || {
+    echo 'FAIL: checkpoint must still push after discarding harness edits' >&2
     exit 1
   }
 

@@ -60,6 +60,7 @@ GATES = (
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
+    Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
 )
 
 

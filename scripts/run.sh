@@ -1771,36 +1771,25 @@ while true; do
                 write_services_manifest || true
                 continue
             fi
-            if public_tunnel_process_is_required "$name" "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" && \
-                [ "$code" -eq 0 ]; then
-                # A required long-running tunnel exiting cleanly is still a stack
-                # failure: the published callback URL is now permanently dead.
-                code=1
-            fi
-            if [ $code -ne 0 ]; then
-                echo ""
-                echo "❌ $name (PID $pid) exited with code $code — shutting down all services."
-                # Log which services are still alive for traceability
-                for j in "${!PIDS[@]}"; do
-                    other_pid="${PIDS[$j]}"
-                    other_name="${NAMES[$j]}"
-                    if [ "$j" != "$i" ] && [ -n "$other_pid" ]; then
-                        if kill -0 "$other_pid" 2>/dev/null; then
-                            echo "   ├── $other_name (PID $other_pid): still running — will be killed"
-                        else
-                            wait "$other_pid" 2>/dev/null; other_code=$?
-                            echo "   ├── $other_name (PID $other_pid): already dead (code $other_code)"
-                        fi
+            code="$(run_required_service_exit_code "$code")"
+            echo ""
+            echo "❌ $name (PID $pid) exited with code $code — shutting down all services."
+            # Log which services are still alive for traceability
+            for j in "${!PIDS[@]}"; do
+                other_pid="${PIDS[$j]}"
+                other_name="${NAMES[$j]}"
+                if [ "$j" != "$i" ] && [ -n "$other_pid" ]; then
+                    if kill -0 "$other_pid" 2>/dev/null; then
+                        echo "   ├── $other_name (PID $other_pid): still running — will be killed"
+                    else
+                        wait "$other_pid" 2>/dev/null; other_code=$?
+                        echo "   ├── $other_name (PID $other_pid): already dead (code $other_code)"
                     fi
-                done
-                cleanup
-                rm -rf "$FAIL_DIR"
-                exit $code
-            fi
-            # Exited with code 0 — log it and remove from tracking
-            echo "⚠️  $name (PID $pid) exited with code 0 (unexpected for a long-running service)"
-            unset "PIDS[$i]"
-            unset "NAMES[$i]"
+                fi
+            done
+            cleanup
+            rm -rf "$FAIL_DIR"
+            exit "$code"
         fi
     done
 

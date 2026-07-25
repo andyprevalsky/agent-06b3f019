@@ -7,10 +7,9 @@ from typing import Any, Dict
 from temporalio import activity
 
 from domains.request_payment_card.contracts import (
-    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-    MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
     MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
 )
+
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",

@@ -103,6 +103,73 @@ async function main(): Promise<void> {
     }
   });
 
+  await test('snapshot includes a failed root only while a prior deployment claim is incomplete', async () => {
+    const runId = `snapshot-incomplete-${randomUUID()}`;
+    const incomplete = await createAgent(runId, 'FAILED');
+    const ordinaryFailed = await createAgent(runId, 'FAILED');
+    try {
+      await prisma.agent.update({
+        where: { id: incomplete },
+        data: {
+          workflowReplacementToken: 'prior-attempt',
+          workflowReplacementState: {
+            version: 1,
+            kind: 'deployment',
+          },
+        },
+      });
+      const candidates = await snapshotOpenRootWorkflows(new Date());
+      assert(candidates.some((candidate) => candidate.agentId === incomplete));
+      assert(!candidates.some((candidate) => candidate.agentId === ordinaryFailed));
+    } finally {
+      await prisma.agent.deleteMany({ where: { userId: runId } });
+    }
+  });
+
+  await test('same-attempt failed candidate blocks preflight while the next attempt may rotate it', async () => {
+    const runId = `failed-candidate-preflight-${randomUUID()}`;
+    const agentId = await createAgent(runId, 'FAILED');
+    const originalWorkflowId = `original-${agentId}`;
+    const candidateWorkflowId = `candidate-${agentId}`;
+    try {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          temporalWorkflowId: candidateWorkflowId,
+          staleTemporalWorkflowId: originalWorkflowId,
+          workflowReplacementToken: 'candidate-token',
+          workflowReplacementState: {
+            version: 1,
+            kind: 'deployment',
+            deployment_attempt: 'build-a:attempt-a',
+          },
+        },
+      });
+      const sameAttempt = await preflightAgentWorkflowReplacement(agentId, undefined, {
+        expectedWorkflowId: originalWorkflowId,
+        deploymentAttempt: 'build-a:attempt-a',
+      });
+      assert.strictEqual(sameAttempt.outcome, 'failed');
+      assert.match(
+        'error' in sameAttempt ? sameAttempt.error : '',
+        /failed before durable readiness/
+      );
+
+      const nextAttempt = await preflightAgentWorkflowReplacement(
+        agentId,
+        undefined,
+        {
+          expectedWorkflowId: candidateWorkflowId,
+          deploymentAttempt: 'build-b:attempt-b',
+        },
+        { captureInProgressTools: async () => [] }
+      );
+      assert.strictEqual(nextAttempt.outcome, 'ready');
+    } finally {
+      await prisma.agent.deleteMany({ where: { userId: runId } });
+    }
+  });
+
   await test('bounded migration attempts every frozen candidate and records failures', async () => {
     const candidates: WorkflowDeploymentCandidate[] = Array.from({ length: 17 }, (_, index) => ({
       agentId: `agent-${index}`,
@@ -459,6 +526,29 @@ async function main(): Promise<void> {
     assert.strictEqual(reads, 3);
 
     clock = 0;
+    let initializedReads = 0;
+    await waitForWorkflowReplacementBootstrap('agent-final-active', 'workflow-new', {
+      timeoutMs: 100,
+      pollIntervalMs: 10,
+      now: () => clock,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+      },
+      requireInitialized: true,
+      readState: async () => ({
+        temporalWorkflowId: 'workflow-new',
+        workflowReplacementToken: null,
+        status: 'ACTIVE',
+        statusMessage: null,
+      }),
+      readInitialized: async () => {
+        initializedReads += 1;
+        return initializedReads === 3;
+      },
+    });
+    assert.strictEqual(initializedReads, 3);
+
+    clock = 0;
     await assert.rejects(
       waitForWorkflowReplacementBootstrap('agent-timeout', 'workflow-new', {
         timeoutMs: 20,
@@ -515,6 +605,7 @@ async function main(): Promise<void> {
 
     for (const status of ['PAUSED', 'COST_LIMIT_REACHED', 'OUT_OF_CREDITS'] as AgentStatus[]) {
       await waitForWorkflowReplacementBootstrap(`agent-${status}`, 'workflow-new', {
+        requireInitialized: true,
         readState: async () => ({
           temporalWorkflowId: 'workflow-new',
           workflowReplacementToken: null,
