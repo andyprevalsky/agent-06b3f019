@@ -218,9 +218,17 @@ fi
 # Try the Conductor-assigned port first
 assign_ports "$CONDUCTOR_PORT"
 
-# If any port in our range is held by another process, find a safe range
+# If any port in our range is held by another process, find a safe range.
+# WMH only binds WMH_PORT when it will actually be served (mirrors
+# should_serve_world_model, which is defined later): a run that skips the World
+# Model Harness never touches WMH_PORT, so an unrelated process occupying it
+# (e.g. Spotify's local port) must not block the strict Conductor port range.
+PORTS_TO_CHECK="$BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT"
+if [ "${ENVIRONMENT:-}" != "production" ] && [ "${BENCHMARK_SKIP_WMH_BUILD:-}" != "1" ]; then
+    PORTS_TO_CHECK="$PORTS_TO_CHECK $WMH_PORT"
+fi
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $WMH_PORT $NGROK_WEB_PORT; do
+for port in $PORTS_TO_CHECK; do
     if port_requires_reassign "$port"; then
         COLLISION=true
         break
