@@ -23,6 +23,7 @@ import {
 import * as purchasesService from '../../domains/purchases/service';
 import {
   assert,
+  capturedPaymentIntent,
   FakeCardProvider,
   FakeWalletFundingProvider,
   StubCardStateProvider,
@@ -155,14 +156,12 @@ test('failed Stripe refund is recorded specifically and retried idempotently', a
     { refundError: new Error('temporary Stripe refund failure') }
   );
 
+  const stripe = { retrievePaymentIntent: capturedPaymentIntent };
   await withFakeStripe(async (calls) => {
     await reconcileFailedPurchaseRefunds({ userId });
     assert(calls.refunds.length === 1, `expected one refund retry, got ${calls.refunds.length}`);
-    assert(
-      calls.refundIdempotencyKeys[0] === `purchase-refund:${purchaseId}`,
-      'refund retry must retain its purchase-scoped idempotency key'
-    );
-  });
+    assert(calls.refundIdempotencyKeys[0] === `purchase-refund:${purchaseId}`, 'wrong refund key');
+  }, stripe);
   const recovered = await prisma.purchaseSpend.findUnique({ where: { id: purchaseId } });
   assert(recovered?.status === 'REFUNDED', `expected REFUNDED, got ${recovered?.status}`);
 });
@@ -197,18 +196,23 @@ test('failed company release is retried before the captured charge is refunded',
     },
   });
 
-  await withFakeStripe(async (calls) => {
-    calls.captures.push(paymentIntentId);
-    await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { userId });
-    const reclaim = walletFundingProvider.reclaimCalls.find(
-      (request) => request.purchaseId === purchase.id
-    );
-    assert(reclaim?.cardId === cardId, 'reclaim retry must carry the AgentCard card id');
-    const matchingRefunds = calls.refunds
-      .map((entry) => JSON.parse(entry) as { payment_intent?: string })
-      .filter((entry) => entry.payment_intent === paymentIntentId);
-    assert(matchingRefunds.length === 1, 'expected one refund after confirmed reclaim');
-  });
+  const card = new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 });
+  await withFakeStripe(
+    async (calls) => {
+      await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { userId }, card);
+      const reclaim = walletFundingProvider.reclaimCalls.find(
+        (request) => request.purchaseId === purchase.id
+      );
+      assert(reclaim?.cardId === cardId, 'reclaim retry must carry the AgentCard card id');
+      const matchingRefunds = calls.refunds
+        .map((entry) => JSON.parse(entry) as { payment_intent?: string })
+        .filter((entry) => entry.payment_intent === paymentIntentId);
+      assert(matchingRefunds.length === 1, 'expected one refund after confirmed reclaim');
+    },
+    {
+      retrievePaymentIntent: capturedPaymentIntent,
+    }
+  );
   const recovered = await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } });
   assert(recovered?.status === PurchaseSpendStatus.VOIDED, `got ${recovered?.status}`);
 });
@@ -582,7 +586,7 @@ test('dissolved hold after card spend records capture failure for reconciliation
   );
 });
 
-test('stale charging reconciler reclaims wallet funding and cancels the hold', async () => {
+test('stale transfer without a card stays resumable under the same provider key', async () => {
   const userId = await createUser('stale-charging-reconciler');
   const walletFundingProvider = new FakeWalletFundingProvider();
   const purchase = await prisma.purchaseSpend.create({
@@ -612,20 +616,20 @@ test('stale charging reconciler reclaims wallet funding and cancels the hold', a
   await withFakeStripe(async (calls) => {
     await reconcileStaleChargingPurchases(walletFundingProvider, { userId });
 
-    assert(calls.cancels.length === 1, `expected one hold cancel, got ${calls.cancels.length}`);
+    assert(calls.cancels.length === 0, `expected no hold cancel, got ${calls.cancels.length}`);
     assert(
-      walletFundingProvider.reclaimCalls.length === 1,
-      `expected one wallet reclaim, got ${walletFundingProvider.reclaimCalls.length}`
+      walletFundingProvider.reclaimCalls.length === 0,
+      `expected no blind wallet reclaim, got ${walletFundingProvider.reclaimCalls.length}`
     );
     const row = await prisma.purchaseSpend.findUnique({ where: { id: purchase.id } });
-    assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+    assert(
+      row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+      `expected FUNDING_PENDING, got ${row?.status}`
+    );
     const funding = await prisma.purchaseWalletFunding.findUnique({
       where: { purchaseId: purchase.id },
     });
-    assert(
-      funding?.status === 'RECLAIMED',
-      `expected wallet funding RECLAIMED, got ${funding?.status}`
-    );
+    assert(funding?.status === 'FUNDED', `expected wallet funding FUNDED, got ${funding?.status}`);
   });
 });
 

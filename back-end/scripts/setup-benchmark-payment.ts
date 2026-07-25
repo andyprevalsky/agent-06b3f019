@@ -2,15 +2,11 @@ import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
-import {
-  ensureAgentCardSandboxFloat,
-  loadAgentCardBenchmarkAdmin,
-} from '../src/providers/agentcard/benchmark-float';
+import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 const DEFAULT_BENCHMARK_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
-const DEFAULT_AGENTCARD_ORG_ID = 'cmqr3fk330005l704hlvyiu0z';
 
 async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
   const cardholderId =
@@ -146,11 +142,13 @@ async function main(): Promise<void> {
 
     await seedAgentCardConnection(prisma, userId);
 
-    const sandboxFloat = await ensureAgentCardSandboxFloat(
-      await loadAgentCardBenchmarkAdmin(),
-      process.env.BENCHMARK_AGENTCARD_ORG_ID?.trim() || DEFAULT_AGENTCARD_ORG_ID
+    // The org identity now travels in the client-credential token itself
+    // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
+    const sandboxFloat = await ensureAgentCardSandboxFloat();
+    console.log(
+      `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
+        `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
     );
-    console.log(`AgentCard sandbox pool ready at $${(sandboxFloat.balanceCents / 100).toFixed(2)}`);
 
     console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);
   } finally {

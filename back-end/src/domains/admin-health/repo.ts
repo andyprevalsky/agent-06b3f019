@@ -88,12 +88,24 @@ export async function findConnectedConnectors(): Promise<ConnectedConnectorRecor
   });
 }
 
-export async function findUsersByIds(userIds: string[]): Promise<UserCreatedRecord[]> {
-  if (userIds.length === 0) return [];
-  return prisma.user.findMany({
-    where: { userId: { in: userIds }, isAnonymous: false },
-    select: { userId: true, createdAt: true },
+// Resolve the explicit core-team allowlist (see ADMIN_HEALTH_ADDITIONAL_PHONES) by
+// phone. isAnonymous is intentionally NOT filtered here: the dev/test account is
+// flagged anonymous but is a real person we always want counted. One user per phone
+// (earliest-created) guards against a phone that later gains a second account
+// double-counting in the "# of Users" set.
+export async function findUsersByPhones(phones: string[]): Promise<UserCreatedRecord[]> {
+  if (phones.length === 0) return [];
+  const rows = await prisma.user.findMany({
+    where: { phone: { in: phones } },
+    select: { userId: true, phone: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
   });
+  const byPhone = new Map<string, UserCreatedRecord>();
+  for (const { userId, phone, createdAt } of rows) {
+    if (phone === null || byPhone.has(phone)) continue;
+    byPhone.set(phone, { userId, createdAt });
+  }
+  return Array.from(byPhone.values());
 }
 
 export async function findSubscriptionUsersByCustomerIds(

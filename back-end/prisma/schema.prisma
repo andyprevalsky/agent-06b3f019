@@ -1299,6 +1299,8 @@ enum ClaudeCodeSessionStatus {
 enum PurchaseSpendStatus {
   PENDING_APPROVAL
   CHARGING
+  FUNDING_PENDING
+  FUNDING_ABANDONED
   HELD
   CLEARED
   VOIDED

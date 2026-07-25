@@ -115,7 +115,7 @@ def test_completed_batch_tasks_are_removed_without_mutating_during_iteration():
 
 def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
     archive_started = asyncio.Event()
-    release_archive = asyncio.Event()
+    archive_release = asyncio.Event()
 
     async def fake_fetch(keys: list[str]):
         return {
@@ -129,7 +129,7 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
 
     async def blocked_archive(*args, **kwargs):
         archive_started.set()
-        await release_archive.wait()
+        await archive_release.wait()
 
     async def run():
         reset_client_state()
@@ -137,16 +137,15 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
         monkeypatch.setattr(client, "_fetch_cache_records_many", fake_fetch)
         monkeypatch.setattr(client, "_archive_cache_read", blocked_archive)
 
-        try:
-            result = await asyncio.wait_for(
-                client.cache_get_record("k1"),
-                timeout=EVENT_TIMEOUT_S,
-            )
-            assert result["hit"] is True
-            await asyncio.wait_for(archive_started.wait(), timeout=EVENT_TIMEOUT_S)
-        finally:
-            release_archive.set()
-            await asyncio.gather(*list(client._archive_read_tasks))
+        result = await asyncio.wait_for(
+            client.cache_get_record("k1"), timeout=EVENT_TIMEOUT_S
+        )
+        assert result["hit"] is True
+        await asyncio.wait_for(archive_started.wait(), timeout=EVENT_TIMEOUT_S)
+        assert client._archive_read_tasks
+        assert all(not task.done() for task in client._archive_read_tasks)
+        archive_release.set()
+        await asyncio.gather(*list(client._archive_read_tasks))
 
     asyncio.run(run())
 

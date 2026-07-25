@@ -17,7 +17,6 @@ import { stripe } from '../../providers/stripe';
 import { AgentCardOrgMcpProvider, AgentCardProviderError } from '../../providers/card-provider';
 import * as purchasesService from '../../domains/purchases/service';
 import { getCustomerDefaultPaymentMethodId } from '../../domains/purchases/stripeCustomer';
-import { isKycRequiredError } from '../../domains/purchases/kyc';
 import { companyFundingInProgressDetails } from '../../domains/purchases/errors';
 import {
   assert,
@@ -174,7 +173,51 @@ async function cleanup(): Promise<void> {
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
-    'organization MCP structured errors surface the upstream failure message',
+    'organization MCP preserves transferless company-funding retries',
+    async () => {
+      const provider = new AgentCardOrgMcpProvider('cardholder-funding', async () => ({
+        content: [
+          {
+            type: 'text',
+            text: 'Company-wallet funding is in progress — call create_card again with the SAME arguments and the SAME idempotency_key in ~10s to collect the card.',
+          },
+        ],
+        structuredContent: {
+          message:
+            'Company-wallet funding is in progress — call create_card again with the SAME arguments and the SAME idempotency_key in ~10s to collect the card.',
+          status: 'funding_in_progress',
+          retryAfterSeconds: 10,
+        },
+      }));
+
+      let caught: unknown;
+      try {
+        await provider.mintCard({
+          amountCents: 100,
+          fundsSource: 'company_flow',
+          idempotencyKey: 'purchase:transferless-funding',
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      assert(
+        caught instanceof AgentCardProviderError &&
+          caught.status === 409 &&
+          caught.code === 'agentcard_company_funding_in_progress' &&
+          caught.details.transferId === undefined &&
+          caught.details.retryAfterSeconds === 10,
+        `expected a typed transferless funding retry, got "${caught instanceof Error ? caught.message : String(caught)}"`
+      );
+      const funding = companyFundingInProgressDetails(caught);
+      assert(
+        funding?.transferId === undefined && funding?.retryAfterSeconds === 10,
+        'the purchase retry loop must accept a transferless funding response'
+      );
+    },
+  ],
+  [
+    'organization MCP prose-only setup errors fail closed after provider mutation starts',
     async () => {
       const calls: string[] = [];
       const provider = new AgentCardOrgMcpProvider('cardholder-missing', async (name) => {
@@ -209,10 +252,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       );
       assert(
         caught instanceof AgentCardProviderError &&
-          caught.status === 409 &&
-          caught.code === 'agentcard_setup_required' &&
-          caught.details.agentcardStatus === 'org_onboarding_required',
-        'organization onboarding must surface as a typed 409 setup gate'
+          caught.status === undefined &&
+          caught.code === undefined,
+        'prose-only onboarding text must remain an ambiguous provider failure'
       );
       assert(
         calls.length === 1 && calls[0] === 'create_card',
@@ -280,12 +322,20 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       const userId = await createSubscribedUser('stale-charging-retry');
       const fingerprint = `stale-charging-${randomUUID()}`;
+      const provider = new FakeCardProvider();
+      const input = validMintBody({ userId, fingerprint, totalCents: 1000 });
       const oldPurchase = await prisma.purchaseSpend.create({
         data: {
           userId,
           fingerprint,
-          merchant: 'Stale Merchant',
-          lineItemsJson: { totalCents: 1000 },
+          merchant: 'Test Merchant',
+          lineItemsJson: {
+            currency: 'USD',
+            lineItems: input.lineItems,
+            fees: input.fees,
+            subtotalCents: 1000,
+            totalCents: 1000,
+          },
           totalCents: 1000,
           status: PurchaseSpendStatus.CHARGING,
           stripePaymentIntentId: `pi_stale_${randomUUID()}`,
@@ -299,26 +349,25 @@ const tests: Array<[string, () => Promise<void>]> = [
           amountCents: 1000,
           currency: 'usd',
           status: 'FUNDED',
-          providerTransferId: `wft_stale_${randomUUID()}`,
+          providerTransferId: provider.providerTransferId,
           idempotencyKey: `purchase-wallet-fund:${oldPurchase.id}`,
         },
       });
-      const provider = new FakeCardProvider();
       const walletFundingProvider = new FakeWalletFundingProvider();
 
       await withFakeStripe(async (calls) => {
         const result = await purchasesService.mintPurchaseCard(
-          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
+          input as never,
           provider,
           walletFundingProvider
         );
 
-        assert(result.cardId === provider.cardId, 'retry should mint a fresh card');
-        assert(calls.cancels.length === 1, 'stale Stripe hold should be canceled');
-        assert(calls.charges.length === 1, 'retry should create one fresh Stripe hold');
+        assert(result.cardId === provider.cardId, 'retry should recover the original card');
+        assert(calls.cancels.length === 0, 'same-purchase retry must preserve its Stripe hold');
+        assert(calls.charges.length === 1, 'retry should replay one idempotent Stripe request');
         assert(
-          walletFundingProvider.reclaimCalls.length === 1,
-          'stale wallet funding should be reclaimed'
+          walletFundingProvider.reclaimCalls.length === 0,
+          'same-key recovery must not reclaim its original transfer'
         );
         assert(
           provider.mintRequests[0]?.fundsSource === 'company_flow',
@@ -330,16 +379,9 @@ const tests: Array<[string, () => Promise<void>]> = [
         );
 
         const oldRow = await prisma.purchaseSpend.findUnique({ where: { id: oldPurchase.id } });
-        assert(
-          oldRow?.status === PurchaseSpendStatus.FAILED,
-          `expected FAILED, got ${oldRow?.status}`
-        );
-        const newRow = await prisma.purchaseSpend.findFirst({
-          where: { userId, fingerprint, status: PurchaseSpendStatus.HELD },
-          orderBy: { createdAt: 'desc' },
-        });
-        assert(newRow !== null, 'retry should create a new HELD purchase row');
-        assert(newRow?.id !== oldPurchase.id, 'retry must not reuse the reclaimed funding row');
+        assert(oldRow?.status === PurchaseSpendStatus.HELD, `expected HELD, got ${oldRow?.status}`);
+        const rows = await prisma.purchaseSpend.findMany({ where: { userId, fingerprint } });
+        assert(rows.length === 1, 'retry must not create a second purchase row');
       });
     },
   ],
@@ -542,40 +584,6 @@ const tests: Array<[string, () => Promise<void>]> = [
       } finally {
         customers.retrieve = originalRetrieve;
       }
-    },
-  ],
-  [
-    'KYC classifier recognizes a non-provider error carrying a numeric status and KYC text',
-    async () => {
-      const error = Object.assign(new Error('Cardholder KYC required'), { status: 422 });
-      assert(isKycRequiredError(error), 'a 422 KYC-text error must be classified as KYC-required');
-      const wrongStatus = Object.assign(new Error('kyc required'), { status: 500 });
-      assert(!isKycRequiredError(wrongStatus), 'a 5xx status must not be treated as KYC-required');
-    },
-  ],
-  [
-    'company-funding detail extractor surfaces the nested AgentCard result',
-    async () => {
-      const details = companyFundingInProgressDetails(
-        new AgentCardProviderError(
-          'AgentCard company funding is in progress',
-          409,
-          undefined,
-          'agentcard_company_funding_in_progress',
-          {
-            transferId: 'owt_nested',
-            retryAfterSeconds: 3,
-            agentcardResult: { transfer: { id: 'owt_nested' } },
-          }
-        )
-      );
-      assert(details?.transferId === 'owt_nested', 'expected the in-progress transfer id');
-      assert(details?.retryAfterSeconds === 3, 'expected the parsed retry delay');
-      assert(
-        (details?.agentcardResult as { transfer?: { id?: string } } | undefined)?.transfer?.id ===
-          'owt_nested',
-        'expected the nested AgentCard result to be surfaced'
-      );
     },
   ],
 ];

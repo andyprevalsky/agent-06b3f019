@@ -86,6 +86,9 @@ docker exec "$DB_CONTAINER" psql -U postgres -d victoria \
 
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+    DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
+    bash scripts/apply-local-workflow-ddl.sh)
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
 echo "🌱 Syncing production data to local database..."

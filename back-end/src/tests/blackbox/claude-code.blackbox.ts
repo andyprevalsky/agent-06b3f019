@@ -64,6 +64,7 @@ import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
 import { resolveClaudeCodeAuthEnvs, resolveClaudeCodeTokenSource } from '../../providers/e2b';
+import { AgentOwnerMismatchError, resolveAgentContext } from '../../domains/claude-code/service';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
 
@@ -394,6 +395,51 @@ async function seedClaudeIntegration(): Promise<{ integrationId: string; userId:
 }
 
 // ==================== POST /create ====================
+
+async function testResolveAgentContext_repoLessAgentKeepsOwnerCredentials() {
+  const agentId = crypto.randomUUID();
+  const userId = crypto.randomUUID();
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId,
+      goal: 'resolve repo-less code-agent credential owner',
+      status: 'STARTING_UP',
+    },
+  });
+  try {
+    const context = await resolveAgentContext(agentId, undefined);
+    assert(context.repoUrl === undefined, 'repo-less agent must not invent a GitHub repo');
+    assert(context.userId === userId, 'repo-less agent must retain its credential owner');
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agentId } });
+  }
+}
+
+async function testResolveAgentContext_rejectsMismatchedCallerOwner() {
+  const agentId = crypto.randomUUID();
+  const userId = crypto.randomUUID();
+  await prisma.agent.create({
+    data: {
+      id: agentId,
+      userId,
+      goal: 'reject mismatched code-agent credential owner',
+      status: 'STARTING_UP',
+    },
+  });
+  try {
+    let rejected = false;
+    try {
+      await resolveAgentContext(agentId, crypto.randomUUID());
+    } catch (error) {
+      rejected = true;
+      assert(error instanceof AgentOwnerMismatchError, `unexpected error: ${String(error)}`);
+    }
+    assert(rejected, 'mismatched caller user_id must be rejected');
+  } finally {
+    await prisma.agent.deleteMany({ where: { id: agentId } });
+  }
+}
 
 // ── resolveClaudeCodeAuthEnvs (pure auth-env selection) ──────────────────────
 const OAUTH_META = {
@@ -1291,6 +1337,14 @@ async function runAll() {
     {
       name: 'authEnvs -- throws when no creds + no key',
       fn: async () => testResolveAuthEnvs_noCredsNoKeyThrows(),
+    },
+    {
+      name: 'agent context -- repo-less agent resolves credential owner',
+      fn: testResolveAgentContext_repoLessAgentKeepsOwnerCredentials,
+    },
+    {
+      name: 'agent context -- caller cannot override credential owner',
+      fn: testResolveAgentContext_rejectsMismatchedCallerOwner,
     },
     // POST /create
     { name: 'POST /create -- no auth -> 401', fn: testCreate_noAuth },

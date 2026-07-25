@@ -12461,6 +12461,52 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def test_manager_payment_gate_retries_company_funding_and_mints():
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": 5,
+            },
+            {
+                "status": "HELD",
+                "purchaseId": "purchase-1",
+                "cardId": "card-1",
+                "pan": "4242424242424242",
+                "cvv": "123",
+                "expiry": "12/30",
+                "last4": "4242",
+            },
+        ]
+    )
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+    assert not any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
+
+
+def test_manager_payment_gate_normalizes_company_funding_retry_delay():
+    from domains.spawn_browser_agent_v3.handler import _normalize_funding_retry_seconds
+
+    for invalid in (True, False, None, "5", float("nan"), float("inf"), 0, -1):
+        assert _normalize_funding_retry_seconds(invalid) == 5.0
+    assert _normalize_funding_retry_seconds(0.001) == 1.0
+    assert _normalize_funding_retry_seconds(5) == 5.0
+    assert _normalize_funding_retry_seconds(600) == 60.0
+
+
+async def test_manager_payment_gate_reports_company_funding_deadline():
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": 5,
+            }
+        ]
+    )
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+    delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
+    assert delayed.metadata["action_type"] == "purchase_funding_delayed"
+
+
 # ========================================
 # Runner
 # ========================================
@@ -13828,6 +13874,18 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_company_funding_retry",
+        test_manager_payment_gate_retries_company_funding_and_mints,
+    )
+    r.record(
+        "manager_payment_gate_company_funding_retry_delay",
+        test_manager_payment_gate_normalizes_company_funding_retry_delay,
+    )
+    await r.record_async(
+        "manager_payment_gate_company_funding_deadline",
+        test_manager_payment_gate_reports_company_funding_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",

@@ -1,24 +1,31 @@
 import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
 import {
-  cancelAuthorizedHold,
   captureAuthorizedHold,
-  refundCapturedPurchase,
+  reversePurchasePaymentIntent,
   stripe,
 } from '../../providers/stripe';
 import {
   createWalletFundingProvider,
   type WalletFundingProvider,
 } from '../../providers/wallet-funding';
-import { PurchaseError, toPurchaseBoundaryError } from './errors';
+import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
+import { assertIssuedCardIsSpendable, sanitizeDescriptorSuffix } from './chargeHelpers';
 import { mintCompanyFlowCard } from './companyFlowCard';
-import { recordPurchaseWalletFunding, reclaimPurchaseWalletFunding } from './walletFunding';
+import { classifyFundingResumeFailure } from './fundingResume';
+import {
+  discardPendingPurchaseWalletCollection,
+  preparePurchaseWalletCollection,
+  recordIssuedPurchaseCardFunding,
+  reclaimPurchaseWalletFunding,
+} from './walletFunding';
 import {
   PurchaseSpendStatus,
+  PurchaseWalletFundingStatus,
   type MintPurchaseInput,
   type MintPurchaseResult,
   type PurchaseSpend,
@@ -35,6 +42,11 @@ interface ChargeState {
   paymentReversalFailed: boolean;
   walletWasFunded: boolean;
   walletReclaimFailed: boolean;
+  walletFundingPrepared: boolean;
+  fundingResumeRequired: boolean;
+  fundingRetryClaimed: boolean;
+  providerCallStarted: boolean;
+  stripeAuthorizationStarted: boolean;
   activeWalletFundingProvider?: WalletFundingProvider;
   activeCardProvider?: CardProvider;
   issuedCardId?: string;
@@ -44,14 +56,6 @@ interface ChargeState {
    * reclaim — but the user's Stripe hold is still captured normally.
    */
   issuedStaticCard: boolean;
-}
-
-function sanitizeDescriptorSuffix(merchant: string): string {
-  const cleaned = merchant
-    .replace(/[^a-zA-Z0-9 ._-]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  return (cleaned || 'Purchase').slice(0, 22);
 }
 
 /** Authorize the user's saved card with a manual-capture hold. */
@@ -78,6 +82,7 @@ async function authorizeStripeHold(
       purchaseSpendId: purchase.id,
     },
   };
+  state.stripeAuthorizationStarted = true;
   const paymentIntent = await stripe.paymentIntents.create(
     stripeRequest,
     // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
@@ -107,26 +112,26 @@ async function mintCaptureAndIssue(
   state.activeWalletFundingProvider = walletFundingProvider ?? createWalletFundingProvider();
   state.activeCardProvider =
     cardProvider ?? (await createCardProviderForAgent(input.userId, input.agentId));
+  const preparedFunding = await preparePurchaseWalletCollection(purchase, 'usd');
+  state.providerCallStarted = true;
   const { cardRequest, minted, providerTransferId } = await mintCompanyFlowCard(
     purchase,
     input,
     state.activeCardProvider,
-    state.activeWalletFundingProvider
+    state.activeWalletFundingProvider,
+    preparedFunding.providerTransferId ?? undefined
   );
   const transferId = minted.providerTransferId ?? providerTransferId;
   const isStaticCard = minted.metadata?.staticCard === true;
-  state.issuedCardId = minted.cardId;
-  state.issuedStaticCard = isStaticCard;
-  // Persist the issued card id immediately, before capture or any later failure point. A crash
-  // between minting and the HELD write would otherwise orphan the funded card with no durable
-  // pointer for reconcilers to close it and reclaim its funding.
-  await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
-    cardId: minted.cardId,
-  });
-  // The static Rose Agent Card (mint cutoff) is company-funded out-of-band: no AgentCard company
-  // transfer exists, so there is nothing to require or wallet-fund. Real AgentCard cards MUST carry
-  // a company transfer id. Either way the user's Stripe hold is captured below.
-  if (!isStaticCard) {
+  if (isStaticCard) {
+    await discardPendingPurchaseWalletCollection(purchaseId);
+    state.walletFundingPrepared = false;
+    state.issuedCardId = minted.cardId;
+    state.issuedStaticCard = true;
+    await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.CHARGING, {
+      cardId: minted.cardId,
+    });
+  } else {
     if (transferId === undefined || transferId.trim() === '') {
       throw new PurchaseError(
         'AgentCard issued a card without a company transfer id',
@@ -134,12 +139,27 @@ async function mintCaptureAndIssue(
         'agentcard_company_transfer_missing'
       );
     }
+    // Card + transfer are one durable fact. If the process dies before this transaction, replaying
+    // create_card with the same purchase idempotency key recovers them; after it commits, cleanup
+    // always has both identifiers required to close and release the card.
+    await recordIssuedPurchaseCardFunding(
+      purchase,
+      'usd',
+      minted.cardId,
+      transferId,
+      minted.metadata
+    );
+    state.issuedCardId = minted.cardId;
+    state.issuedStaticCard = false;
     state.walletWasFunded = true;
-    await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
   }
-  await captureAuthorizedHold(paymentIntent.id);
-  state.paymentIntentCaptured = true;
   const details = await state.activeCardProvider.getDetails(minted.cardId);
+  if (!isStaticCard) {
+    // An exact-key replay can return a card created by an earlier attempt. Re-read the provider
+    // state after card+transfer persistence and before charging the user; a closed/consumed or
+    // underfunded replay is reclaimed by rollback and must never reach Stripe capture.
+    assertIssuedCardIsSpendable(details, purchase.totalCents);
+  }
   await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
     mint_request: cardRequest,
     mint_response: minted,
@@ -150,6 +170,8 @@ async function mintCaptureAndIssue(
     },
   });
 
+  await captureAuthorizedHold(paymentIntent.id);
+  state.paymentIntentCaptured = true;
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
     cardId: minted.cardId,
     stripePaymentIntentId: paymentIntent.id,
@@ -194,17 +216,14 @@ async function closeIssuedCardOnFailure(
   }
 }
 
-/** Reverse the Stripe charge (refund if captured, else cancel the hold) after a mint failure. */
+/** Reverse Stripe after a mint failure by re-reading the durable PaymentIntent state. */
 async function reverseStripePaymentOnFailure(
   state: ChargeState,
   purchaseId: string
 ): Promise<void> {
   const paymentIntentId = state.paymentIntentId;
   if (paymentIntentId === undefined || state.walletReclaimFailed) return;
-  const reversePayment = state.paymentIntentCaptured
-    ? refundCapturedPurchase(paymentIntentId, purchaseId)
-    : cancelAuthorizedHold(paymentIntentId);
-  await reversePayment.catch((reverseError) => {
+  await reversePurchasePaymentIntent(paymentIntentId, purchaseId).catch((reverseError) => {
     state.paymentReversalFailed = true;
     log.warn('Failed to reverse Stripe payment after purchase mint failure', {
       purchase_id: purchaseId,
@@ -223,11 +242,13 @@ async function rollbackChargeFailure(
   error: unknown
 ): Promise<never> {
   const purchaseId = purchase.id;
-  const boundaryError = toPurchaseBoundaryError(error);
-  if (
-    boundaryError instanceof PurchaseError &&
-    boundaryError.code === 'agentcard_company_funding_in_progress'
-  ) {
+  const fundingFailure = await classifyFundingResumeFailure(purchase, error, state);
+  const boundaryError = fundingFailure.boundaryError;
+  state.walletWasFunded = fundingFailure.walletWasFunded;
+  state.fundingResumeRequired = fundingFailure.fundingResumeRequired;
+  state.walletFundingPrepared = fundingFailure.walletFundingPrepared;
+  state.issuedCardId ??= fundingFailure.issuedCardId;
+  if (state.fundingResumeRequired) {
     state.walletReclaimFailed = true;
   }
   await closeIssuedCardOnFailure(state, purchase);
@@ -248,11 +269,13 @@ async function rollbackChargeFailure(
   });
   await repo.updatePurchaseStatus(
     purchaseId,
-    state.walletReclaimFailed
-      ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
-      : state.paymentIntentCaptured && state.paymentReversalFailed
-        ? PurchaseSpendStatus.REFUND_FAILED
-        : PurchaseSpendStatus.FAILED,
+    state.fundingResumeRequired
+      ? PurchaseSpendStatus.FUNDING_PENDING
+      : state.walletReclaimFailed
+        ? PurchaseSpendStatus.FUNDING_RECLAIM_FAILED
+        : state.paymentReversalFailed
+          ? PurchaseSpendStatus.REFUND_FAILED
+          : PurchaseSpendStatus.FAILED,
     {
       stripePaymentIntentId: state.paymentIntentId ?? null,
     }
@@ -260,14 +283,16 @@ async function rollbackChargeFailure(
   // A genuine AgentCard KYC rejection (not the MCP per-user setup flow, whose
   // error text carries no kyc_required code) surfaces as a typed kyc_required
   // PurchaseError so the agent workflow can raise a KYC gate and retry.
-  if (isKycRequiredError(error)) throw kycRequiredPurchaseError();
+  if (!state.fundingResumeRequired && isKycRequiredError(error)) {
+    throw kycRequiredPurchaseError();
+  }
   throw boundaryError;
 }
 
 /**
- * Authorize the user's saved card, mint the company-funded single-use card, then capture the
- * user's charge as soon as AgentCard confirms the transfer. A returned card is therefore always
- * fully funded. If any later setup step fails, close/reclaim the card and refund the charge.
+ * Authorize the user's saved card, mint the company-funded single-use card, verify that the
+ * returned card is live and fully funded, then capture the charge. Failures before capture close
+ * and reclaim the card before canceling the hold; failures after capture refund the charge.
  */
 export async function chargeAndIssueCard(
   purchase: PurchaseSpend,
@@ -276,14 +301,26 @@ export async function chargeAndIssueCard(
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
+  const fundingRetryClaimed = purchase.cardId === null && purchase.stripePaymentIntentId !== null;
   const state: ChargeState = {
+    paymentIntentId: purchase.stripePaymentIntentId ?? undefined,
     paymentIntentCaptured: false,
     paymentReversalFailed: false,
     walletWasFunded: false,
     walletReclaimFailed: false,
+    walletFundingPrepared: fundingRetryClaimed,
+    fundingResumeRequired: false,
+    fundingRetryClaimed,
+    providerCallStarted: false,
+    stripeAuthorizationStarted: false,
     issuedStaticCard: false,
   };
   try {
+    const preparedFunding = await preparePurchaseWalletCollection(purchase, 'usd');
+    state.walletFundingPrepared = true;
+    state.walletWasFunded =
+      preparedFunding.status === PurchaseWalletFundingStatus.FUNDED ||
+      preparedFunding.status === PurchaseWalletFundingStatus.CONSUMED;
     const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
     return await mintCaptureAndIssue(
       state,

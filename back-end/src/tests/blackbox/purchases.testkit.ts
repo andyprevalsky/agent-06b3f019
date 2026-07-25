@@ -48,7 +48,7 @@ export class FakeCardProvider implements CardProvider {
       cardId: this.cardId,
       last4: '4242',
       expiry: this.expiry,
-      spendLimitCents: 1000,
+      spendLimitCents: request.amountCents,
       status: 'active',
       providerTransferId: this.providerTransferId,
     };
@@ -61,7 +61,7 @@ export class FakeCardProvider implements CardProvider {
       pan: this.pan,
       cvv: this.cvv,
       expiry: this.expiry,
-      balanceCents: 1000,
+      balanceCents: this.mintRequests.at(-1)?.amountCents ?? 1000,
       status: 'active',
     };
   }
@@ -204,9 +204,9 @@ export class FundingInProgressCardProvider extends FakeCardProvider {
 }
 
 /**
- * Rejects mint with an `agentcard_company_funding_in_progress` error that carries NO usable transfer
- * id, so the company-flow loop rethrows immediately (no retry/sleep) and the charge rollback takes
- * its funding-reclaim-required branch.
+ * Rejects mint with an `agentcard_company_funding_in_progress` error that carries no usable
+ * transfer id and a retry delay at the full company-flow deadline, so the loop times out without
+ * sleeping and charge rollback takes its funding-reclaim-required branch.
  */
 export class FundingInProgressNoTransferCardProvider extends FakeCardProvider {
   async mintCard(request: CardProviderMintRequest): Promise<never> {
@@ -217,7 +217,29 @@ export class FundingInProgressNoTransferCardProvider extends FakeCardProvider {
       409,
       undefined,
       'agentcard_company_funding_in_progress',
-      { agentcardStatus: 'funding_in_progress' }
+      { agentcardStatus: 'funding_in_progress', retryAfterSeconds: 60 }
+    );
+  }
+}
+
+/** First request stalls without a transfer id; a later request can complete the same card key. */
+export class ResumableFundingInProgressCardProvider extends FakeCardProvider {
+  private fundingReady = false;
+
+  completeFunding(): void {
+    this.fundingReady = true;
+  }
+
+  async mintCard(request: CardProviderMintRequest) {
+    if (this.fundingReady) return super.mintCard(request);
+    this.mintCalls += 1;
+    this.mintRequests.push(request);
+    throw new AgentCardProviderError(
+      'AgentCard company funding is in progress',
+      409,
+      undefined,
+      'agentcard_company_funding_in_progress',
+      { agentcardStatus: 'funding_in_progress', retryAfterSeconds: 60 }
     );
   }
 }
@@ -281,11 +303,22 @@ export async function seedHeldPurchase(userId: string, fingerprint: string, card
  * params. */
 export interface FakeStripeCalls {
   charges: string[];
+  chargeIdempotencyKeys: Array<string | undefined>;
+  chargeResultIds: string[];
   refunds: string[];
   refundIdempotencyKeys: Array<string | undefined>;
   captures: string[];
   cancels: string[];
   retrieves: string[];
+}
+
+export function capturedPaymentIntent(id: string, amountReceived = 1000) {
+  return {
+    id,
+    status: 'succeeded',
+    amount_capturable: 0,
+    amount_received: amountReceived,
+  };
 }
 
 /**
@@ -298,13 +331,18 @@ export async function withFakeStripe<T>(
   opts: {
     retrievePaymentIntent?: (id: string) => Promise<unknown> | unknown;
     refundError?: Error;
+    captureError?: Error;
+    cancelError?: Error;
+    fixedPaymentIntentId?: string;
+    afterCapture?: (id: string) => void;
   } = {}
 ) {
   const paymentIntents = stripe.paymentIntents as unknown as {
-    create: (params: unknown) => Promise<{ id: string }>;
+    create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
     capture: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
     cancel: (id: string, params?: unknown) => Promise<{ id: string; status: string }>;
     retrieve: (id: string) => Promise<unknown>;
+    search: (params: { query: string; limit?: number }) => Promise<{ data: Array<{ id: string }> }>;
   };
   const refunds = stripe.refunds as unknown as {
     create: (params: unknown, options?: { idempotencyKey?: string }) => Promise<{ id: string }>;
@@ -320,10 +358,13 @@ export async function withFakeStripe<T>(
   const originalPaymentIntentCapture = paymentIntents.capture;
   const originalPaymentIntentCancel = paymentIntents.cancel;
   const originalPaymentIntentRetrieve = paymentIntents.retrieve;
+  const originalPaymentIntentSearch = paymentIntents.search;
   const originalRefundCreate = refunds.create;
   const originalCustomerRetrieve = customers.retrieve;
   const calls: FakeStripeCalls = {
     charges: [],
+    chargeIdempotencyKeys: [],
+    chargeResultIds: [],
     refunds: [],
     refundIdempotencyKeys: [],
     captures: [],
@@ -335,16 +376,35 @@ export async function withFakeStripe<T>(
     id: customerId,
     invoice_settings: { default_payment_method: 'pm_fake_default' },
   });
-  paymentIntents.create = async (params: unknown) => {
-    const id = `pi_${randomUUID()}`;
+  const paymentIntentIdsByIdempotencyKey = new Map<string, string>();
+  const paymentIntentParamsById = new Map<string, Record<string, unknown>>();
+  paymentIntents.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
+    const idempotencyKey = options?.idempotencyKey;
+    const id =
+      (idempotencyKey !== undefined
+        ? paymentIntentIdsByIdempotencyKey.get(idempotencyKey)
+        : undefined) ??
+      opts.fixedPaymentIntentId ??
+      `pi_${randomUUID()}`;
+    if (idempotencyKey !== undefined) {
+      paymentIntentIdsByIdempotencyKey.set(idempotencyKey, id);
+    }
     calls.charges.push(JSON.stringify(params));
+    calls.chargeIdempotencyKeys.push(idempotencyKey);
+    calls.chargeResultIds.push(id);
+    if (typeof params === 'object' && params !== null) {
+      paymentIntentParamsById.set(id, params as Record<string, unknown>);
+    }
     return { id };
   };
   paymentIntents.capture = async (id: string) => {
     calls.captures.push(id);
+    opts.afterCapture?.(id);
+    if (opts.captureError !== undefined) throw opts.captureError;
     return { id, status: 'succeeded' };
   };
   paymentIntents.cancel = async (id: string) => {
+    if (opts.cancelError !== undefined) throw opts.cancelError;
     calls.cancels.push(id);
     return { id, status: 'canceled' };
   };
@@ -357,6 +417,22 @@ export async function withFakeStripe<T>(
       status: captured ? 'succeeded' : 'requires_capture',
       amount_capturable: captured ? 0 : 1000,
       amount_received: captured ? 1000 : 0,
+    };
+  };
+  paymentIntents.search = async ({ query }) => {
+    const purchaseId = query.match(/metadata\['purchaseSpendId'\]:'([^']+)'/)?.[1];
+    return {
+      data: [...paymentIntentParamsById.entries()]
+        .filter(([, params]) => {
+          const metadata = params.metadata;
+          return (
+            purchaseId !== undefined &&
+            typeof metadata === 'object' &&
+            metadata !== null &&
+            (metadata as Record<string, unknown>).purchaseSpendId === purchaseId
+          );
+        })
+        .map(([id]) => ({ id })),
     };
   };
   refunds.create = async (params: unknown, options?: { idempotencyKey?: string }) => {
@@ -374,6 +450,7 @@ export async function withFakeStripe<T>(
     paymentIntents.capture = originalPaymentIntentCapture;
     paymentIntents.cancel = originalPaymentIntentCancel;
     paymentIntents.retrieve = originalPaymentIntentRetrieve;
+    paymentIntents.search = originalPaymentIntentSearch;
     refunds.create = originalRefundCreate;
     customers.retrieve = originalCustomerRetrieve;
   }
