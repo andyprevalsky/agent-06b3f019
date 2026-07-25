@@ -515,6 +515,7 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert "Brush x1: $6.36" in result["tool_question"]
     assert result["domain_question"] == result["tool_question"]
     assert result["same_fingerprint"] is True
+    assert result["mint_activity_timeout_seconds"] == 90.0
     assert result["mint_activity_imported"] is True
     assert result["mint_activity_timeout_seconds"] == 90.0
 
@@ -602,6 +603,9 @@ def test_domain_config_and_types_module_constants():
         "DEFAULT_CURRENCY",
         "LOOKUP_TIMEOUT_SECONDS",
         "MINT_TIMEOUT_SECONDS",
+        "MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS",
+        "MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS",
+        "MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS",
     }
 
     # TypeAliases are concrete Dict aliases and exported.
