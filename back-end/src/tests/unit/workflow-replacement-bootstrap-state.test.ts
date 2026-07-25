@@ -3,6 +3,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import { updateAgentStatus } from '../../domains/agents/agentControlService';
+import { acceptStartedWorkflowReplacement } from '../../domains/agents/agentRestartService';
 import { prisma } from '../../providers/database';
 import {
   acknowledgeWorkflowReplacementBootstrap,
@@ -41,6 +42,127 @@ async function withAgent(fn: (agentId: string) => Promise<void>): Promise<void> 
 }
 
 async function main(): Promise<void> {
+  await test('stale accepted starts are terminated, cleaned, and rejected', async () => {
+    const events: string[] = [];
+    const claim = {
+      agentId: 'agent-stale-start',
+      token: 'claim-token',
+      plannedWorkflowId: 'candidate-a',
+      staleWorkflowId: 'original',
+      staleFirstExecutionRunId: null,
+      resumeState: {
+        version: 1 as const,
+        kind: 'deployment' as const,
+        prior_status: 'PAUSED' as const,
+        prior_status_message: null,
+        progress: 0,
+        token_count: 0,
+        tokens_in: 0,
+        tokens_out: 0,
+        tree_tokens_in: 0,
+        tree_tokens_out: 0,
+        context_size: 0,
+        message_count: 0,
+        workflow_started_at: null,
+        own_cost_cents: 0,
+        subtree_cost_cents: 0,
+        children_cost_cents: {},
+        children_tokens_in: {},
+        children_tokens_out: {},
+        child_last_tokens: {},
+        child_tool_counts: {},
+        iteration_offset: 0,
+        max_iterations: null,
+        context_gates: null,
+      },
+    };
+    await assert.rejects(
+      acceptStartedWorkflowReplacement(
+        claim,
+        { workflowId: 'candidate-a', firstExecutionRunId: 'candidate-a-run' },
+        undefined,
+        {
+          recordAcceptance: async () => false,
+          terminate: async () => {
+            events.push('terminate');
+          },
+          cleanup: async () => {
+            events.push('cleanup');
+          },
+        }
+      ),
+      /became stale before start acceptance and was terminated/
+    );
+    assert.deepStrictEqual(events, ['terminate', 'cleanup']);
+  });
+
+  await test('rejected start acceptance durably records the exact stale execution', async () => {
+    await withAgent(async (agentId) => {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { temporalWorkflowId: `${agentId}:original`, status: 'PAUSED' },
+      });
+      const claim = await claimWorkflowReplacement(agentId);
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: {
+          temporalWorkflowId: `${agentId}:candidate-b`,
+          workflowReplacementToken: 'candidate-b-token',
+        },
+      });
+      assert.strictEqual(
+        await recordWorkflowReplacementStartAcceptance(claim, {
+          workflowId: claim.plannedWorkflowId,
+          firstExecutionRunId: 'candidate-a-run',
+        }),
+        false
+      );
+      const obligation = await prisma.temporalWorkflowCleanup.findUniqueOrThrow({
+        where: {
+          agentId_workflowId: {
+            agentId,
+            workflowId: claim.plannedWorkflowId,
+          },
+        },
+      });
+      assert.strictEqual(obligation.firstExecutionRunId, 'candidate-a-run');
+      assert.strictEqual(
+        (await prisma.agent.findUniqueOrThrow({ where: { id: agentId } })).temporalCleanupPending,
+        true
+      );
+    });
+  });
+
+  await test('soft deletion rejects a late accepted start even when its workflow ID is unchanged', async () => {
+    await withAgent(async (agentId) => {
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { temporalWorkflowId: `${agentId}:original`, status: 'PAUSED' },
+      });
+      const claim = await claimWorkflowReplacement(agentId);
+      await prisma.agent.update({
+        where: { id: agentId },
+        data: { deletedAt: new Date() },
+      });
+      assert.strictEqual(
+        await recordWorkflowReplacementStartAcceptance(claim, {
+          workflowId: claim.plannedWorkflowId,
+          firstExecutionRunId: 'late-after-delete-run',
+        }),
+        false
+      );
+      const obligation = await prisma.temporalWorkflowCleanup.findUniqueOrThrow({
+        where: {
+          agentId_workflowId: {
+            agentId,
+            workflowId: claim.plannedWorkflowId,
+          },
+        },
+      });
+      assert.strictEqual(obligation.firstExecutionRunId, 'late-after-delete-run');
+    });
+  });
+
   await test('cost-limited snapshots distinguish own tokens from child tree tokens', async () => {
     await withAgent(async (agentId) => {
       const childId = randomUUID();

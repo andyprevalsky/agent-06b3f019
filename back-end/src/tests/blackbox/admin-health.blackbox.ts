@@ -287,7 +287,7 @@ function assertNoImpossibleConversion(body: z.infer<typeof AdminHealthResponseSc
 }
 
 async function expectedAdminHealthUserIds(): Promise<Set<string>> {
-  const { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
+  const { ADMIN_HEALTH_ADDITIONAL_PHONES, ADMIN_HEALTH_EXCLUDED_USER_IDS } =
     await import('../../domains/admin-health/config');
   const { getVerifiedStripeMetricsClient } = await import('../../providers/stripe');
   const stripe = await getVerifiedStripeMetricsClient();
@@ -321,14 +321,14 @@ async function expectedAdminHealthUserIds(): Promise<Set<string>> {
     const userId = sessions.data[0]?.client_reference_id;
     if (userId && !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(userId)) userIds.add(userId);
   }
+  // Mirror findUsersByPhones: core-team allowlist resolved by phone,
+  // isAnonymous-agnostic, one user per phone (each phone has a single account).
   const additionalUsers = await prisma.user.findMany({
-    where: {
-      userId: { in: Array.from(ADMIN_HEALTH_ADDITIONAL_USER_IDS) },
-      isAnonymous: false,
-    },
-    select: { userId: true },
+    where: { phone: { in: Array.from(ADMIN_HEALTH_ADDITIONAL_PHONES) } },
+    select: { userId: true, phone: true },
   });
-  for (const user of additionalUsers) userIds.add(user.userId);
+  const userIdByPhone = new Map(additionalUsers.map((u) => [u.phone, u.userId]));
+  for (const userId of userIdByPhone.values()) userIds.add(userId);
   return userIds;
 }
 

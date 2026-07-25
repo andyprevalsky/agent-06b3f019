@@ -5875,9 +5875,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
             provider_exit_rejection = (
-                browser_network_recorder.pop_provider_exit_rejection()
-                if browser_network_recorder is not None
-                else None
+                browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
                 # The streamed model action was superseded before execution;
@@ -6202,9 +6200,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(
-                            unified_action.get("params", {}).get("provider_exit_rejected")
-                        ),
+                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
                     )
 
                     config_result = recovery.config_result

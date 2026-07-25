@@ -24,9 +24,17 @@ export interface WorkflowResumeState {
   iteration_offset: number;
   max_iterations: number | null;
   context_gates: Record<string, boolean> | null;
+  deployment_attempt?: string;
   runtime_state?: {
     deployment_validation?: boolean;
   };
+}
+
+export function workflowReplacementDeploymentAttempt(
+  value: Prisma.JsonValue | null
+): string | null {
+  const attempt = savedResumeState(value).deployment_attempt;
+  return typeof attempt === 'string' && attempt !== '' ? attempt : null;
 }
 
 export function savedResumeState(value: Prisma.JsonValue | null): WorkflowResumeState {

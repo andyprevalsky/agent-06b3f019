@@ -21,21 +21,28 @@ import {
 } from '../../providers/workflowReplacement';
 import {
   acknowledgeWorkflowReplacementBootstrap as acknowledgeReplacementBootstrap,
-  claimWorkflowReplacement,
   finalizeWorkflowReplacementBootstrap as finalizeReplacementBootstrap,
   markWorkflowReplacementFailed,
   refreshWorkflowReplacementResumeState,
   recordStaleWorkflowChain,
-  recordWorkflowReplacementStartAcceptance,
   type WorkflowReplacementClaim,
 } from '../../providers/workflowReplacementState';
+import { workflowReplacementDeploymentAttempt } from '../../providers/workflowReplacementResumeState';
+import { acceptStartedWorkflowReplacement } from '../../providers/workflowReplacementStartAcceptance';
+import {
+  captureClaimedStaleWorkflowTools,
+  claimReplacementGeneration,
+} from '../../providers/workflowReplacementPreparation';
 import type { UpdateStatusBody } from './types';
 import * as repo from './repo';
+
+export { acceptStartedWorkflowReplacement, captureClaimedStaleWorkflowTools };
 
 const log = createLogger('Agents');
 
 export interface RestartAgentOptions {
   expectedWorkflowId?: string;
+  deploymentAttempt?: string;
   deadlineAtMs?: number;
 }
 
@@ -186,10 +193,15 @@ export async function prepareAgentWorkflowReplacement(
   }
   if (agent.verifier === null) return { error: 'Agent has no verifier configured', status: 400 };
 
+  const rotatesPriorDeployment =
+    agent.workflowReplacementToken !== null &&
+    options.deploymentAttempt !== undefined &&
+    workflowReplacementDeploymentAttempt(agent.workflowReplacementState) !==
+      options.deploymentAttempt;
   const capturedStaleWorkflowId =
-    agent.workflowReplacementToken !== null
-      ? agent.staleTemporalWorkflowId
-      : agent.temporalWorkflowId;
+    agent.workflowReplacementToken === null || rotatesPriorDeployment
+      ? agent.temporalWorkflowId
+      : agent.staleTemporalWorkflowId;
   const preTerminationSnapshot =
     capturedStaleWorkflowId === null
       ? []
@@ -199,10 +211,12 @@ export async function prepareAgentWorkflowReplacement(
   assertRestartDeadline(options.deadlineAtMs, 'launch config read');
   const expectedWorkflowId =
     options.expectedWorkflowId ?? capturedStaleWorkflowId ?? agent.temporalWorkflowId;
-  const claim =
-    expectedWorkflowId === null
-      ? await claimWorkflowReplacement(agentId, launchConfig)
-      : await claimWorkflowReplacement(agentId, launchConfig, { expectedWorkflowId });
+  const claim = await claimReplacementGeneration(
+    agentId,
+    launchConfig,
+    expectedWorkflowId,
+    options.deploymentAttempt
+  );
   assertRestartDeadline(options.deadlineAtMs, 'replacement claim');
   if ('skipped' in claim) {
     return {
@@ -215,12 +229,19 @@ export async function prepareAgentWorkflowReplacement(
     };
   }
 
+  const claimedPreTerminationSnapshot = await captureClaimedStaleWorkflowTools(
+    agentId,
+    claim.staleWorkflowId,
+    capturedStaleWorkflowId,
+    preTerminationSnapshot
+  );
+  assertRestartDeadline(options.deadlineAtMs, 'claimed tool snapshot');
   const staleExecution = await staleExecutionForReplacement(claim, options.deadlineAtMs);
   const finalClaim = await sealClaimedReplacement(
     agentId,
     claim,
     staleExecution,
-    preTerminationSnapshot,
+    claimedPreTerminationSnapshot,
     options.deadlineAtMs
   );
   return {
@@ -250,7 +271,7 @@ export async function startPreparedAgentWorkflowReplacement(
       deadlineAtMs
     );
     assertRestartDeadline(deadlineAtMs, 'candidate start acceptance');
-    await recordWorkflowReplacementStartAcceptance(claim, execution);
+    await acceptStartedWorkflowReplacement(claim, execution, deadlineAtMs);
     log.info('Restarted agent', { agent_id: agentId, workflow_id: execution.workflowId });
     return {
       success: true,

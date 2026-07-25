@@ -2,6 +2,7 @@
 import assert from 'node:assert';
 import { randomUUID } from 'node:crypto';
 import type { Message } from '@prisma/client';
+import { captureClaimedStaleWorkflowTools } from '../../domains/agents/agentRestartService';
 import { prisma } from '../../providers/database';
 import { finishAttentionMessages, resolveAndSignal } from '../../providers/gateResolution';
 import { createMessage } from '../../providers/messages';
@@ -86,6 +87,38 @@ async function withAgent(fn: (agentId: string) => Promise<void>): Promise<void> 
 }
 
 async function main(): Promise<void> {
+  await test('a claim-time generation race recaptures tools from the generation actually sealed', async () => {
+    const oldSnapshot = [{ toolCallId: 'old-tool', metadata: {}, messageId: 'old-message' }];
+    const claimedSnapshot = [
+      { toolCallId: 'claimed-tool', metadata: {}, messageId: 'claimed-message' },
+    ];
+    let captures = 0;
+    const recaptured = await captureClaimedStaleWorkflowTools(
+      'agent-race',
+      'candidate-a',
+      'original',
+      oldSnapshot,
+      async (_agentId, workflowGeneration) => {
+        captures += 1;
+        assert.strictEqual(workflowGeneration, 'candidate-a');
+        return claimedSnapshot;
+      }
+    );
+    assert.deepStrictEqual(recaptured, claimedSnapshot);
+    assert.strictEqual(captures, 1);
+
+    const unchanged = await captureClaimedStaleWorkflowTools(
+      'agent-race',
+      'original',
+      'original',
+      oldSnapshot,
+      async () => {
+        throw new Error('same-generation snapshot must not be recaptured');
+      }
+    );
+    assert.deepStrictEqual(unchanged, oldSnapshot);
+  });
+
   await test('a success committed before reconciliation prevents a deployment error', async () => {
     await withAgent(async (agentId) => {
       const toolCallId = randomUUID();
@@ -277,10 +310,25 @@ async function main(): Promise<void> {
       const request = await prisma.agentAttentionRequest.findUniqueOrThrow({
         where: { id: requestId },
       });
+      const freshRequest = await prisma.agentAttentionRequest.create({
+        data: {
+          userId: `workflow-restart-unit-${agentId}`,
+          agentId,
+          workflowId: `${agentId}:replacement`,
+          question: 'Retry the action on the replacement workflow?',
+          gateKey: `stale-gate-${requestId}`,
+        },
+      });
       const terminals = (await messagesForCall(agentId, toolCallId)).filter(isTerminal);
       assert.strictEqual(request.userResponse, DEPLOY_INTERRUPTED_TOOL_MESSAGE);
       assert.strictEqual(terminals.length, 1);
       assert.strictEqual(metadataOf(terminals[0]).errorCode, 'DEPLOY_INTERRUPTED');
+      assert.notStrictEqual(freshRequest.id, request.id);
+      assert.strictEqual(freshRequest.userResponse, null);
+      assert.strictEqual(freshRequest.workflowId, `${agentId}:replacement`);
+      await prisma.agentAttentionRequest.deleteMany({
+        where: { id: { in: [requestId, freshRequest.id] } },
+      });
     });
   });
 
