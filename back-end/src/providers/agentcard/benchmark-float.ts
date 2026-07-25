@@ -50,6 +50,13 @@ export async function ensureAgentCardSandboxFloat(
 ): Promise<AgentCardSandboxFloat> {
   const wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
 
+  if (wallet.livemode) {
+    throw new Error(
+      'AgentCard benchmark requires sandbox OAuth credentials; get_company_wallet resolved to a live wallet. ' +
+        'Point AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET at the sandbox org so the float never draws on live funds.'
+    );
+  }
+
   if (wallet.availableCents < minCents) {
     throw new Error(
       `AgentCard sandbox pool too low: ${formatUsd(wallet.availableCents)} available ` +

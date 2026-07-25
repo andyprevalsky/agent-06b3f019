@@ -4,12 +4,17 @@
 import assert from 'node:assert/strict';
 import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
 
-function walletResult(cents: { balance: number; committed?: number; available: number }): unknown {
+function walletResult(cents: {
+  balance: number;
+  committed?: number;
+  available: number;
+  livemode?: boolean;
+}): unknown {
   return {
     structuredContent: {
       wallet: {
         object: 'org_wallet',
-        livemode: false,
+        livemode: cents.livemode ?? false,
         balance_cents: cents.balance,
         committed_cents: cents.committed ?? 0,
         available_cents: cents.available,
@@ -63,6 +68,19 @@ async function main(): Promise<void> {
   {
     const callOrgTool = async () => ({ structuredContent: {} });
     await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), /no structured wallet/i);
+  }
+
+  // A live wallet is rejected before the floor check so the benchmark never draws
+  // on live funds, even when it is amply funded.
+  {
+    const callOrgTool = async () =>
+      walletResult({ balance: 1_000_000, available: 1_000_000, livemode: true });
+    await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /live wallet/i);
+      assert.match(message, /sandbox/i);
+      return true;
+    });
   }
 
   console.log('AgentCard benchmark sandbox float tests passed');
