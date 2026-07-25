@@ -2,38 +2,79 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  sandboxFloatTargetCents,
+} from '../../providers/agentcard/benchmark-float';
+
+function walletResult(wallet: {
+  livemode: boolean;
+  balance_cents: number;
+  available_cents: number;
+}): unknown {
+  return {
+    structuredContent: {
+      wallet: {
+        object: 'org_wallet',
+        committed_cents: 0,
+        ...wallet,
+      },
+    },
+  };
+}
 
 async function main(): Promise<void> {
-  const calls: Array<{ url: string; method: string; body?: string; authorization: string | null }> =
-    [];
-  let balanceCents = 1_644;
-  const fetchImpl = async (input: RequestInfo | URL, init: RequestInit = {}) => {
-    const url = String(input);
-    const headers = new Headers(init.headers);
-    calls.push({
-      url,
-      method: init.method ?? 'GET',
-      body: typeof init.body === 'string' ? init.body : undefined,
-      authorization: headers.get('authorization'),
-    });
-    if (url.endsWith('/test-fund')) {
-      const body = JSON.parse(String(init.body)) as { amountCents: number };
-      balanceCents += body.amountCents;
-      return Response.json({ sandboxWalletBalanceCents: balanceCents });
-    }
-    return Response.json({ settings: { sandbox_balance_cents: balanceCents } });
-  };
+  // Reads the v2 sandbox company wallet via get_company_wallet and returns its
+  // balance when the available headroom clears the floor. No funding call: the
+  // sandbox wallet is pre-provisioned, so a single get_company_wallet is enough.
+  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  const funded = await ensureAgentCardSandboxFloat(200_000, async (tool, args) => {
+    calls.push({ tool, args });
+    return walletResult({ livemode: false, balance_cents: 100_966_476, available_cents: 100_966_476 });
+  });
+  assert.deepEqual(funded, { balanceCents: 100_966_476, availableCents: 100_966_476 });
+  assert.equal(calls.length, 1, 'a single get_company_wallet read, no top-up');
+  assert.equal(calls[0].tool, 'get_company_wallet');
 
-  const admin = { apiUrl: 'https://agentcard.test', token: 'admin-token' };
-  const funded = await ensureAgentCardSandboxFloat(admin, 'org-123', 50_000, fetchImpl);
-  assert.deepEqual(funded, { previousCents: 1_644, balanceCents: 50_000, addedCents: 48_356 });
-  assert.equal(calls[1].body, JSON.stringify({ amountCents: 48_356 }));
-  assert.equal(calls[1].authorization, 'Bearer admin-token');
+  // Fails closed on a LIVE wallet so a misconfigured benchmark cannot draw real funds.
+  await assert.rejects(
+    ensureAgentCardSandboxFloat(200_000, async () =>
+      walletResult({ livemode: true, balance_cents: 100_966_476, available_cents: 100_966_476 })
+    ),
+    /LIVE AgentCard org wallet/
+  );
 
-  const unchanged = await ensureAgentCardSandboxFloat(admin, 'org-123', 50_000, fetchImpl);
-  assert.deepEqual(unchanged, { previousCents: 50_000, balanceCents: 50_000, addedCents: 0 });
-  assert.equal(calls.length, 3, 'a funded pool must not make another POST');
+  // Fails when the sandbox wallet is somehow below the required floor.
+  await assert.rejects(
+    ensureAgentCardSandboxFloat(200_000, async () =>
+      walletResult({ livemode: false, balance_cents: 1_000, available_cents: 1_000 })
+    ),
+    /below the required floor/
+  );
+
+  // Concurrency-headroom floor: the default target must exceed a single run's
+  // worst-case reservation by a wide margin so concurrent benchmark runs sharing
+  // one org wallet cannot starve each other. Override raises it; a too-small or
+  // invalid override is clamped up to the floor (never below).
+  assert.equal(sandboxFloatTargetCents({}), 200_000, 'default float floor');
+  assert.equal(
+    sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: '500000' }),
+    500_000,
+    'override raises the floor'
+  );
+  assert.equal(
+    sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: '10000' }),
+    200_000,
+    'override below the floor is clamped up'
+  );
+  for (const bad of ['', '  ', 'abc', '0', '-5']) {
+    assert.equal(
+      sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: bad }),
+      200_000,
+      `invalid override "${bad}" falls back to the floor`
+    );
+  }
+
   console.log('AgentCard benchmark sandbox float tests passed');
 }
 
