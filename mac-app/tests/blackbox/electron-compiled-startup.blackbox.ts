@@ -405,17 +405,20 @@ describe('compiled Electron startup blackbox', () => {
     expect(providerEntitlements['keychain-access-groups']).toEqual(['P3HATASMP9.*']);
   });
 
-  it('packages Python helpers outside app.asar so child processes can execute them', () => {
+  it('does not bundle any Python helper — IndexedDB is read natively in TS', () => {
     const packageJson = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')) as {
       build: {
         extraResources: Array<{ from: string; to: string }>;
       };
     };
 
-    expect(packageJson.build.extraResources).toContainEqual({
-      from: 'scripts/read_indexeddb.py',
-      to: 'scripts/read_indexeddb.py',
-    });
+    // The Chrome IndexedDB reader is now pure TypeScript (see
+    // main/domains/indexed-db-reader/native/), so nothing python-related should
+    // ship in the bundle. Guarding this prevents a regression back to the
+    // spawn('python3') path that triggered the macOS CLT installer stub.
+    for (const resource of packageJson.build.extraResources) {
+      expect(resource.from.endsWith('.py')).toBe(false);
+    }
   });
 
   it('compiles main/preload output and starts with window.api installed', () => {

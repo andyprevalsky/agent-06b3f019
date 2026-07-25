@@ -104,10 +104,6 @@
       {
         "from": "dist/native",
         "to": "native"
-      },
-      {
-        "from": "scripts/read_indexeddb.py",
-        "to": "scripts/read_indexeddb.py"
       }
     ],
     "afterSign": "scripts/notarize.js",
