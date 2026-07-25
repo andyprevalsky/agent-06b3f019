@@ -1415,11 +1415,14 @@ async def test_completed_browser_output_forces_parent_completion_instead_of_seco
             max_iterations=2,
             skip_status_updates=True,
             response_schema=response_schema,
+            fast_mode_cache_enabled=True,
         )
 
     assert result["status"] == "completed"
     assert executed_tools == ["attempt_completion"]
     assert len(llm_calls) == 2
+    assert llm_calls[0][25] is True
+    assert llm_calls[1][25] is False
     for call in llm_calls:
         assert call[2] == ["spawn_agent", "attempt_completion"]
         assert call[11] == "attempt_completion"

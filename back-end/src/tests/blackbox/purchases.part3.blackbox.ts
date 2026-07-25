@@ -49,46 +49,55 @@ async function main(): Promise<void> {
   };
 
   try {
-    await withFakeStripe(async (calls) => {
-      const minted = await purchasesService.mintPurchaseCard(
-        {
-          userId,
-          fingerprint,
-          merchant: 'Pending Release Merchant',
-          currency: 'USD',
-          lineItems: [{ label: 'Widget', amountCents: 1000 }],
-          fees: [],
-          subtotalCents: 1000,
-          totalCents: 1000,
-        } as never,
-        cardProvider,
-        walletFundingProvider
-      );
+    await withFakeStripe(
+      async (calls) => {
+        const minted = await purchasesService.mintPurchaseCard(
+          {
+            userId,
+            fingerprint,
+            merchant: 'Pending Release Merchant',
+            currency: 'USD',
+            lineItems: [{ label: 'Widget', amountCents: 1000 }],
+            fees: [],
+            subtotalCents: 1000,
+            totalCents: 1000,
+          } as never,
+          cardProvider,
+          walletFundingProvider
+        );
 
-      const closeResult = await purchasesService.closePurchaseCard(
-        cardProvider.cardId,
-        cardProvider,
-        walletFundingProvider
-      );
-      assert(closeResult.status === PurchaseSpendStatus.HELD, `got ${closeResult.status}`);
-      assert(calls.refunds.length === 0, 'pending release must not refund Stripe');
+        const closeResult = await purchasesService.closePurchaseCard(
+          cardProvider.cardId,
+          cardProvider,
+          walletFundingProvider
+        );
+        assert(closeResult.status === PurchaseSpendStatus.HELD, `got ${closeResult.status}`);
+        assert(calls.refunds.length === 0, 'pending release must not refund Stripe');
 
-      const pending = await prisma.purchaseSpend.findFirst({
-        where: { userId, fingerprint },
-        include: { walletFunding: true },
-      });
-      assert(pending?.status === PurchaseSpendStatus.HELD, 'purchase must remain HELD');
-      assert(pending?.walletFunding?.status === 'RECLAIMING', 'funding must be RECLAIMING');
+        const pending = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          include: { walletFunding: true },
+        });
+        assert(pending?.status === PurchaseSpendStatus.HELD, 'purchase must remain HELD');
+        assert(pending?.walletFunding?.status === 'RECLAIMING', 'funding must be RECLAIMING');
 
-      // The minute reconciler intentionally leaves a live provider polling loop alone. Age the
-      // durable lease to model the next eligible retry after that owner has exited pending.
-      await prisma.purchaseWalletFunding.update({
-        where: { purchaseId: minted.purchaseId },
-        data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
-      });
-      await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { userId });
-      assert(calls.refunds.length === 1, 'confirmed release must refund Stripe exactly once');
-    });
+        // The minute reconciler intentionally leaves a live provider polling loop alone. Age the
+        // durable lease to model the next eligible retry after that owner has exited pending.
+        await prisma.purchaseWalletFunding.update({
+          where: { purchaseId: minted.purchaseId },
+          data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
+        });
+        await reconcileFailedPurchaseFundingReclaims(
+          walletFundingProvider,
+          { userId },
+          cardProvider
+        );
+        assert(calls.refunds.length === 1, 'confirmed release must refund Stripe exactly once');
+      },
+      {
+        retrievePaymentIntent: (id) => ({ id, status: 'succeeded', amount_received: 1000 }),
+      }
+    );
 
     const recovered = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
     assert(recovered?.status === PurchaseSpendStatus.VOIDED, `got ${recovered?.status}`);

@@ -58,4 +58,5 @@ class PaymentImportWorkflow:
             "same_fingerprint": payload["fingerprint"] == domain_payload["fingerprint"],
             "mint_activity_timeout_seconds": MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
             "mint_activity_imported": callable(mint_purchase_card_activity),
+            "mint_activity_timeout_seconds": MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
         }

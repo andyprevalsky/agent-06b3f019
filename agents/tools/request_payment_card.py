@@ -2,6 +2,11 @@
 
 from typing import TYPE_CHECKING
 
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
+    MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
+)
 from domains.request_payment_card.handler import (
     build_payment_fingerprint,
     build_payment_question,

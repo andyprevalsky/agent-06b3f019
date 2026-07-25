@@ -68,30 +68,22 @@ export async function getVerifiedStripeMetricsClient(): Promise<Stripe> {
 export type { Stripe };
 
 /**
- * Stripe raises this error code when you capture/cancel a PaymentIntent that is already in a
- * terminal state (already captured, already canceled). Our settlement paths are driven by
- * at-least-once AgentCard webhooks AND an agent-cleanup backstop, so the same hold can legitimately
- * be acted on twice — we treat that collision as an idempotent no-op instead of an error.
- */
-function isPaymentIntentTerminalState(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    (error as { code?: unknown }).code === 'payment_intent_unexpected_state'
-  );
-}
-
-/**
  * Capture a previously-authorized manual-capture hold — this is the moment the user is actually
- * charged. Idempotent: capturing an already-captured or already-canceled PaymentIntent is a no-op.
+ * charged. A lost/terminal response is only considered successful after re-reading Stripe and
+ * proving that the intent was captured; a canceled intent must never be returned as a usable card.
  */
 export async function captureAuthorizedHold(paymentIntentId: string): Promise<void> {
   try {
     await stripe.paymentIntents.capture(paymentIntentId);
   } catch (error) {
-    if (isPaymentIntentTerminalState(error)) {
-      log.warn('Capture on an already-settled/canceled hold — idempotent no-op', {
+    let intent: ReturnType<typeof paymentIntentStatus>;
+    try {
+      intent = paymentIntentStatus(await stripe.paymentIntents.retrieve(paymentIntentId));
+    } catch {
+      throw error;
+    }
+    if (paymentIntentWasCaptured(intent)) {
+      log.warn('Capture response was ambiguous, but Stripe confirms the charge succeeded', {
         payment_intent_id: paymentIntentId,
       });
       return;
@@ -102,14 +94,21 @@ export async function captureAuthorizedHold(paymentIntentId: string): Promise<vo
 
 /**
  * Release a previously-authorized hold — no money is taken and (unlike a refund) there is no
- * user-visible charge/refund churn or fee. Idempotent on an already-captured/canceled PaymentIntent.
+ * user-visible charge/refund churn or fee. An ambiguous response is only successful after Stripe
+ * confirms cancellation; if a concurrent capture won, the caller must retry through refund logic.
  */
 export async function cancelAuthorizedHold(paymentIntentId: string): Promise<void> {
   try {
     await stripe.paymentIntents.cancel(paymentIntentId);
   } catch (error) {
-    if (isPaymentIntentTerminalState(error)) {
-      log.warn('Cancel on an already-captured/canceled hold — idempotent no-op', {
+    let intent: ReturnType<typeof paymentIntentStatus>;
+    try {
+      intent = paymentIntentStatus(await stripe.paymentIntents.retrieve(paymentIntentId));
+    } catch {
+      throw error;
+    }
+    if (intent.status === 'canceled') {
+      log.warn('Cancel response was ambiguous, but Stripe confirms the hold was canceled', {
         payment_intent_id: paymentIntentId,
       });
       return;
@@ -153,6 +152,13 @@ function paymentIntentStatus(paymentIntent: unknown): {
     amountReceived:
       typeof candidate.amount_received === 'number' ? candidate.amount_received : undefined,
   };
+}
+
+function paymentIntentWasCaptured(intent: ReturnType<typeof paymentIntentStatus>): boolean {
+  return (
+    intent.status === 'succeeded' ||
+    (intent.amountReceived !== undefined && intent.amountReceived > 0)
+  );
 }
 
 /**

@@ -1676,17 +1676,20 @@ fi
 
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
-SERVICE_STATUS=running
-write_services_manifest
-echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
-echo "🌐 Public frontend: $PUBLIC_BASE_URL"
-
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (simulate-only cloud bench)"
 else
     echo "⏳ Verifying public tunnel smoke..."
     bash scripts/test-public-tunnel.sh
 fi
+
+# Readiness consumers must not start benchmark work until the public endpoint
+# has passed its smoke check. Publishing running earlier leaves a race where
+# run.sh can fail the tunnel immediately after the harness accepts the stack.
+SERVICE_STATUS=running
+write_services_manifest
+echo "🧭 Service manifest: $RUN_CONTEXT_DIR/services.json"
+echo "🌐 Public frontend: $PUBLIC_BASE_URL"
 
 # ── Post-launch: verify exactly one listener per service port ──
 # Wait for services to bind, then confirm no duplicate listeners.

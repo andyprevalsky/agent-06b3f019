@@ -1,0 +1,5 @@
+"""Workflow-safe constants shared by payment-card orchestration and activities."""
+
+MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
+MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
+MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0

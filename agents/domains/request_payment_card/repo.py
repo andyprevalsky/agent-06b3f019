@@ -6,9 +6,11 @@ from typing import Any, Dict
 
 from temporalio import activity
 
-MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
-MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
-MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS,
+    MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
+)
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",
@@ -149,6 +151,12 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
 
             code = str(payload.get("code") or "").lower()
             detail = str(payload.get("error") or response.text or "")
+
+            if code == "agentcard_company_funding_in_progress":
+                return {
+                    "status": "agentcard_company_funding_in_progress",
+                    **payload,
+                }
 
             # main (gate feature): org-managed KYC gate — surface as a signal so the
             # workflow raises a KYC gate and retries rather than failing.

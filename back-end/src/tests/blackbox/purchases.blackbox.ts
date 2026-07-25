@@ -250,7 +250,8 @@ const tests: Array<[string, () => Promise<void>]> = [
           throw new AgentCardProviderError(
             'AgentCard request failed with 422',
             422,
-            '{"code":"customers_needed_kyc","message":"Customer needs KYC"}'
+            '{"code":"customers_needed_kyc","message":"Customer needs KYC"}',
+            'agentcard_kyc_required'
           );
         },
         async getDetails() {
@@ -492,7 +493,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'mint cancels the Stripe hold if AgentCard card issuance fails before company transfer',
+    'mint preserves an ambiguous AgentCard failure for same-key reconciliation',
     async () => {
       const userId = await createSubscribedUser('mint-card-failure');
       const fingerprint = `mint-card-failure-${randomUUID()}`;
@@ -510,7 +511,8 @@ const tests: Array<[string, () => Promise<void>]> = [
         } catch (error) {
           threw = true;
           assert(
-            error instanceof Error && error.message.includes('card mint failed'),
+            error instanceof purchasesService.PurchaseError &&
+              error.code === 'agentcard_company_funding_in_progress',
             `unexpected error: ${error instanceof Error ? error.message : String(error)}`
           );
         }
@@ -524,25 +526,28 @@ const tests: Array<[string, () => Promise<void>]> = [
           walletFundingProvider.reclaimCalls.length === 0,
           'no AgentCard funding should be reclaimed before create_card returns a transfer'
         );
-        assert(calls.cancels.length === 1, 'Stripe hold should be canceled');
+        assert(calls.cancels.length === 0, 'an ambiguous provider outcome must keep the hold');
 
         const row = await prisma.purchaseSpend.findFirst({
           where: { userId, fingerprint },
           orderBy: { createdAt: 'desc' },
         });
-        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
         const funding = await prisma.purchaseWalletFunding.findUnique({
           where: { purchaseId: row?.id ?? '' },
         });
         assert(
-          funding === null,
-          'no wallet funding row should be created before a transfer exists'
+          funding?.status === 'PENDING',
+          `the pre-provider marker must remain resumable, got ${funding?.status}`
         );
       });
     },
   ],
   [
-    'mint reclaims the issued AgentCard and refunds Stripe if detail retrieval fails after funding',
+    'mint reclaims the issued AgentCard and cancels Stripe if details fail before capture',
     async () => {
       const userId = await createSubscribedUser('mint-details-failure');
       const fingerprint = `mint-details-failure-${randomUUID()}`;
@@ -562,12 +567,9 @@ const tests: Array<[string, () => Promise<void>]> = [
         }
         assert(errorMessage.includes('card details failed'), `unexpected error: ${errorMessage}`);
         assert(provider.closeCalls === 1, 'issued AgentCard should be closed after detail failure');
-        assert(
-          calls.captures.length === 1,
-          'AgentCard funding should capture Stripe before details'
-        );
-        assert(calls.cancels.length === 0, 'a captured Stripe payment must not be canceled');
-        assert(calls.refunds.length === 1, 'captured Stripe payment should be refunded once');
+        assert(calls.captures.length === 0, 'card details must be verified before Stripe capture');
+        assert(calls.cancels.length === 1, 'the uncaptured Stripe hold must be canceled');
+        assert(calls.refunds.length === 0, 'an uncaptured Stripe hold must not be refunded');
         assert(
           walletFundingProvider.reclaimCalls.length === 1,
           'AgentCard company transfer should be reclaimed before refunding Stripe'
@@ -577,10 +579,6 @@ const tests: Array<[string, () => Promise<void>]> = [
           orderBy: { createdAt: 'desc' },
         });
         assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
-        assert(
-          calls.refundIdempotencyKeys[0] === `purchase-refund:${row?.id}`,
-          'refund must use the purchase-scoped idempotency key'
-        );
         const funding = await prisma.purchaseWalletFunding.findUnique({
           where: { purchaseId: row?.id ?? '' },
         });
