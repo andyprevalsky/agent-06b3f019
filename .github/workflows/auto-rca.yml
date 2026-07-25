@@ -436,6 +436,8 @@ jobs:
               --no-cache-dir -q -r agents/requirements.txt
           hydrate_stage "Prisma client generation" \
             back-end/node_modules/.bin/prisma generate --schema back-end/prisma/schema.prisma
+          hydrate_stage "agent browser runtime (Playwright Chromium + headless shell + system libs)" \
+            agents/venv/bin/python -m playwright install --with-deps chromium
           npm cache clean --force
           sudo apt-get clean
           df -h /
