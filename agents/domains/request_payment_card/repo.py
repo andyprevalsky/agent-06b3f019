@@ -9,6 +9,7 @@ from temporalio import activity
 from domains.request_payment_card.contracts import (
     MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
 )
+
 KYC_REQUIRED_CODES = {
     "kyc_required",
     "customer_kyc_required",
@@ -149,6 +150,12 @@ async def _mint_purchase_card_real(user_id: str, payload: Dict[str, Any]) -> Dic
 
             code = str(payload.get("code") or "").lower()
             detail = str(payload.get("error") or response.text or "")
+
+            if code == "agentcard_company_funding_in_progress":
+                return {
+                    "status": "agentcard_company_funding_in_progress",
+                    **payload,
+                }
 
             # main (gate feature): org-managed KYC gate — surface as a signal so the
             # workflow raises a KYC gate and retries rather than failing.

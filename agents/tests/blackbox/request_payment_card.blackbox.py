@@ -454,6 +454,31 @@ async def test_mint_purchase_card_activity_maps_kyc_required():
     assert "KYC" in result["error"]
 
 
+async def test_mint_purchase_card_activity_maps_company_funding_in_progress():
+    setup_mock(
+        {
+            "/api/purchases/mint": {
+                "status": 409,
+                "json": {
+                    "error": "AgentCard company funding is still in progress",
+                    "code": "agentcard_company_funding_in_progress",
+                    "retryAfterSeconds": 10,
+                },
+            }
+        }
+    )
+
+    from domains.request_payment_card.service import normalize_payment_payload
+    from tools.request_payment_card import mint_purchase_card_activity
+
+    payload = normalize_payment_payload(_sample_tool_call(), "user-123")
+    result = await mint_purchase_card_activity("user-123", payload)
+
+    assert result["status"] == "agentcard_company_funding_in_progress"
+    assert result["code"] == "agentcard_company_funding_in_progress"
+    assert result["retryAfterSeconds"] == 10
+
+
 async def test_payment_helper_import_is_workflow_sandbox_safe():
     from payment_import_workflow_fixture import PaymentImportWorkflow
     from temporalio.testing import WorkflowEnvironment
@@ -493,6 +518,7 @@ async def test_payment_helper_import_is_workflow_sandbox_safe():
     assert result["same_fingerprint"] is True
     assert result["mint_activity_timeout_seconds"] == 90.0
     assert result["mint_activity_imported"] is True
+    assert result["mint_activity_timeout_seconds"] == 90.0
 
 
 async def test_mint_purchase_card_activity_returns_agentcard_setup_state():
@@ -632,6 +658,10 @@ async def run_all_tests():
     await result.record_async("lookup_boundary", test_lookup_purchase_activity_boundary)
     await result.record_async("mint_boundary", test_mint_purchase_card_activity_boundary)
     await result.record_async("mint_maps_kyc_required", test_mint_purchase_card_activity_maps_kyc_required)
+    await result.record_async(
+        "mint_maps_company_funding_in_progress",
+        test_mint_purchase_card_activity_maps_company_funding_in_progress,
+    )
     await result.record_async("workflow_sandbox_import", test_payment_helper_import_is_workflow_sandbox_safe)
     await result.record_async(
         "mint_agentcard_setup_state",

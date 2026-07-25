@@ -3156,6 +3156,16 @@
       "fees": []
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "stripePaymentIntentCount": 1,
+        "cardCount": 1,
+        "stripeProviderPaymentIntentCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "VOIDED",
         "merchant": "Rose Labs Test Payment",
@@ -3181,7 +3191,7 @@
       "orgTransfer": {
         "status": "reclaimed",
         "amountCents": 100,
-        "transferredCents": 100,
+        "transferredCents": 0,
         "releasedCents": 100,
         "livemode": true
       },

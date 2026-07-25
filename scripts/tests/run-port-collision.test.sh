@@ -140,11 +140,21 @@ from pathlib import Path
 
 text = Path(os.environ["RUN_SH_PATH"]).read_text()
 ready = text.find('wait_for_frontend_ready "$FRONTEND_PID"')
-tunnel = text.find("bash scripts/test-public-tunnel.sh")
-if ready < 0 or tunnel < 0 or ready > tunnel:
-    raise SystemExit("frontend readiness must run before the public tunnel smoke")
+tunnel = text.find("bash scripts/test-public-tunnel.sh", ready)
+running = text.find("SERVICE_STATUS=running", ready)
+manifest = text.find("write_services_manifest", running)
+if (
+    ready < 0
+    or tunnel < 0
+    or running < 0
+    or manifest < 0
+    or not ready < tunnel < running < manifest
+):
+    raise SystemExit(
+        "frontend readiness and public tunnel smoke must precede running manifest publication"
+    )
 PY
-echo "PASS: run.sh gates public tunnel smoke on local frontend readiness"
+echo "PASS: run.sh publishes running only after frontend and public tunnel readiness"
 
 foreign_dir="$TMP_ROOT/foreign"
 mkdir -p "$foreign_dir"

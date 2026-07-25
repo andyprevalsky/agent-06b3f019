@@ -296,6 +296,10 @@ async def run_agent(
     no_tool_count = 0  # Track consecutive iterations with no tool calls
     consecutive_llm_failures = 0  # Track consecutive LLM call failures for early exit
     exclude_anthropic_family_on_llm_retry = False  # Set after refusal to reroute the immediate retry
+    # A semantically invalid structured response is a new model turn, not a
+    # resumable transport retry. Replaying the same Fast Mode entry would
+    # deterministically return the same rejected tool/schema again.
+    bypass_fast_mode_cache_on_llm_retry = False
     consecutive_verifier_errors = 0  # Track consecutive verifier failures for early exit
     compactor_failures = 0  # Circuit-breaker: skip compaction after 3 consecutive failures
     ineffective_compactions = 0  # Circuit-breaker for repeated low-value compactions
@@ -1273,7 +1277,7 @@ async def run_agent(
                         compute_token_lineage_key,
                         compute_token_fast_cache_affinity_key,
                         user_id,
-                        fast_mode_cache_enabled,
+                        fast_mode_cache_enabled and not bypass_fast_mode_cache_on_llm_retry,
                         goal_text,
                         fast_cache_step,
                         False,
@@ -1308,6 +1312,7 @@ async def run_agent(
             # Account the successful provider attempt. Semantically rejected
             # attempts were already accounted before their retries above.
             exclude_anthropic_family_on_llm_retry = False
+            bypass_fast_mode_cache_on_llm_retry = False
             if await _account_llm_usage(usage, label="accepted attempt"):
                 logger.info("Agent paused after cost check")
                 return _paused_after_cost_result()
@@ -1400,7 +1405,10 @@ async def run_agent(
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
-                # agent loop owns the bounded semantic retry instead.
+                # agent loop owns the bounded semantic retry instead. That
+                # retry must generate a fresh response rather than resume a
+                # cached response that already violated the contract.
+                bypass_fast_mode_cache_on_llm_retry = True
                 logger.info(
                     "run_agent.structured_output_retry",
                     agent_id=agent_id,

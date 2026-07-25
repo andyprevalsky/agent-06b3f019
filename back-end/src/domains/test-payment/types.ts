@@ -62,6 +62,16 @@ export interface TestPaymentConfirmation {
 
 export interface TestPaymentLifecycle {
   agentId: string;
+  integrity: {
+    purchaseCount: number;
+    walletFundingCount: number;
+    stripePaymentIntentCount: number;
+    cardCount: number;
+    stripeProviderPaymentIntentCount: number;
+    agentCardProviderCardCount: number;
+    agentCardProviderTransferCount: number;
+    agentCardProviderUnlinkedTransferCount: number;
+  };
   purchase: null | {
     id: string;
     status: string;

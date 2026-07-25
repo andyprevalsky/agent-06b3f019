@@ -29,6 +29,18 @@ AGENTS_ROOT = Path(__file__).resolve().parent.parent
 TESTS_DIR = AGENTS_ROOT / "tests" / "blackbox"
 ROOT_DIR = AGENTS_ROOT.parent
 ARTIFACT_ROOT = ROOT_DIR / ".context" / "test-runs"
+BLACKBOX_CONFIG_DEFAULTS = {
+    "TEMPORAL_API_KEY": "blackbox-temporal-key",
+    "TEMPORAL_NAMESPACE": "blackbox.namespace",
+    "TEMPORAL_ADDRESS": "localhost:7233",
+    "TEMPORAL_TASK_QUEUE": "blackbox-agent-tasks",
+    "OPENROUTER_API_KEY": "blackbox-openrouter-key",
+    "OPENAI_API_KEY": "blackbox-openai-key",
+    "PERPLEXITY_API_KEY": "blackbox-perplexity-key",
+    "GEMINI_API_KEY": "blackbox-gemini-key",
+    "BROWSERBASE_API_KEY": "blackbox-browserbase-key",
+    "BROWSERBASE_PROJECT_ID": "blackbox-browserbase-project",
+}
 
 # Add agents root to path so test files can import tools/helpers
 sys.path.insert(0, str(AGENTS_ROOT))
@@ -135,6 +147,12 @@ async def run_tests(
     os.environ["BLACKBOX_TEST_CAPTURE_OUTBOUND"] = "1"
     os.environ["BLACKBOX_TEST_RUN_ID"] = run_id
     os.environ["BLACKBOX_TEST_ARTIFACT_DIR"] = str(artifact_dir)
+    # Blackbox requests are captured and replayed, but importing a domain may
+    # still construct AppConfig before its test installs a narrower fixture.
+    # Keep the standalone runner deterministic in clean CI without overriding
+    # any explicitly supplied credential or endpoint.
+    for name, value in BLACKBOX_CONFIG_DEFAULTS.items():
+        os.environ.setdefault(name, value)
 
     # Install capture harness
     from helpers.httpx_capture import install_capture

@@ -21,6 +21,8 @@
  *   npx tsx src/tests/blackbox/admin-health-waitlist.blackbox.ts
  */
 
+import { randomInt } from 'node:crypto';
+
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
@@ -121,7 +123,7 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
 // A unique fake phone per seeding test so parallel cases never collide on the
 // Waitlist.phone unique constraint or on each other's account rows.
 function uniquePhone(): string {
-  return `+1999${String(Date.now()).slice(-7)}${Math.floor(Math.random() * 1000)}`;
+  return `+1999${String(randomInt(0, 100_000_000_000)).padStart(11, '0')}`;
 }
 
 async function testList_noAuth() {

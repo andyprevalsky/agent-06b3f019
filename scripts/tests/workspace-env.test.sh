@@ -59,6 +59,29 @@ trusted_name="$(
 )"
 expect_eq "$trusted_name" "custom-name" "explicit trust flag preserves custom workspace name"
 
+deploy_child="$TMP_ROOT/deploy-child"
+mkdir -p "$deploy_child/.context"
+cat >"$deploy_child/.context/deploy-worktree.env" <<ENV
+export ROSE_DEPLOY_WORKTREE=1
+export ROSE_DEPLOY_WORKTREE_PATH=$deploy_child
+export CONDUCTOR_WORKSPACE_PATH=$deploy_child
+export CONDUCTOR_WORKSPACE_NAME=deploy-child
+export CONDUCTOR_PORT=56020
+ENV
+isolated_benchmark_env="$(
+  cd "$deploy_child"
+  BENCHMARK_ISOLATED_RUN=true \
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=deploy-child-bench-run-123 \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  CONDUCTOR_PORT=56220 \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s\\n' \"\$CONDUCTOR_WORKSPACE_NAME\" \"\$CONDUCTOR_PORT\""
+)"
+isolated_benchmark_name=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '1p')
+isolated_benchmark_port=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '2p')
+expect_eq "$isolated_benchmark_name" "deploy-child-bench-run-123" "isolated benchmark preserves its child identity"
+expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its reserved port range"
+
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
 cat >"$cloud_workspace/.cloud-env" <<'ENV'

@@ -11,6 +11,27 @@ import {
 
 const log = createLogger('PurchaseWalletFunding');
 
+/**
+ * Persist the purchase-scoped funding attempt before calling AgentCard. A process crash or a
+ * transferless `funding_in_progress` response can then be resumed with the same purchase id and
+ * provider idempotency key instead of opening a second company transfer.
+ */
+export async function preparePurchaseWalletCollection(purchase: PurchaseSpend, currency: string) {
+  return repo.createOrGetWalletFunding({
+    purchaseId: purchase.id,
+    userId: purchase.userId,
+    agentId: purchase.agentId ?? undefined,
+    amountCents: purchase.totalCents,
+    currency,
+    idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
+  });
+}
+
+/** Static company cards have no per-purchase AgentCard transfer; remove their unused marker. */
+export async function discardPendingPurchaseWalletCollection(purchaseId: string): Promise<void> {
+  await repo.deletePendingWalletFunding(purchaseId);
+}
+
 export async function fundPurchaseWallet(
   purchase: PurchaseSpend,
   currency: string,
@@ -62,14 +83,7 @@ export async function confirmPurchaseWalletCollection(
   metadata: Record<string, unknown> | undefined,
   walletFundingProvider?: WalletFundingProvider
 ) {
-  const funding = await repo.createOrGetWalletFunding({
-    purchaseId: purchase.id,
-    userId: purchase.userId,
-    agentId: purchase.agentId ?? undefined,
-    amountCents: purchase.totalCents,
-    currency,
-    idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
-  });
+  const funding = await preparePurchaseWalletCollection(purchase, currency);
 
   if (
     funding.status === PurchaseWalletFundingStatus.FUNDED ||
@@ -115,14 +129,7 @@ export async function recordPurchaseWalletFunding(
   providerTransferId: string,
   metadata: Record<string, unknown> | undefined
 ) {
-  const funding = await repo.createOrGetWalletFunding({
-    purchaseId: purchase.id,
-    userId: purchase.userId,
-    agentId: purchase.agentId ?? undefined,
-    amountCents: purchase.totalCents,
-    currency,
-    idempotencyKey: `purchase-wallet-fund:${purchase.id}`,
-  });
+  const funding = await preparePurchaseWalletCollection(purchase, currency);
   if (
     funding.status === PurchaseWalletFundingStatus.FUNDED ||
     funding.status === PurchaseWalletFundingStatus.CONSUMED
@@ -136,6 +143,23 @@ export async function recordPurchaseWalletFunding(
       status: 'company_flow_transfer_recorded',
       transfer_id: providerTransferId,
     },
+  });
+}
+
+export async function recordIssuedPurchaseCardFunding(
+  purchase: PurchaseSpend,
+  currency: string,
+  cardId: string,
+  providerTransferId: string,
+  metadata: Record<string, unknown> | undefined
+) {
+  const funding = await preparePurchaseWalletCollection(purchase, currency);
+  return repo.recordIssuedCardAndFunding({
+    purchaseId: purchase.id,
+    fundingId: funding.id,
+    cardId,
+    providerTransferId,
+    metadata,
   });
 }
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env tsx
 /** Black-box coverage for retry-safe waitlist delivery and Gmail boundaries. */
 
+import { randomInt } from 'node:crypto';
+
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 
@@ -32,7 +34,7 @@ const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 function uniquePhone(): string {
-  return `+1999${String(Date.now()).slice(-7)}${Math.floor(Math.random() * 1000)}`;
+  return `+1999${String(randomInt(0, 100_000_000_000)).padStart(11, '0')}`;
 }
 
 async function seedPerson(prefix: string) {

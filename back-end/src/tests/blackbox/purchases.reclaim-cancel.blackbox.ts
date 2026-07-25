@@ -5,7 +5,11 @@ import { config } from 'dotenv';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { reconcileFailedPurchaseFundingReclaims } from '../../providers/purchaseCleanup';
-import { FakeWalletFundingProvider, withFakeStripe } from './purchases.testkit';
+import {
+  FakeWalletFundingProvider,
+  StubCardStateProvider,
+  withFakeStripe,
+} from './purchases.testkit';
 
 config();
 
@@ -42,7 +46,11 @@ async function main() {
 
   const walletFundingProvider = new FakeWalletFundingProvider();
   await withFakeStripe(async (calls) => {
-    await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { userId });
+    await reconcileFailedPurchaseFundingReclaims(
+      walletFundingProvider,
+      { userId },
+      new StubCardStateProvider({ status: 'OPEN', balanceCents: 1000 })
+    );
     assert.equal(walletFundingProvider.reclaimCalls.length, 1);
     assert.equal(calls.refunds.length, 0, 'uncaptured hold must not use Stripe refunds');
     assert.deepEqual(calls.cancels, [paymentIntentId], 'uncaptured hold must be canceled');

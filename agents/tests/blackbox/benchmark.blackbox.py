@@ -1482,6 +1482,8 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
     assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["orgTransfer"]["transferredCents"] == 0
+    assert production.expected_payment_lifecycle["orgTransfer"]["releasedCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 
@@ -6503,7 +6505,7 @@ def test_runner_fixtures_reject_manifest_without_database_identity():
 
 
 def test_local_isolated_stack_opts_into_fast_seed_dump():
-    """An empty per-run DB must restore a cached seed instead of cold-syncing prod."""
+    """An isolated stack must use its own tunnel and restore a cached seed."""
     from benchmarks import local as local_bench
 
     captured = {}
@@ -6519,6 +6521,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     original_popen = local_bench.subprocess.Popen
     original_wait = local_bench.wait_for_services
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
+    prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
+    os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
@@ -6540,12 +6544,55 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert seed_dump.name.endswith(".dump")
             assert seed_dump.parent.is_dir()
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
+            assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen
         local_bench.wait_for_services = original_wait
         if prior_seed_dump is not None:
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
+        if prior_ephemeral_tunnel is None:
+            os.environ.pop("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL", None)
+        else:
+            os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
+
+
+def test_local_shared_stack_preserves_public_tunnel_mode():
+    """The shared dev stack must retain its configured stable tunnel mode."""
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(_command, **kwargs):
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
+    os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            context_dir = Path(tmp) / "shared-run"
+            stack = local_bench.ServiceStack(
+                run_id="shared-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=False,
+            )
+            with (
+                patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
+                patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
+            ):
+                local_bench.start_services(stack, clean_first=False)
+        assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "0"
+    finally:
+        if prior_ephemeral_tunnel is None:
+            os.environ.pop("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL", None)
+        else:
+            os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
 
 
 def test_local_start_services_reaps_process_when_readiness_fails():
@@ -10198,6 +10245,10 @@ async def run_all_tests():
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
+    r.record(
+        "local_shared_public_tunnel_mode",
+        test_local_shared_stack_preserves_public_tunnel_mode,
+    )
     r.record(
         "local_start_services_readiness_cleanup",
         test_local_start_services_reaps_process_when_readiness_fails,
