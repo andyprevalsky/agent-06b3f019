@@ -1482,6 +1482,8 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
     assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["orgTransfer"]["transferredCents"] == 0
+    assert production.expected_payment_lifecycle["orgTransfer"]["releasedCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["livemode"] is True
     assert production.name not in {task.name for task in suite_tasks()}
 
