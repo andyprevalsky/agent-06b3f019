@@ -266,12 +266,13 @@ const tests: Array<[string, () => Promise<void>]> = [
         findAttentionRequests: async () =>
           [
             {
-              id: 'attention-1',
               userResponse: 'setup_complete',
               metadata: { attentionKind: 'agentcard_user_cardholder_onboarding_required' },
             },
           ] as never,
         getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
+        searchStripeHolds: async () => ({ data: [] }),
+        getOrgCardholderId: async () => undefined,
         retrieveStripeHold: async () => ({
           id: 'pi-hold-1',
           status: 'succeeded',
