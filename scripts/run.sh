@@ -858,6 +858,11 @@ fi
 
 fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
+# Restored dumps and schema pushes must both carry the hand-written production
+# functions/triggers that Prisma cannot represent.
+(cd back-end && DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME="$LOCAL_DB_NAME" \
+    bash scripts/apply-local-workflow-ddl.sh)
+
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
 $IS_MAC && JS_SVC_DIRS+=(mac-app)

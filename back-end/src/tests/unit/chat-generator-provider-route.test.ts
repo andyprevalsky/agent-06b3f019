@@ -211,7 +211,7 @@ async function testDirectPreHeaderStallFallsThroughToWaterfall(): Promise<void> 
   }
 }
 
-async function testSilentDirectRouteRacesBothOpenRouterFallbacks(): Promise<void> {
+async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
     cerebrasKey: process.env.CEREBRAS_API_KEY,
@@ -240,7 +240,8 @@ async function testSilentDirectRouteRacesBothOpenRouterFallbacks(): Promise<void
         glmSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
-      return sseResponse(GENERATOR_SSE);
+      if (body.model === 'google/gemini-2.5-flash-lite') return sseResponse(GENERATOR_SSE);
+      throw new Error(`Unexpected OpenRouter model ${String(body.model)}`);
     }
     throw new Error(`Unexpected route ${url}`);
   }) as typeof fetch;
@@ -248,18 +249,23 @@ async function testSilentDirectRouteRacesBothOpenRouterFallbacks(): Promise<void
   try {
     const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
     const text = chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('');
-    assert.ok(text.length > 0, 'the generic fallback must rescue both silent GLM routes');
+    assert.ok(text.length > 0, 'the independent fallback must rescue both silent GLM routes');
 
     const glmBody = openRouterBodies.find((body) => body.model === 'z-ai/glm-4.7');
-    const genericBody = openRouterBodies.find((body) => body.model === 'google/gemini-3.5-flash');
+    const fastBody = openRouterBodies.find((body) => body.model === 'google/gemini-2.5-flash-lite');
     assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter GLM spill');
-    assert.ok(genericBody, 'the GLM spill must race the generic OpenRouter fallback');
+    assert.ok(fastBody, 'the GLM spill must race the measured fast fallback model');
     assert.equal(
       (glmBody.provider as { allow_fallbacks?: boolean }).allow_fallbacks,
       true,
       'the GLM race branch must be allowed to spill beyond Cerebras'
     );
-    assert.deepEqual(genericBody.reasoning, { effort: 'minimal' });
+    assert.deepEqual(fastBody.response_format, directGeneratorOptions().response_format);
+    assert.equal(
+      fastBody.reasoning,
+      undefined,
+      'the fast fallback must not opt into slow provider reasoning'
+    );
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(
@@ -286,7 +292,7 @@ async function testSilentDirectRouteRacesBothOpenRouterFallbacks(): Promise<void
   }
 }
 
-async function testLosingWaterfallStopsBeforeItsNextModel(): Promise<void> {
+async function testLosingFastFallbackIsAborted(): Promise<void> {
   const originalFetch = globalThis.fetch;
   const saved = {
     cerebrasKey: process.env.CEREBRAS_API_KEY,
@@ -300,7 +306,7 @@ async function testLosingWaterfallStopsBeforeItsNextModel(): Promise<void> {
   process.env.CEREBRAS_CHAT_IDLE_TIMEOUT_MS = '500';
 
   const openRouterModels: string[] = [];
-  let genericSignal: AbortSignal | null | undefined;
+  let fastSignal: AbortSignal | null | undefined;
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input.toString();
     if (url === CEREBRAS_API_URL) return stallingResponse(init?.signal);
@@ -309,8 +315,11 @@ async function testLosingWaterfallStopsBeforeItsNextModel(): Promise<void> {
       const model = String(body.model);
       openRouterModels.push(model);
       if (model === 'z-ai/glm-4.7') return sseResponse(GENERATOR_SSE);
-      genericSignal = init?.signal;
-      return stallingResponse(init?.signal);
+      if (model === 'google/gemini-2.5-flash-lite') {
+        fastSignal = init?.signal;
+        return stallingResponse(init?.signal);
+      }
+      throw new Error(`Unexpected OpenRouter model ${model}`);
     }
     throw new Error(`Unexpected route ${url}`);
   }) as typeof fetch;
@@ -321,10 +330,10 @@ async function testLosingWaterfallStopsBeforeItsNextModel(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       openRouterModels,
-      ['z-ai/glm-4.7', 'google/gemini-3.5-flash'],
-      'an aborted losing waterfall must not advance to Kimi'
+      ['z-ai/glm-4.7', 'google/gemini-2.5-flash-lite'],
+      'the bounded fast fallback must not advance to the general waterfall'
     );
-    assert.equal(genericSignal?.aborted, true, 'the losing generic waterfall must be aborted');
+    assert.equal(fastSignal?.aborted, true, 'the losing fast fallback must be aborted');
   } finally {
     globalThis.fetch = originalFetch;
     for (const [name, value] of [
@@ -422,8 +431,8 @@ async function run(): Promise<void> {
   await testPhaseUsesDirectCerebras();
   await testDirectFailureFallsThroughToWaterfall();
   await testDirectPreHeaderStallFallsThroughToWaterfall();
-  await testSilentDirectRouteRacesBothOpenRouterFallbacks();
-  await testLosingWaterfallStopsBeforeItsNextModel();
+  await testSilentDirectRouteRacesIndependentFallbacks();
+  await testLosingFastFallbackIsAborted();
   await testDirectQuotaFallsOverToOpenRouterGlm();
   process.stdout.write(
     'PASS Chat Generator provider routes fall through on Cerebras stalls and rate caps\n'

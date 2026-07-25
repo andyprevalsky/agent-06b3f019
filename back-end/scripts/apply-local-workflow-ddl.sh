@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Prisma db push owns tables and columns but intentionally ignores hand-written
+# functions and triggers from migrations. Re-apply the exact idempotent workflow
+# DDL after every local db push so local tests exercise the production schema.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+MIGRATION_SQL="$BACKEND_DIR/prisma/migrations/20260723000000_add_workflow_iteration_offset/migration.sql"
+DATABASE_TARGET="${DIRECT_URL:-${DATABASE_URL:-}}"
+START_MARKER="-- Protect the rolling-deploy window"
+END_MARKER="-- Prefer explicit logical-iteration checkpoints"
+
+if [[ ! -f "$MIGRATION_SQL" ]]; then
+  echo "Workflow migration is missing: $MIGRATION_SQL" >&2
+  exit 1
+fi
+
+DDL_SQL="$(
+  awk -v start="$START_MARKER" -v end="$END_MARKER" '
+    index($0, start) == 1 {
+      if (started) exit 2
+      started = 1
+      emit = 1
+    }
+    index($0, end) == 1 {
+      if (!started || ended) exit 2
+      ended = 1
+      emit = 0
+    }
+    emit
+    END {
+      if (!started || !ended) exit 2
+    }
+  ' "$MIGRATION_SQL"
+)"
+
+if [[ -n "${DB_CONTAINER:-}" ]] &&
+  command -v docker >/dev/null 2>&1 &&
+  docker inspect "$DB_CONTAINER" --format '{{.State.Running}}' 2>/dev/null | grep -qx true; then
+  printf '%s\n' "$DDL_SQL" |
+    docker exec -i "$DB_CONTAINER" psql \
+      -U "${LOCAL_DB_USER:-postgres}" \
+      -d "${LOCAL_DB_NAME:-victoria}" \
+      -v ON_ERROR_STOP=1 >/dev/null
+elif [[ -n "$DATABASE_TARGET" ]] && command -v psql >/dev/null 2>&1; then
+  printf '%s\n' "$DDL_SQL" | psql "$DATABASE_TARGET" -v ON_ERROR_STOP=1 >/dev/null
+else
+  echo "A running DB_CONTAINER or host psql with DATABASE_URL/DIRECT_URL is required." >&2
+  exit 1
+fi
+
+echo "Applied local workflow functions and triggers."
