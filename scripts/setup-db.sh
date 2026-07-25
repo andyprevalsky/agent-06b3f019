@@ -11,6 +11,7 @@ if [ -z "$CONDUCTOR_PORT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
 
@@ -92,5 +93,14 @@ echo "🐘 Syncing Prisma schema..."
 
 echo "🌱 Syncing production data to local database..."
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/seed-local.ts)
+
+echo "🗜️  Publishing synchronized DB for isolated local benchmarks..."
+BENCHMARK_SEED_PATH="$(
+    bash "$SCRIPT_DIR/benchmark-seed-cache" materialize \
+        "$REPO_ROOT/back-end/prisma/schema.prisma" \
+        "$REPO_ROOT/.context/benchmarks/seed-cache" \
+        "$DB_CONTAINER"
+)"
+echo "   ✅ Local benchmark seed dump: $BENCHMARK_SEED_PATH"
 
 echo "🐘 Local database setup complete."

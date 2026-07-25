@@ -182,8 +182,7 @@ def _has_failed_completion_feedback(workflow_instance) -> bool:
         ):
             continue
         feedback = " ".join(
-            str(value or "")
-            for value in (metadata.get("title"), metadata.get("message"), msg.get("text"))
+            str(value or "") for value in (metadata.get("title"), metadata.get("message"), msg.get("text"))
         ).lower()
         if "verifier rejected" in feedback or ("progress:" in feedback and "100%" not in feedback):
             return True
@@ -418,25 +417,29 @@ class SpawnAgentManager(ToolManager):
                 span_source="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
                 span_key="agents.domains.spawn_agent.handler.SpawnAgentManager._spawn_explore",
             ):
+                activity_args = [
+                    workflow_instance.agent_id,
+                    workflow_instance.user_id,
+                    goal,
+                    model,
+                    task_id,
+                    tool_call_id,
+                    claude_token,
+                    gpt_token,
+                    gpt_account_id,
+                    gpt_token_source,
+                    gpt_token_pool_id,
+                    attachment_texts,
+                    getattr(workflow_instance, "max_context_tokens", None) or 200_000,
+                    depth,
+                    explore_max_iterations,
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    activity_args.append(world_model_mode)
                 activity_handle = workflow.start_activity(
                     spawn_explore_agent_activity,
-                    args=[
-                        workflow_instance.agent_id,
-                        workflow_instance.user_id,
-                        goal,
-                        model,
-                        task_id,
-                        tool_call_id,
-                        claude_token,
-                        gpt_token,
-                        gpt_account_id,
-                        gpt_token_source,
-                        gpt_token_pool_id,
-                        attachment_texts,
-                        getattr(workflow_instance, "max_context_tokens", None) or 200_000,
-                        depth,
-                        explore_max_iterations,
-                    ],
+                    args=activity_args,
                     start_to_close_timeout=explore_activity_timeout,
                     heartbeat_timeout=EXPLORE_HEARTBEAT_TIMEOUT,
                     cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,

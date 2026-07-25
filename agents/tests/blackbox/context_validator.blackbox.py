@@ -242,6 +242,68 @@ def test_for_each_aggregate_parent_result_pairs_declared_tool_use():
     assert not pairing_errors, f"for_each aggregate result should pair parent id: {pairing_errors}"
 
 
+def test_direct_subagent_parent_result_wins_over_later_child_ui_row():
+    """A child UI completion must not supersede the parent-visible aggregate result.
+
+    Direct spawn_agent completion emits two terminal rows with the same toolCallId:
+    the parent aggregate uses ``subAgentIds`` and the later child UI row uses
+    ``subAgentId``. The LLM context filters the child row before terminal-result
+    deduplication, so the benchmark validator must preserve that same ordering.
+    """
+    from context_validator import validate_context
+
+    spawn_id = "call_spawn_direct"
+    completion_id = "call_attempt_completion"
+    messages = [
+        _make_msg("USER", "Delegate this task.", ts="2024-01-01T00:00:00.000Z"),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("spawn_agent", spawn_id)],
+            ts="2024-01-01T00:00:01.000Z",
+        ),
+        _make_msg(
+            "TOOL",
+            "Parent-visible structured result",
+            metadata={
+                "toolCallId": spawn_id,
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "subAgentIds": ["child-1"],
+            },
+            ts="2024-01-01T00:00:02.000Z",
+        ),
+        _make_msg(
+            "TOOL",
+            "Child UI completion",
+            metadata={
+                "toolCallId": spawn_id,
+                "toolName": "spawn_general_purpose_agent",
+                "toolStatus": "FINISHED",
+                "subAgentId": "child-1",
+            },
+            ts="2024-01-01T00:00:02.100Z",
+        ),
+        _make_msg(
+            "ASSISTANT",
+            "",
+            tool_calls=[_tc("attempt_completion", completion_id)],
+            ts="2024-01-01T00:00:03.000Z",
+        ),
+    ]
+
+    violations = validate_context(messages)
+    role_errors = [
+        violation
+        for violation in violations
+        if violation.rule == "role_alternation" and violation.severity == "error"
+    ]
+    assert not role_errors, (
+        "Parent aggregate result must remain between assistant turns; "
+        f"got role errors: {[violation.message for violation in role_errors]}"
+    )
+
+
 def test_final_orphan_tool_use_matches_llm_repair_path():
     """Smoke validator should mirror build_llm_messages synthetic tool-result repair.
 
@@ -337,6 +399,7 @@ async def run_all_tests():
     r.record("two_consecutive_text_only_assistants_exempt", test_two_consecutive_text_only_assistants_exempt)
     r.record("file_output_assistant_does_not_break_tool_result_pairing", test_file_output_assistant_does_not_break_tool_result_pairing)
     r.record("for_each_aggregate_parent_result_pairs_declared_tool_use", test_for_each_aggregate_parent_result_pairs_declared_tool_use)
+    r.record("direct_subagent_parent_result_wins_over_later_child_ui_row", test_direct_subagent_parent_result_wins_over_later_child_ui_row)
     r.record("final_orphan_tool_use_matches_llm_repair_path", test_final_orphan_tool_use_matches_llm_repair_path)
     r.record("duplicate_system_messages_are_scoped_to_sub_agent", test_duplicate_system_messages_are_scoped_to_sub_agent)
     return r.all_passed

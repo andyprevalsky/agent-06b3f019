@@ -12,6 +12,15 @@ This command composes /benchmark, /rca, and /deploy. Read
 benchmark.md, rca.md, and deploy.md completely before starting. This file owns
 their orchestration, state, user-input gates, and response contract.
 
+## Canonical human-approval format
+
+Both planned user-input gates, and any unplanned human approval permitted by
+the composed commands, must follow `.claude/shared/approval-format.md`.
+Read it completely immediately before composing the request. The
+response-contract fields below add benchmark and lifecycle context, but never
+replace the shared Detail, Before Behavior, After Behavior, and Downstream
+Implications sections.
+
 ## Hard rules
 
 1. **No reward hacking.** Never change a benchmark definition, prompt, expected
@@ -503,8 +512,9 @@ or multi-line explanations.
 
 After the lifecycle table, include one section per HARNESS row with
 ⏳ Fix approval. Lead with the complete benchmark task and the one-glance core
-claim, then use the exact five-part RCA narrative. Never truncate, summarize,
-or paraphrase `task.prompt`, even when it is long or multiline:
+claim, then use the canonical four-part approval narrative from
+`.claude/shared/approval-format.md`. Never truncate, summarize, or paraphrase
+`task.prompt`, even when it is long or multiline:
 
 ### <row ID> · <issue summary>
 
@@ -512,16 +522,33 @@ or paraphrase `task.prompt`, even when it is long or multiline:
 
 > <full exact task.prompt with every line and character preserved>
 
+#### Detail
+
 **Core claim:** This task failed because **<issue cluster>**. <One or two plain
 sentences describing the exact mismatch or failure; expand internal names such
 as write_lock into ordinary language.>
 
 The issue is **<root cause at the first-bad boundary>**. I reproduced it with
 **<minimal local test and exact command>**, where we measured **<measurement>**
-and observed **<wrong result>** instead of **<expected result>**. I fixed it by
-**<specific implementation change>**. The unchanged local repro now
-**<exact passing result>**, and the regression is cemented in
-**<permanent test name>**.
+and observed **<wrong result>** instead of **<expected result>**.
+The unchanged local repro now **<exact passing result>**, and the regression is
+cemented in **<permanent test name>**. Include the approval snapshot and
+clickable links to every affected hunk.
+
+#### Before Behavior
+
+<Trigger, ordering, measured wrong result, and user-visible failure before the
+fix.>
+
+#### After Behavior
+
+<The same trigger and ordering after the fix, including the measured passing
+result and what remains unchanged.>
+
+#### Downstream Implications
+
+<Affected tasks, users, agents, services, data/cost/security impact, rollback,
+and 10k-agent behavior.>
 
 **Is this fix approved?**
 
@@ -541,8 +568,25 @@ After the affected lifecycle rows, include:
 
 ### A-<id> · <row IDs>
 
-This deploy changes **<one-line prompt or terminal-behavior effect>**. The exact
-snapshot-scoped diff is **<diff reference or displayed hunk>**.
+#### Detail
+
+This deploy changes **<one-line prompt or terminal-behavior effect>**. Name the
+exact unchanged test or reproduction that failed before and passes after the
+change, its concrete results, the approval snapshot ID, and clickable links to
+every affected hunk.
+
+#### Before Behavior
+
+<The exact prompt or terminal behavior before this deploy.>
+
+#### After Behavior
+
+<The exact prompt or terminal behavior after this deploy.>
+
+#### Downstream Implications
+
+<Affected tasks, users, agents, services, data/cost/security impact, rollback,
+and 10k-agent behavior.>
 
 **Is this deploy change approved?**
 

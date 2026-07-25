@@ -43,6 +43,7 @@ export interface Agent {
   price_limit_cents: number; // Price limit in cents (100 = $1.00)
   tree_cost_cents: number; // Total tree cost in cents
   fast_mode_cache_enabled?: boolean;
+  world_model_mode?: 'real' | 'simulate' | 'shadow';
   created_at: string;
   updated_at: string;
   write_lock_enabled: boolean;
@@ -131,6 +132,7 @@ export interface CreateAgentPayload {
   price_limit_cents?: number; // Price limit for new agent (default 100 = $1.00)
   depth?: number; // Depth >= 1 auto-responds to questions (used for agentic integrations)
   fast_mode_cache_enabled?: boolean; // Fast Mode aggressive cache (record/replay third-party responses)
+  world_model_mode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
 }
 
 // Sub-agent Tree Types

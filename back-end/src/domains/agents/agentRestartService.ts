@@ -34,6 +34,7 @@ import {
   claimReplacementGeneration,
 } from '../../providers/workflowReplacementPreparation';
 import type { UpdateStatusBody } from './types';
+import { normalizeWorldModelMode } from './agentExecutionMode';
 import * as repo from './repo';
 
 export { acceptStartedWorkflowReplacement, captureClaimedStaleWorkflowTools };
@@ -123,6 +124,7 @@ async function startReplacementWorkflow(
       depth: agent.depth,
       priceLimitCents: agent.priceLimitCents,
       fastModeCacheEnabled: agent.fastModeCacheEnabled,
+      worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
       startPhase: 'resume',
       ...(claim.resumeState.max_iterations !== null
         ? { maxIterations: claim.resumeState.max_iterations }

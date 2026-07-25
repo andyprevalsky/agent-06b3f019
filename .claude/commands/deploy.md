@@ -8,6 +8,16 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
+## Canonical human-approval format
+
+Every human approval request in this command—including prompt or
+agent-behavior approval, a gate override, credential/billing/environment
+escalation, a destructive action, or any other approval—must follow
+`.claude/shared/approval-format.md`. Read it completely immediately before
+composing the request. Its Detail, Before Behavior, After Behavior, and
+Downstream Implications sections are mandatory and additive to the
+deploy-specific telemetry, file-link, and snapshot rules below.
+
 ---
 
 # Step 0: Capture original Conductor workspace title
@@ -387,11 +397,13 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these eleven independent suites without
+The concurrent runner executes exactly these thirteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
+`bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,

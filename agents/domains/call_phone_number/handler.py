@@ -79,6 +79,7 @@ class CallPhoneNumberManager(ToolManager):
         tool_call_id: str,
         agent_id: str,
         user_id: str | None = None,
+        world_model_mode: str = "real",
     ) -> dict[str, Any]:
         """Execute phone call and post events via handle_tool_event."""
         to = tool_call.get("to", "")
@@ -110,9 +111,12 @@ class CallPhoneNumberManager(ToolManager):
 
         # 2. Execute phone call activity
         try:
+            activity_args = [to, system_prompt, output_schema, agent_id, tool_call_id, user_id]
+            if world_model_mode != "real":
+                activity_args.append(world_model_mode)
             result = await execute_activity(
                 call_phone_number_activity,
-                args=[to, system_prompt, output_schema, agent_id, tool_call_id, user_id],
+                args=activity_args,
                 start_to_close_timeout=timedelta(minutes=ACTIVITY_TIMEOUT_MINUTES),
                 heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(
@@ -125,7 +129,7 @@ class CallPhoneNumberManager(ToolManager):
 
             # 3. Report usage based on call duration
             duration_seconds = result.get("duration", 0)
-            usage_items = compute_service_usage(duration_seconds)
+            usage_items = [] if result.get("world_model_simulated") else compute_service_usage(duration_seconds)
 
             await handle_tool_event(
                 event=ToolEvent(
@@ -197,6 +201,7 @@ async def call_phone_number(
     tool_call_id: str,
     agent_id: str,
     user_id: str | None = None,
+    world_model_mode: str = "real",
 ) -> dict[str, Any]:
     """Execute call_phone_number tool.
 
@@ -217,6 +222,7 @@ async def call_phone_number(
         tool_call_id=tool_call_id,
         agent_id=agent_id,
         user_id=user_id,
+        world_model_mode=world_model_mode,
     )
 
 
@@ -235,6 +241,7 @@ async def call_phone_number_activity(
     agent_id: str,
     tool_call_id: str,
     user_id: str | None = None,
+    world_model_mode: str | None = None,
 ) -> dict[str, Any]:
     async def real_executor(_tool_name: str, _tool_args: dict[str, Any], _tool_call_id: str) -> dict[str, Any]:
         return await _call_phone_number_activity_real(
@@ -246,7 +253,10 @@ async def call_phone_number_activity(
             user_id=user_id,
         )
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
         "call_phone_number",
         {
             "to": to,
@@ -257,6 +267,7 @@ async def call_phone_number_activity(
         },
         tool_call_id,
         real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
 
 

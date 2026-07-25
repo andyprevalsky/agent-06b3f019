@@ -33,12 +33,14 @@ def _firecrawl_mock_body(markdown: str = "Hello world.", links: list[str] | None
 
 def _setup_firecrawl(markdown: str = "Page body.", links: list[str] | None = None) -> None:
     os.environ["FIRECRAWL_API_KEY"] = "test-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {
-            "status": 200,
-            "json": _firecrawl_mock_body(markdown=markdown, links=links or []),
-        },
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {
+                "status": 200,
+                "json": _firecrawl_mock_body(markdown=markdown, links=links or []),
+            },
+        }
+    )
 
 
 def _parallel_mock_body(
@@ -129,22 +131,20 @@ async def test_firecrawl_403_falls_back_to_parallel_extract():
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
     os.environ.pop("PARALLEL_API_KEY", None)
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {
-            "status": 403,
-            "json": {"success": False, "error": "unsupported site"},
-        },
-        "api.parallel.ai/v1/extract": {
-            "status": 200,
-            "json": _parallel_mock_body(
-                full_content=(
-                    "# Profile\n"
-                    "[Deck](https://example.com/deck.pdf)\n"
-                    "Bare https://example.com/data.csv."
-                )
-            ),
-        },
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {
+                "status": 403,
+                "json": {"success": False, "error": "unsupported site"},
+            },
+            "api.parallel.ai/v1/extract": {
+                "status": 200,
+                "json": _parallel_mock_body(
+                    full_content=("# Profile\n[Deck](https://example.com/deck.pdf)\nBare https://example.com/data.csv.")
+                ),
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import scrape_url
@@ -198,16 +198,18 @@ async def test_firecrawl_empty_markdown_falls_back_to_parallel_extract():
     """A malformed Firecrawl success with no markdown falls back to Parallel Extract."""
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {
-            "status": 200,
-            "json": _firecrawl_mock_body(markdown="", links=["https://example.com/firecrawl-only.pdf"]),
-        },
-        "api.parallel.ai/v1/extract": {
-            "status": 200,
-            "json": _parallel_mock_body(full_content="Parallel recovered markdown."),
-        },
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {
+                "status": 200,
+                "json": _firecrawl_mock_body(markdown="", links=["https://example.com/firecrawl-only.pdf"]),
+            },
+            "api.parallel.ai/v1/extract": {
+                "status": 200,
+                "json": _parallel_mock_body(full_content="Parallel recovered markdown."),
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import scrape_url
@@ -222,13 +224,15 @@ async def test_parallel_extract_prefers_full_content_over_excerpts():
     """Parallel normalization uses full_content before excerpts."""
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {"status": 500, "json": {"error": "firecrawl down"}},
-        "api.parallel.ai/v1/extract": {
-            "status": 200,
-            "json": _parallel_mock_body(full_content="Full content.", excerpts=["Excerpt content."]),
-        },
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {"status": 500, "json": {"error": "firecrawl down"}},
+            "api.parallel.ai/v1/extract": {
+                "status": 200,
+                "json": _parallel_mock_body(full_content="Full content.", excerpts=["Excerpt content."]),
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import scrape_url
@@ -242,13 +246,15 @@ async def test_parallel_extract_uses_joined_excerpts_when_full_content_missing()
     """Parallel normalization still returns markdown when only excerpts are present."""
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {"status": 500, "json": {"error": "firecrawl down"}},
-        "api.parallel.ai/v1/extract": {
-            "status": 200,
-            "json": _parallel_mock_body(full_content=None, excerpts=["Excerpt one.", "Excerpt two."]),
-        },
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {"status": 500, "json": {"error": "firecrawl down"}},
+            "api.parallel.ai/v1/extract": {
+                "status": 200,
+                "json": _parallel_mock_body(full_content=None, excerpts=["Excerpt one.", "Excerpt two."]),
+            },
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import scrape_url
@@ -262,10 +268,12 @@ async def test_both_fetch_providers_failing_raises_combined_error():
     """If Firecrawl and Parallel both fail, the raised error names both providers."""
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
-        "api.parallel.ai/v1/extract": {"status": 422, "json": {"errors": [{"content": "bad url"}]}},
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
+            "api.parallel.ai/v1/extract": {"status": 422, "json": {"errors": [{"content": "bad url"}]}},
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
@@ -286,10 +294,12 @@ async def test_retryable_provider_failure_remains_retryable():
     """If either provider failure is retryable by provider docs, Temporal may retry the activity."""
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
-        "api.parallel.ai/v1/extract": {"status": 500, "json": {"error": "temporary upstream failure"}},
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
+            "api.parallel.ai/v1/extract": {"status": 500, "json": {"error": "temporary upstream failure"}},
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from domains.web_fetch.service import WebFetchProvidersFailed, scrape_url
@@ -310,10 +320,12 @@ async def test_web_fetch_activity_marks_deterministic_provider_failures_non_retr
 
     os.environ["FIRECRAWL_API_KEY"] = "test-firecrawl-key"
     os.environ["PARRALLEL_API_KEY"] = "test-parallel-key"
-    setup_mock({
-        "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
-        "api.parallel.ai/v1/extract": {"status": 422, "json": {"errors": [{"content": "bad url"}]}},
-    })
+    setup_mock(
+        {
+            "api.firecrawl.dev/v2/scrape": {"status": 403, "json": {"error": "unsupported"}},
+            "api.parallel.ai/v1/extract": {"status": 422, "json": {"errors": [{"content": "bad url"}]}},
+        }
+    )
 
     with patch("temporalio.activity.heartbeat"):
         from tools.web_fetch import web_fetch_activity
@@ -414,7 +426,12 @@ async def test_download_and_attach_skips_failed_downloads():
     uploaded: list[dict] = []
 
     async def fake_upload(user_id, file_content, filename, mime_type):
-        p = {"id": f"fp-{len(uploaded)}", "original_filename": filename, "mime_type": mime_type, "size_bytes": len(file_content)}
+        p = {
+            "id": f"fp-{len(uploaded)}",
+            "original_filename": filename,
+            "mime_type": mime_type,
+            "size_bytes": len(file_content),
+        }
         uploaded.append(p)
         return p
 
@@ -608,7 +625,13 @@ async def test_handler_execute_tool_happy_path():
     summary_call = next(call for call in calls if call["activity"] == "summarize_and_filter_links")
     assert summary_call["args"][-1] == "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
     download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
-    assert download_call["args"] == [["https://example.com/file.pdf"], "u-1", True, "root goal", False]
+    assert download_call["args"] == [
+        ["https://example.com/file.pdf"],
+        "u-1",
+        True,
+        "root goal",
+        False,
+    ]
 
     # Result wires the file_pointer through
     assert out["result"]["downloaded_files"][0]["original_filename"] == "file.pdf"
@@ -628,6 +651,43 @@ async def test_handler_execute_tool_happy_path():
     ]
     assert tool_titles[0] == "Fetching https://example.com/a for download the PDF"
     assert tool_titles[-1] == "Fetched https://example.com/a for download the PDF"
+
+
+async def test_handler_simulator_appends_mode_only_to_boundary_activities():
+    """Simulated agents carry mode/identity while real agents retain legacy activity histories."""
+    from domains.web_fetch.handler import WebFetchManager
+
+    calls = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        name = getattr(fn, "__name__", "")
+        calls.append({"activity": name, "args": args})
+        if name == "web_fetch_activity":
+            return {"markdown": "page text", "links": ["https://example.com/file.pdf"], "metadata": {}}
+        if name == "summarize_and_filter_links":
+            return {
+                "summary": "Summary.",
+                "files_to_download": ["https://example.com/file.pdf"],
+                "usage": {},
+                "summarized": True,
+            }
+        if name == "web_fetch_download_activity":
+            return []
+        return None
+
+    await WebFetchManager().execute_tool(
+        execute_activity=fake_execute_activity,
+        tool_call={"url": "https://example.com/a", "objective": "download"},
+        tool_call_id="tc-sim",
+        agent_id="a-sim",
+        user_id="u-1",
+        world_model_mode="simulate",
+    )
+
+    scrape_call = next(call for call in calls if call["activity"] == "web_fetch_activity")
+    assert scrape_call["args"][-2:] == ["a-sim", "simulate"]
+    download_call = next(call for call in calls if call["activity"] == "web_fetch_download_activity")
+    assert download_call["args"][-2:] == ["a-sim", "simulate"]
 
 
 async def test_handler_reports_parallel_provider_when_fallback_succeeds():
@@ -850,8 +910,12 @@ async def run_all_tests() -> bool:
         "parallel_uses_joined_excerpts",
         test_parallel_extract_uses_joined_excerpts_when_full_content_missing,
     )
-    await r.record_async("both_providers_failing_combined_error", test_both_fetch_providers_failing_raises_combined_error)
-    await r.record_async("retryable_provider_failure_remains_retryable", test_retryable_provider_failure_remains_retryable)
+    await r.record_async(
+        "both_providers_failing_combined_error", test_both_fetch_providers_failing_raises_combined_error
+    )
+    await r.record_async(
+        "retryable_provider_failure_remains_retryable", test_retryable_provider_failure_remains_retryable
+    )
     await r.record_async(
         "activity_deterministic_provider_failures_non_retryable",
         test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable,
@@ -867,20 +931,30 @@ async def run_all_tests() -> bool:
     await r.record_async("download_happy_path", test_download_and_attach_happy_path)
     await r.record_async("download_skips_failed", test_download_and_attach_skips_failed_downloads)
     await r.record_async("download_fast_cache_hit", test_download_and_attach_fast_cache_hit_skips_external_download)
-    await r.record_async("download_fast_cache_miss_stores", test_download_and_attach_fast_cache_miss_stores_downloaded_bytes)
+    await r.record_async(
+        "download_fast_cache_miss_stores", test_download_and_attach_fast_cache_miss_stores_downloaded_bytes
+    )
 
     # Handler
     r.record("handler_safe_time_ok", test_handler_safe_time_happy_path)
     r.record("handler_safe_time_fallback", test_handler_safe_time_fallback)
     r.record("handler_get_manager_singleton", test_handler_get_manager_singleton)
     await r.record_async("handler_exec_happy", test_handler_execute_tool_happy_path)
-    await r.record_async("handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds)
+    await r.record_async(
+        "handler_simulator_appends_mode_only_to_boundaries",
+        test_handler_simulator_appends_mode_only_to_boundary_activities,
+    )
+    await r.record_async(
+        "handler_reports_parallel_provider", test_handler_reports_parallel_provider_when_fallback_succeeds
+    )
     await r.record_async("handler_fast_cache_scrape_no_cost", test_handler_fast_cache_scrape_hit_has_no_service_cost)
     await r.record_async(
         "activity_fast_cache_ignores_unavailable",
         test_web_fetch_activity_ignores_unavailable_fast_cache_when_fallback_enabled,
     )
-    await r.record_async("handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files)
+    await r.record_async(
+        "handler_skips_download_when_no_files", test_handler_skips_download_when_haiku_returns_no_files
+    )
     await r.record_async("handler_activity_error_reraises", test_handler_execute_tool_activity_error_reraises)
 
     # Tool surface

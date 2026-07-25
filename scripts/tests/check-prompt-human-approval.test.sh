@@ -135,6 +135,15 @@ fi
 echo "PASS: exact-head deferral is restricted to trusted Auto RCA"
 expect_deferred_pass "$prompt_path_repo" "trusted Auto RCA may defer prompt approval to the exact-head review"
 
+shared_instruction_repo="$(new_repo shared-instruction-path)"
+mkdir -p "$shared_instruction_repo/.claude/shared"
+cat >"$shared_instruction_repo/.claude/shared/approval-format.md" <<'MD'
+Shared instructions consumed by multiple commands.
+MD
+git -C "$shared_instruction_repo" add .claude/shared/approval-format.md
+expect_fail "$shared_instruction_repo" "shared Claude instruction artifact requires approval"
+expect_flag_pass "$shared_instruction_repo" "approval flag permits shared Claude instruction artifact"
+
 prompt_text_repo="$(new_repo prompt-text-path)"
 mkdir -p "$prompt_text_repo/.github"
 cat >"$prompt_text_repo/.github/auto-rca-prompt.txt" <<'TXT'

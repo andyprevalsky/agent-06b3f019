@@ -53,15 +53,24 @@ async def get_agent_source(agent_id: str) -> str:
 
 
 @activity.defn
-async def send_direct_sms_activity(user_id: str, message: str) -> Dict:
+async def send_direct_sms_activity(
+    user_id: str,
+    message: str,
+    agent_id: str | None = None,
+    world_model_mode: str | None = None,
+) -> Dict:
     async def real_executor(_tool_name: str, _tool_args: Dict, _tool_call_id: str) -> Dict:
         return await _send_direct_sms_real(user_id, message)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=user_id).execute(
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id or user_id,
+        mode=world_model_mode,
+    ).execute(
         "send_direct_sms",
         {"user_id": user_id, "message": message},
         f"send_direct_sms:{user_id}",
         real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
 
 
@@ -119,15 +128,25 @@ async def _send_direct_sms_real(user_id: str, message: str) -> Dict:
 
 
 @activity.defn
-async def notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: Dict) -> Dict:
+async def notify_sms_event_activity(
+    user_id: str,
+    event_type: str,
+    agent_id: str,
+    payload: Dict,
+    world_model_mode: str | None = None,
+) -> Dict:
     async def real_executor(_tool_name: str, _tool_args: Dict, _tool_call_id: str) -> Dict:
         return await _notify_sms_event_real(user_id, event_type, agent_id, payload)
 
-    return await WorldModelToolExecutionAdapter.from_env(agent_id=agent_id).execute(
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
         "notify_sms_event",
         {"user_id": user_id, "event_type": event_type, "agent_id": agent_id, "payload": payload},
         f"notify_sms_event:{agent_id}:{event_type}",
         real_executor,
+        allow_real_fallback=world_model_mode is None,
     )
 
 

@@ -29,6 +29,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
 import { startAgentWorkflow } from '../temporal';
+import { normalizeWorldModelMode } from '../worldModelMode';
 import { createMessage } from '../messages';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
@@ -343,6 +344,7 @@ interface ChatTemporalAgentConfig {
   verifier: { type: string };
   priceLimitCents: number;
   fastModeCacheEnabled: boolean;
+  worldModelMode: string;
 }
 
 export function buildChatTemporalStartParams(params: {
@@ -362,6 +364,7 @@ export function buildChatTemporalStartParams(params: {
     startPhase: params.startPhase,
     priceLimitCents: params.agent.priceLimitCents,
     fastModeCacheEnabled: params.agent.fastModeCacheEnabled,
+    worldModelMode: normalizeWorldModelMode(params.agent.worldModelMode),
   };
 }
 
@@ -399,6 +402,7 @@ async function startTemporalWorkflowForChat(
         verifier: { type: agent.verifier.type },
         priceLimitCents: agent.priceLimitCents,
         fastModeCacheEnabled: agent.fastModeCacheEnabled,
+        worldModelMode: agent.worldModelMode,
       },
     })
   );

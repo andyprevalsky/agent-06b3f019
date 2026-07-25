@@ -120,6 +120,26 @@ test('POST /agents/batch — anonymous JWT cannot create children → 401', asyn
   assert(body.error.includes('Login required'), `Unexpected error: ${body.error}`);
 });
 
+test('POST /agents/batch — non-admin cannot enable Simulator mode', async () => {
+  const userId = `batch-simulator-non-admin-${RUN_ID}`;
+  const res = await request(`${BASE_URL}/api/agents/batch`, {
+    method: 'POST',
+    headers: apiKeyHeaders(userId),
+    body: JSON.stringify({
+      agents: [
+        {
+          agent_id: randomUUID(),
+          goal: `Unauthorized batch Simulator test ${RUN_ID}`,
+          world_model_mode: 'simulate',
+        },
+      ],
+    }),
+  });
+  assertStatus(res.status, 403, res.data);
+  const body = assertSchema(ErrorResponse, res.data, 'POST /agents/batch unauthorized simulator');
+  assert(body.error.includes('administrator access'), `Unexpected error: ${body.error}`);
+});
+
 test('POST /agents/batch — missing agents → 400', async () => {
   const session = await createAnonymousSession('batch-empty');
   const res = await request(`${BASE_URL}/api/agents/batch`, {
