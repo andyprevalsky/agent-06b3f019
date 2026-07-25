@@ -115,6 +115,10 @@ async function createBrowserSession(params: {
       sessionId: params.sessionId ?? `steel-session-${randomUUID()}`,
       debugUrl: params.debugUrl,
       status: 'ACTIVE',
+      provider: 'steel',
+      providerProfileId: `session-bound-profile-${randomUUID()}`,
+      providerProfileSource: 'test_session_bound',
+      providerProfilePersist: true,
     },
     include: { context: true },
   });
@@ -374,7 +378,7 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
     where: {
       userId_contextId_authRealm: {
         userId,
-        contextId: browserSession.context.contextId!,
+        contextId: browserSession.providerProfileId!,
         authRealm: 'example.com',
       },
     },
@@ -412,7 +416,7 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
     where: {
       userId_contextId_authRealm: {
         userId,
-        contextId: browserSession.context.contextId!,
+        contextId: browserSession.providerProfileId!,
         authRealm: 'example.com',
       },
     },
@@ -433,7 +437,7 @@ async function testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent(): Promise<vo
     where: {
       userId_contextId_authRealm: {
         userId,
-        contextId: browserSession.context.contextId!,
+        contextId: browserSession.providerProfileId!,
         authRealm: 'example.com',
       },
     },
@@ -491,7 +495,7 @@ async function testAttentionRespondCompletesAuthAssistance(): Promise<void> {
     where: {
       userId_contextId_authRealm: {
         userId,
-        contextId: browserSession.context.contextId!,
+        contextId: browserSession.providerProfileId!,
         authRealm: 'amazon.com',
       },
     },

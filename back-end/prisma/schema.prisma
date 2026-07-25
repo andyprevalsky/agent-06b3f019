@@ -453,6 +453,11 @@ model BrowserSession {
   closedAt              DateTime?
   wsUrl                 String?
   provider              String               @default("steel")
+  // Provider identity actually loaded by this session. BrowserContext provider
+  // profiles are shared defaults and cannot identify concurrent isolated runs.
+  providerProfileId      String?
+  providerProfileSource  String?
+  providerProfilePersist Boolean              @default(true)
   injectedOrigins       Json?
   controlState          BrowserControlState  @default(AGENT)
   controlLeaseExpiresAt DateTime?

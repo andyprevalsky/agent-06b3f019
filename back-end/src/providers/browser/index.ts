@@ -64,6 +64,11 @@ export interface BrowserSessionCreationDependencies {
   createSteel: typeof createSteelSessionWithContext;
 }
 
+export interface BrowserSessionCreationOptions {
+  keepValidationConnection?: boolean;
+  requiredSteelProfileId?: string;
+}
+
 const browserSessionCreationDependencies: BrowserSessionCreationDependencies = {
   readPreferredConfig: async (contextId) => {
     const context = await prisma.browserContext.findUnique({
@@ -115,7 +120,7 @@ export async function createSessionWithContext(
   agentId: string,
   proxyLocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string,
-  options?: { keepValidationConnection?: boolean }
+  options?: BrowserSessionCreationOptions
 ): Promise<BrowserProviderSession> {
   return createSessionWithContextUsingDependencies(
     contextId,
@@ -133,13 +138,17 @@ export async function createSessionWithContextUsingDependencies(
   agentId: string,
   proxyLocation: ProxyGeoLocation,
   startUrl: string | undefined,
-  options: { keepValidationConnection?: boolean } | undefined,
+  options: BrowserSessionCreationOptions | undefined,
   dependencies: BrowserSessionCreationDependencies
 ): Promise<BrowserProviderSession> {
-  const preferred = compatiblePreferredBrowserConfig(
-    await dependencies.readPreferredConfig(contextId),
-    proxyLocation
-  );
+  const requiredSteelProfileId = options?.requiredSteelProfileId;
+  const preferred =
+    requiredSteelProfileId === undefined
+      ? compatiblePreferredBrowserConfig(
+          await dependencies.readPreferredConfig(contextId),
+          proxyLocation
+        )
+      : null;
   const createForProvider = async (
     provider: BrowserProviderName,
     usePreference: typeof preferred
@@ -175,6 +184,13 @@ export async function createSessionWithContextUsingDependencies(
       validationBrowser: session.validationBrowser,
     };
   };
+
+  if (requiredSteelProfileId !== undefined) {
+    // SteelSessionAuth represents browser state held by one exact Steel
+    // profile. Falling back to another provider/profile would falsely claim the
+    // agent is authenticated, so this path is intentionally fail-closed.
+    return createForProvider('steel', null);
+  }
 
   if (preferred !== null) {
     try {

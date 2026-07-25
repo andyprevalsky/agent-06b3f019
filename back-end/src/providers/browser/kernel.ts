@@ -36,6 +36,13 @@ import {
   cleanupBenchmarkKernelProfiles as cleanupIsolatedKernelProfiles,
   getOrCreateBenchmarkKernelProfile,
 } from './benchmarkProfileIsolation';
+import {
+  providerProfileData,
+  providerProfileMismatch,
+  recordedProviderProfileBinding,
+  type ProviderProfileBinding,
+} from './profileBinding';
+import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
 
 const log = createLogger('Kernel');
 
@@ -80,24 +87,13 @@ interface KernelRemoteSessionOptions {
     specificity: KernelRecoveryProxySpecificity;
   };
   omitProfile?: boolean;
+  boundProfile?: ProviderProfileBinding;
 }
 
 function kernelClient(): Kernel {
   const apiKey = process.env.KERNEL_API_KEY?.trim();
   if (!apiKey) throw new Error('KERNEL_API_KEY is required when BROWSER_PROVIDER=kernel');
   return new Kernel({ apiKey });
-}
-
-function readOnlyLiveView(url: string | undefined): string {
-  if (!url) return '';
-  const parsed = new URL(url);
-  parsed.searchParams.set('readOnly', 'true');
-  return parsed.toString();
-}
-
-function kernelTimeoutSeconds(): number {
-  const parsed = Number.parseInt(process.env.KERNEL_TIMEOUT_SECONDS ?? '900', 10);
-  return Number.isFinite(parsed) ? Math.min(259_200, Math.max(10, parsed)) : 900;
 }
 
 export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
@@ -140,14 +136,19 @@ export async function releaseKernelRemoteSession(sessionId: string): Promise<voi
 
 async function createProfile(
   contextId: string,
-  agentId: string
+  agentId: string,
+  boundProfile?: ProviderProfileBinding
 ): Promise<{
   profileId: string | null;
   profileSource: string;
 }> {
   if (!browserProviderEnabled('KERNEL_PROFILE_ENABLED', true)) {
+    if (boundProfile !== undefined) {
+      throw new Error('A bound Kernel session requires browser profile support');
+    }
     return { profileId: null, profileSource: 'disabled' };
   }
+  if (boundProfile !== undefined) return boundProfile;
   const client = kernelClient();
   if (benchmarkIsolatedBrowserProfilesEnabled()) {
     try {
@@ -220,7 +221,7 @@ async function createRemoteSession(
   const client = kernelClient();
   const profile = options.omitProfile
     ? { profileId: null, profileSource: 'challenge_candidate_ephemeral' }
-    : await createProfile(contextId, agentId);
+    : await createProfile(contextId, agentId, options.boundProfile);
   const stealth = browserProviderEnabled('KERNEL_STEALTH_ENABLED', true);
 
   const createValidatedSession = async (proxy: KernelProxySelection) =>
@@ -243,6 +244,17 @@ async function createRemoteSession(
           ...(proxy.proxyId !== undefined ? { proxy_id: proxy.proxyId } : {}),
           tags: { rose_agent_id: agentId, rose_session_request: randomUUID() },
         });
+        const actualProfileId = session.profile?.id ?? null;
+        // Only a required authenticated profile (Steel SessionAuth, H-07) fails
+        // closed on mismatch. Kernel manages its own profiles and its create
+        // response does not reliably echo the loaded id, so a best-effort
+        // recreate binding tolerates a differing/NONE id (providerProfileMismatch
+        // returns null) rather than 500ing the rotate/resume path.
+        const profileMismatch = providerProfileMismatch(options.boundProfile, actualProfileId);
+        if (profileMismatch !== null) {
+          await releaseKernelRemoteSession(session.session_id);
+          throw new KernelSessionValidationError(`Kernel ${profileMismatch}`);
+        }
 
         const validationBrowser = await connectValidatedBrowser(session.cdp_ws_url);
         if (validationBrowser !== null) {
@@ -392,6 +404,7 @@ export async function createKernelSessionWithContext(
         status: 'ACTIVE',
         startUrl: _startUrl || undefined,
         provider: 'kernel',
+        ...providerProfileData(remote.profileId, remote.profileSource, true),
       },
     });
   } catch (error) {
@@ -492,7 +505,10 @@ async function recreateKernelSession(
     oldSession.contextId,
     oldSession.agentId,
     proxyLocation,
-    { forceManagedProxyType: opts.forceManagedProxyType }
+    {
+      forceManagedProxyType: opts.forceManagedProxyType,
+      boundProfile: recordedProviderProfileBinding(oldSession),
+    }
   );
   await remote.validationBrowser.close().catch(() => {});
 
@@ -505,6 +521,7 @@ async function recreateKernelSession(
       status: 'ACTIVE',
       closedAt: null,
       provider: 'kernel',
+      ...providerProfileData(remote.profileId, remote.profileSource, true),
       ...(opts.proxyTier !== undefined ? { proxyTier: opts.proxyTier } : {}),
     },
   });

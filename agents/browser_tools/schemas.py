@@ -275,9 +275,19 @@ class PaymentLineItem(BaseModel):
         ),
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
-    rating: str = Field(description="Product rating shown on the product page, such as '4.8 stars'")
+    rating: str = Field(
+        description=(
+            "Product rating shown on the product page, such as '4.8 stars'. If the page "
+            "genuinely shows no rating (e.g. a service, ticket, or event booking), pass "
+            "'0 stars', never 'N/A', 'none', 'unknown', or a made-up number."
+        )
+    )
     review_count: str = Field(
-        description="Product review count shown on the product page, preserving visible formatting",
+        description=(
+            "Product review count shown on the product page, preserving visible formatting. "
+            "If the page genuinely shows no reviews (e.g. a service, ticket, or event "
+            "booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a made-up number."
+        ),
         validation_alias=AliasChoices("review_count", "reviewCount"),
     )
     unit_price_cents: int = Field(

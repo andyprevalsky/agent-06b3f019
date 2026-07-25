@@ -151,6 +151,109 @@ test('benchmark anon auth options hide saved auth and expose minted identity', a
   }
 });
 
+test('enabled Steel session suppresses minted fallback creation and exposure', async () => {
+  const userId = await createUser('Rose Harbor');
+  const authRealm = 'uber.com';
+  const previousPrimitiveKey = process.env.PRIMITIVE_API_KEY;
+  const previousAgentPhoneKey = process.env.AGENTPHONE_API_KEY;
+  try {
+    delete process.env.PRIMITIVE_API_KEY;
+    delete process.env.AGENTPHONE_API_KEY;
+    await prisma.agentIdentity.create({
+      data: {
+        userId,
+        email: 'rose.harbor47@mail.roselabs.ai',
+      },
+    });
+    await prisma.steelSessionAuth.create({
+      data: {
+        userId,
+        contextId: `ctx-${randomUUID()}`,
+        authRealm,
+      },
+    });
+
+    const options = await getAuthOptions(userId, authRealm);
+
+    assert(options.steel_session?.disabled === false, 'expected enabled Steel session');
+    assert(options.minted === null, 'expected minted fallback suppressed by Steel session');
+    const mintedCount = await prisma.mintedAccount.count({ where: { userId, authRealm } });
+    assert(mintedCount === 0, 'expected no minted fallback row to be created');
+  } finally {
+    if (previousPrimitiveKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousPrimitiveKey;
+    if (previousAgentPhoneKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneKey;
+    await cleanup(userId);
+  }
+});
+
+test('session-scoped auth options expose only the bound Steel profile', async () => {
+  const userId = await createUser();
+  const otherUserId = await createUser();
+  const authRealm = 'uber.com';
+  const boundContextId = `ctx-bound-${randomUUID()}`;
+  const newerOtherContextId = `ctx-other-${randomUUID()}`;
+  const previousPrimitiveKey = process.env.PRIMITIVE_API_KEY;
+  const previousAgentPhoneKey = process.env.AGENTPHONE_API_KEY;
+  try {
+    delete process.env.PRIMITIVE_API_KEY;
+    delete process.env.AGENTPHONE_API_KEY;
+    await prisma.steelSessionAuth.create({
+      data: {
+        userId,
+        contextId: boundContextId,
+        authRealm,
+        authenticatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      },
+    });
+    await prisma.agentIdentity.create({
+      data: {
+        userId: otherUserId,
+        email: 'other-owner@example.com',
+      },
+    });
+    await prisma.steelSessionAuth.create({
+      data: {
+        userId,
+        contextId: newerOtherContextId,
+        authRealm,
+        authenticatedAt: new Date('2026-02-01T00:00:00.000Z'),
+      },
+    });
+
+    const boundOptions = await getAuthOptions(userId, authRealm, {
+      steelContextId: boundContextId,
+    });
+    const nonSteelOptions = await getAuthOptions(userId, authRealm, {
+      steelContextId: null,
+    });
+    const otherOwnerOptions = await getAuthOptions(otherUserId, authRealm, {
+      steelContextId: boundContextId,
+    });
+
+    assert(
+      boundOptions.steel_session?.contextId === boundContextId,
+      'expected JIT auth options to use the browser session-bound Steel profile'
+    );
+    assert(
+      nonSteelOptions.steel_session === null,
+      'expected non-Steel sessions not to advertise another session profile'
+    );
+    assert(
+      otherOwnerOptions.steel_session === null,
+      'expected a source profile never to cross the credential owner boundary'
+    );
+  } finally {
+    if (previousPrimitiveKey === undefined) delete process.env.PRIMITIVE_API_KEY;
+    else process.env.PRIMITIVE_API_KEY = previousPrimitiveKey;
+    if (previousAgentPhoneKey === undefined) delete process.env.AGENTPHONE_API_KEY;
+    else process.env.AGENTPHONE_API_KEY = previousAgentPhoneKey;
+    await cleanup(userId);
+    await cleanup(otherUserId);
+  }
+});
+
 test('mark Steel session auth failed disables only owner row and resets context', async () => {
   const userId = await createUser();
   const otherUserId = await createUser();

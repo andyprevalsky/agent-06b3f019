@@ -7,6 +7,7 @@
  */
 
 import { canonicalAuthRealm, hostnameFromRealmInput } from './authRealm';
+import { benchmarkSavedBrowserAuthDisabled } from './benchmarkBrowserAuth';
 import { primitiveDomain, createMintedInbox, findMintedInbox } from './primitive';
 import { createAgentPhoneNumber } from './agentPhone';
 import { createLogger } from './logger';
@@ -19,12 +20,6 @@ const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const CHROMIUM_UNIX_EPOCH_OFFSET_MS = 11644473600000n;
 const CHROMIUM_ONE_DAY_MICROSECONDS = 86400000000n;
 const UNIX_MS_VS_CHROMIUM_MICROSECONDS_BOUNDARY = 10000000000000n;
-
-function benchmarkSavedBrowserAuthDisabled(): boolean {
-  return ['1', 'true', 'yes', 'on'].includes(
-    (process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH ?? '').trim().toLowerCase()
-  );
-}
 
 function emailUsesCurrentMintedDomain(email: string): boolean {
   const currentDomain = primitiveDomain().toLowerCase();
@@ -68,7 +63,8 @@ function passwordRefWithCollisionSuffix(
 
 export async function getAuthOptions(
   userId: string,
-  realmInput: string
+  realmInput: string,
+  scope: { steelContextId?: string | null } = {}
 ): Promise<AuthOptionsResponse> {
   const realm = canonicalAuthRealm(realmInput);
   if (realm === '') {
@@ -76,7 +72,7 @@ export async function getAuthOptions(
   }
 
   const [steelAuth, bundles, passwordsAll, passkeysAll, minted, agentIdentity] = await Promise.all([
-    repo.findSteelSessionAuth(userId, realm),
+    repo.findSteelSessionAuth(userId, realm, scope.steelContextId),
     repo.findCookieBundles(userId, realm),
     repo.findBrowserPasswords(userId),
     repo.findPasskeys(userId, realm),
@@ -97,10 +93,13 @@ export async function getAuthOptions(
   }));
   const emailOtpEmails: string[] = [];
   const emailOtpAvailable = false;
+  const enabledSteelSession =
+    steelAuth !== null && steelAuth.disabledAt === null && !hideSavedBrowserAuth;
   const enabledCookieBundles = cookieBundles.filter((bundle) => !bundle.disabled);
   const enabledPasswordOptions = passwordOptions.filter((password) => !password.disabled);
   const enabledPasskeys = passkeyOptions.filter((pk) => !pk.disabled);
   const shouldExposeMinted =
+    !enabledSteelSession &&
     enabledCookieBundles.length === 0 &&
     enabledPasswordOptions.length === 0 &&
     enabledPasskeys.length === 0 &&

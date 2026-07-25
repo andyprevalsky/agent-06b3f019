@@ -4524,6 +4524,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     seen_otp_codes: set[str] = set()
     available_file_paths: Dict[str, str] = {}
     passkey_ref_by_credential_id: Dict[str, Dict[str, str]] = {}
+    # Every decrypted passkey we have ever seeded on the virtual authenticator,
+    # keyed by credentialId. The CDP virtual authenticator is scoped to the live
+    # target, so any target reset (proxy rotation / challenge recovery) hands us a
+    # fresh, empty authenticator. Retaining the union of seeded credentials lets a
+    # single helper re-seed the new target the same way bootstrap does — so
+    # passkeys are restored on reset exactly like cookies/localStorage, instead of
+    # being the one injected surface that silently vanishes.
+    seeded_decrypted_passkeys_by_credential_id: Dict[str, Dict[str, Any]] = {}
     recorded_passkey_credential_ids: set[str] = {
         credential_id
         for credential_id in (write_lock_resume_state or {}).get("recorded_passkey_credential_ids", [])
@@ -4541,6 +4549,39 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             task_id=task_id,
             browser_url=browser_url or "",
         )
+
+    async def sync_passkeys_onto_target(
+        new_passkeys: Optional[List[Dict[str, Any]]] = None,
+        *,
+        context: str,
+    ) -> int:
+        """Seed the current target's virtual authenticator with every passkey we hold.
+
+        The single choke point for passkey injection. Called at session bootstrap
+        and on each realm transition with that realm's freshly-decrypted passkeys
+        (`new_passkeys`), and on target reset (proxy rotation) with no new payload
+        to re-seed the union onto the fresh authenticator. `inject_passkeys` dedups
+        per target instance, so re-calling with the full union is idempotent on an
+        existing target and a full restore on a new one.
+        """
+        if dom_service is None:
+            return 0
+        for pk in new_passkeys or []:
+            credential_id = pk.get("credentialId")
+            if credential_id:
+                seeded_decrypted_passkeys_by_credential_id[credential_id] = pk
+        if not seeded_decrypted_passkeys_by_credential_id:
+            return 0
+        injected = await dom_service.inject_passkeys(
+            list(seeded_decrypted_passkeys_by_credential_id.values())
+        )
+        logger.info(
+            "Seeded cloud-custody passkeys onto browser virtual authenticator",
+            count=injected,
+            held=len(seeded_decrypted_passkeys_by_credential_id),
+            context=context,
+        )
+        return injected
 
     try:
         # ===== SETUP TIMING TRACKER =====
@@ -5190,12 +5231,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         auth_runtime_state = initial_realm_credential_state.auth_runtime_state
         passkey_ref_by_credential_id.update(initial_realm_credential_state.passkey_ref_by_credential_id)
         if initial_realm_credential_state.decrypted_passkeys:
-            injected_passkey_count = await dom_service.inject_passkeys(
-                initial_realm_credential_state.decrypted_passkeys
-            )
-            logger.info(
-                "Injected cloud-custody passkeys into browser virtual authenticator",
-                count=injected_passkey_count,
+            await sync_passkeys_onto_target(
+                initial_realm_credential_state.decrypted_passkeys,
+                context="session start",
             )
 
         # ===== PHASE 3: POST-SETUP =====
@@ -5409,7 +5447,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             ):
                 raise RuntimeError(f"Credential realm mismatch: requested {target_realm}, got {realm_state.auth_realm}")
 
-            injected_passkey_count = await dom_service.inject_passkeys(realm_state.decrypted_passkeys)
+            injected_passkey_count = await sync_passkeys_onto_target(
+                realm_state.decrypted_passkeys,
+                context=f"realm transition to {target_realm}",
+            )
             passkey_ref_by_credential_id.update(realm_state.passkey_ref_by_credential_id)
 
             retained_non_password_refs = {
@@ -6240,6 +6281,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             current_url=current_url,
                             restore_cookies=not bool(config_result.get("storage_state_preloaded")),
                         )
+                        # The rotated target came up with a fresh, empty virtual
+                        # authenticator. Re-seed the passkeys we already hold so
+                        # passkey auth survives the reset exactly like the cookies
+                        # and localStorage restored just above.
+                        await sync_passkeys_onto_target(context="after proxy rotation")
 
                         if browser_recorder is not None:
                             with contextlib.suppress(Exception):

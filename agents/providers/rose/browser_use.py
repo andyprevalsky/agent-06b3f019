@@ -242,11 +242,21 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                         },
                         "rating": {
                             "type": "string",
-                            "description": "Numeric rating shown on the product page, such as '4.8 stars'",
+                            "description": (
+                                "Numeric rating shown on the product page, such as '4.8 stars'. "
+                                "If the page genuinely shows no rating (e.g. a service, ticket, or "
+                                "event booking), pass '0 stars', never 'N/A', 'none', 'unknown', or a "
+                                "made-up number."
+                            ),
                         },
                         "review_count": {
                             "type": "string",
-                            "description": "Numeric review count shown on the product page, such as '312 reviews'",
+                            "description": (
+                                "Numeric review count shown on the product page, such as '312 reviews'. "
+                                "If the page genuinely shows no reviews (e.g. a service, ticket, or "
+                                "event booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a "
+                                "made-up number."
+                            ),
                         },
                         "unit_price_cents": {"type": "integer", "description": "Unit price in cents"},
                         "quantity": {"type": "integer", "description": "Quantity"},

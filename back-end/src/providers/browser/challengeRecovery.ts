@@ -469,6 +469,9 @@ export async function searchAndPromoteBrowserConfig(
             status: 'ACTIVE',
             closedAt: null,
             provider: config.provider,
+            providerProfileId: session.profileId,
+            providerProfileSource: session.profileSource,
+            providerProfilePersist: false,
             proxyTier: config.proxyMode,
           },
         });
