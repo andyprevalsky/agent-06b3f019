@@ -31,7 +31,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
-from browser_tools.schemas import AVAILABLE_ACTIONS
+from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
 from domains.request_payment_card.contracts import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
@@ -1806,6 +1806,70 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+async def _feed_browser_tool_validation_error_back(
+    *,
+    error: BrowserToolArgsValidationError,
+    action_history: Any,
+    browser_turn_messages: List[Dict[str, Any]],
+    dom_service: Any,
+    browser_state: Dict[str, Any],
+    task_prompt: str,
+    iteration: int,
+    agent_id: str,
+    task_id: str,
+    browser_url: str,
+) -> None:
+    """Route a model tool-arg validation error through the normal tool-result path.
+
+    A schema rejection of the model's OWN tool arguments is a model-output error, not
+    a Rose transport/infra failure. Record it in action_history and append it to
+    browser_turn_messages so the NEXT decision turn sees the rejection and can
+    self-correct, and emit a visible ERROR trajectory row — exactly how execution
+    errors are surfaced. Deliberately mirrors the auth-blocked branch; it must never
+    be swallowed, hidden, or counted toward the consecutive-API-failure abort budget.
+    """
+    validation_message = (
+        f"Your `{error.tool_name}` tool call was rejected because its arguments "
+        f"failed validation:\n{error.detail}\n"
+        "Fix the arguments and call the tool again, or choose a different action."
+    )
+    result = {"success": False, "error": validation_message}
+    tool_call_id_action = str(uuid_module.uuid4())
+    synthetic_action = {
+        "action": error.tool_name,
+        "thinking": error.thinking or "",
+        "params": error.tool_args,
+    }
+    await action_history.record_action(
+        dom_service=dom_service,
+        action=error.tool_name,
+        thinking=error.thinking or "",
+        params=error.tool_args,
+        result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages,
+        task=task_prompt,
+        browser_state=browser_state,
+        include_screenshot=False,
+        unified_action=synthetic_action,
+        result=result,
+        tool_call_id=tool_call_id_action,
+    )
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title=f"Invalid {error.tool_name} arguments — retrying",
+        task_id=task_id,
+        message=validation_message,
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url,
+        action_type=error.tool_name,
+        tool_call_id=tool_call_id_action,
+        steps_taken=iteration,
+        total_steps=MAX_ITERATIONS,
+    )
 
 
 def json_dumps_compact(value: Any) -> str:
@@ -5830,6 +5894,31 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
+            except BrowserToolArgsValidationError as validation_error:
+                # The model chose a real tool but supplied arguments its schema
+                # rejects. This is a model-output error, NOT a Rose transport/infra
+                # failure: feed it back through the normal tool-result path so the
+                # next turn sees the rejection and self-corrects, keep it visible in
+                # the trajectory, and do NOT count it toward the abort budget.
+                logger.info(
+                    f"Browser tool args rejected ({validation_error.tool_name}); feeding validation error back to model",
+                    iteration=iteration,
+                    detail=validation_error.detail,
+                )
+                consecutive_api_failures = 0
+                await _feed_browser_tool_validation_error_back(
+                    error=validation_error,
+                    action_history=action_history,
+                    browser_turn_messages=browser_turn_messages,
+                    dom_service=dom_service,
+                    browser_state=browser_state,
+                    task_prompt=task_prompt,
+                    iteration=iteration,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    browser_url=browser_url,
+                )
+                continue
             except Exception as e:
                 consecutive_api_failures += 1
                 logger.error(
