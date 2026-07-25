@@ -2054,8 +2054,9 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
     source='documents' via a completed explore spawn_agent. The FINAL answer's per-provider
     PASS/VERIFY checklist is no longer parsed structurally here — the agent's response_schema
     auto-generates at create time and its shape varies, so a rigid structured parse produced false
-    'Seen: []' failures. That final-answer quality check now runs as a semantic LLM judge
-    (`_judge_user_data_prod_grep_final_answer`)."""
+    'Seen: []' failures. That final-answer quality check now runs as a reusable, key-name-agnostic
+    semantic judge over the agent's populated output schema
+    (`_judge_output_recovers_expected_fields`)."""
     seen_providers: set[str] = set()
     matching_grep_calls = 0
     completed_explore_spawns = 0
@@ -2115,71 +2116,83 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
     return None
 
 
-def _extract_final_answer_text(messages: List[dict]) -> str:
-    """Collect the agent's final-answer evidence for semantic judging: the tail of its assistant
-    messages plus any completion-summary outputs (serialized). Deliberately schema-agnostic — the
-    response_schema auto-generates and its shape varies, so we judge the substance, not a key name."""
-    assistant_texts: list[str] = []
-    completion_blobs: list[str] = []
+# ── Reusable semantic output evaluator (not overfitted to any one task) ──────────────────────────
+# A key-name-agnostic LLM judge: given a task's REQUIRED output fields and the agent's POPULATED
+# output schema, it scores 1.0 only when every required field's value is recoverable from that
+# output — matched by MEANING, not by key name. This replaces brittle per-task structured parses and
+# is reusable: e.g. "did the output contain a cost / a receipt id" without pinning the exact key.
+# Declare a task's fields in SEMANTIC_OUTPUT_EXPECTATIONS; the judge does the mapping.
+SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, List[Dict[str, str]]] = {
+    "user-data-prod-grep": [
+        {
+            "name": f"{provider}_row",
+            "description": (
+                f"A checklist row for provider '{provider}' that EITHER cites concrete synced-document "
+                f"evidence (a documents/{provider}/... path or an exact snippet) OR honestly states that "
+                f"no document evidence is currently synced for {provider}. An honest empty is correct; a "
+                f"row claiming verified evidence WITHOUT a documents source is fabricated and must fail."
+            ),
+        }
+        for provider in ("chatgpt", "claude", "apple_notes", "obsidian")
+    ],
+}
+
+SEMANTIC_OUTPUT_JUDGE_PROMPT = """You are a strict benchmark output judge. You are given (1) a list of REQUIRED OUTPUT FIELDS, each with a description of what it must contain, and (2) an agent's POPULATED OUTPUT (the response schema it generated and the values it filled in).
+
+For EACH required field, decide whether you can recover a correct value for it from the agent's output — matching by MEANING, not by key name. The agent may use any key names, nesting, or wording; a field counts as recovered whenever its required information is present and correct (e.g. a required "cost" is satisfied by ANY key holding the correct total amount, whether named cost, total, amount, price, ...). When a field's description explicitly permits an honest negative (e.g. "or state that no data is synced"), that honest statement also counts as recovered.
+
+Score exactly 1.0 only if EVERY required field is recoverable. Score 0.0 if any required field is missing, unrecoverable, or contradicted (including evidence a field's description marks as fabricated). Give the score and a one-line reason naming the FIRST field you could not recover."""
+
+
+def _extract_agent_structured_output(messages: List[dict], root_agent_data: Optional[dict]) -> str:
+    """The agent's POPULATED output — the response schema it generated plus the completion-summary
+    structured outputs it filled in — serialized for semantic judging. Deliberately excludes
+    free-form assistant prose: the populated output schema is the contract we judge against."""
+    populated_outputs: List[dict] = []
     for msg in messages:
         meta = msg.get("metadata") or {}
         summary = meta.get("completionSummary")
-        if summary:
-            completion_blobs.append(json.dumps(summary, default=str))
-        if str(msg.get("role") or "").upper() == "ASSISTANT":
-            text = _benchmark_message_text(msg)
-            if text.strip():
-                assistant_texts.append(text)
-    tail = "\n\n".join(assistant_texts[-3:])
-    summary_text = "\n\n".join(completion_blobs[-2:])
-    return "\n\n".join(part for part in [tail, summary_text] if part.strip())
+        if not summary:
+            continue
+        for out in summary.get("outputs") or []:
+            populated_outputs.append({"key": out.get("key"), "value": out.get("value")})
+    response_schema = ((root_agent_data or {}).get("agent") or {}).get("response_schema")
+    blob = {"generated_response_schema": response_schema, "populated_outputs": populated_outputs}
+    return json.dumps(blob, default=str, indent=2)
 
 
-async def _judge_user_data_prod_grep_final_answer(
-    root_agent_id: str, messages: List[dict]
+async def _judge_output_recovers_expected_fields(
+    root_agent_id: str,
+    agent_output_blob: str,
+    expected_fields: List[Dict[str, str]],
+    task_label: str,
 ) -> Optional[str]:
-    """Semantic LLM judge for the prod user-data final answer (replaces the brittle structured
-    checklist parse — H-01). Verify the final answer presents an honest PASS/VERIFY checklist
-    covering all four V1 providers, each row either citing concrete documents evidence or honestly
-    reporting no synced data. Returns None on pass, or a failure reason on fail."""
+    """Reusable semantic output judge (see SEMANTIC_OUTPUT_EXPECTATIONS). Returns None on pass, or a
+    failure reason. Scores 1.0 only when every expected field is recoverable from the agent's
+    populated output, regardless of the key names the agent chose."""
     from helpers.llm import check_progress
 
-    final_answer = _extract_final_answer_text(messages)
-    if not final_answer.strip():
-        return "User-data prod grep produced no final answer to judge."
+    if not agent_output_blob.strip() or agent_output_blob.strip() in ("{}", "null"):
+        return f"{task_label}: agent produced no populated output schema to judge."
+    if not expected_fields:
+        return None
 
-    judge_prompt = """You are a strict benchmark judge for a prod user-data validation task.
-
-The agent had to produce a FINAL PASS/VERIFY checklist with one row per document provider for ALL
-FOUR of: chatgpt, claude, apple_notes, obsidian. Each row must EITHER cite concrete grep evidence
-from that provider's synced documents (a documents/<provider>/... path or an exact snippet) OR
-honestly state that no document evidence is currently synced for that provider — a legitimately
-empty provider is a CORRECT outcome, not a failure.
-
-Score exactly 1.0 only when the final answer covers all four providers this way. Score 0.0 if any
-of the four providers is missing from the checklist, or if a row claims verified evidence for a
-provider without citing a concrete documents source (fabricated evidence). Do NOT require any
-specific field names or output schema — judge the substance of the free-text answer. Give a score
-and a one-line reason naming the first missing or fabricated provider."""
-
+    fields_desc = "\n".join(f"- {f['name']}: {f['description']}" for f in expected_fields)
     judged = await check_progress(
         context=[
-            {
-                "role": "USER",
-                "text": "Judge the final answer's four-provider PASS/VERIFY checklist.",
-            },
-            {"role": "TOOL", "text": final_answer[:8000]},
+            {"role": "USER", "text": f"REQUIRED OUTPUT FIELDS:\n{fields_desc}"},
+            {"role": "TOOL", "text": f"AGENT POPULATED OUTPUT:\n{agent_output_blob[:8000]}"},
         ],
-        verifier_system_prompt=judge_prompt,
+        verifier_system_prompt=SEMANTIC_OUTPUT_JUDGE_PROMPT,
         response_schema=None,
-        call_site="user_data_prod_grep_final_judge",
+        call_site="semantic_output_field_recovery_judge",
         agent_id=root_agent_id,
     )
     score = float(judged.get("score", 0.0))
     if score >= 1.0:
         return None
     reasoning = str(judged.get("reasoning") or "no reasoning")
-    return f"User-data prod grep final checklist judge failed (score={score}): {reasoning}"
+    return f"{task_label}: semantic output judge failed (score={score}): {reasoning}"
 
 
 async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: str) -> Optional[str]:
@@ -2198,8 +2211,16 @@ async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: st
     gate_a_error = _validate_user_data_prod_grep_messages(messages)
     if gate_a_error is not None:
         return gate_a_error
-    # Gate B (semantic): the final PASS/VERIFY checklist covers all four providers honestly.
-    return await _judge_user_data_prod_grep_final_answer(root_agent_id, messages)
+    # Gate B (semantic, reusable): the agent's populated output must let us recover a checklist row
+    # for every provider — key-name-agnostic, so an auto-generated schema of any shape passes.
+    root_data = await get_agent(base_url, root_agent_id)
+    agent_output_blob = _extract_agent_structured_output(messages, root_data)
+    return await _judge_output_recovers_expected_fields(
+        root_agent_id,
+        agent_output_blob,
+        SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"],
+        "user-data-prod-grep",
+    )
 
 
 def _validate_tool_count_expectations(

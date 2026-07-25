@@ -8139,53 +8139,102 @@ def test_user_data_prod_grep_requires_all_provider_filters():
 
 
 def test_user_data_prod_grep_final_answer_semantic_judge():
-    """H-01: the prod user-data final answer is judged semantically (LLM), not by structured parse.
+    """H-01: the final answer is judged by a REUSABLE, key-name-agnostic semantic output judge over
+    the agent's POPULATED output schema (completion-summary outputs + generated response_schema), not
+    a rigid structured parse and not free-text assistant prose.
 
-    response_schema auto-generates at agent-create and its shape varies, so the old rigid
-    completionSummary parse produced false 'Seen: []' failures. The final PASS/VERIFY checklist is
-    now scored by an LLM judge over the free-text answer."""
+    response_schema auto-generates at agent-create and its shape varies, so the old rigid parse
+    produced false 'Seen: []' failures. The judge now asks only whether each required field is
+    recoverable from the populated output regardless of key name."""
     import asyncio
     from unittest.mock import AsyncMock, patch
     from benchmarks.run_benchmark import (
-        _extract_final_answer_text,
-        _judge_user_data_prod_grep_final_answer,
+        SEMANTIC_OUTPUT_EXPECTATIONS,
+        _extract_agent_structured_output,
+        _judge_output_recovers_expected_fields,
     )
 
+    # The agent's POPULATED output (arbitrary key names) — NOT the four expected field names.
     messages = [
         {
             "role": "ASSISTANT",
-            "text": (
-                "PASS/VERIFY checklist:\n"
-                "- chatgpt: no synced document evidence\n"
-                "- claude: goal (documents/claude/session.json)\n"
-                "- apple_notes: project (documents/apple_notes/note:1)\n"
-                "- obsidian: tool (documents/obsidian/vault/note.md)"
-            ),
+            "text": "here is my summary",
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [
+                        {
+                            "key": "provider_audit",  # deliberately not our expected key names
+                            "value": [
+                                {"who": "chatgpt", "note": "no synced document evidence"},
+                                {"who": "claude", "path": "documents/claude/session.json"},
+                                {"who": "apple_notes", "path": "documents/apple_notes/note:1"},
+                                {"who": "obsidian", "path": "documents/obsidian/vault/note.md"},
+                            ],
+                        }
+                    ]
+                }
+            },
         },
     ]
-    final_text = _extract_final_answer_text(messages)
-    assert "chatgpt" in final_text and "obsidian" in final_text
+    root_data = {"agent": {"response_schema": {"fields": [{"name": "provider_audit"}]}}}
 
-    # Judge PASSES (score 1.0) → no failure reason.
+    blob = _extract_agent_structured_output(messages, root_data)
+    assert "provider_audit" in blob and "documents/claude/session.json" in blob
+    # The extractor judges the populated output schema, not free-text prose.
+    assert "here is my summary" not in blob
+
+    fields = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
+
+    # Judge PASSES (score 1.0) → no failure reason, even though keys differ from field names.
     with patch(
         "helpers.llm.check_progress",
-        new=AsyncMock(return_value={"score": 1.0, "reasoning": "all four providers covered"}),
+        new=AsyncMock(return_value={"score": 1.0, "reasoning": "all four rows recoverable"}),
     ):
-        result = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", messages))
+        result = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, fields, "user-data-prod-grep")
+        )
     assert result is None
 
     # Judge FAILS (score 0.0) → the judge's reason surfaces as the failure.
     with patch(
         "helpers.llm.check_progress",
-        new=AsyncMock(return_value={"score": 0.0, "reasoning": "missing obsidian row"}),
+        new=AsyncMock(return_value={"score": 0.0, "reasoning": "could not recover obsidian_row"}),
     ):
-        failure = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", messages))
-    assert failure is not None
-    assert "missing obsidian row" in failure
+        failure = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, fields, "user-data-prod-grep")
+        )
+    assert failure is not None and "obsidian_row" in failure
 
-    # No final answer → judged as missing without an LLM call.
-    empty = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", []))
-    assert empty is not None and "no final answer" in empty
+    # No populated output → judged as missing without an LLM call.
+    empty = asyncio.run(
+        _judge_output_recovers_expected_fields("agent-1", "{}", fields, "user-data-prod-grep")
+    )
+    assert empty is not None and "no populated output schema" in empty
+
+    # REUSABLE / not overfitted: the same judge works for a totally different task's fields
+    # (receipt id + cost) with arbitrary agent key names — proving it isn't pinned to one task.
+    receipt_messages = [
+        {
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [{"key": "order", "value": {"confirmation": "tp_c505", "paid": 43.96}}]
+                }
+            }
+        }
+    ]
+    receipt_blob = _extract_agent_structured_output(receipt_messages, None)
+    receipt_fields = [
+        {"name": "receipt_id", "description": "the order/receipt/confirmation identifier"},
+        {"name": "cost", "description": "the total amount paid, any currency/key name"},
+    ]
+    with patch(
+        "helpers.llm.check_progress",
+        new=AsyncMock(return_value={"score": 1.0, "reasoning": "receipt_id and cost both present"}),
+    ):
+        receipt_ok = asyncio.run(
+            _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_fields, "receipt-task")
+        )
+    assert receipt_ok is None
 
 
 def test_admin_bypass_card_mint_variant_wiring():
