@@ -146,7 +146,6 @@ USER_DATA_PROD_GREP_TASK_NAME = "user-data-prod-grep"
 MESSAGE_PERSON_TASK_NAME = "message-person"
 MESSAGE_PERSON_AGENT_SMS_TASK_NAME = "message-person-agent-sms"
 USER_DATA_PROD_DOCUMENT_SOURCES = {"chatgpt", "claude", "apple_notes", "obsidian"}
-USER_DATA_PROD_CHECKLIST_KEYS = {"provider_validation_checklist", "provider_verification_checklist"}
 GREP_BASE_SNAPSHOT_ENV = "BENCHMARK_GREP_BASE_SNAPSHOT"
 PLAID_TRANSACTION_BENCHMARK_TASK_NAMES = {
     "plaid-transactions-monthly-spend",
@@ -180,9 +179,16 @@ FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000101"
 PURCHASE_SUBSCRIPTION_GATE_TASK_NAME = "gate-subscription-card-mint"
 PURCHASE_KYC_GATE_TASK_NAME = "gate-kyc-card-mint"
 SOURCE_CONNECT_GATE_TASK_NAME = "gate-source-connect-gmail"
+# Admin-bypass counterpart to gate-subscription-card-mint: same depleted (no-subscription) fixture,
+# but the run user is a synthetic ADMIN (via ADMIN_USER_IDS_EXTRA), so the card must mint with NO
+# subscription gate. Proves the admin bypass end-to-end. Local-only.
+PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME = "gate-subscription-card-mint-admin-bypass"
 PURCHASE_SUBSCRIPTION_GATE_USER_ID = "00000000-0000-4000-8000-000000000102"
 PURCHASE_KYC_GATE_USER_ID = "00000000-0000-4000-8000-000000000103"
 SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
+# Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
+# benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
+ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
 # Repeatable-cache baselines from local smoke run
 # 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
 # agent identity + call site and excludes one-shot calls. Per the one-way
@@ -201,11 +207,14 @@ CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_ENV = "BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_W
 CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY_TASKS = {"claude-code-agent"}
 GATE_FIXTURE_TASK_MODES = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: "purchase-subscription",
+    # Admin bypass reuses the same depleted fixture; only the run user (an admin) differs.
+    PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME: "purchase-subscription",
     PURCHASE_KYC_GATE_TASK_NAME: "purchase-kyc",
     SOURCE_CONNECT_GATE_TASK_NAME: "source-connect",
 }
 GATE_FIXTURE_TASK_USER_IDS = {
     PURCHASE_SUBSCRIPTION_GATE_TASK_NAME: PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+    PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME: ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
     PURCHASE_KYC_GATE_TASK_NAME: PURCHASE_KYC_GATE_USER_ID,
     SOURCE_CONNECT_GATE_TASK_NAME: SOURCE_CONNECT_GATE_USER_ID,
 }
@@ -2041,9 +2050,13 @@ def _benchmark_message_text(msg: dict) -> str:
 
 
 def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str]:
-    """Require prod user-data benchmark grep calls to cover every provider explicitly."""
+    """Gate A (mechanical) for the prod user-data benchmark: every provider must be grepped from
+    source='documents' via a completed explore spawn_agent. The FINAL answer's per-provider
+    PASS/VERIFY checklist is no longer parsed structurally here — the agent's response_schema
+    auto-generates at create time and its shape varies, so a rigid structured parse produced false
+    'Seen: []' failures. That final-answer quality check now runs as a semantic LLM judge
+    (`_judge_user_data_prod_grep_final_answer`)."""
     seen_providers: set[str] = set()
-    final_providers: set[str] = set()
     matching_grep_calls = 0
     completed_explore_spawns = 0
     invalid_spawns: List[str] = []
@@ -2068,39 +2081,6 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
             and not meta.get("subAgentId")
         ):
             completed_explore_spawns += 1
-
-        completion_summary = meta.get("completionSummary") or {}
-        for output in completion_summary.get("outputs") or []:
-            # Accept any provider checklist output. The agent's exact key name
-            # varies run to run (provider_validation_checklist,
-            # provider_verification_checklist, provider_checklist, ...), so match
-            # on the "checklist" intent rather than an exact-name allowlist.
-            output_key = str(output.get("key") or "").strip().lower()
-            if output_key not in USER_DATA_PROD_CHECKLIST_KEYS and "checklist" not in output_key:
-                continue
-            for item in output.get("value") or []:
-                if not isinstance(item, dict):
-                    continue
-                provider = str(item.get("provider") or "").strip().lower()
-                if provider not in USER_DATA_PROD_DOCUMENT_SOURCES:
-                    continue
-                document_path = str(item.get("document_path") or "")
-                appears_verified = bool(
-                    item.get("appears_verified_from_prod_data", item.get("verified_from_prod_data"))
-                )
-                # Gate A already verified each provider was grepped from
-                # source='documents', so we no longer parse the agent's free-form
-                # `grep_filters_used` string (its wording/key names vary run to
-                # run and produced false negatives). A checklist row counts as
-                # covering its provider when it either cites a concrete
-                # documents/<provider> evidence path OR honestly reports that the
-                # provider had no synced prod data (verified flag False) — a
-                # legitimately-empty provider is a correct outcome and must not
-                # fail the checklist. Only a row that CLAIMS verification without
-                # a documents/ path (fabricated evidence) is rejected.
-                if appears_verified and not document_path.startswith("documents/"):
-                    continue
-                final_providers.add(provider)
 
         if meta.get("toolName") != "grep" or meta.get("toolStatus") != "FINISHED":
             continue
@@ -2132,14 +2112,74 @@ def _validate_user_data_prod_grep_messages(messages: List[dict]) -> Optional[str
             "before finalizing. Completed explore spawn_agent calls: "
             f"{completed_explore_spawns}"
         )
-    missing_final = USER_DATA_PROD_DOCUMENT_SOURCES - final_providers
-    if missing_final:
-        return (
-            "User-data prod grep final provider_validation_checklist must cite every V1 provider "
-            "with source='documents' grep filters and a prod evidence boolean. "
-            f"Missing final providers: {sorted(missing_final)}. Seen: {sorted(final_providers)}"
-        )
     return None
+
+
+def _extract_final_answer_text(messages: List[dict]) -> str:
+    """Collect the agent's final-answer evidence for semantic judging: the tail of its assistant
+    messages plus any completion-summary outputs (serialized). Deliberately schema-agnostic — the
+    response_schema auto-generates and its shape varies, so we judge the substance, not a key name."""
+    assistant_texts: list[str] = []
+    completion_blobs: list[str] = []
+    for msg in messages:
+        meta = msg.get("metadata") or {}
+        summary = meta.get("completionSummary")
+        if summary:
+            completion_blobs.append(json.dumps(summary, default=str))
+        if str(msg.get("role") or "").upper() == "ASSISTANT":
+            text = _benchmark_message_text(msg)
+            if text.strip():
+                assistant_texts.append(text)
+    tail = "\n\n".join(assistant_texts[-3:])
+    summary_text = "\n\n".join(completion_blobs[-2:])
+    return "\n\n".join(part for part in [tail, summary_text] if part.strip())
+
+
+async def _judge_user_data_prod_grep_final_answer(
+    root_agent_id: str, messages: List[dict]
+) -> Optional[str]:
+    """Semantic LLM judge for the prod user-data final answer (replaces the brittle structured
+    checklist parse — H-01). Verify the final answer presents an honest PASS/VERIFY checklist
+    covering all four V1 providers, each row either citing concrete documents evidence or honestly
+    reporting no synced data. Returns None on pass, or a failure reason on fail."""
+    from helpers.llm import check_progress
+
+    final_answer = _extract_final_answer_text(messages)
+    if not final_answer.strip():
+        return "User-data prod grep produced no final answer to judge."
+
+    judge_prompt = """You are a strict benchmark judge for a prod user-data validation task.
+
+The agent had to produce a FINAL PASS/VERIFY checklist with one row per document provider for ALL
+FOUR of: chatgpt, claude, apple_notes, obsidian. Each row must EITHER cite concrete grep evidence
+from that provider's synced documents (a documents/<provider>/... path or an exact snippet) OR
+honestly state that no document evidence is currently synced for that provider — a legitimately
+empty provider is a CORRECT outcome, not a failure.
+
+Score exactly 1.0 only when the final answer covers all four providers this way. Score 0.0 if any
+of the four providers is missing from the checklist, or if a row claims verified evidence for a
+provider without citing a concrete documents source (fabricated evidence). Do NOT require any
+specific field names or output schema — judge the substance of the free-text answer. Give a score
+and a one-line reason naming the first missing or fabricated provider."""
+
+    judged = await check_progress(
+        context=[
+            {
+                "role": "USER",
+                "text": "Judge the final answer's four-provider PASS/VERIFY checklist.",
+            },
+            {"role": "TOOL", "text": final_answer[:8000]},
+        ],
+        verifier_system_prompt=judge_prompt,
+        response_schema=None,
+        call_site="user_data_prod_grep_final_judge",
+        agent_id=root_agent_id,
+    )
+    score = float(judged.get("score", 0.0))
+    if score >= 1.0:
+        return None
+    reasoning = str(judged.get("reasoning") or "no reasoning")
+    return f"User-data prod grep final checklist judge failed (score={score}): {reasoning}"
 
 
 async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: str) -> Optional[str]:
@@ -2153,7 +2193,13 @@ async def validate_user_data_prod_grep_contract(base_url: str, root_agent_id: st
         except Exception:
             continue
         messages.extend(data.get("messages", []))
-    return _validate_user_data_prod_grep_messages(messages)
+
+    # Gate A (mechanical): every provider grepped from source='documents' via a completed explore.
+    gate_a_error = _validate_user_data_prod_grep_messages(messages)
+    if gate_a_error is not None:
+        return gate_a_error
+    # Gate B (semantic): the final PASS/VERIFY checklist covers all four providers honestly.
+    return await _judge_user_data_prod_grep_final_answer(root_agent_id, messages)
 
 
 def _validate_tool_count_expectations(

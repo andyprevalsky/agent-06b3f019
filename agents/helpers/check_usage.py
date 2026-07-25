@@ -55,10 +55,14 @@ async def check_user_usage(user_id: str) -> dict:
                     usage_data = response.json()
 
                     remaining = usage_data.get("remaining", 0)
-                    has_credits = remaining > 0
+                    # Admins (ADMIN_USER_IDS) carry an `unlimited` flag from the backend and are
+                    # never blocked by the free-credit / subscription gate, regardless of balance.
+                    unlimited = bool(usage_data.get("unlimited", False))
+                    has_credits = unlimited or remaining > 0
 
                     activity.logger.info(
-                        f"💰 Usage check complete: ${remaining:.2f} remaining (has_credits: {has_credits})"
+                        f"💰 Usage check complete: ${remaining:.2f} remaining "
+                        f"(has_credits: {has_credits}, unlimited: {unlimited})"
                     )
 
                     return {

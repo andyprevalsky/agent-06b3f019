@@ -17,7 +17,7 @@ import { PurchaseError } from './errors';
 import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { reclaimPurchaseWalletFunding } from './walletFunding';
-import { chargeAndIssueCard } from './charge';
+import { resolveAndIssuePurchaseCard } from './issueCard';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 import {
   ensureAllLegacyFingerprintsIndexed,
@@ -343,13 +343,6 @@ export async function mintPurchaseCard(
     throw kycRequiredPurchaseError();
   }
 
-  const subscription = await repo.findSubscriptionByUserId(input.userId);
-  const stripeCustomerId = subscription?.stripeCustomerId;
-  if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
-    throw new PurchaseError('User does not have a Stripe billing customer', 402);
-  }
-
-  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
-  return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
+  // Admin bypass vs. the standard subscription/card-on-file path is decided in charge.ts.
+  return resolveAndIssuePurchaseCard(purchase, input, cardProvider, walletFundingProvider);
 }

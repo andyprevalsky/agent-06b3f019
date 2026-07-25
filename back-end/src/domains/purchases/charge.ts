@@ -46,6 +46,16 @@ interface ChargeState {
   issuedStaticCard: boolean;
 }
 
+function freshChargeState(): ChargeState {
+  return {
+    paymentIntentCaptured: false,
+    paymentReversalFailed: false,
+    walletWasFunded: false,
+    walletReclaimFailed: false,
+    issuedStaticCard: false,
+  };
+}
+
 function sanitizeDescriptorSuffix(merchant: string): string {
   const cleaned = merchant
     .replace(/[^a-zA-Z0-9 ._-]/g, ' ')
@@ -94,12 +104,17 @@ async function authorizeStripeHold(
   return paymentIntent;
 }
 
-/** Mint the company-funded card, capture the user's charge, and mark the purchase HELD. */
+/**
+ * Mint the company-funded card, capture the user's charge (when there is one), and mark the
+ * purchase HELD. `paymentIntent` is `undefined` for the admin no-charge flow: the card is funded
+ * entirely by the AgentCard company transfer (Rose fronts the cost) and there is no Stripe hold to
+ * capture.
+ */
 async function mintCaptureAndIssue(
   state: ChargeState,
   purchase: PurchaseSpend,
   input: MintPurchaseInput,
-  paymentIntent: StripePaymentIntent,
+  paymentIntent: StripePaymentIntent | undefined,
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
@@ -137,8 +152,11 @@ async function mintCaptureAndIssue(
     state.walletWasFunded = true;
     await recordPurchaseWalletFunding(purchase, 'usd', transferId, minted.metadata);
   }
-  await captureAuthorizedHold(paymentIntent.id);
-  state.paymentIntentCaptured = true;
+  // Admin no-charge flow has no Stripe hold to capture; the card is already fully company-funded.
+  if (paymentIntent !== undefined) {
+    await captureAuthorizedHold(paymentIntent.id);
+    state.paymentIntentCaptured = true;
+  }
   const details = await state.activeCardProvider.getDetails(minted.cardId);
   await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
     mint_request: cardRequest,
@@ -152,7 +170,7 @@ async function mintCaptureAndIssue(
 
   await repo.updatePurchaseStatus(purchaseId, PurchaseSpendStatus.HELD, {
     cardId: minted.cardId,
-    stripePaymentIntentId: paymentIntent.id,
+    ...(paymentIntent !== undefined ? { stripePaymentIntentId: paymentIntent.id } : {}),
   });
 
   return {
@@ -276,13 +294,7 @@ export async function chargeAndIssueCard(
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
-  const state: ChargeState = {
-    paymentIntentCaptured: false,
-    paymentReversalFailed: false,
-    walletWasFunded: false,
-    walletReclaimFailed: false,
-    issuedStaticCard: false,
-  };
+  const state = freshChargeState();
   try {
     const paymentIntent = await authorizeStripeHold(state, purchase, input, stripeCustomerId);
     return await mintCaptureAndIssue(
@@ -290,6 +302,34 @@ export async function chargeAndIssueCard(
       purchase,
       input,
       paymentIntent,
+      cardProvider,
+      walletFundingProvider
+    );
+  } catch (error) {
+    return await rollbackChargeFailure(state, purchase, input, error);
+  }
+}
+
+/**
+ * Admin-only: issue a company-funded card WITHOUT any personal Stripe charge. Reserved for
+ * `ADMIN_USER_IDS` (Andy + Tamy) purchases that bypass the subscription / card-on-file requirement
+ * — Rose fronts the cost via the AgentCard company transfer and there is no Stripe hold to
+ * capture or reverse. On failure the issued card is closed and its funding reclaimed, exactly like
+ * the charged flow, but no payment reversal is attempted (nothing was charged).
+ */
+export async function issueAdminCompanyCard(
+  purchase: PurchaseSpend,
+  input: MintPurchaseInput,
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
+): Promise<MintPurchaseResult> {
+  const state = freshChargeState();
+  try {
+    return await mintCaptureAndIssue(
+      state,
+      purchase,
+      input,
+      undefined,
       cardProvider,
       walletFundingProvider
     );

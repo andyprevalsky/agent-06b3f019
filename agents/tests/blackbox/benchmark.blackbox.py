@@ -6373,10 +6373,6 @@ def test_runner_fixtures_use_isolated_system_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
-def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
-    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
-
-
 def test_runner_fixtures_retry_transient_local_database_probe_timeout():
     """One bounded psql stall must not abort the benchmark before agent creation."""
     from types import SimpleNamespace
@@ -6843,7 +6839,8 @@ def test_local_port_range_allocation_is_reserved_across_processes():
         child_base_text = child.stdout.readline().strip()
         assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
         child_base = int(child_base_text)
-        occupied = lambda base: {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
+        def occupied(base):
+            return {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
 
         overlapping_base = local_bench.allocate_port_range(child_base - 1)
         parent_bases.append(overlapping_base)
@@ -8119,7 +8116,11 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     assert wrong_spawn_failure is not None
     assert "spawn_general_purpose_agent" in wrong_spawn_failure
 
-    no_final_failure = _validate_user_data_prod_grep_messages(
+    # Gate A no longer parses the final structured checklist (H-01): four completed
+    # source='documents' greps via a completed explore spawn PASS the mechanical gate even without
+    # a completionSummary. The final-answer PASS/VERIFY quality is judged semantically instead
+    # (see test_user_data_prod_grep_final_answer_semantic_judge).
+    no_final_pass = _validate_user_data_prod_grep_messages(
         [
             {
                 "metadata": {
@@ -8134,8 +8135,103 @@ def test_user_data_prod_grep_requires_all_provider_filters():
             grep_msg("obsidian"),
         ]
     )
-    assert no_final_failure is not None
-    assert "provider_validation_checklist" in no_final_failure
+    assert no_final_pass is None
+
+
+def test_user_data_prod_grep_final_answer_semantic_judge():
+    """H-01: the prod user-data final answer is judged semantically (LLM), not by structured parse.
+
+    response_schema auto-generates at agent-create and its shape varies, so the old rigid
+    completionSummary parse produced false 'Seen: []' failures. The final PASS/VERIFY checklist is
+    now scored by an LLM judge over the free-text answer."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.run_benchmark import (
+        _extract_final_answer_text,
+        _judge_user_data_prod_grep_final_answer,
+    )
+
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "text": (
+                "PASS/VERIFY checklist:\n"
+                "- chatgpt: no synced document evidence\n"
+                "- claude: goal (documents/claude/session.json)\n"
+                "- apple_notes: project (documents/apple_notes/note:1)\n"
+                "- obsidian: tool (documents/obsidian/vault/note.md)"
+            ),
+        },
+    ]
+    final_text = _extract_final_answer_text(messages)
+    assert "chatgpt" in final_text and "obsidian" in final_text
+
+    # Judge PASSES (score 1.0) → no failure reason.
+    with patch(
+        "helpers.llm.check_progress",
+        new=AsyncMock(return_value={"score": 1.0, "reasoning": "all four providers covered"}),
+    ):
+        result = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", messages))
+    assert result is None
+
+    # Judge FAILS (score 0.0) → the judge's reason surfaces as the failure.
+    with patch(
+        "helpers.llm.check_progress",
+        new=AsyncMock(return_value={"score": 0.0, "reasoning": "missing obsidian row"}),
+    ):
+        failure = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", messages))
+    assert failure is not None
+    assert "missing obsidian row" in failure
+
+    # No final answer → judged as missing without an LLM call.
+    empty = asyncio.run(_judge_user_data_prod_grep_final_answer("agent-1", []))
+    assert empty is not None and "no final answer" in empty
+
+
+def test_admin_bypass_card_mint_variant_wiring():
+    """The admin-bypass card-mint benchmark inverts the gate contract: same depleted fixture, a
+    synthetic ADMIN run user, and an assertion that a card is minted with NO subscription gate."""
+    from benchmarks.run_benchmark import (
+        GATE_FIXTURE_TASK_MODES,
+        GATE_FIXTURE_TASK_USER_IDS,
+        PURCHASE_SUBSCRIPTION_GATE_TASK_NAME,
+        PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME,
+        PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+        ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
+    )
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    # Both variants share the depleted purchase-subscription fixture...
+    assert (
+        GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == "purchase-subscription"
+    )
+    assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == "purchase-subscription"
+    # ...but run as different users: a synthetic admin vs a plain non-admin.
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    )
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME]
+        == PURCHASE_SUBSCRIPTION_GATE_USER_ID
+    )
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID != PURCHASE_SUBSCRIPTION_GATE_USER_ID
+
+    non_admin = get_task_by_name(PURCHASE_SUBSCRIPTION_GATE_TASK_NAME)
+    admin = get_task_by_name(PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME)
+
+    # Non-admin still expects the blocking subscription gate.
+    assert non_admin.expected_gate and non_admin.expected_gate.get("type") == "subscription"
+    non_admin_checks = {c["type"] for e in non_admin.evaluators for c in e.get("checks", [])}
+    assert "expected_gate" in non_admin_checks
+
+    # Admin variant expects NO gate — instead a minted-card payment receipt.
+    assert getattr(admin, "expected_gate", None) is None
+    assert admin.expected_payment_receipt is True
+    admin_checks = {c["type"] for e in admin.evaluators for c in e.get("checks", [])}
+    assert "expected_gate" not in admin_checks
+    assert "expected_payment_receipt" in admin_checks
 
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():
