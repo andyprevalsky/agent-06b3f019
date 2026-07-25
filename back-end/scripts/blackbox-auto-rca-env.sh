@@ -9,3 +9,4 @@ export SLACK_SIGNING_SECRET=blackbox-slack-signing-secret
 export SLACK_BOT_TOKEN=xoxb-blackbox-slack-token
 export SLACK_ERROR_CHANNEL_ID=C0BE1B87882
 export GITHUB_DISPATCH_TOKEN=github-blackbox-dispatch-token
+export STRIPE_SECRET_KEY=sk_test_blackbox_capture_only

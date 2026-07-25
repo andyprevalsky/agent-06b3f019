@@ -1,38 +1,46 @@
 name: Auto RCA — deploy approved fix
 
+# Approval state machine:
+# ready PR -> APPROVED review | exact maintainer /deploy comment
+# -> bind approval to current HEAD -> authority + queued-feedback guards
+# -> trusted Auto RCA run green -> recheck same HEAD -> merge.
+
 on:
   pull_request_review:
     types: [submitted]
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: auto-rca-deploy-${{ github.event.pull_request.number }}
+  group: auto-rca-deploy-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
   deploy:
     if: >-
+      (github.event_name == 'pull_request_review' &&
       github.event.review.state == 'approved' &&
       github.event.review.user.type == 'User' &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.draft == false &&
-      startsWith(github.event.pull_request.head.ref, 'auto-rca/')
+      startsWith(github.event.pull_request.head.ref, 'auto-rca/')) ||
+      (github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.type == 'User' &&
+      github.event.comment.body == '/deploy')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       actions: read
       contents: write
+      issues: read
       pull-requests: write
 
     env:
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
-      PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-      PR_DRAFT: ${{ github.event.pull_request.draft }}
-      PR_TITLE: ${{ github.event.pull_request.title }}
-      PR_BODY: ${{ github.event.pull_request.body }}
+      PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
       REVIEW_COMMIT_SHA: ${{ github.event.review.commit_id }}
-      REVIEWER: ${{ github.event.review.user.login }}
+      REVIEWER: ${{ github.event.review.user.login || github.event.comment.user.login }}
+      APPROVAL_KIND: ${{ github.event_name == 'issue_comment' && 'deploy-comment' || 'review' }}
 
     steps:
       - name: Checkout trusted lifecycle code
@@ -46,6 +54,42 @@ jobs:
           sudo install -o root -g root -m 0555 scripts/auto-rca-tool /usr/local/bin/rose-auto-rca-tool
           sudo install -o root -g root -m 0555 scripts/check-prompt-human-approval.sh /usr/local/bin/rose-prompt-approval-guard
           sudo install -o root -g root -m 0555 scripts/check-agent-behavior-approval.sh /usr/local/bin/rose-agent-behavior-approval-guard
+
+      - name: Resolve the exact approval snapshot
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || { echo 'Invalid PR number.' >&2; exit 1; }
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          [ "$(printf '%s' "$pr" | jq -r '.state')" = open ] || {
+            echo 'Approved deploy requires an open PR.' >&2; exit 1;
+          }
+          head_sha="$(printf '%s' "$pr" | jq -r '.head.sha')"
+          head_ref="$(printf '%s' "$pr" | jq -r '.head.ref')"
+          head_repo="$(printf '%s' "$pr" | jq -r '.head.repo.full_name')"
+          base_ref="$(printf '%s' "$pr" | jq -r '.base.ref')"
+          draft="$(printf '%s' "$pr" | jq -r '.draft')"
+          title="$(printf '%s' "$pr" | jq -r '.title')"
+          [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid PR head.' >&2; exit 1; }
+          [[ "$head_ref" =~ ^auto-rca/[A-Za-z0-9._/-]+$ ]] || {
+            echo 'Approved deploy requires an Auto-RCA branch.' >&2; exit 1;
+          }
+          [[ "$title" =~ ^auto-RCA:\ Production\ agent\ failure\ [0-9a-fA-F-]{36}$ ]] || {
+            echo 'Approved deploy requires the canonical Auto-RCA title.' >&2; exit 1;
+          }
+          approval_sha="${REVIEW_COMMIT_SHA:-$head_sha}"
+          {
+            printf 'PR_HEAD_SHA=%s\n' "$head_sha"
+            printf 'PR_HEAD_REF=%s\n' "$head_ref"
+            printf 'PR_HEAD_REPO=%s\n' "$head_repo"
+            printf 'PR_BASE_REF=%s\n' "$base_ref"
+            printf 'PR_DRAFT=%s\n' "$draft"
+            printf 'PR_TITLE=%s\n' "$title"
+            printf 'PR_BODY_B64=%s\n' "$(printf '%s' "$pr" | jq -r '.body // ""' | base64 -w0)"
+            printf 'REVIEW_COMMIT_SHA=%s\n' "$approval_sha"
+          } >> "$GITHUB_ENV"
 
       - name: Validate exact-head trusted RCA contract
         id: contract
@@ -63,8 +107,10 @@ jobs:
             admin|maintain|write) ;;
             *) echo 'Approved deploy requires a reviewer with write permission.' >&2; exit 1 ;;
           esac
-          decision="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviewDecision --jq '.reviewDecision')"
-          [ "$decision" = APPROVED ] || { echo 'The PR review decision is not APPROVED.' >&2; exit 1; }
+          if [ "$APPROVAL_KIND" = review ]; then
+            decision="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviewDecision --jq '.reviewDecision')"
+            [ "$decision" = APPROVED ] || { echo 'The PR review decision is not APPROVED.' >&2; exit 1; }
+          fi
 
       - name: Refuse approval while reviewer feedback is queued
         shell: bash
@@ -141,9 +187,11 @@ jobs:
           [ "$(printf '%s' "$current" | jq -r '.draft')" = false ] || {
             echo 'PR returned to draft after approval.' >&2; exit 1;
           }
-          [ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviewDecision --jq '.reviewDecision')" = APPROVED ] || {
-            echo 'PR approval was dismissed before merge.' >&2; exit 1;
-          }
+          if [ "$APPROVAL_KIND" = review ]; then
+            [ "$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json reviewDecision --jq '.reviewDecision')" = APPROVED ] || {
+              echo 'PR approval was dismissed before merge.' >&2; exit 1;
+            }
+          fi
           comment_pages="$(gh api --paginate --slurp \
             "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments?per_page=100")"
           pending="$(printf '%s' "$comment_pages" | TRIGGER_COMMENT_ID=1 \
