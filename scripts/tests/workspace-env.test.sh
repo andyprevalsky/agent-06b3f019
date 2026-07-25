@@ -8,6 +8,23 @@ RUN_CONTEXT_SRC="$ROOT_DIR/scripts/lib/run-context.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# Hermeticity: this suite sets the exact identity/trust inputs it asserts on
+# inside each subshell. A deploy shell (or a /descend deploy worktree that has
+# sourced .context/deploy-worktree.env) legitimately exports these same vars —
+# most notably ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 — which would otherwise leak
+# in and make normalize_conductor_workspace_env preserve a stale name that the
+# untrusted-normalization assertions expect to be overridden. Clear them here so
+# the test result never depends on the caller's ambient identity environment.
+unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
+  CONDUCTOR_WORKSPACE_NAME \
+  CONDUCTOR_WORKSPACE_PATH \
+  CONDUCTOR_PORT \
+  BENCHMARK_ISOLATED_RUN \
+  ROSE_DEPLOY_WORKTREE \
+  ROSE_DEPLOY_WORKTREE_PATH \
+  ROSE_DEPLOY_SOURCE_WORKSPACE \
+  TEMPORAL_TASK_QUEUE 2>/dev/null || true
+
 expect_eq() {
   local actual="$1"
   local expected="$2"

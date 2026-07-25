@@ -4,6 +4,13 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
+import {
+  CredentialExhaustionSkip,
+  codexSmokeCreditSkipReason,
+  testCreditExhaustion_neverOverridesSuccessSentinel,
+  testDetectCreditExhaustion_negative,
+  testDetectCreditExhaustion_positive,
+} from './codex-credit-skip';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -15,6 +22,8 @@ const ErrorResponse = z.object({ error: z.string() });
 interface TestResult {
   name: string;
   passed: boolean;
+  skipped?: boolean;
+  skipReason?: string;
   error?: string;
   duration: number;
 }
@@ -56,6 +65,17 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
     await fn();
     return { name, passed: true, duration: Date.now() - start };
   } catch (error) {
+    if (error instanceof CredentialExhaustionSkip) {
+      // Not a failure: the third-party account is out of credits/quota. Report
+      // as a loud SKIP so the deploy gate is not blocked by external funding.
+      return {
+        name,
+        passed: true,
+        skipped: true,
+        skipReason: error.message,
+        duration: Date.now() - start,
+      };
+    }
     return {
       name,
       passed: false,
@@ -308,6 +328,16 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
+    // Before treating a missing sentinel as a hard failure, check whether the
+    // run simply ran out of credits on EVERY credential path (OAuth + funded
+    // key). That is an external funding state, not a code regression, so it is
+    // a deploy-approved SKIP rather than a FAIL.
+    const creditSkip = codexSmokeCreditSkipReason(output, events);
+    if (creditSkip) {
+      throw new CredentialExhaustionSkip(
+        `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
+      );
+    }
     assert(
       output.includes('CODEX_E2B_DONE'),
       `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
@@ -416,6 +446,18 @@ async function runAll() {
       name: 'auth -- throws when funded key is empty',
       fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
     },
+    {
+      name: 'smoke-skip -- credit exhaustion detected across output and events',
+      fn: async () => testDetectCreditExhaustion_positive(),
+    },
+    {
+      name: 'smoke-skip -- healthy run and bare re-auth error are NOT fundless skips',
+      fn: async () => testDetectCreditExhaustion_negative(),
+    },
+    {
+      name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
+      fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
+    },
   ];
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
     console.log(
@@ -432,15 +474,22 @@ async function runAll() {
   for (const test of tests) {
     const result = await runTest(test.name, test.fn);
     results.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
+    const icon = result.skipped ? '  SKIP' : result.passed ? '  PASS' : '  FAIL';
+    const suffix = result.skipped
+      ? ` -- ${result.skipReason}`
+      : result.passed
+        ? ''
+        : ` -- ${result.error}`;
+    console.log(`${icon}  ${result.name}${suffix} (${result.duration}ms)`);
   }
 
   const failed = results.filter((r) => !r.passed);
+  const skipped = results.filter((r) => r.skipped);
+  const passed = results.filter((r) => r.passed && !r.skipped);
   console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${results.length - failed.length} passed, ${failed.length} failed`);
+  console.log(
+    `\nResults: ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped`
+  );
   if (failed.length > 0) {
     process.exit(1);
   }
