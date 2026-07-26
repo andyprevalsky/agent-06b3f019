@@ -157,7 +157,7 @@ jobs:
           echo "Waiting for Render backend to go live on ${BUILD_ID:0:7} before touching routing..."
           RENDER_LIVE=""
           for i in $(seq 1 90); do
-            STATUS_COMMIT=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+            STATUS_COMMIT=$(curl -fsS --connect-timeout 10 --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
               "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=5" 2>/dev/null \
               | BUILD_ID="$BUILD_ID" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const want=(process.env.BUILD_ID||"").slice(0,7);const live=a.find(x=>x.deploy&&x.deploy.status==="live"&&((x.deploy.commit||{}).id||"").slice(0,7)===want);const failed=a.find(x=>x.deploy&&/failed|canceled/.test(x.deploy.status||"")&&((x.deploy.commit||{}).id||"").slice(0,7)===want);process.stdout.write(live?"live":(failed?"failed":"pending"))}catch{process.stdout.write("pending")}})' || echo pending)
             if [ "$STATUS_COMMIT" = "live" ]; then RENDER_LIVE=1; echo "Render backend live on ${BUILD_ID:0:7}"; break; fi
