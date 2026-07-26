@@ -1390,3 +1390,19 @@ model SmsShortcode {
   @@index([userId])
   @@index([expiresAt])
 }
+
+// Singleton pointer to the Temporal task queue that NEW agent workflows route
+// to — the current zero-downtime cutover "generation". Its value is
+// `navi-agent-tasks@<surfaceHash>`, where surfaceHash is the replay-surface hash
+// (scripts/agent_workflow_surface_hash.py). Read on every workflow start (cached
+// in-process, ~5s TTL, so it is O(1) at 10k agents, not a per-start DB hit) and
+// flipped atomically by the deploy cutover. When the row is ABSENT, callers fall
+// back to the TEMPORAL_TASK_QUEUE env var — so this is fully backward-compatible
+// and inert until the cutover writes it.
+model AgentQueuePointer {
+  id          String   @id @default("singleton")
+  taskQueue   String
+  surfaceHash String
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+}

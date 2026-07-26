@@ -132,6 +132,7 @@ from helpers.sms_activities import (
 from helpers.summarize import summarize_and_filter_links
 from helpers.update_tokens import update_agent_tree_cost_activity
 from helpers.worker_activation import wait_for_worker_build_activation
+from helpers.worker_generation import resolve_production_task_queue
 from helpers.world_model_runtime import world_model_step_activity
 from tools.people_search import people_search_activity  # not yet refactored into domains/
 from tools.web_search import web_search_activity  # not yet refactored into domains/
@@ -1154,12 +1155,29 @@ async def main():
             activation_marker_workflow_id=marker_id,
         )
 
+    # Zero-downtime cutover: poll this build's generation-scoped queue
+    # (`<base>@<surfaceHash>`) so a worker never replays a foreign generation's
+    # history. Absent a surface hash, poll the plain base queue (pre-cutover
+    # behavior). The metrics poller reports on the SAME queue so the
+    # fly-autoscaler scales each generation's fleet by its own backlog and old
+    # generations retire as they drain.
+    production_task_queue = resolve_production_task_queue(
+        config.temporal.task_queue,
+        os.getenv("TEMPORAL_WORKER_SURFACE_HASH"),
+    )
+    logger.info(
+        "Resolved production task queue for this worker generation",
+        base_task_queue=config.temporal.task_queue,
+        surface_hash=os.getenv("TEMPORAL_WORKER_SURFACE_HASH") or None,
+        production_task_queue=production_task_queue,
+    )
+
     # Start background queue metrics poller (feeds /metrics for fly-autoscaler)
     asyncio.create_task(
         poll_queue_metrics(
             client,
             config.temporal.namespace,
-            config.temporal.task_queue,
+            production_task_queue,
             activity_admission_snapshot,
             config.temporal.max_concurrent_workflows,
         ),
@@ -1172,7 +1190,7 @@ async def main():
     # Create worker with all workflows and activities
     worker = Worker(
         client,
-        task_queue=config.temporal.task_queue,
+        task_queue=production_task_queue,
         workflows=[AgentWorkflow],
         activities=registered_activities,
         tuner=tuner,

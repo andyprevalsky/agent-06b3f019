@@ -1771,6 +1771,22 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
   git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
     { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
   cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+  # Self-driving CI is the primary cutover driver (deploy-agents.yml runs
+  # validate → flip pointer → migrate itself, so a bare `gh pr merge` can never
+  # strand the fleet). If CI already rolled over to this build's generation, the
+  # local drive below is redundant: short-circuit to a verify-only pass. This is
+  # the fallback path for when CI could not self-drive (e.g. cutover secrets
+  # absent). Both paths are idempotent, so double-driving is harmless.
+  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
+  AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
+  if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
+    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying and skipping the local drive"
+    release_agent_cutover_lock success "Cutover completed by self-driving CI"
+    trap - EXIT
+    gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
+    python3 scripts/record_factory_event.py deploy production-finish fly
+  else
   # Before sealing even one production history, prove the exact candidate image
   # can construct its full worker and run real workflow initialization. Only
   # this deployment attempt polls this isolated queue. The validation stops at
@@ -1862,6 +1878,25 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ] ||
     { echo "❌ Exact production deploy lock is no longer held"; exit 1; }
 
+  # Zero-downtime routing flip. Compute this build's replay-surface generation and
+  # point NEW agent workflows at its generation queue (`navi-agent-tasks@<hash>`)
+  # BEFORE respawning open workflows. Every replacement resolves its queue through
+  # the same pointer (providers/agentQueuePointer.ts, wired into
+  # startAgentWorkflowExecution), so respawns and all new traffic land on the
+  # just-activated generation while the old generation keeps serving until each
+  # workflow is migrated off it. The flip is atomic and instantly reversible
+  # (flip back to the previous generation = rollback, no redeploy).
+  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
+  AGENT_GENERATION_QUEUE="navi-agent-tasks@${AGENT_SURFACE_HASH}"
+  echo "Flipping agent queue pointer to generation ${AGENT_GENERATION_QUEUE}"
+  npx tsx scripts/set-agent-queue-pointer.ts \
+    --queue "$AGENT_GENERATION_QUEUE" \
+    --surface-hash "$AGENT_SURFACE_HASH" \
+    --by "deploy-${DEPLOY_MERGED_SHA}"
+  # Wait past the pointer cache TTL so every backend instance routes new workflows
+  # to the new generation before we start draining the old one.
+  sleep 6
+
   TEMPORAL_TASK_QUEUE=navi-agent-tasks \
     TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
     TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
@@ -1878,6 +1913,7 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   trap - EXIT
   gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
   python3 scripts/record_factory_event.py deploy production-finish fly
+  fi
 fi
 ```
 
