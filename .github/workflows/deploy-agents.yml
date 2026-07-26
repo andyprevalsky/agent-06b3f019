@@ -15,7 +15,9 @@ on:
 
 permissions:
   contents: read
-  statuses: read
+  # write: the self-driving cutover posts an agent-cutover commit status
+  # (release()) to record cutover success/failure for observers.
+  statuses: write
 
 concurrency:
   group: deploy-agents-production
@@ -143,7 +145,12 @@ jobs:
           trap 'release error "self-driving cutover failed"' ERR
 
           cd back-end
-          npm ci
+          # `back-end` is an npm workspace and the ROOT lockfile is not committed,
+          # so a plain `npm ci` walks up to the (absent-in-CI) root lockfile and
+          # fails. `--workspaces=false` pins npm to the committed back-end/package-
+          # lock.json; `--ignore-scripts` skips postinstall (we run prisma generate
+          # explicitly). Same pattern as chat-lifecycle-ratchet.yml / auto-rca.yml.
+          npm ci --workspaces=false --ignore-scripts
           npx prisma generate
 
           # Wait for the Render backend to be live on THIS merge commit BEFORE any
@@ -180,8 +187,15 @@ jobs:
           CURRENT_HASH=$(printf '%s' "$CURRENT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})')
           CURRENT_QUEUE=$(printf '%s' "$CURRENT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.taskQueue?o.taskQueue:"")}catch{process.stdout.write("")}})')
           if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
-            echo "Generation $SURFACE_HASH already live — rolling restart only, no rollover"
-            release success "generation already live (no rollover)"; trap - ERR; exit 0
+            # Replay-compatible rolling restart: the surface generation is unchanged,
+            # so the freshly deployed standby workers can serve the SAME generation
+            # queue with no seal/migration. Just release them from standby (post the
+            # activation marker) — otherwise they'd stand by forever and strand prod.
+            echo "Generation $SURFACE_HASH already live — rolling restart; activating standby workers (no rollover)"
+            TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
+              TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
+              npx tsx scripts/activate-agent-worker-build.ts
+            release success "generation already live (rolling restart activated)"; trap - ERR; exit 0
           fi
           echo "Rolling over agent generation: '${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH'"
 

@@ -364,6 +364,30 @@ fi
 require_text "$DEPLOY" 'CI already cut over' \
   "skill cutover must short-circuit when CI already rolled over (no double-drive)"
 
+# The self-driving cutover installs back-end deps in CI. back-end is an npm
+# workspace and the root lockfile is not committed, so a plain `npm ci` in the
+# workspace fails (EUSAGE) — it must pin to the committed back-end lockfile.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'npm ci --workspaces=false' \
+  "self-driving cutover must install back-end deps with --workspaces=false (root lockfile is not committed)"
+if grep -qE '^\s+npm ci\s*$' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "self-driving cutover must not use a bare 'npm ci' (fails in the back-end workspace without the root lockfile)"
+fi
+# release() posts an agent-cutover commit status, which needs statuses: write.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'statuses: write' \
+  "deploy-agents must grant statuses: write so the self-driving cutover can post its release status"
+
+# Rolling-restart (same-generation) deploys still deploy standby workers, so the
+# no-op cutover path MUST release them from standby (activate) — otherwise a
+# surface-unchanged deploy strands prod. It must NOT run the full seal+respawn.
+ACTIVATE_CLI="$ROOT/back-end/scripts/activate-agent-worker-build.ts"
+[ -f "$ACTIVATE_CLI" ] || fail "activate-agent-worker-build.ts (no-op rolling-restart activation) must exist"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'activate-agent-worker-build.ts' \
+  "no-op rolling-restart path must activate standby workers (not leave them parked)"
+# The activation path activates without sealing: it must post the marker + retire
+# superseded ones, never seal open workflows.
+require_text "$ACTIVATE_CLI" 'activateTemporalWorkerBuild' \
+  "activation CLI must post the worker build activation marker"
+
 # The CI cutover must wait for the Render backend (which reads the routing pointer)
 # to be live on this exact commit BEFORE flipping — otherwise the old backend
 # routes new workflow starts to the old queue while workers moved to the new
