@@ -364,4 +364,17 @@ fi
 require_text "$DEPLOY" 'CI already cut over' \
   "skill cutover must short-circuit when CI already rolled over (no double-drive)"
 
+# The CI cutover must wait for the Render backend (which reads the routing pointer)
+# to be live on this exact commit BEFORE flipping — otherwise the old backend
+# routes new workflow starts to the old queue while workers moved to the new
+# generation, stranding those agents.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend to go live' \
+  "self-driving cutover must wait for the Render backend before flipping the routing pointer"
+render_wait_line=$(grep -n 'Render backend to go live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+# The forward flip is uniquely marked by `--by "deploy-...` (rollback uses `rollback-`,
+# the pre-read uses `--read`), so target it specifically.
+agents_flip_line=$(grep -n 'deploy-${BUILD_ID}' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+[[ -n "$render_wait_line" && -n "$agents_flip_line" && $render_wait_line -lt $agents_flip_line ]] || \
+  fail "CI cutover must wait for the Render backend live BEFORE flipping the routing pointer"
+
 echo "workflow deployment migration structural tests: PASS"

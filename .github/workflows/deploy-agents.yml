@@ -122,6 +122,8 @@ jobs:
           TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
           TEMPORAL_NAMESPACE: ${{ secrets.TEMPORAL_NAMESPACE }}
           TEMPORAL_API_KEY: ${{ secrets.TEMPORAL_API_KEY }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
           SURFACE_HASH: ${{ steps.surface.outputs.hash }}
           GENERATION_QUEUE: ${{ steps.surface.outputs.queue }}
           BUILD_ID: ${{ github.sha }}
@@ -163,6 +165,25 @@ jobs:
             TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
             TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
             npx tsx scripts/validate-candidate-workflow-image.ts --execute
+
+          # 1b) Wait for the Render backend to be live on THIS merge commit before
+          #     flipping. The backend reads the routing pointer; if we flipped while the
+          #     old backend were still serving, it would route new workflow starts to the
+          #     old plain queue while workers moved to the new generation — stranding
+          #     those agents. Bounded ~15m; on timeout we DO NOT flip (fail-safe: the old
+          #     generation keeps serving). This is the same ordering guarantee the
+          #     /deploy skill enforces in Step 13a.
+          echo "Waiting for Render backend to go live on ${BUILD_ID:0:7} before flipping routing..."
+          RENDER_LIVE=""
+          for i in $(seq 1 90); do
+            STATUS_COMMIT=$(curl -fsS -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=5" 2>/dev/null \
+              | BUILD_ID="$BUILD_ID" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const want=(process.env.BUILD_ID||"").slice(0,7);const live=a.find(x=>x.deploy&&x.deploy.status==="live"&&((x.deploy.commit||{}).id||"").slice(0,7)===want);const failed=a.find(x=>x.deploy&&/failed|canceled/.test(x.deploy.status||"")&&((x.deploy.commit||{}).id||"").slice(0,7)===want);process.stdout.write(live?"live":(failed?"failed":"pending"))}catch{process.stdout.write("pending")}})' || echo pending)
+            if [ "$STATUS_COMMIT" = "live" ]; then RENDER_LIVE=1; echo "Render backend live on ${BUILD_ID:0:7}"; break; fi
+            if [ "$STATUS_COMMIT" = "failed" ]; then echo "❌ Render deploy failed for ${BUILD_ID:0:7}; not flipping" >&2; break; fi
+            echo "  Render backend not yet live (${STATUS_COMMIT}) — waiting ($i/90)"; sleep 10
+          done
+          [ "$RENDER_LIVE" = "1" ] || { echo "❌ Render backend not live on ${BUILD_ID:0:7}; refusing to flip (old generation keeps serving)"; exit 1; }
 
           # 2) Flip routing to the new generation. New agent workflows (and every
           #    respawn, which resolves its queue through this pointer) now land on the
