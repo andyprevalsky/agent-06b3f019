@@ -306,6 +306,55 @@ async function testInbound_flatPayload() {
   }
 }
 
+// --- outbound delivery-status receipts (message.sent/delivered/failed) ---
+
+async function postDeliveryEvent(type: string, phone: string, extra: Record<string, unknown> = {}) {
+  return request(`${BASE_URL}/api/sms/inbound`, {
+    method: 'POST',
+    body: JSON.stringify({
+      account_id: 'acct_test',
+      id: 'evt_test',
+      timestamp: '2026-07-25T23:11:35.000Z',
+      type,
+      data: {
+        id: 'msg_test_delivery',
+        body: 'Started: "buy socks"\nView agent: https://srgv.co/abcd',
+        conversation: {
+          contact: { phone_number: phone },
+          phone_number: { number: '+14154498072' },
+        },
+        ...extra,
+      },
+    }),
+  });
+}
+
+/**
+ * Delivery receipts (message.sent/delivered/failed) are acknowledged (200) and
+ * MUST NOT be parsed as inbound text — no User is provisioned, no supervisor run
+ * starts. Guards the latent bug where a receipt carrying our own outbound body
+ * would be routed to the supervisor as if the user texted it.
+ */
+async function assertDeliveryReceiptNotRouted(type: string, extra: Record<string, unknown>) {
+  const phone = uniqueSmsPhone();
+  const res = await postDeliveryEvent(type, phone, extra);
+  assertStatus(res.status, 200, res.data);
+  const user = await prisma.user.findFirst({ where: { phone } });
+  if (user) {
+    await prisma.user.deleteMany({ where: { phone } }).catch(() => {});
+    throw new Error(`${type} receipt was misrouted: it provisioned a user like inbound SMS`);
+  }
+}
+
+const testDelivery_failedEventRecordedNotRouted = () =>
+  assertDeliveryReceiptNotRouted('message.failed', {
+    failure_reason: 'message_filtered',
+    failed_at: '2026-07-25T23:11:36.000Z',
+  });
+
+const testDelivery_deliveredEventAcknowledged = () =>
+  assertDeliveryReceiptNotRouted('message.delivered', { delivered_at: '2026-07-25T23:11:37.000Z' });
+
 // --- method checks ---
 
 async function testInbound_getNotAllowed() {
@@ -652,6 +701,15 @@ async function runAll() {
     {
       name: 'reproducibility -- 3 sequential identical status',
       fn: testReproducibility_threeSequential,
+    },
+    // delivery-status receipts: acknowledged, never misrouted as inbound
+    {
+      name: 'POST /sms/inbound -- message.failed receipt recorded, not routed',
+      fn: testDelivery_failedEventRecordedNotRouted,
+    },
+    {
+      name: 'POST /sms/inbound -- message.delivered receipt acknowledged',
+      fn: testDelivery_deliveredEventAcknowledged,
     },
   ];
 

@@ -67,6 +67,93 @@ def check_fatal_errors(output: str) -> Optional[str]:
     return None
 
 
+def check_terminal_fatal_error(
+    output: str,
+    *,
+    code_provider: str,
+    exit_code: Optional[int],
+    credential_feedback: Optional[list[dict[str, str]]] = None,
+) -> Optional[str]:
+    """Classify terminal failures after the provider process has exited.
+
+    Codex can retain either supported plan-exhaustion wording in the terminal,
+    retry with the funded API key, and then exit successfully. Credential
+    exhaustion is therefore terminal only when the complete Codex process
+    still failed after its runtime fallback opportunity.
+    """
+    fatal_error = check_fatal_errors(output)
+    if fatal_error is not None:
+        return fatal_error
+    codex_credential_exhausted = bool(credential_feedback) or any(
+        marker in output.lower()
+        for marker in (
+            "you've hit your usage limit",
+            "usage_limit_reached",
+            "purchase more credits",
+            "quota exceeded. check your plan and billing details.",
+            "insufficient_quota",
+        )
+    )
+    if code_provider == "codex" and exit_code != 0 and codex_credential_exhausted:
+        return (
+            "Codex credentials are rate-limited or out of quota and the runtime "
+            "fallback did not complete successfully."
+        )
+    return None
+
+
+def build_codex_credential_feedback(
+    code_events: list[Dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Extract at most one compact exhaustion event per credential source.
+
+    Structured events are not bounded by the 500-row terminal display. This
+    preserves the pre/post-fallback ordering even when a long successful run
+    scrolls the original OAuth error and fallback marker out of the terminal.
+    """
+    feedback_by_source: dict[str, str] = {}
+    fallback_seen = False
+
+    for event in code_events:
+        if event.get("provider") != "codex":
+            continue
+        if event.get("type") == "auth_fallback":
+            fallback_seen = True
+            reason = str(event.get("reason") or "runtime_auth_fallback")
+            feedback_by_source.setdefault("oauth", reason[:2000])
+            continue
+        if event.get("type") != "error":
+            continue
+
+        error = event.get("error")
+        nested_message = error.get("message") if isinstance(error, dict) else None
+        message = str(event.get("message") or nested_message or "")
+        normalized = message.lower()
+        if not any(
+            marker in normalized
+            for marker in (
+                "you've hit your usage limit",
+                "usage_limit_reached",
+                "purchase more credits",
+                "quota exceeded. check your plan and billing details.",
+                "insufficient_quota",
+            )
+        ):
+            continue
+        source = "funded_api_key" if fallback_seen else "initial"
+        feedback_by_source.setdefault(source, message[:2000])
+
+    if fallback_seen and "initial" in feedback_by_source:
+        initial_reason = feedback_by_source.pop("initial")
+        feedback_by_source["oauth"] = initial_reason
+
+    return [
+        {"source": source, "reason": feedback_by_source[source]}
+        for source in ("initial", "oauth", "funded_api_key")
+        if source in feedback_by_source
+    ]
+
+
 def safe_time() -> float:
     """Get current time, returning 0 if in workflow sandbox where time.time() is restricted."""
     try:
@@ -511,7 +598,15 @@ async def _run_agentic_loop(  # noqa: C901
                         # Temporal-retried activity will re-fetch the same
                         # broken token via LRU and burn another E2B sandbox).
                         try:
-                            await persist_terminal_output(task_id, filtered_output, agent_id, code_provider)
+                            await persist_terminal_output(
+                                task_id,
+                                filtered_output,
+                                agent_id,
+                                code_provider,
+                                credential_feedback=build_codex_credential_feedback(code_events)
+                                if code_provider == "codex"
+                                else None,
+                            )
                         except Exception as persist_err:
                             logger.warning(
                                 "[ClaudeCode] Failed to persist fatal terminal output",
@@ -1463,7 +1558,16 @@ async def spawn_claude_code_activity(  # noqa: C901
 
         # 4. Persist terminal output
         filtered_output = terminal.get_display()
-        await persist_terminal_output(task_id, filtered_output, agent_id, code_provider)
+        credential_feedback = (
+            build_codex_credential_feedback(code_events) if code_provider == "codex" else None
+        )
+        await persist_terminal_output(
+            task_id,
+            filtered_output,
+            agent_id,
+            code_provider,
+            credential_feedback=credential_feedback,
+        )
 
         # A fast CLI failure can set ``exit_code`` before the one-second silence
         # window in ``_run_agentic_loop`` gets a chance to inspect the terminal.
@@ -1471,7 +1575,12 @@ async def spawn_claude_code_activity(  # noqa: C901
         # as a terminal tool error instead of going through the verifier as an
         # ordinary incomplete result. The latter makes the parent believe the
         # tool executed successfully and repeatedly spawn new paid sandboxes.
-        fatal_error = check_fatal_errors(filtered_output)
+        fatal_error = check_terminal_fatal_error(
+            filtered_output,
+            code_provider=code_provider,
+            exit_code=exit_code,
+            credential_feedback=credential_feedback,
+        )
         if fatal_error:
             action_summary.append(f"FATAL: {fatal_error}")
             raise ApplicationError(

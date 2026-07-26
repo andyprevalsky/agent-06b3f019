@@ -71,6 +71,28 @@ findings + an observability gap". Say so, add the missing capture, keep it open.
 Never present a theory, a code read, a production correlation, or a
 third-party-state explanation as a completed RCA.
 
+### Benchmark failures have a second, non-substitutable gate
+
+When the reported symptom is a benchmark failure, distinguish two proofs:
+
+1. **Causal proof:** the smallest owning-boundary repro fails before the fix and
+   passes afterward. This proves the proposed cause and prevents regression.
+2. **Outcome proof:** the exact unchanged benchmark task fails locally before the
+   fix and passes locally afterward through `scripts/run-bench --local <exact-task-name>`.
+   This proves the fix resolves the failure the user actually reported.
+
+Both are mandatory before saying the benchmark issue is fixed, approval-ready,
+or complete. A unit test, mocked browser state, simulator, fixture replay,
+provider-contract test, or renamed "benchmark-like" test is supporting evidence
+only. It may prove a mechanism, but it may never substitute for the exact
+benchmark outcome. Do not claim that a benchmark will pass from proxy evidence.
+
+Run the exact benchmark unchanged: do not edit its prompt, evaluator, expected
+tools, fixture, timeout, or pass criteria to manufacture the pass. If the exact
+benchmark cannot be made to fail locally on the buggy revision, keep the RCA open
+as an outcome-reproduction gap. If it fails after the proposed fix, continue the
+RCA/fix loop from that new run; do not ask for approval or report success.
+
 **Never come back to the user with "I think it's X" or "it's probably load / a
 race / a 404". Come back with: here's the repro that failed, here's the fix,
 here's the repro now passing.** A hypothesis is not a deliverable.
@@ -95,6 +117,8 @@ changed, do not use this classification until a model-only replay proves it.
 - Deterministic repro artifact exists locally and was executed (record the command + output).
 - It exercises the same first-bad boundary the runtime evidence identified.
 - After the fix, the SAME artifact passes unchanged (no weakened assertion).
+- For a benchmark failure, the exact canonical benchmark also fails locally on
+  the buggy revision and passes locally on the fixed revision, unchanged.
 - The repro is promoted to the permanent checked-in blackbox suite that owns the
   first-bad boundary (see the table in `docs/root-cause-analysis.md`), and
   `/deploy` runs that suite for the affected surface.

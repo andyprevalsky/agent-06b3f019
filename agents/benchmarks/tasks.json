@@ -2634,6 +2634,9 @@
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 1
+    },
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
@@ -2692,6 +2695,9 @@
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 1
+    },
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",

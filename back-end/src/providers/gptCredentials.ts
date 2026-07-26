@@ -4,12 +4,16 @@ import { createLogger } from './logger';
 
 const log = createLogger('GptCredentials');
 const RATE_LIMIT_COOLDOWN_MS = 5 * 60 * 1000;
+const GPT_API_KEY_COOLDOWN_MS = 30 * 60 * 1000;
+const GPT_API_KEY_COOLDOWN_USER_ID = '00000000-0000-0000-0000-000000000000';
+const GPT_API_KEY_COOLDOWN_NAME = 'gpt_api_key_cooldown';
 
 export interface GptCodeCredentialResult {
   accessToken: string;
   accountId?: string;
   source: 'user' | 'pool';
   userId: string;
+  integrationId?: string;
   poolTokenId?: string;
 }
 
@@ -91,6 +95,7 @@ export async function fetchGptPoolToken(
       accountId: parsed.accountId,
       source: 'pool',
       userId: poolIntegration.userId,
+      integrationId: poolIntegration.id,
       poolTokenId: poolIntegration.id,
     };
   }
@@ -133,6 +138,7 @@ export async function fetchGptCodeCredentialsWithMeta(
         accountId: parsed.accountId,
         source: 'user',
         userId,
+        integrationId: userIntegration.id,
       };
     }
   }
@@ -166,6 +172,7 @@ export async function fetchGptCodeCredentialsWithMeta(
       accountId: parsed.accountId,
       source: 'pool',
       userId: poolIntegration.userId,
+      integrationId: poolIntegration.id,
       poolTokenId: poolIntegration.id,
     };
   }
@@ -196,6 +203,55 @@ export async function markGptPoolTokenRateLimited(
     data: { rateLimitedUntil: until },
   });
   log.info(`GPT pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
+}
+
+export async function markGptIntegrationRateLimited(
+  integrationId: string,
+  options?: { rateLimitedUntil?: string | Date | null }
+): Promise<void> {
+  const until = resolveRateLimitedUntil(options?.rateLimitedUntil);
+  await prisma.integration.update({
+    where: { id: integrationId },
+    data: { rateLimitedUntil: until },
+  });
+  log.info(`GPT integration ${integrationId} rate-limited until ${until.toISOString()}`);
+}
+
+/** True when the shared funded GPT_API_KEY is currently backed off. */
+export async function isGptApiKeyOnCooldown(): Promise<boolean> {
+  const row = await prisma.integration.findUnique({
+    where: {
+      userId_name: {
+        userId: GPT_API_KEY_COOLDOWN_USER_ID,
+        name: GPT_API_KEY_COOLDOWN_NAME,
+      },
+    },
+    select: { rateLimitedUntil: true },
+  });
+  return row?.rateLimitedUntil !== null && (row?.rateLimitedUntil?.getTime() ?? 0) > Date.now();
+}
+
+/** Back the shared funded GPT_API_KEY off after a provider quota response. */
+export async function markGptApiKeyOnCooldown(reason: string): Promise<void> {
+  const until = new Date(Date.now() + GPT_API_KEY_COOLDOWN_MS);
+  await prisma.integration.upsert({
+    where: {
+      userId_name: {
+        userId: GPT_API_KEY_COOLDOWN_USER_ID,
+        name: GPT_API_KEY_COOLDOWN_NAME,
+      },
+    },
+    create: {
+      userId: GPT_API_KEY_COOLDOWN_USER_ID,
+      name: GPT_API_KEY_COOLDOWN_NAME,
+      type: 'TOOL_SETUP',
+      status: 'NOT_CONNECTED',
+      rateLimitedUntil: until,
+      failureReason: reason,
+    },
+    update: { rateLimitedUntil: until, failureReason: reason },
+  });
+  log.warn('Funded GPT API key backed off', { reason, until: until.toISOString() });
 }
 
 export async function markGptUserTokenRateLimited(

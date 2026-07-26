@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
+import { prisma } from '../../providers/database';
+import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
   CredentialExhaustionSkip,
   codexSmokeCreditSkipReason,
@@ -298,6 +300,112 @@ function testResolveCodexAuthEnvs_emptyKeyThrows() {
   assert(threw, 'throws when the api-key fallback is an empty string');
 }
 
+function testResolveCodexAuthEnvs_cooldownExcludesFundedKey() {
+  const oauthEnvs = resolveCodexCodeAuthEnvs(CODEX_OAUTH_META, 'sk-proj-funded-key', true);
+  assert(
+    oauthEnvs.CODEX_AUTH_JSON !== undefined && oauthEnvs.OPENAI_API_KEY === undefined,
+    'cooled funded key must be withheld while a usable OAuth credential remains'
+  );
+
+  let threw = false;
+  try {
+    resolveCodexCodeAuthEnvs(null, 'sk-proj-funded-key', true);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'cooled funded key must not launch an API-key-only Codex sandbox');
+}
+
+async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
+  const userId = crypto.randomUUID();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gpt_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+    },
+  });
+  const taskId = crypto.randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId: crypto.randomUUID(),
+      sandboxId: `codex-funded-exhaustion-${taskId}`,
+      goal: 'captured Codex OAuth-to-funded-key exhaustion replay',
+      status: 'ACTIVE',
+      claudeTokenSource: 'user',
+      claudeTokenIntegrationId: integration.id,
+    },
+  });
+
+  try {
+    const output =
+      Array.from({ length: 650 }, (_, index) => `normal fallback output ${index}`).join('\n') +
+      '\n[Codex] Error code: insufficient_quota\n';
+    const res = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        output,
+        credential_feedback: [
+          {
+            source: 'oauth',
+            reason: 'Quota exceeded. Check your plan and billing details.',
+          },
+          { source: 'funded_api_key', reason: 'insufficient_quota' },
+        ],
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const persistedIntegration = await prisma.integration.findUnique({
+      where: { id: integration.id },
+    });
+    assert(
+      persistedIntegration?.rateLimitedUntil instanceof Date &&
+        persistedIntegration.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
+    );
+
+    const cooldown = await prisma.integration.findUnique({
+      where: {
+        userId_name: {
+          userId: '00000000-0000-0000-0000-000000000000',
+          name: 'gpt_api_key_cooldown',
+        },
+      },
+    });
+    assert(
+      cooldown?.rateLimitedUntil instanceof Date &&
+        cooldown.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+    await prisma.integration.deleteMany({ where: { id: integration.id } });
+    await prisma.integration.deleteMany({
+      where: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+      },
+    });
+  }
+}
+
+async function testPersistOutput_rejectsInvalidCredentialFeedback() {
+  const res = await request(`${BASE_URL}/api/codex-code-session/${crypto.randomUUID()}/output`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      output: 'terminal output',
+      credential_feedback: [{ source: 'funded_api_key', reason: '' }],
+    }),
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
@@ -328,6 +436,12 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
+    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output }),
+    });
+    assertStatus(outputRes.status, 200, outputRes.data);
     // Before treating a missing sentinel as a hard failure, check whether the
     // run simply ran out of credits on EVERY credential path (OAuth + funded
     // key). That is an external funding state, not a code regression, so it is
@@ -445,6 +559,22 @@ async function runAll() {
     {
       name: 'auth -- throws when funded key is empty',
       fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
+    },
+    {
+      name: 'auth -- cooled funded key is excluded before sandbox creation',
+      fn: async () => testResolveCodexAuthEnvs_cooldownExcludesFundedKey(),
+    },
+    {
+      name: 'feedback -- captured OAuth exhaustion cools exact credential',
+      fn: testPersistOutput_coolsExhaustedOAuthCredential,
+    },
+    {
+      name: 'feedback -- failed OAuth fallback cools OAuth and funded credentials',
+      fn: testPersistOutput_coolsBothCredentialsAfterFailedFallback,
+    },
+    {
+      name: 'feedback -- invalid structured credential event is rejected',
+      fn: testPersistOutput_rejectsInvalidCredentialFeedback,
     },
     {
       name: 'smoke-skip -- credit exhaustion detected across output and events',

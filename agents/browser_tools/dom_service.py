@@ -922,6 +922,15 @@ class DOMService:
             raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
         if self._passkey_authenticator_id is None:
             try:
+                # Provider/browser startup can replace or reset the target after
+                # connect-time overlay suppression. Own the WebAuthn precondition
+                # at the operation that requires it instead of relying on that
+                # earlier best-effort side effect to remain live.
+                await self._send_cdp_command(
+                    self._webauthn_cdp,
+                    "WebAuthn.enable",
+                    {"enableUI": False},
+                )
                 result = await self._send_cdp_command(
                     self._webauthn_cdp,
                     "WebAuthn.addVirtualAuthenticator",
