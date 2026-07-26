@@ -6,6 +6,7 @@ import {
   WorkflowNotFoundError,
 } from '@temporalio/client';
 import { createLogger } from './logger';
+import { getCurrentAgentQueue } from './agentQueuePointer';
 import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
 
 const log = createLogger('Temporal');
@@ -400,26 +401,21 @@ export async function startAgentWorkflowExecutionWithClient(
   params: StartAgentWorkflowParams,
   deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
-  // Use provided task queue or default to environment-specific queue
-  const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
-  if (!taskQueue) {
-    throw new Error(
-      'TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME'
-    );
-  }
   const workflowId = params.workflowId ?? params.agentId;
-
-  log.info('Starting agent workflow', {
-    workflowId,
-    taskQueue,
-  });
 
   let execution: TemporalWorkflowExecutionRef;
   try {
     const handle = await withTemporalControlDeadline(
       client,
-      () =>
-        client.workflow.start('AgentWorkflow', {
+      async () => {
+        // Explicit override (descendants inherit the parent's generation queue;
+        // tests isolate) wins; otherwise resolve the current cutover generation
+        // via the AgentQueuePointer, which falls back to TEMPORAL_TASK_QUEUE when
+        // unset. Resolved UNDER the control deadline so a cache-miss Prisma read
+        // cannot block the start past the caller's deadline.
+        const taskQueue = params.taskQueue || (await getCurrentAgentQueue());
+        log.info('Starting agent workflow', { workflowId, taskQueue });
+        return client.workflow.start('AgentWorkflow', {
           taskQueue,
           workflowId,
           args: buildAgentWorkflowArgs(params),
@@ -429,7 +425,8 @@ export async function startAgentWorkflowExecutionWithClient(
                 workflowIdConflictPolicy: 'FAIL' as const,
               }
             : {}),
-        }),
+        });
+      },
       deadlineAtMs
     );
     execution = {

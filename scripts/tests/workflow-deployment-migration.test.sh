@@ -195,7 +195,10 @@ initial_candidate_validation_line=$(grep -n 'npx tsx scripts/validate-candidate-
   fail "candidate image must validate before the old-backend drain and every workflow tombstone"
 fleet_recheck_line=$(grep -n 'bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"' "$DEPLOY" | cut -d: -f1)
 lock_recheck_line=$(grep -n 'Exact production deploy lock is no longer held' "$DEPLOY" | cut -d: -f1)
-release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | cut -d: -f1)
+# Two success-releases exist: the CI-already-cut-over short-circuit and the
+# fallback local driver. The ordering invariant applies to the fallback driver
+# (migrate → release), which is the last occurrence.
+release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | tail -1 | cut -d: -f1)
 [[ $render_drain_line -lt $fleet_recheck_line &&
    $fleet_recheck_line -lt $candidate_validation_line &&
    $candidate_validation_line -lt $lock_recheck_line &&
@@ -304,5 +307,74 @@ production_validation_line=$(grep -n '## Step 13ac: Validate workflow replacemen
 semantic_line=$(grep -n '## Step 13b: Production semantic' "$DEPLOY" | cut -d: -f1)
 [[ $health_line -lt $migration_line && $migration_line -lt $production_validation_line && $production_validation_line -lt $semantic_line ]] || \
   fail "workflow migration and production matrix must run after backend health and before production semantic verification"
+
+# ── Zero-downtime generation-queue cutover contract ──────────────────────────
+# Each build polls a replay-surface-hashed generation queue; the deploy flips a
+# routing pointer to that generation before respawning open workflows so new work
+# and every respawn land on the just-activated generation with no dark-queue gap.
+SURFACE_TOOL="$ROOT/scripts/agent_workflow_surface_hash.py"
+POINTER_PROVIDER="$ROOT/back-end/src/providers/agentQueuePointer.ts"
+POINTER_CLI="$ROOT/back-end/scripts/set-agent-queue-pointer.ts"
+WORKER_GENERATION="$ROOT/agents/helpers/worker_generation.py"
+DEPLOY_AGENTS_WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
+
+[ -f "$SURFACE_TOOL" ] || fail "replay-surface generation hash tool must exist"
+[ -f "$POINTER_PROVIDER" ] || fail "agent queue pointer provider must exist"
+[ -f "$POINTER_CLI" ] || fail "agent queue pointer flip CLI must exist"
+[ -f "$WORKER_GENERATION" ] || fail "worker generation-queue resolver must exist"
+
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'scripts/agent_workflow_surface_hash.py' \
+  "deploy-agents workflow must compute the replay-surface generation hash"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'TEMPORAL_WORKER_SURFACE_HASH=' \
+  "deploy-agents workflow must pass the surface hash so workers poll their generation queue"
+
+require_text "$WORKER_GENERATION" 'def resolve_production_task_queue' \
+  "worker must resolve a generation-scoped production queue"
+
+require_text "$TEMPORAL" 'getCurrentAgentQueue' \
+  "workflow start must resolve the routing pointer (so respawns land on the current generation)"
+
+require_text "$DEPLOY" 'set-agent-queue-pointer.ts' \
+  "cutover must flip the agent queue pointer to the new generation"
+require_text "$DEPLOY" 'agent_workflow_surface_hash.py' \
+  "cutover must compute the generation hash it flips the pointer to"
+# The pointer flip must happen BEFORE the workflow migration so every respawn
+# (which resolves its queue through the pointer) lands on the new generation.
+pointer_flip_line=$(grep -n 'set-agent-queue-pointer.ts' "$DEPLOY" | tail -1 | cut -d: -f1)
+migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY" | tail -1 | cut -d: -f1)
+[[ -n "$pointer_flip_line" && -n "$migrate_exec_line" && $pointer_flip_line -lt $migrate_exec_line ]] || \
+  fail "cutover must flip the routing pointer BEFORE respawning open workflows"
+
+# Self-driving CI cutover: the deploy workflow drives its own validate → flip →
+# migrate so a bare `gh pr merge` can never strand the fleet in standby (the
+# incident this redesign fixes). No external-driver hold, and a fail-safe rollback.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'set-agent-queue-pointer.ts' \
+  "deploy workflow must self-drive the routing-pointer flip"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'migrate-open-agent-workflows.ts --execute' \
+  "deploy workflow must self-drive the workflow respawn"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'validate-candidate-workflow-image.ts --execute' \
+  "deploy workflow must validate the candidate image before routing any traffic"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
+  "self-driving cutover must use the prod DB secret"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'rollback-' \
+  "self-driving cutover must fail-safe roll the routing pointer back on failure"
+if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
+fi
+require_text "$DEPLOY" 'CI already cut over' \
+  "skill cutover must short-circuit when CI already rolled over (no double-drive)"
+
+# The CI cutover must wait for the Render backend (which reads the routing pointer)
+# to be live on this exact commit BEFORE flipping — otherwise the old backend
+# routes new workflow starts to the old queue while workers moved to the new
+# generation, stranding those agents.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend to go live' \
+  "self-driving cutover must wait for the Render backend before flipping the routing pointer"
+render_wait_line=$(grep -n 'Render backend to go live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+# The forward flip is uniquely marked by `--by "deploy-...` (rollback uses `rollback-`,
+# the pre-read uses `--read`), so target it specifically.
+agents_flip_line=$(grep -n 'deploy-${BUILD_ID}' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+[[ -n "$render_wait_line" && -n "$agents_flip_line" && $render_wait_line -lt $agents_flip_line ]] || \
+  fail "CI cutover must wait for the Render backend live BEFORE flipping the routing pointer"
 
 echo "workflow deployment migration structural tests: PASS"

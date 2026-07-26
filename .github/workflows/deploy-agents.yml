@@ -32,6 +32,19 @@ jobs:
       
       - uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Compute workflow replay-surface generation hash
+        id: surface
+        run: |
+          # The generation key for zero-downtime cutover: workers poll
+          # `navi-agent-tasks@<surfaceHash>`, so a build only ever replays its own
+          # generation's histories. Same hash as the live pointer => replay-compatible
+          # rolling restart (no rollover); a changed hash => a new generation the
+          # cutover rolls over to.
+          SURFACE_HASH=$(python3 scripts/agent_workflow_surface_hash.py)
+          echo "hash=$SURFACE_HASH" >> "$GITHUB_OUTPUT"
+          echo "queue=navi-agent-tasks@$SURFACE_HASH" >> "$GITHUB_OUTPUT"
+          echo "Workflow surface generation: $SURFACE_HASH"
+
       - name: Classify whether shipped worker runtime changed
         id: classify
         env:
@@ -49,11 +62,12 @@ jobs:
           fi
           echo "require_activation=$REQUIRE_ACTIVATION" >> "$GITHUB_OUTPUT"
           echo "Temporal activation gate: $REQUIRE_ACTIVATION"
-      
+
       - name: Deploy to Fly.io
         run: >-
           flyctl deploy --remote-only
           --env TEMPORAL_WORKER_BUILD_ID="${GITHUB_SHA}"
+          --env TEMPORAL_WORKER_SURFACE_HASH="${SURFACE_HASH}"
           --env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --env TEMPORAL_WORKER_VALIDATION_TASK_QUEUE="navi-agent-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           --env TEMPORAL_WORKER_ACTIVATION_TIMEOUT_SECONDS="7200"
@@ -62,6 +76,7 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           REQUIRE_ACTIVATION: ${{ steps.classify.outputs.require_activation }}
+          SURFACE_HASH: ${{ steps.surface.outputs.hash }}
 
       - name: Verify every retained machine has the exact candidate policy
         env:
@@ -97,29 +112,112 @@ jobs:
 
       - name: Hold production deploy lock until exact cutover completes
         if: steps.classify.outputs.require_activation == '1'
-        timeout-minutes: 125
+        timeout-minutes: 30
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}
+          # Self-driving cutover credentials (prod). Set as repo Actions secrets.
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+          DIRECT_URL: ${{ secrets.PROD_DIRECT_URL }}
+          TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
+          TEMPORAL_NAMESPACE: ${{ secrets.TEMPORAL_NAMESPACE }}
+          TEMPORAL_API_KEY: ${{ secrets.TEMPORAL_API_KEY }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+          SURFACE_HASH: ${{ steps.surface.outputs.hash }}
+          GENERATION_QUEUE: ${{ steps.surface.outputs.queue }}
+          BUILD_ID: ${{ github.sha }}
+          DEPLOYMENT_TOKEN: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          for attempt in $(seq 1 500); do
-            RELEASE_STATE=$(
-              gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/status" \
-                --jq "[.statuses[] | select(.context == \"${RELEASE_CONTEXT}\")][0].state // \"\"" \
-                2>/dev/null || true
-            )
-            case "$RELEASE_STATE" in
-              success)
-                echo "Exact cutover completed; releasing production deploy lock"
-                exit 0
-                ;;
-              error|failure)
-                echo "Exact cutover failed; releasing lock with state=$RELEASE_STATE" >&2
-                exit 1
-                ;;
-            esac
-            echo "Holding production deploy lock for ${RELEASE_CONTEXT} (poll ${attempt}/500)"
-            sleep 15
+          set -euo pipefail
+          # SELF-DRIVING CUTOVER. Previously this step blocked up to 125 min waiting
+          # for an *external* driver (the /deploy skill) to post a release status; a
+          # bare `gh pr merge` skipped that driver and stranded the whole fleet in
+          # standby (the incident this redesign fixes). Now the deploy drives its own
+          # cutover in CI, so any merge — bare or skill-driven — completes safely. The
+          # migration and pointer flip are idempotent, so a later skill-run is a no-op.
+          release() {  # publish the same status the skill contract used, for observers
+            gh api "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -X POST \
+              -f state="$1" -f context="$RELEASE_CONTEXT" -f description="$2" >/dev/null || true
+          }
+          trap 'release error "self-driving cutover failed"' ERR
+
+          cd back-end
+          npm ci
+          npx prisma generate
+
+          # Wait for the Render backend to be live on THIS merge commit BEFORE any
+          # pointer work. Render's `prisma migrate deploy` is what creates the
+          # AgentQueuePointer table and ships the pointer-reading backend code, so
+          # both the read below and the flip must come after it — otherwise the very
+          # first deploy would read a not-yet-created table, and a mid-window flip
+          # would strand new agents on the old queue served by the old backend.
+          # Bounded ~15m; on timeout we do NOT proceed (fail-safe: old generation
+          # keeps serving). Same ordering guarantee as the /deploy skill's Step 13a.
+          echo "Waiting for Render backend to go live on ${BUILD_ID:0:7} before touching routing..."
+          RENDER_LIVE=""
+          for i in $(seq 1 90); do
+            STATUS_COMMIT=$(curl -fsS --connect-timeout 10 --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
+              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=5" 2>/dev/null \
+              | BUILD_ID="$BUILD_ID" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const want=(process.env.BUILD_ID||"").slice(0,7);const live=a.find(x=>x.deploy&&x.deploy.status==="live"&&((x.deploy.commit||{}).id||"").slice(0,7)===want);const failed=a.find(x=>x.deploy&&/failed|canceled/.test(x.deploy.status||"")&&((x.deploy.commit||{}).id||"").slice(0,7)===want);process.stdout.write(live?"live":(failed?"failed":"pending"))}catch{process.stdout.write("pending")}})' || echo pending)
+            if [ "$STATUS_COMMIT" = "live" ]; then RENDER_LIVE=1; echo "Render backend live on ${BUILD_ID:0:7}"; break; fi
+            if [ "$STATUS_COMMIT" = "failed" ]; then echo "❌ Render deploy failed for ${BUILD_ID:0:7}; not rolling over" >&2; break; fi
+            echo "  Render backend not yet live (${STATUS_COMMIT}) — waiting ($i/90)"; sleep 10
           done
-          echo "Timed out waiting for exact cutover release ${RELEASE_CONTEXT}" >&2
-          exit 1
+          [ "$RENDER_LIVE" = "1" ] || { echo "❌ Render backend not live on ${BUILD_ID:0:7}; refusing to roll over (old generation keeps serving)"; release failure "cutover aborted: Render backend not live"; trap - ERR; exit 1; }
+
+          # Idempotent + no-op safe: skip when this generation is already live
+          # (replay-compatible rolling restart, or a re-run of the same deploy).
+          # A genuine read FAILURE (DB unreachable) must NOT be collapsed into
+          # "no previous generation" — that would run the first-deploy path and
+          # leave rollback with no target. `--read` exits 0 for an absent row
+          # (printing "null"); non-zero means a real failure, so we abort and let
+          # the old generation keep serving (fail-safe).
+          if ! CURRENT_JSON=$(npx tsx scripts/set-agent-queue-pointer.ts --read); then
+            echo "❌ could not read the current agent queue pointer (DB unreachable?); refusing to roll over" >&2
+            release failure "cutover aborted: routing-pointer read failed"; trap - ERR; exit 1
+          fi
+          CURRENT_HASH=$(printf '%s' "$CURRENT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})')
+          CURRENT_QUEUE=$(printf '%s' "$CURRENT_JSON" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.taskQueue?o.taskQueue:"")}catch{process.stdout.write("")}})')
+          if [ "$CURRENT_HASH" = "$SURFACE_HASH" ]; then
+            echo "Generation $SURFACE_HASH already live — rolling restart only, no rollover"
+            release success "generation already live (no rollover)"; trap - ERR; exit 0
+          fi
+          echo "Rolling over agent generation: '${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH'"
+
+          # 1) Prove the exact candidate image builds a worker and runs real workflow
+          #    initialization on its isolated validation queue before any traffic moves.
+          PRODUCTION_WORKFLOW_MIGRATION_VALIDATION=1 \
+            TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+            TEMPORAL_CANDIDATE_VALIDATION_TASK_QUEUE="navi-agent-candidate-${DEPLOYMENT_TOKEN}" \
+            TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
+            TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
+            npx tsx scripts/validate-candidate-workflow-image.ts --execute
+
+          # 2) Flip routing to the new generation. New agent workflows (and every
+          #    respawn, which resolves its queue through this pointer) now land on the
+          #    just-validated generation; the old generation keeps serving until drained.
+          npx tsx scripts/set-agent-queue-pointer.ts \
+            --queue "$GENERATION_QUEUE" --surface-hash "$SURFACE_HASH" --by "deploy-${BUILD_ID}"
+          sleep 6   # cross-instance pointer-cache convergence (TTL is 5s)
+
+          # 3) Respawn every open workflow onto the new generation. FAIL-SAFE: on any
+          #    failure, flip the pointer back to the previous generation instantly.
+          if ! TEMPORAL_TASK_QUEUE=navi-agent-tasks \
+               TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
+               TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
+               WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
+               npx tsx scripts/migrate-open-agent-workflows.ts --execute; then
+            echo "❌ cutover migration failed — rolling routing pointer back to ${CURRENT_QUEUE:-<env default>}" >&2
+            if [ -n "$CURRENT_QUEUE" ] && [ -n "$CURRENT_HASH" ]; then
+              npx tsx scripts/set-agent-queue-pointer.ts \
+                --queue "$CURRENT_QUEUE" --surface-hash "$CURRENT_HASH" --by "rollback-${BUILD_ID}" || true
+            fi
+            release failure "cutover migration failed; routing rolled back"
+            trap - ERR
+            exit 1
+          fi
+
+          echo "✅ Cutover complete — generation $SURFACE_HASH is live"
+          release success "self-driving cutover completed"
+          trap - ERR
