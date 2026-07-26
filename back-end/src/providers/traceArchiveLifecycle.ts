@@ -337,20 +337,21 @@ async function writePublicManifest(
 const PENDING_WORLD_MODEL_MODE = 'pending';
 
 /**
- * The creation-time world-model mode for a root agent. Prod agents are always
- * real, so a crashed prod run keeps `real` and stays ingestible. Benchmark runs
- * can be shadow/simulate and their true mode is only known at finalize; marking
- * them `pending` (a non-real mode) keeps a crashed benchmark run OUT of the
- * real-world corpus until finalize stamps the actual mode — a simulate run that
- * dies before finalize can never be mistaken for real signal.
+ * The creation-time world-model mode for a root agent. Product agents use the
+ * persisted per-agent mode. Benchmark runs can be shadow/simulate and their true
+ * mode is only known at finalize; marking them `pending` (a non-real mode) keeps
+ * a crashed simulated run OUT of the real-world corpus until finalize stamps it.
  */
 function startWorldModelMode(
   agentId: string,
   fixture: Awaited<ReturnType<typeof collectFixture>>
 ): string {
   const root = fixture.rows.Agent?.find((row) => (row as { id?: unknown }).id === agentId) as
-    { isBenchmark?: unknown } | undefined;
-  return root?.isBenchmark === true ? PENDING_WORLD_MODEL_MODE : 'real';
+    { isBenchmark?: unknown; worldModelMode?: unknown } | undefined;
+  if (root?.isBenchmark === true) return PENDING_WORLD_MODEL_MODE;
+  return root?.worldModelMode === 'simulate' || root?.worldModelMode === 'shadow'
+    ? root.worldModelMode
+    : 'real';
 }
 
 /**

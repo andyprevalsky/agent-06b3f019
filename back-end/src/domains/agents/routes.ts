@@ -16,6 +16,7 @@ import * as routeGuards from './routes.guards';
 import * as lifecycleService from './agentLifecycleService';
 import * as controlService from './agentControlService';
 import * as queryService from './agentQueryService';
+import { WorldModelModeAccessError } from './agentExecutionMode';
 import messageRoutes from './routes.messages';
 import batchRoutes from './routes.batch';
 import alertRoutes from './routes.alerts';
@@ -48,6 +49,10 @@ function handleRouteError(
   }
   if (error instanceof StaleParentWorkflowGenerationError) {
     res.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof WorldModelModeAccessError) {
+    res.status(403).json({ error: error.message });
     return;
   }
   log.error(msg, {

@@ -209,6 +209,7 @@ export interface StartAgentWorkflowParams {
     shared_files?: boolean;
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
+  worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   workflowId?: string; // Optional preclaimed generation-specific workflow ID
   resumeState?: WorkflowResumeState; // Durable state captured before deployment replacement
   rejectDuplicateWorkflowId?: boolean; // Durable child-start outbox uses one immutable ID.
@@ -303,9 +304,18 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
     params.contextGates || null,
     params.fastModeCacheEnabled ?? false,
   ];
-  // Keep ordinary starts compatible with the previous 16-argument worker.
-  // Only a candidate worker handling a deployment replacement receives #17.
-  if (params.resumeState !== undefined) args.push(params.resumeState);
+  // Keep ordinary real-mode starts compatible with the previous 16-argument
+  // worker. Deployment state remains #17; Simulator mode uses #18 so it does
+  // not change the durable replacement contract.
+  if (
+    params.resumeState !== undefined ||
+    (params.worldModelMode !== undefined && params.worldModelMode !== 'real')
+  ) {
+    args.push(params.resumeState ?? null);
+  }
+  if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {
+    args.push(params.worldModelMode);
+  }
   return args;
 }
 

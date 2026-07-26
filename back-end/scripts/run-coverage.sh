@@ -30,6 +30,40 @@ for arg in "$@"; do
   [[ "$arg" == "--report-only" ]] && REPORT_ONLY=1
 done
 
+# Returns 0 when a funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY) fallback is
+# available to the coverage backend — either already exported into this shell or
+# present and non-empty in back-end/.env (which the backend loads via dotenv at
+# startup). resolveCodexCodeAuthEnvs uses this key to authenticate the Codex Code
+# E2B session when no gpt_code OAuth credential is seeded, so its presence means
+# the codex-code smoke can still run (and self-SKIP when the key is exhausted).
+codex_funded_fallback_configured() {
+  local env_name value
+  for value in "${GPT_API_KEY:-}" "${OPENAI_API_KEY:-}"; do
+    [[ -n "$value" ]] && return 0
+  done
+  [[ -f "$BACKEND_DIR/.env" ]] || return 1
+  for env_name in GPT_API_KEY OPENAI_API_KEY; do
+    # Mirror the backend's dotenv semantics rather than trusting the first raw
+    # grep hit: the LAST assignment wins (dotenv is last-in-wins), quoted values
+    # keep '#' literally, unquoted values drop an inline "# comment", and an
+    # empty/whitespace/comment-only effective value counts as absent — so a blank
+    # or commented-out key cannot spuriously satisfy the fallback and skip the
+    # intended no-credential failure path.
+    value="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${env_name}=" "$BACKEND_DIR/.env" | tail -1 || true)"
+    [[ -z "$value" ]] && continue
+    value="${value#*=}"
+    value="${value#"${value%%[![:space:]]*}"}"
+    case "$value" in
+      \"*) value="${value#\"}"; value="${value%%\"*}" ;;
+      \'*) value="${value#\'}"; value="${value%%\'*}" ;;
+      *)   value="${value%%#*}"
+           value="${value%"${value##*[![:space:]]}"}" ;;
+    esac
+    [[ -n "$value" ]] && return 0
+  done
+  return 1
+}
+
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
 COV_TMP="$BACKEND_DIR/coverage/tmp"
 rm -rf "$COV_TMP"
@@ -208,9 +242,19 @@ SQL
         "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
       if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
         echo "Using the connected gpt_code credential already seeded in the isolated test database."
+      elif codex_funded_fallback_configured; then
+        # No seeded gpt_code OAuth credential, but the Codex Code session also
+        # authenticates via the funded OpenAI key (GPT_API_KEY / OPENAI_API_KEY)
+        # fallback that resolveCodexCodeAuthEnvs injects when no OAuth credential
+        # is present (see src/providers/e2b.ts). With that funded key configured,
+        # the codex-code E2B smoke still runs end-to-end — and emits the
+        # deploy-approved out-of-funds SKIP if the key is exhausted — so a missing
+        # seeded credential must NOT hard-fail the whole coverage run. Only fail
+        # when NO credential path exists at all (handled by the else below).
+        echo "No seeded gpt_code credential; a funded OpenAI key (GPT_API_KEY/OPENAI_API_KEY) fallback is configured, so the Codex smoke will run via that fallback (and SKIP if it is out of credits/quota)."
       else
-        echo "❌ Codex auth is not ChatGPT mode and the isolated test database has no connected gpt_code credential." >&2
-        echo "   Run codex login, seed the integration, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
+        echo "❌ Codex auth is not ChatGPT mode, the isolated test database has no connected gpt_code credential, and no funded OpenAI key (GPT_API_KEY/OPENAI_API_KEY) fallback is configured." >&2
+        echo "   Run codex login, seed the integration, configure a funded key, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
         exit 1
       fi
     fi

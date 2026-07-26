@@ -15,6 +15,7 @@ const params = buildChatTemporalStartParams({
     verifier: { type: 'default' },
     priceLimitCents: 100,
     fastModeCacheEnabled: true,
+    worldModelMode: 'simulate',
   },
 });
 
@@ -22,5 +23,6 @@ assert.strictEqual(params.model, 'rose-labs/rose-1-ultra');
 assert.strictEqual(params.goal, 'refined goal');
 assert.strictEqual(params.startPhase, 'execute');
 assert.strictEqual(params.fastModeCacheEnabled, true);
+assert.strictEqual(params.worldModelMode, 'simulate');
 
 process.stdout.write('PASS Temporal escalation preserves the requested Ultra model\n');

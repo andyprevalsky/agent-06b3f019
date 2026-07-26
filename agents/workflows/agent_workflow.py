@@ -180,6 +180,7 @@ class AgentWorkflow:
         # goal that varies run to run). All cache keying threads this, never self.goal.
         self.fast_cache_goal: Optional[str] = None
         self.fast_mode_cache_enabled: bool = False
+        self.world_model_mode: str = "real"
         self.model: str = "anthropic/claude-sonnet-4.6"
         self.reasoning_max_tokens: int = 256
         self.verifier: Optional[Dict] = None
@@ -607,7 +608,7 @@ class AgentWorkflow:
 
     def _continuation_args(self, context: Optional[List[Dict]]) -> List[Any]:
         """Build the single canonical execute continuation argument contract."""
-        return [
+        args = [
             self.agent_id,
             self.user_id,
             self.goal,
@@ -626,6 +627,9 @@ class AgentWorkflow:
             self.fast_mode_cache_enabled,
             self._continuation_resume_state(context),
         ]
+        if self.world_model_mode != "real":
+            args.append(self.world_model_mode)
+        return args
 
     def _iteration_resume_kwargs(self) -> Dict[str, int]:
         """Keep iteration/cache history across replacement and continuation runs."""
@@ -938,6 +942,7 @@ class AgentWorkflow:
         context_gates: Optional[Dict[str, bool]] = None,  # Control which user context sections to include
         fast_mode_cache_enabled: bool = False,  # Fast Mode aggressive cache (own flag, NOT a context gate)
         resume_state: Optional[Dict] = None,  # Deployment or continue-as-new durable runtime state
+        world_model_mode: str = "real",  # Per-agent provider/environment execution mode
     ) -> Dict:
         """Execute agent task: optionally PLAN phase → EXECUTE phase."""
         # Bind agent_id to structlog context so ALL downstream structlog calls
@@ -960,6 +965,7 @@ class AgentWorkflow:
         self.bus_id = bus_id
         self.context_gates = context_gates or {}  # Empty dict = all gates open (default)
         self.fast_mode_cache_enabled = fast_mode_cache_enabled  # Record/replay third-party responses
+        self.world_model_mode = world_model_mode if world_model_mode in {"simulate", "shadow"} else "real"
         self.max_iterations = max_iterations
         self.price_limit_cents = price_limit_cents  # Use passed value instead of hardcoded default
         self.compute_token_lineage_key = f"agent:{agent_id}"
@@ -1140,9 +1146,12 @@ class AgentWorkflow:
         # on the backend (Agent.isBenchmark) so this never texts the operator.
         if not parent_workflow_id and not self._deployment_resume:
             try:
+                notification_args = [user_id, "agent_started", agent_id, {"goal": goal}]
+                if self.world_model_mode != "real":
+                    notification_args.append(self.world_model_mode)
                 await workflow.execute_activity(
                     notify_sms_event_activity,
-                    args=[user_id, "agent_started", agent_id, {"goal": goal}],
+                    args=notification_args,
                     start_to_close_timeout=timedelta(seconds=30),
                     retry_policy=RetryPolicy(maximum_attempts=2),
                 )
@@ -2441,6 +2450,8 @@ class AgentWorkflow:
                 # large bodies; pass auth so the summarizer can use claudeAuth
                 # ($0) instead of falling through OpenRouter waterfall.
                 extra_executor_kwargs: Dict[str, Any] = {}
+                if self.world_model_mode != "real" and tool_name in ("web_search", "web_fetch", "call_phone_number"):
+                    extra_executor_kwargs["world_model_mode"] = self.world_model_mode
                 # Fast Mode: pass the goal so web_search/web_fetch can either
                 # read+write (Fast Mode on) or write-only for allowlisted accounts.
                 fast_mode_write_through = self.user_id in FAST_MODE_WRITE_THROUGH_USER_IDS
@@ -3550,17 +3561,20 @@ class AgentWorkflow:
             # Send SMS notification for cost_limit (root + SMS-source only)
             if self.agent_source == "SMS":
                 try:
+                    notification_args = [
+                        self.user_id,
+                        "cost_limit",
+                        self.agent_id,
+                        {
+                            "tree_cost_cents": int(self.subtree_cost_cents),
+                            "price_limit_cents": self.price_limit_cents,
+                        },
+                    ]
+                    if self.world_model_mode != "real":
+                        notification_args.append(self.world_model_mode)
                     await workflow.execute_activity(
                         notify_sms_event_activity,
-                        args=[
-                            self.user_id,
-                            "cost_limit",
-                            self.agent_id,
-                            {
-                                "tree_cost_cents": int(self.subtree_cost_cents),
-                                "price_limit_cents": self.price_limit_cents,
-                            },
-                        ],
+                        args=notification_args,
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )
@@ -4151,14 +4165,17 @@ class AgentWorkflow:
             # parent; notifying per child would fan out at tree scale.
             if not self.parent_workflow_id and summary:
                 try:
+                    notification_args = [
+                        self.user_id,
+                        "completion",
+                        self.agent_id,
+                        {"summary": summary, "outputs": formatted_outputs},
+                    ]
+                    if self.world_model_mode != "real":
+                        notification_args.append(self.world_model_mode)
                     await workflow.execute_activity(
                         notify_sms_event_activity,
-                        args=[
-                            self.user_id,
-                            "completion",
-                            self.agent_id,
-                            {"summary": summary, "outputs": formatted_outputs},
-                        ],
+                        args=notification_args,
                         start_to_close_timeout=timedelta(seconds=30),
                         retry_policy=RetryPolicy(maximum_attempts=2),
                     )

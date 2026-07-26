@@ -16,13 +16,12 @@ import {
 import { PurchaseError } from './errors';
 import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
-import { reclaimPurchaseWalletFunding } from './walletFunding';
 import { resolveAndIssuePurchaseCard } from './issueCard';
-import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 import {
   ensureAllLegacyFingerprintsIndexed,
   ensureRecentLegacyFingerprintsIndexed,
 } from './fingerprintBackfill';
+import { canonicalInputFingerprint, purchaseReceipt, tryClaimFundingResume } from './fundingResume';
 import {
   PurchaseSpendStatus,
   type MintPurchaseInput,
@@ -40,14 +39,6 @@ export {
 } from './reconcile';
 
 const log = createLogger('Purchases');
-const RETRYABLE_PURCHASE_STATUSES = new Set<PurchaseSpendStatus>([
-  PurchaseSpendStatus.FAILED,
-  PurchaseSpendStatus.REFUNDED,
-  PurchaseSpendStatus.VOIDED,
-  PurchaseSpendStatus.CAPTURE_FAILED,
-  PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
-]);
-
 function assertPositiveCents(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new PurchaseError(`${field} must be a positive integer`);
@@ -167,20 +158,28 @@ export async function lookupPurchase(
 async function tryReuseExistingPurchase(
   existing: PurchaseSpend,
   cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider,
   now = new Date()
 ): Promise<MintPurchaseResult | null> {
   if (isStaleChargingPurchase(existing, now)) {
-    await recoverStaleChargingPurchase(existing, walletFundingProvider);
+    await recoverStaleChargingPurchase(existing);
     return null;
   }
 
   // Another mint for this exact cart is mid-flight — don't double-charge.
   if (
     existing.status === PurchaseSpendStatus.CHARGING ||
-    existing.status === PurchaseSpendStatus.PENDING_APPROVAL
+    existing.status === PurchaseSpendStatus.PENDING_APPROVAL ||
+    existing.status === PurchaseSpendStatus.FUNDING_ABANDONED
   ) {
-    throw new PurchaseError('This purchase is already in progress', 409);
+    throw new PurchaseError(
+      existing.status === PurchaseSpendStatus.FUNDING_ABANDONED
+        ? 'This purchase is being reconciled after company funding was abandoned'
+        : 'This purchase is already in progress',
+      409,
+      existing.status === PurchaseSpendStatus.FUNDING_ABANDONED
+        ? 'purchase_funding_abandoned_reconciliation'
+        : undefined
+    );
   }
 
   // Idempotent retry within the reuse window: hand back the held card while it's still live and
@@ -211,39 +210,40 @@ async function tryReuseExistingPurchase(
   return null;
 }
 
-async function recoverStaleChargingPurchase(
-  purchase: PurchaseSpend,
-  walletFundingProvider?: WalletFundingProvider
-): Promise<void> {
+async function recoverStaleChargingPurchase(purchase: PurchaseSpend): Promise<void> {
   log.warn('Recovering stale CHARGING purchase', {
     purchase_id: purchase.id,
     user_id: purchase.userId,
     stripe_payment_intent_id: purchase.stripePaymentIntentId,
   });
 
-  try {
-    await reclaimPurchaseWalletFunding(
-      purchase,
-      'stale_charging_purchase_recovery',
-      walletFundingProvider
+  const funding = await repo.findWalletFundingByPurchaseId(purchase.id);
+  if (purchase.cardId !== null || funding !== null) {
+    // A card or pre-provider marker means an external AgentCard result may exist. Only the cron
+    // compensator may close/release it; never mark the row retryable from an HTTP request.
+    throw new PurchaseError(
+      'This purchase is being reconciled after an interrupted funding attempt',
+      409,
+      'purchase_funding_reconciliation_in_progress'
     );
-  } catch (error) {
-    log.error('Failed to reclaim wallet funding while recovering stale CHARGING purchase', {
-      purchase_id: purchase.id,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
-    throw new PurchaseError('Purchase wallet funding requires manual reconciliation', 409);
   }
 
   if (purchase.stripePaymentIntentId !== null) {
-    await cancelAuthorizedHold(purchase.stripePaymentIntentId).catch((error) => {
+    try {
+      await cancelAuthorizedHold(purchase.stripePaymentIntentId);
+    } catch (error) {
       log.warn('Failed to cancel Stripe hold while recovering stale CHARGING purchase', {
         purchase_id: purchase.id,
         stripe_payment_intent_id: purchase.stripePaymentIntentId,
         error: error instanceof Error ? error.message : String(error),
       });
-    });
+      // Preserve CHARGING so another request cannot open a second row while the first hold may live.
+      throw new PurchaseError(
+        'Stripe authorization cleanup is still in progress',
+        409,
+        'purchase_stripe_reconciliation_in_progress'
+      );
+    }
   }
 
   await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED, {
@@ -252,39 +252,10 @@ async function recoverStaleChargingPurchase(
 }
 
 /** Open a PENDING_APPROVAL purchase row for this fingerprint. */
-async function openPendingPurchase(
-  input: MintPurchaseInput,
-  existing: PurchaseSpend | null
-): Promise<PurchaseSpend> {
-  const receipt = {
-    currency: input.currency,
-    lineItems: input.lineItems,
-    fees: input.fees,
-    subtotalCents: input.subtotalCents,
-    totalCents: input.totalCents,
-  };
-  const canonicalFingerprint = canonicalStoredPurchaseFingerprint({
-    userId: input.userId,
-    merchant: input.merchant,
-    lineItemsJson: receipt,
-    totalCents: input.totalCents,
-  });
-  if (canonicalFingerprint === null) {
-    throw new PurchaseError('purchase receipt cannot be fingerprinted');
-  }
-
-  if (existing && RETRYABLE_PURCHASE_STATUSES.has(existing.status)) {
-    return repo.createPendingPurchase({
-      userId: input.userId,
-      agentId: input.agentId,
-      fingerprint: input.fingerprint,
-      canonicalFingerprint,
-      merchant: input.merchant,
-      lineItemsJson: receipt,
-      totalCents: input.totalCents,
-    });
-  }
-  return repo.createPendingPurchase({
+async function openPendingPurchase(input: MintPurchaseInput) {
+  const receipt = purchaseReceipt(input);
+  const canonicalFingerprint = canonicalInputFingerprint(input);
+  return repo.createPendingPurchaseWithLock({
     userId: input.userId,
     agentId: input.agentId,
     fingerprint: input.fingerprint,
@@ -327,22 +298,37 @@ export async function mintPurchaseCard(
       input.fingerprint
     );
   }
+  let resumedPurchase: PurchaseSpend | null = null;
   if (existing) {
-    const reused = await tryReuseExistingPurchase(
-      existing,
-      cardProvider,
-      walletFundingProvider,
-      now
-    );
-    if (reused) return reused;
+    resumedPurchase = await tryClaimFundingResume(existing, input, now);
+    if (resumedPurchase === null) {
+      const reused = await tryReuseExistingPurchase(existing, cardProvider, now);
+      if (reused) return reused;
+    }
   }
 
-  const purchase = await openPendingPurchase(input, existing);
-  if (benchmarkPurchaseKycRequired(input.userId)) {
+  let purchase = resumedPurchase;
+  if (purchase === null) {
+    const opened = await openPendingPurchase(input);
+    if (!opened.created) {
+      const reused = await tryReuseExistingPurchase(opened.purchase, cardProvider, now);
+      if (reused !== null) return reused;
+      throw new PurchaseError('This purchase is already in progress', 409);
+    }
+    purchase = opened.purchase;
+  }
+  if (resumedPurchase === null && benchmarkPurchaseKycRequired(input.userId)) {
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
     throw kycRequiredPurchaseError();
   }
 
-  // Admin bypass vs. the standard subscription/card-on-file path is decided in charge.ts.
-  return resolveAndIssuePurchaseCard(purchase, input, cardProvider, walletFundingProvider);
+  // Admins bypass the subscription / card-on-file gate (company-funded no-charge card); everyone
+  // else goes through the standard Stripe-customer check. Funding-resume state is threaded through.
+  return resolveAndIssuePurchaseCard(
+    purchase,
+    input,
+    resumedPurchase,
+    cardProvider,
+    walletFundingProvider
+  );
 }

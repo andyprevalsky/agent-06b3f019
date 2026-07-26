@@ -10,6 +10,7 @@ class PaymentImportWorkflow:
             normalize_payment_payload as normalize_domain_payment_payload,
         )
         from tools.request_payment_card import (
+            MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
             build_payment_question,
             mint_purchase_card_activity,
             normalize_payment_payload,
@@ -55,5 +56,7 @@ class PaymentImportWorkflow:
             "tool_question": build_payment_question(payload),
             "domain_question": build_domain_payment_question(domain_payload),
             "same_fingerprint": payload["fingerprint"] == domain_payload["fingerprint"],
+            "mint_activity_timeout_seconds": MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
             "mint_activity_imported": callable(mint_purchase_card_activity),
+            "mint_activity_timeout_seconds": MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
         }

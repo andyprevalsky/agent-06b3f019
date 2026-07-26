@@ -19,6 +19,7 @@ export const AgentListItem = z.object({
   tokens_out: z.number(),
   context_size: z.number(),
   message_count: z.number(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   created_at: DATE_LIKE,
   updated_at: DATE_LIKE,
 });
@@ -58,6 +59,7 @@ export const CreateAgentResponse = z.object({
   status: z.string(),
   status_message: z.string().nullable(),
   temporal_workflow_id: z.string().nullable(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   created_at: DATE_LIKE,
   updated_at: DATE_LIKE,
   available_endpoints: z.record(z.any()),
@@ -106,6 +108,7 @@ export const AgentDetail = z.object({
   message_count: z.number(),
   price_limit_cents: z.number(),
   tree_cost_cents: z.number(),
+  world_model_mode: z.enum(['real', 'simulate', 'shadow']),
   token_in_price_microdollars: z.number().nullable(),
   token_out_price_microdollars: z.number().nullable(),
   created_at: DATE_LIKE,

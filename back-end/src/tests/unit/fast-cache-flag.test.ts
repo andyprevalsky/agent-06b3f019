@@ -26,7 +26,10 @@ import { createSessionSchema as createCodexSessionSchema } from '../../domains/c
 import {
   applyFastModeDefault,
   applyFastModeInheritance,
-} from '../../domains/agents/agentLifecycleService';
+  applyWorldModelModeInheritance,
+  assertWorldModelModeAccess,
+  disableFastModeForWorldModel,
+} from '../../domains/agents/agentExecutionMode';
 import { buildChatTemporalStartParams } from '../../providers/chat/chatHandler';
 
 let passed = 0;
@@ -188,6 +191,62 @@ test('#5 createAgentSchema accepts fast_mode_cache_enabled', () => {
   assert.strictEqual(absent.fast_mode_cache_enabled, undefined); // route/service applies defaults
 });
 
+test('createAgentSchema accepts supported world-model modes', () => {
+  const simulated = createAgentSchema.parse({ goal: 'x', world_model_mode: 'simulate' });
+  assert.strictEqual(simulated.world_model_mode, 'simulate');
+  assert.strictEqual(
+    createAgentSchema.parse({ goal: 'x', world_model_mode: 'shadow' }).world_model_mode,
+    'shadow'
+  );
+  assert.throws(() => createAgentSchema.parse({ goal: 'x', world_model_mode: 'bogus' }));
+});
+
+test('non-real world-model modes require a canonical admin account', () => {
+  const simulated = createAgentSchema.parse({ goal: 'x', world_model_mode: 'simulate' });
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(simulated, '1f85ff25-6e29-4c1b-8739-f917bd101a30')
+  );
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(simulated, '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9')
+  );
+  assert.throws(
+    () => assertWorldModelModeAccess(simulated, '22222222-2222-4222-8222-222222222222'),
+    /requires administrator access/
+  );
+  const real = createAgentSchema.parse({ goal: 'x', world_model_mode: 'real' });
+  assert.doesNotThrow(() =>
+    assertWorldModelModeAccess(real, '22222222-2222-4222-8222-222222222222')
+  );
+});
+
+test('Simulator mode disables Fast Mode provider-cache reads', () => {
+  const body = createAgentSchema.parse({
+    goal: 'x',
+    world_model_mode: 'simulate',
+    fast_mode_cache_enabled: true,
+  });
+  disableFastModeForWorldModel(body);
+  assert.strictEqual(body.fast_mode_cache_enabled, false);
+
+  const shadow = createAgentSchema.parse({
+    goal: 'x',
+    world_model_mode: 'shadow',
+    fast_mode_cache_enabled: true,
+  });
+  disableFastModeForWorldModel(shadow);
+  assert.strictEqual(shadow.fast_mode_cache_enabled, false);
+});
+
+test('sub-agents inherit Simulator mode from their parent', () => {
+  const body = createAgentSchema.parse({
+    goal: 'x',
+    parent_agent_id: '00000000-0000-4000-8000-000000000001',
+    parent_workflow_id: '00000000-0000-4000-8000-000000000001',
+  });
+  applyWorldModelModeInheritance(body, 'simulate');
+  assert.strictEqual(body.world_model_mode, 'simulate');
+});
+
 test('Codex Code createSessionSchema accepts explicit Fast Mode flag', () => {
   const on = createCodexSessionSchema.parse({
     agent_id: '11111111-1111-4111-8111-111111111111',
@@ -265,18 +324,20 @@ test('batch-created sub-agents use parent Fast Mode inheritance', () => {
     'utf8'
   );
   assert.ok(
-    batchService.includes('applyFastModeInheritanceForBatch'),
-    'batch create must resolve parent fast-mode flags before insert/start'
+    batchService.includes('applyExecutionModeInheritanceForBatch'),
+    'batch create must resolve parent execution-mode flags before insert/start'
   );
   assert.ok(
-    batchService.includes('repo.findFastModeFlagsByIds(parentIds)'),
-    'batch create must bulk-fetch parent fast-mode flags'
+    batchService.includes('repo.findExecutionModeFlagsByIds(parentIds)'),
+    'batch create must bulk-fetch parent execution-mode flags'
   );
   assert.ok(
-    batchService.includes(
-      'applyFastModeInheritance(body, parentFlagById.get(body.parent_agent_id))'
-    ),
+    batchService.includes('applyFastModeInheritance(body, parent?.fastModeCacheEnabled)'),
     'batch create must apply the same inheritance helper as single create'
+  );
+  assert.ok(
+    batchService.includes('disableFastModeForWorldModel(body);'),
+    'batch create must disable Fast Mode for every explicit or inherited non-real mode'
   );
 });
 
@@ -451,9 +512,11 @@ test('chat escalation preserves Fast Mode on the root Temporal workflow', () => 
       verifier: { type: 'default' },
       priceLimitCents: 100,
       fastModeCacheEnabled: true,
+      worldModelMode: 'simulate',
     },
   });
   assert.strictEqual(params.fastModeCacheEnabled, true);
+  assert.strictEqual(params.worldModelMode, 'simulate');
   assert.strictEqual(params.model, 'rose-labs/rose-1-ultra');
 });
 

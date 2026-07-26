@@ -14,6 +14,7 @@ import html as html_module
 import importlib
 import inspect
 import json
+import math
 import os
 import random
 import re
@@ -30,8 +31,12 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
-from browser_tools.schemas import AVAILABLE_ACTIONS
+from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
+from domains.request_payment_card.contracts import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+)
+from domains.request_payment_card.handler import build_payment_question, normalize_payment_payload
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -153,6 +158,18 @@ def _normalize_payment_card_last4(value: Any) -> Optional[str]:
     return None
 
 
+def _normalize_funding_retry_seconds(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 5.0
+    try:
+        retry_seconds = float(value)
+    except OverflowError:
+        return 5.0
+    if not math.isfinite(retry_seconds) or retry_seconds <= 0:
+        return 5.0
+    return min(max(retry_seconds, 1.0), 60.0)
+
+
 def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]]:
     safe_last4 = _normalize_payment_card_last4(last4)
     if safe_last4 is None:
@@ -171,12 +188,16 @@ def _build_payment_card_verifier_evidence(last4: Any) -> Optional[Dict[str, Any]
 async def _lookup_payment_purchase(
     user_id: str,
     payment_payload: Dict[str, Any],
+    world_model_mode: Optional[str] = None,
 ) -> tuple[Dict[str, Any], str]:
     """Look up the canonical key and retain a matched pre-canonicalization key for mint."""
     fingerprint = str(payment_payload.get("fingerprint") or "")
+    activity_args = [user_id, fingerprint]
+    if world_model_mode not in {None, "real"}:
+        activity_args.append(world_model_mode)
     result = await workflow.execute_activity(
         "lookup_purchase_activity",
-        args=[user_id, fingerprint],
+        args=activity_args,
         start_to_close_timeout=timedelta(seconds=30),
         retry_policy=RetryPolicy(maximum_attempts=3),
     )
@@ -1791,6 +1812,70 @@ def _append_browser_turn_messages(
         )
 
 
+async def _feed_browser_tool_validation_error_back(
+    *,
+    error: BrowserToolArgsValidationError,
+    action_history: Any,
+    browser_turn_messages: List[Dict[str, Any]],
+    dom_service: Any,
+    browser_state: Dict[str, Any],
+    task_prompt: str,
+    iteration: int,
+    agent_id: str,
+    task_id: str,
+    browser_url: str,
+) -> None:
+    """Route a model tool-arg validation error through the normal tool-result path.
+
+    A schema rejection of the model's OWN tool arguments is a model-output error, not
+    a Rose transport/infra failure. Record it in action_history and append it to
+    browser_turn_messages so the NEXT decision turn sees the rejection and can
+    self-correct, and emit a visible ERROR trajectory row — exactly how execution
+    errors are surfaced. Deliberately mirrors the auth-blocked branch; it must never
+    be swallowed, hidden, or counted toward the consecutive-API-failure abort budget.
+    """
+    validation_message = (
+        f"Your `{error.tool_name}` tool call was rejected because its arguments "
+        f"failed validation:\n{error.detail}\n"
+        "Fix the arguments and call the tool again, or choose a different action."
+    )
+    result = {"success": False, "error": validation_message}
+    tool_call_id_action = str(uuid_module.uuid4())
+    synthetic_action = {
+        "action": error.tool_name,
+        "thinking": error.thinking or "",
+        "params": error.tool_args,
+    }
+    await action_history.record_action(
+        dom_service=dom_service,
+        action=error.tool_name,
+        thinking=error.thinking or "",
+        params=error.tool_args,
+        result=result,
+    )
+    _append_browser_turn_messages(
+        browser_turn_messages,
+        task=task_prompt,
+        browser_state=browser_state,
+        include_screenshot=False,
+        unified_action=synthetic_action,
+        result=result,
+        tool_call_id=tool_call_id_action,
+    )
+    await save_browser_action_message(
+        agent_id=agent_id,
+        title=f"Invalid {error.tool_name} arguments — retrying",
+        task_id=task_id,
+        message=validation_message,
+        status=MessageStatus.FINISHED,
+        browser_url=browser_url,
+        action_type=error.tool_name,
+        tool_call_id=tool_call_id_action,
+        steps_taken=iteration,
+        total_steps=MAX_ITERATIONS,
+    )
+
+
 def json_dumps_compact(value: Any) -> str:
     import json
 
@@ -3050,6 +3135,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     gpt_token_source: Optional[str] = None,
     gpt_token_pool_id: Optional[str] = None,
     fast_mode_cache_enabled: bool = False,
+    world_model_mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     # A browser is its own stateful environment. Do not inherit either the
     # benchmark runner's explicit session or the parent agent's module-cached
@@ -3061,6 +3147,7 @@ async def spawn_browser_agent_activity_v3(  # noqa: C901
     world_model = WorldModelToolExecutionAdapter.from_env(
         agent_id=f"{agent_id}:browser:{tool_call_id}",
         inherit_explicit_session=False,
+        mode=world_model_mode,
     )
     if world_model.should_simulate("browser_action"):
         return await _spawn_browser_agent_activity_v3_simulated(
@@ -5813,6 +5900,31 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     logger.error(f"Aborting: {MAX_CONSECUTIVE_API_FAILURES} consecutive browser decision timeouts")
                     break
                 raise
+            except BrowserToolArgsValidationError as validation_error:
+                # The model chose a real tool but supplied arguments its schema
+                # rejects. This is a model-output error, NOT a Rose transport/infra
+                # failure: feed it back through the normal tool-result path so the
+                # next turn sees the rejection and self-corrects, keep it visible in
+                # the trajectory, and do NOT count it toward the abort budget.
+                logger.info(
+                    f"Browser tool args rejected ({validation_error.tool_name}); feeding validation error back to model",
+                    iteration=iteration,
+                    detail=validation_error.detail,
+                )
+                consecutive_api_failures = 0
+                await _feed_browser_tool_validation_error_back(
+                    error=validation_error,
+                    action_history=action_history,
+                    browser_turn_messages=browser_turn_messages,
+                    dom_service=dom_service,
+                    browser_state=browser_state,
+                    task_prompt=task_prompt,
+                    iteration=iteration,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    browser_url=browser_url,
+                )
+                continue
             except Exception as e:
                 consecutive_api_failures += 1
                 logger.error(
@@ -5858,9 +5970,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 with contextlib.suppress(Exception):
                     browser_network_recorder = network_recorder_task.result()
             provider_exit_rejection = (
-                browser_network_recorder.pop_provider_exit_rejection()
-                if browser_network_recorder is not None
-                else None
+                browser_network_recorder.pop_provider_exit_rejection() if browser_network_recorder is not None else None
             )
             if provider_exit_rejection is not None:
                 # The streamed model action was superseded before execution;
@@ -6185,9 +6295,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(
-                            unified_action.get("params", {}).get("provider_exit_rejected")
-                        ),
+                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
                     )
 
                     config_result = recovery.config_result
@@ -7534,6 +7642,31 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             result = None
 
             while True:
+                activity_args = [
+                    user_id,
+                    agent_id,
+                    goal,
+                    tool_call_id,
+                    (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
+                    (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
+                    (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
+                    write_lock_resume_state is not None,
+                    output_schema,
+                    attachments if attachments else None,
+                    write_lock_enabled,
+                    current_start_url,
+                    write_lock_resume_state,
+                    system_name,
+                    bool(active_claude_token) and not bool(active_gpt_token),
+                    active_gpt_token,
+                    active_gpt_account_id,
+                    active_gpt_source,
+                    active_gpt_pool_id,
+                    False,
+                ]
+                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                if world_model_mode != "real":
+                    activity_args.append(world_model_mode)
                 async with span(
                     "browser_activity_wait",
                     agent_id=agent_id,
@@ -7545,28 +7678,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 ):
                     activity_handle = workflow.start_activity(
                         spawn_browser_agent_activity_v3,
-                        args=[
-                            user_id,
-                            agent_id,
-                            goal,
-                            tool_call_id,
-                            (write_lock_resume_state.get("task_id") if write_lock_resume_state else None),
-                            (write_lock_resume_state.get("session_id") if write_lock_resume_state else None),
-                            (write_lock_resume_state.get("cdp_url") if write_lock_resume_state else None),
-                            write_lock_resume_state is not None,
-                            output_schema,
-                            attachments if attachments else None,
-                            write_lock_enabled,
-                            current_start_url,
-                            write_lock_resume_state,
-                            system_name,
-                            bool(active_claude_token) and not bool(active_gpt_token),
-                            active_gpt_token,
-                            active_gpt_account_id,
-                            active_gpt_source,
-                            active_gpt_pool_id,
-                            False,
-                        ],
+                        args=activity_args,
                         start_to_close_timeout=timedelta(minutes=ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES),
                         heartbeat_timeout=timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS),
                         cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
@@ -7709,11 +7821,6 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         return
 
                 if result and result.get("status") == "awaiting_payment_card_approval":
-                    from tools.request_payment_card import (
-                        MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-                        build_payment_question,
-                        normalize_payment_payload,
-                    )
                     from tools.request_user_approval import (
                         request_user_approval_direct,
                         request_user_attention_direct,
@@ -7748,6 +7855,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                     lookup_result, matched_fingerprint = await _lookup_payment_purchase(
                         workflow_instance.user_id or "",
                         payment_payload,
+                        getattr(workflow_instance, "world_model_mode", "real"),
                     )
                     # Mint uses the same fingerprint as lookup. When a held
                     # purchase was created before canonicalization shipped,
@@ -7782,15 +7890,40 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             attention_request_id=approval_response.get("attention_request_id"),
                         )
 
+                    funding_retry_deadline = None
+
                     async def mint_payment_card() -> Dict[str, Any]:
-                        return await workflow.execute_activity(
-                            "mint_purchase_card_activity",
-                            args=[workflow_instance.user_id or "", payment_payload],
-                            start_to_close_timeout=timedelta(
-                                seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
-                            ),
-                            retry_policy=RetryPolicy(maximum_attempts=1),
-                        )
+                        nonlocal funding_retry_deadline
+                        activity_args = [workflow_instance.user_id or "", payment_payload]
+                        world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
+                        if world_model_mode != "real":
+                            activity_args.append(world_model_mode)
+                        while True:
+                            minted_card = await workflow.execute_activity(
+                                "mint_purchase_card_activity",
+                                args=activity_args,
+                                start_to_close_timeout=timedelta(
+                                    seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
+                                ),
+                                retry_policy=RetryPolicy(maximum_attempts=1),
+                            )
+                            if minted_card.get("status") != "agentcard_company_funding_in_progress":
+                                return minted_card
+
+                            if funding_retry_deadline is None:
+                                funding_retry_deadline = workflow.now() + timedelta(minutes=10)
+                            retry_seconds = _normalize_funding_retry_seconds(
+                                minted_card.get("retryAfterSeconds", 5)
+                            )
+                            if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
+                                return minted_card
+                            logger.info(
+                                "AgentCard company funding pending; resuming same purchase",
+                                agent_id=workflow_instance.agent_id,
+                                task_id=result.get("task_id"),
+                                retry_seconds=retry_seconds,
+                            )
+                            await workflow.sleep(retry_seconds)
 
                     async def create_agentcard_setup_attention(
                         setup_card: Dict[str, Any],
@@ -8059,6 +8192,24 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                                 },
                             )
                             return
+
+                    if card.get("status") == "agentcard_company_funding_in_progress":
+                        yield ToolEvent(
+                            type=EventType.POST_MESSAGE,
+                            title="Payment funding is delayed",
+                            message=(
+                                "AgentCard has not confirmed the company funding transfer yet. "
+                                "The approved purchase is preserved and can be retried without "
+                                "creating another charge."
+                            ),
+                            status=MessageStatus.FINISHED,
+                            metadata={
+                                "toolName": "spawn_browser_agent",
+                                "task_id": result.get("task_id"),
+                                "action_type": "purchase_funding_delayed",
+                            },
+                        )
+                        return
 
                     logger.info(
                         "Browser payment card minted",

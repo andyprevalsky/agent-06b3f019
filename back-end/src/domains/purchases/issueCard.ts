@@ -19,21 +19,31 @@ import {
 export async function resolveAndIssuePurchaseCard(
   purchase: PurchaseSpend,
   input: MintPurchaseInput,
+  resumedPurchase: PurchaseSpend | null,
   cardProvider?: CardProvider,
   walletFundingProvider?: WalletFundingProvider
 ): Promise<MintPurchaseResult> {
+  // A resumed purchase already holds a wallet-funding claim; only a fresh purchase transitions to
+  // CHARGING here (a resume re-enters mid-flight). Mirrors the non-admin path below.
   if (isAdminUser(input.userId)) {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+    if (resumedPurchase === null) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+    }
     return issueAdminCompanyCard(purchase, input, cardProvider, walletFundingProvider);
   }
 
   const subscription = await repo.findSubscriptionByUserId(input.userId);
   const stripeCustomerId = subscription?.stripeCustomerId;
   if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.FAILED);
+    await repo.updatePurchaseStatus(
+      purchase.id,
+      resumedPurchase === null ? PurchaseSpendStatus.FAILED : PurchaseSpendStatus.FUNDING_PENDING
+    );
     throw new PurchaseError('User does not have a Stripe billing customer', 402);
   }
 
-  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+  if (resumedPurchase === null) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+  }
   return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
 }

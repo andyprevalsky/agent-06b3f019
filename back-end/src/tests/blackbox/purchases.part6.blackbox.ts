@@ -1,140 +1,238 @@
 #!/usr/bin/env tsx
-/**
- * Black-box tests for the admin purchase bypass (part 6).
- *
- * Admins (ADMIN_USER_IDS) bypass the subscription / card-on-file requirement: the card is minted
- * from the AgentCard company transfer with NO personal Stripe hold (Rose fronts the cost). A
- * non-admin without a Stripe billing customer still fails with a 402.
- */
+/** Durable cross-request AgentCard company-funding retry regressions. */
 
 import { randomUUID } from 'node:crypto';
 import { config } from 'dotenv';
-import { PurchaseSpendStatus } from '@prisma/client';
+import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
+import { mintPurchaseCard } from '../../domains/purchases/service';
+import { PurchaseError } from '../../domains/purchases/errors';
 import { prisma } from '../../providers/database';
-import * as purchasesService from '../../domains/purchases/service';
+import { AgentCardProviderError, type CardProvider } from '../../providers/card-provider';
 import {
   assert,
-  FakeCardProvider,
   FakeWalletFundingProvider,
+  ResumableFundingInProgressCardProvider,
   withFakeStripe,
 } from './purchases.testkit';
 
 config();
 
-const RUN_ID =
-  process.env.BLACKBOX_TEST_RUN_ID ||
-  process.env.CONTRACT_TEST_RUN_ID ||
-  `${Date.now()}-${randomUUID().slice(0, 8)}`;
+const RUN_ID = process.env.BLACKBOX_TEST_RUN_ID || `${Date.now()}-${randomUUID().slice(0, 8)}`;
+const userIds: string[] = [];
 
-const ADMIN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30'; // Andy Prevalsky — ADMIN_USER_IDS
+async function createSubscribedUser(): Promise<string> {
+  const userId = `purchase6-${RUN_ID}-${randomUUID()}`;
+  await prisma.user.create({ data: { userId, isAnonymous: true } });
+  userIds.push(userId);
+  await prisma.subscription.create({
+    data: {
+      userId,
+      subscriptionTier: 1,
+      stripeSubscriptionId: `sub_${randomUUID()}`,
+      stripeCustomerId: `cus_${randomUUID()}`,
+      currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+    },
+  });
+  return userId;
+}
 
-function validMintBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function mintInput(userId: string, fingerprint: string, totalCents = 1000) {
   return {
-    fingerprint: `fp-${randomUUID()}`,
+    userId,
+    fingerprint,
     merchant: 'Test Merchant',
     currency: 'USD',
     lineItems: [{ label: 'Widget', amountCents: 1000 }],
     fees: [{ label: 'Tax', amountCents: 80 }],
     subtotalCents: 1000,
-    totalCents: 1080,
-    ...overrides,
-  };
+    totalCents,
+  } as never;
 }
 
-async function adminMintIssuesCompanyCardWithoutCharge(): Promise<void> {
-  await prisma.user.upsert({
-    where: { userId: ADMIN_USER_ID },
-    update: {},
-    create: { userId: ADMIN_USER_ID, isAnonymous: true },
-  });
-  const fingerprint = `admin-nocharge-${RUN_ID}-${randomUUID()}`;
-  const provider = new FakeCardProvider();
-  const walletFundingProvider = new FakeWalletFundingProvider();
+async function expectPurchaseError(fn: () => Promise<unknown>): Promise<PurchaseError> {
   try {
-    await withFakeStripe(async (calls) => {
-      const result = await purchasesService.mintPurchaseCard(
-        validMintBody({ userId: ADMIN_USER_ID, fingerprint, totalCents: 1000 }) as never,
-        provider,
-        walletFundingProvider
-      );
-      assert(result.cardId === provider.cardId, 'admin mint should issue the company card');
-      assert(result.status === PurchaseSpendStatus.HELD, `expected HELD, got ${result.status}`);
-      assert(provider.mintCalls === 1, `expected one company-flow mint, got ${provider.mintCalls}`);
-      assert(
-        provider.mintRequests[0]?.fundsSource === 'company_flow',
-        'admin card should still request AgentCard company_flow funding'
-      );
-      assert(
-        calls.charges.length === 0,
-        `admin mint must not authorize a Stripe hold, got ${calls.charges.length}`
-      );
-      assert(
-        calls.captures.length === 0,
-        `admin mint must not capture a Stripe charge, got ${calls.captures.length}`
-      );
-      const row = await prisma.purchaseSpend.findFirst({
-        where: { userId: ADMIN_USER_ID, fingerprint },
-        orderBy: { createdAt: 'desc' },
-      });
-      assert(row?.status === PurchaseSpendStatus.HELD, `expected HELD row, got ${row?.status}`);
-      assert(row?.cardId === provider.cardId, 'admin purchase should store the card id');
-      assert(
-        row?.stripePaymentIntentId === null,
-        'admin (Rose-funded) purchase should carry no Stripe payment intent'
-      );
-    });
-  } finally {
-    // Andy is a real synced user — never delete him; drop only this test's purchase rows
-    // (PurchaseWalletFunding cascades on the PurchaseSpend FK).
-    await prisma.purchaseSpend.deleteMany({ where: { userId: ADMIN_USER_ID, fingerprint } });
+    await fn();
+  } catch (error) {
+    if (error instanceof PurchaseError) return error;
+    throw error;
   }
-  console.log('PASS admin mint issues a company-funded card with no Stripe charge');
-}
-
-async function nonAdminWithoutCustomerFails402(): Promise<void> {
-  const userId = `purchase6-${RUN_ID}-non-admin-${randomUUID()}`;
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-  const fingerprint = `non-admin-402-${randomUUID()}`;
-  const provider = new FakeCardProvider();
-  try {
-    await withFakeStripe(async (calls) => {
-      let caught: unknown;
-      try {
-        await purchasesService.mintPurchaseCard(
-          validMintBody({ userId, fingerprint, totalCents: 1000 }) as never,
-          provider
-        );
-      } catch (error) {
-        caught = error;
-      }
-      assert(caught instanceof purchasesService.PurchaseError, 'expected PurchaseError');
-      const purchaseError = caught as purchasesService.PurchaseError;
-      assert(purchaseError.statusCode === 402, `expected 402, got ${purchaseError.statusCode}`);
-      assert(provider.mintCalls === 0, 'non-admin without a customer must never mint a card');
-      assert(calls.charges.length === 0, 'non-admin 402 must not touch Stripe');
-      const row = await prisma.purchaseSpend.findFirst({
-        where: { userId, fingerprint },
-        orderBy: { createdAt: 'desc' },
-      });
-      assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
-    });
-  } finally {
-    await prisma.user.deleteMany({ where: { userId } });
-  }
-  console.log('PASS non-admin without a Stripe customer still fails 402');
+  throw new Error('expected PurchaseError');
 }
 
 async function main(): Promise<void> {
-  try {
-    await adminMintIssuesCompanyCardWithoutCharge();
-    await nonAdminWithoutCustomerFails402();
-  } finally {
-    await prisma.$disconnect();
-  }
+  const userId = await createSubscribedUser();
+  const fingerprint = `funding-resume-${randomUUID()}`;
+  const input = mintInput(userId, fingerprint);
+  const provider = new ResumableFundingInProgressCardProvider();
+  const walletProvider = new FakeWalletFundingProvider();
+
+  await withFakeStripe(async (calls) => {
+    const firstError = await expectPurchaseError(() =>
+      mintPurchaseCard(input, provider, walletProvider)
+    );
+    assert(
+      firstError.code === 'agentcard_company_funding_in_progress',
+      `expected funding-in-progress, got ${firstError.code}`
+    );
+    const pending = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId, fingerprint },
+    });
+    assert(
+      pending.status === PurchaseSpendStatus.FUNDING_PENDING,
+      `expected FUNDING_PENDING, got ${pending.status}`
+    );
+
+    const mismatch = await expectPurchaseError(() =>
+      mintPurchaseCard(mintInput(userId, fingerprint, 2000), provider, walletProvider)
+    );
+    assert(
+      mismatch.code === 'purchase_funding_resume_mismatch',
+      `expected resume mismatch, got ${mismatch.code}`
+    );
+
+    provider.completeFunding();
+    const result = await mintPurchaseCard(input, provider, walletProvider);
+    assert(result.purchaseId === pending.id, 'retry must resume the original purchase row');
+    assert(result.status === PurchaseSpendStatus.HELD, `expected HELD, got ${result.status}`);
+
+    const purchases = await prisma.purchaseSpend.findMany({
+      where: { userId, fingerprint },
+      include: { walletFunding: true },
+    });
+    assert(purchases.length === 1, `expected one PurchaseSpend, got ${purchases.length}`);
+    assert(calls.charges.length === 2, `expected two Stripe calls, got ${calls.charges.length}`);
+    assert(
+      calls.chargeIdempotencyKeys[0] === calls.chargeIdempotencyKeys[1],
+      'Stripe retries must use the same idempotency key'
+    );
+    assert(
+      calls.chargeResultIds[0] === calls.chargeResultIds[1],
+      'Stripe retries must resolve to the same PaymentIntent'
+    );
+    assert(
+      provider.mintRequests.length === 2 &&
+        provider.mintRequests[0]?.idempotencyKey === provider.mintRequests[1]?.idempotencyKey,
+      'AgentCard retries must use the same purchase-scoped idempotency key'
+    );
+    assert(
+      purchases[0]?.walletFunding?.status === PurchaseWalletFundingStatus.FUNDED,
+      `expected FUNDED wallet row, got ${purchases[0]?.walletFunding?.status}`
+    );
+    assert(calls.cancels.length === 0, 'the shared hold must never be canceled');
+    assert(calls.captures.length === 1, 'the shared hold must be captured exactly once');
+  });
+
+  const ambiguousUserId = await createSubscribedUser();
+  const ambiguousFingerprint = `ambiguous-kyc-prose-${randomUUID()}`;
+  const ambiguousProvider: CardProvider = {
+    async mintCard(): Promise<never> {
+      throw new AgentCardProviderError(
+        'AgentCard returned 500; diagnostics mentioned kyc_required after create',
+        500
+      );
+    },
+    async getDetails(): Promise<never> {
+      throw new Error('details must not run for an ambiguous provider response');
+    },
+    async closeCard(): Promise<void> {
+      throw new Error('an unknown card must not be closed without its id');
+    },
+  };
+  await withFakeStripe(async (calls) => {
+    const error = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(ambiguousUserId, ambiguousFingerprint),
+        ambiguousProvider,
+        new FakeWalletFundingProvider()
+      )
+    );
+    assert(
+      error.code === 'agentcard_company_funding_in_progress',
+      `ambiguous KYC prose must remain funding-pending, got ${error.code}`
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: ambiguousUserId, fingerprint: ambiguousFingerprint },
+      include: { walletFunding: true },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FUNDING_PENDING,
+      `ambiguous response must preserve FUNDING_PENDING, got ${purchase.status}`
+    );
+    assert(
+      purchase.walletFunding?.status === PurchaseWalletFundingStatus.PENDING,
+      `ambiguous response must preserve the funding marker, got ${purchase.walletFunding?.status}`
+    );
+    assert(calls.cancels.length === 0, 'ambiguous provider outcome must preserve the Stripe hold');
+  });
+
+  const closedReplayUserId = await createSubscribedUser();
+  const closedReplayFingerprint = `closed-replay-${randomUUID()}`;
+  const closedReplayCardId = `card-closed-${randomUUID()}`;
+  let closedReplayCloseCalls = 0;
+  const closedReplayProvider: CardProvider = {
+    async mintCard() {
+      return {
+        cardId: closedReplayCardId,
+        last4: '4242',
+        expiry: '12/30',
+        spendLimitCents: 1000,
+        status: 'CLOSED',
+        providerTransferId: `owt_closed_${randomUUID()}`,
+      };
+    },
+    async getDetails() {
+      return {
+        pan: '4242424242424242',
+        cvv: '123',
+        expiry: '12/30',
+        balanceCents: 0,
+        status: 'CLOSED',
+      };
+    },
+    async closeCard() {
+      closedReplayCloseCalls += 1;
+    },
+  };
+  const closedReplayWallet = new FakeWalletFundingProvider();
+  await withFakeStripe(async (calls) => {
+    const error = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(closedReplayUserId, closedReplayFingerprint),
+        closedReplayProvider,
+        closedReplayWallet
+      )
+    );
+    assert(
+      error.code === 'agentcard_company_card_unusable',
+      `closed replay must fail as unusable, got ${error.code}`
+    );
+    assert(calls.captures.length === 0, 'a closed replay card must never capture Stripe');
+    assert(calls.cancels.length === 1, 'a closed replay card must release the Stripe hold');
+    assert(closedReplayCloseCalls === 1, 'the unusable card must enter idempotent close cleanup');
+    assert(
+      closedReplayWallet.reclaimCalls.length === 1,
+      'the unusable card transfer must be reclaimed'
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: closedReplayUserId, fingerprint: closedReplayFingerprint },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FAILED,
+      `closed replay cleanup must end FAILED, got ${purchase.status}`
+    );
+  });
+
+  process.stdout.write('PASS durable AgentCard company-funding resume (3/3)\n');
 }
 
-main().catch(async (error) => {
-  console.error(error);
-  await prisma.$disconnect();
-  process.exit(1);
-});
+main()
+  .catch((error) => {
+    process.stderr.write(`FAIL ${error instanceof Error ? error.stack : String(error)}\n`);
+    process.exitCode = 1;
+  })
+  .finally(async () => {
+    await prisma.purchaseSpend.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.subscription.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.user.deleteMany({ where: { userId: { in: userIds } } });
+    await prisma.$disconnect();
+  });

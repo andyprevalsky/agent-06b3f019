@@ -2,8 +2,8 @@
  * Types for the indexed-db-reader domain.
  *
  * Encapsulates the shapes produced when parsing Chrome's IndexedDB LevelDB
- * via the bundled `scripts/read_indexeddb.py` helper. A per-origin sha256
- * prefix is attached downstream for cache invalidation.
+ * natively (see `native/indexeddb.ts`). A per-origin sha256 prefix is attached
+ * downstream for cache invalidation.
  */
 
 /** One decoded record inside a Chrome IndexedDB object store. */

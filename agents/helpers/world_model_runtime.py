@@ -256,9 +256,9 @@ def _redact(value: Any) -> Any:
 # The adapter is constructed per tool call (each handler calls `from_env().execute()`),
 # so WMH sessions are cached at module level keyed by (agent_id, world_model). Repeated
 # boundary calls for one agent reuse the same world session, and no session id needs to be
-# pre-provisioned or injected via env. `agent_id` is None for handlers that don't thread it
-# yet (web_search/people_search) — those share a "default" session per worker process, which
-# is correct for a single-agent run; threading agent_id in is the per-agent/cloud follow-up.
+# pre-provisioned or injected via env. Product workflows thread the agent id through every
+# intercepted boundary; direct benchmark activity calls may omit it and use the worker's
+# single-run "default" session for backward compatibility.
 _WMH_SESSION_CACHE: dict[tuple[str, str], str] = {}
 _WMH_SESSION_LOCK = asyncio.Lock()
 
@@ -315,8 +315,9 @@ class WorldModelToolExecutionAdapter:
         *,
         agent_id: str | None = None,
         inherit_explicit_session: bool = True,
+        mode: str | None = None,
     ) -> "WorldModelToolExecutionAdapter":
-        mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real").strip().lower() or "real"
+        resolved_mode = (mode or os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real")).strip().lower() or "real"
         base_url = os.environ.get("WMH_BASE_URL") or os.environ.get("WORLD_MODEL_HARNESS_URL")
         model_name = os.environ.get("WMH_MODEL_NAME") or os.environ.get("WORLD_MODEL_NAME")
         session_id = None
@@ -324,7 +325,7 @@ class WorldModelToolExecutionAdapter:
             session_id = os.environ.get("WMH_SESSION_ID") or os.environ.get("WORLD_MODEL_SESSION_ID")
         client = WMHHttpClient(base_url) if base_url else None
         return cls(
-            mode=mode,
+            mode=resolved_mode,
             client=client,
             world_model_name=model_name,
             session_id=session_id,

@@ -34,6 +34,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.seed_cache_path import seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
@@ -815,12 +816,82 @@ def _dashboard_context_dir(stack: ServiceStack) -> Path:
     return stack.context_dir
 
 
-def local_seed_dump_path() -> Path:
-    """Schema- and day-scoped cache path for isolated local benchmark databases."""
+def local_seed_dump_path(
+    schema_path: Path | None = None,
+    cache_root: Path | None = None,
+    cache_day: str | None = None,
+) -> Path:
+    """Resolve the producer/consumer seed path through the shared cache contract."""
+    return seed_dump_path(
+        schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma",
+        cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache",
+        cache_day,
+    )
+
+
+def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
+    """Snapshot a healthy shared stack when today's isolated seed cache is cold."""
     schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
     schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
-    day = time.strftime("%Y%m%d", time.gmtime())
-    return BENCHMARK_CONTEXT_ROOT / "seed-cache" / f"{schema_hash}-{day}.dump"
+    sidecar = Path(f"{seed_dump}.schemahash")
+    lock_path = Path(f"{seed_dump}.lock")
+    seed_dump.parent.mkdir(parents=True, exist_ok=True)
+
+    def current_dump_exists() -> bool:
+        try:
+            return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
+        except OSError:
+            return False
+
+    if current_dump_exists():
+        return True
+
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if current_dump_exists():
+            return True
+        try:
+            manifest = json.loads(SERVICES_MANIFEST.read_text())
+            if manifest.get("status") != "running":
+                return False
+            manifest_worktree = manifest.get("worktree")
+            if manifest_worktree and Path(str(manifest_worktree)).resolve() != REPO_ROOT.resolve():
+                return False
+            ports = manifest.get("ports") if isinstance(manifest.get("ports"), dict) else {}
+            backend_port = ports.get("backend")
+            if not backend_port or not http_ok(f"http://localhost:{backend_port}/health"):
+                return False
+            database = (
+                manifest.get("database") if isinstance(manifest.get("database"), dict) else {}
+            )
+            database_name = database.get("name")
+            database_port = database.get("port") or ports.get("local_db")
+            if not database_name or not database_port:
+                return False
+            command = [
+                "bash",
+                str(REPO_ROOT / "scripts" / "save-seed-dump.sh"),
+                str(seed_dump),
+                "localhost",
+                str(database_port),
+                "postgres",
+                str(database_name),
+            ]
+            container = database.get("container")
+            if not database.get("use_system_postgres") and isinstance(container, str) and container:
+                command.append(container)
+            subprocess.run(command, cwd=REPO_ROOT, check=True)
+            sidecar_tmp = Path(f"{sidecar}.tmp-{os.getpid()}")
+            sidecar_tmp.write_text(schema_hash)
+            os.replace(sidecar_tmp, sidecar)
+            print(f"Primed isolated benchmark seed dump from shared stack: {seed_dump}")
+            return True
+        except Exception as exc:
+            print(
+                f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
+                file=sys.stderr,
+            )
+            return False
 
 
 def start_services(
@@ -843,19 +914,46 @@ def start_services(
         assert stack.base_port
         env["BENCHMARK_ISOLATED_RUN"] = "true"
         env["BENCHMARK_ISOLATED_BROWSER_PROFILES"] = "true"
+        # macOS distraction-blockers (e.g. Freedom) install a system HTTP(S) proxy
+        # that silently intercepts Node/Prisma outbound and breaks the prod cold-sync
+        # + compute-token fetch — it surfaces as a phantom "Can't reach database
+        # server" even though raw psql/TCP to the same host succeeds. Neutralize the
+        # proxy for every isolated-run subprocess (never disable the app itself).
+        env.setdefault("NO_PROXY", "*")
+        env.setdefault("no_proxy", "*")
+        for _proxy_var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            env.pop(_proxy_var, None)
         env["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
         env["BENCHMARK_RUN_ID"] = stack.run_id
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # Isolated stacks can start in the same second and share a long
+        # workspace-name prefix. Stable ngrok domains truncate that prefix,
+        # which can collapse distinct runs onto one public endpoint. Give each
+        # isolated stack a provider-assigned quick tunnel instead; the shared
+        # dev stack keeps its stable ngrok domain.
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "1"
         # Every isolated run starts with an empty per-run database. Opt into
         # run.sh's schema/day-keyed R2 seed cache so startup restores the same
         # prod snapshot in seconds instead of row-syncing tens of thousands of
         # records before services.json can be published.
         seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
         seed_dump.parent.mkdir(parents=True, exist_ok=True)
+        _prime_local_seed_dump_from_shared_stack(seed_dump)
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
-        env["BENCHMARK_REQUIRE_SEED_DUMP"] = "1"
+        # Default: require a schema-matched cached dump and refuse the slow prod
+        # cold-sync. But the very first local run on a fresh schema/day has no
+        # cached dump to restore, so allow an explicit opt-in
+        # (BENCHMARK_REQUIRE_SEED_DUMP=0) to bootstrap the cache via one cold-sync.
+        env["BENCHMARK_REQUIRE_SEED_DUMP"] = os.environ.get("BENCHMARK_REQUIRE_SEED_DUMP", "1")
+        if not simulate:
+            # Real-mode local benches never use the World Model Harness, so skip its
+            # slow R2-corpus + GEPA cold build. Left unset, that build runs
+            # synchronously during startup and can hang stack readiness (the manifest
+            # is never published → wait_for_services blocks forever). Mirrors the
+            # cloud-bench real-mode path, which sets the same flag for this reason.
+            env.setdefault("BENCHMARK_SKIP_WMH_BUILD", "1")
         if simulate:
             # Put the worker into simulate mode. run.sh forks the agents worker from this
             # env, so these must be set here (the worker's WMH adapter + fast-cache scope

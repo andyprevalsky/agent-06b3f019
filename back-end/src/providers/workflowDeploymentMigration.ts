@@ -72,7 +72,10 @@ export async function snapshotOpenRootWorkflows(
       deletedAt: null,
       parentAgentId: null,
       temporalWorkflowId: { not: null },
-      status: { notIn: TERMINAL_AGENT_STATUSES },
+      OR: [
+        { status: { notIn: TERMINAL_AGENT_STATUSES } },
+        { status: 'FAILED', workflowReplacementToken: { not: null } },
+      ],
     },
     orderBy: { id: 'asc' },
     select: { id: true, temporalWorkflowId: true, status: true },

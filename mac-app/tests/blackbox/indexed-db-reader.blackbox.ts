@@ -1,455 +1,669 @@
 /**
  * indexed-db-reader domain blackbox
  *
- * Surface under test:
- *   - main/services/indexedDBReader.ts
- *     IndexedDBReader.readIndexedDB(originFilter?) — spawns the bundled
- *     `scripts/read_indexeddb.py` Python helper (Chrome's LevelDB IndexedDB
- *     format needs a custom comparator), parses its stdout JSON array, and
- *     returns an `IndexedDBData` shape with a per-origin sha256(16) hash for
- *     cache invalidation.
+ * Surface under test: the fully-native Chrome IndexedDB reader
+ * (`main/domains/indexed-db-reader/`), which replaced the old
+ * `spawn('python3', scripts/read_indexeddb.py)` path. There is NO python
+ * dependency anymore — decoding is pure TypeScript
+ * (`native/leveldb.ts` + `native/v8-deserializer.ts` +
+ * `native/blink-deserializer.ts` + `native/indexeddb.ts`), validated
+ * byte-for-byte against `ccl_chromium_reader` across real Chrome profiles.
+ *
+ * These tests build a REAL Chrome-format IndexedDB LevelDB write-ahead log on
+ * disk (global/database/object-store metadata records + object-store data
+ * records whose values are produced by Node's `v8.serialize`, which emits the
+ * same wire format Chrome's Blink serializer uses) and then assert the reader
+ * decodes it correctly end-to-end.
  *
  * Observable behavior exercised here:
- *   - Successful Python run → results JSON parsed, every non-error origin
- *     receives a 16-hex-char sha256 hash, result preserves origin ordering.
- *   - Same `databases` shape → same hash regardless of process invocation
- *     (deterministic key for downstream cache).
- *   - Different `databases` shape → different hash (invariant for cache
- *     invalidation).
- *   - Python exits with code 1 and empty stderr → "no matching origins found",
- *     treated as a clean empty result (not an error).
- *   - Python exits with a non-zero code AND non-empty stderr → reported as
- *     error but still resolves to the empty shape (never rejects).
- *   - Python stdout returns a single-element `[{error: ...}]` → reported and
- *     resolves to empty shape.
- *   - Python stdout is not JSON → parse error handled, resolves to empty
- *     shape.
- *   - Python binary missing (spawn `error` event) → resolves to empty shape
- *     (never rejects).
- *   - No origin filter → script is invoked with a single arg (the script
- *     path); with an origin filter → two args (script path + filter).
- *   - Process cwd is always `app.getPath('home')` — a stable, per-user root.
- *
- * Boundary capture: N/A — this domain makes zero outbound HTTP calls. The
- *   only system boundaries are the Python subprocess, the filesystem (via
- *   `app.getPath('home')`), and `crypto` (pure JS). `fetchCaptures` is
- *   asserted empty as a hard invariant to guard against regression.
- *
- * Scope deferrals (per batch prompt):
- *   - flake×5 reruns, concurrent invocations, negative-control checks,
- *     broader-suite verification.
+ *   - readIndexedDbDatabases() decodes databases → object stores → records,
+ *     round-tripping strings, numbers, booleans, null, nested objects, and
+ *     arrays through the V8 deserializer.
+ *   - The service layer (readIndexedDB) discovers the active Chrome profile,
+ *     filters by origin, derives the origin from the folder name, and attaches
+ *     a stable per-origin sha256(16) change-detection hash.
+ *   - Folder discovery finds/filters `*.indexeddb.leveldb` folders and picks
+ *     the most-recently-modified profile.
+ *   - No IndexedDB folders / no Chrome profile → empty result (never throws).
+ *   - Zero outbound HTTP calls (this domain only touches the filesystem).
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { EventEmitter } from 'events';
-import crypto from 'crypto';
+import v8 from 'v8';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { fetchCaptures, clearFetchCaptures, installFetchCapture } from './fetch-capture';
+import { snappyDecompressBlock } from '../../main/domains/indexed-db-reader/native/snappy';
 
-// ── child_process.spawn shim ────────────────────────────────────────────────
-// The SUT reads stdout/stderr `data` events and the process-level `close` /
-// `error` events. Tests drive that lifecycle via the `SpawnDriver` callback.
-
-interface SpawnedProc {
-  command: string;
-  args: readonly string[];
-  cwd: string | undefined;
-  emitter: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
-  stdout: EventEmitter;
-  stderr: EventEmitter;
-}
-
-type SpawnDriver = (proc: SpawnedProc) => void;
-
-const cp = vi.hoisted(() => ({
-  spawned: [] as Array<{
-    command: string;
-    args: readonly string[];
-    cwd: string | undefined;
-    emitter: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-  }>,
-  driver: null as null | SpawnDriver,
-}));
-
-vi.mock('child_process', () => {
-  const spawn = (
-    command: string,
-    args: readonly string[],
-    options?: { cwd?: string }
-  ): EventEmitter => {
-    const stdout = new EventEmitter();
-    const stderr = new EventEmitter();
-    const emitter = new EventEmitter() as EventEmitter & {
-      stdout: EventEmitter;
-      stderr: EventEmitter;
-    };
-    emitter.stdout = stdout;
-    emitter.stderr = stderr;
-    const entry = { command, args, cwd: options?.cwd, emitter, stdout, stderr };
-    cp.spawned.push(entry);
-    // Defer so the SUT can attach its `data`/`close`/`error` listeners first.
-    if (cp.driver) {
-      const drv = cp.driver;
-      queueMicrotask(() => drv(entry));
-    }
-    return emitter;
-  };
-
-  const mod = { spawn };
-  return { ...mod, default: mod };
-});
-
-// ── Electron app.getPath stub ───────────────────────────────────────────────
-const TEST_HOME = '/tmp/mac-app-test-home';
+// ── Electron app.getPath stub (home is redirected per-test to a temp dir) ────
+const homeRef = { dir: '/tmp/does-not-exist' };
 vi.mock('electron', () => ({
-  app: {
-    getPath: vi.fn(() => TEST_HOME),
-    getAppPath: vi.fn(() => path.join(__dirname, '..', '..')),
-  },
+  app: { getPath: vi.fn(() => homeRef.dir) },
 }));
 
-// ── Helpers ─────────────────────────────────────────────────────────────────
+// ── LevelDB / IndexedDB fixture builders ─────────────────────────────────────
+// Minimal encoders mirroring Chromium's leveldb_coding_scheme so we can write a
+// genuine `.log` the reader parses. Only what the fixtures need is implemented.
 
-const EXPECTED_SCRIPT_SUFFIX = path.join('scripts', 'read_indexeddb.py');
-
-const spawnedProcs = cp.spawned;
-
-function setDriver(drv: SpawnDriver): void {
-  cp.driver = drv;
+function leVarint(value: number): number[] {
+  const out: number[] = [];
+  let v = value;
+  do {
+    let b = v & 0x7f;
+    v = Math.floor(v / 128);
+    if (v > 0) b |= 0x80;
+    out.push(b);
+  } while (v > 0);
+  return out;
 }
 
-function resetCp(): void {
-  cp.spawned.length = 0;
-  cp.driver = null;
+function utf16be(s: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    out.push((c >> 8) & 0xff, c & 0xff);
+  }
+  return out;
+}
+
+function leBytes(val: number): number[] {
+  if (val === 0) return [0];
+  const out: number[] = [];
+  let v = val;
+  while (v > 0) {
+    out.push(v & 0xff);
+    v = Math.floor(v / 256);
+  }
+  return out;
+}
+
+function makePrefix(dbId: number, storeId: number, indexId: number, end: number[] = []): number[] {
+  const sizes = (n: number): number => leBytes(n).length;
+  const byteOne = ((sizes(dbId) - 1) << 5) | ((sizes(storeId) - 1) << 2) | (sizes(indexId) - 1);
+  return [byteOne, ...leBytes(dbId), ...leBytes(storeId), ...leBytes(indexId), ...end];
+}
+
+/** Encode a String IdbKey: type 1, varint char-count, utf16-be chars. */
+function idbStringKey(s: string): number[] {
+  return [1, ...leVarint(s.length), ...utf16be(s)];
+}
+
+function float64le(n: number): number[] {
+  const b = Buffer.alloc(8);
+  b.writeDoubleLE(n, 0);
+  return Array.from(b);
+}
+
+/** Encode a Number IdbKey (type 3) — float64 LE. */
+function idbNumberKey(n: number): number[] {
+  return [3, ...float64le(n)];
+}
+
+/** Encode a Date IdbKey (type 2) — float64 LE milliseconds. */
+function idbDateKey(ms: number): number[] {
+  return [2, ...float64le(ms)];
+}
+
+/** Encode a Binary IdbKey (type 6) — varint length + bytes. */
+function idbBinaryKey(bytes: number[]): number[] {
+  return [6, ...leVarint(bytes.length), ...bytes];
+}
+
+/** Encode an Array IdbKey (type 4) — varint count + inner keys. */
+function idbArrayKey(inner: number[][]): number[] {
+  return [4, ...leVarint(inner.length), ...inner.flat()];
+}
+
+/** Wrap a v8-serialized value in the IndexedDB value envelope (blink version 17, no trailer). */
+function idbValue(value: unknown): number[] {
+  const v8Payload = Array.from(v8.serialize(value)); // starts with 0xFF <v8ver>
+  return [
+    0x01 /* idb value version */,
+    0xff /* blink tag */,
+    0x11 /* blink version 17 */,
+    ...v8Payload,
+  ];
+}
+
+interface KvPair {
+  key: number[];
+  value: number[];
+  /** When true, written as a LevelDB delete tombstone (key only, no value). */
+  del?: boolean;
+}
+
+/** Build the leveldb key/value pairs for one database with one object store. */
+function idbRecords(opts: {
+  dbId: number;
+  origin: string;
+  dbName: string;
+  storeId: number;
+  storeName: string;
+  records: { key: string; value: unknown }[];
+}): KvPair[] {
+  const pairs: KvPair[] = [];
+  // Database id record: 00 00 00 00 c9 <origin><name> -> db id (truncated int)
+  pairs.push({
+    key: [
+      0,
+      0,
+      0,
+      0,
+      0xc9,
+      ...leVarint(opts.origin.length),
+      ...utf16be(opts.origin),
+      ...leVarint(opts.dbName.length),
+      ...utf16be(opts.dbName),
+    ],
+    value: leBytes(opts.dbId),
+  });
+  // Database metadata: MaximumObjectStoreId (meta type 3)
+  pairs.push({ key: [...makePrefix(opts.dbId, 0, 0), 3], value: leBytes(opts.storeId) });
+  // Object store metadata: StoreName (meta type 0), value is utf16-be name
+  pairs.push({
+    key: [...makePrefix(opts.dbId, 0, 0, [50]), ...leVarint(opts.storeId), 0],
+    value: utf16be(opts.storeName),
+  });
+  // Object store data records
+  for (const rec of opts.records) {
+    pairs.push({
+      key: [...makePrefix(opts.dbId, opts.storeId, 1), ...idbStringKey(rec.key)],
+      value: idbValue(rec.value),
+    });
+  }
+  return pairs;
+}
+
+/** Frame key/value pairs into a single-block leveldb `.log` file and write it. */
+function writeLevelDbLog(leveldbDir: string, pairs: KvPair[]): void {
+  fs.mkdirSync(leveldbDir, { recursive: true });
+  // WriteBatch: seq(8 LE) | count(4 LE) | entries[ type(1)=Put | keyLen varint | key | valLen varint | val ]
+  const batch: number[] = [];
+  const seq = 1;
+  for (let i = 0; i < 8; i++) batch.push((seq >> (i * 8)) & 0xff);
+  const count = pairs.length;
+  for (let i = 0; i < 4; i++) batch.push((count >> (i * 8)) & 0xff);
+  for (const p of pairs) {
+    if (p.del === true) {
+      batch.push(0); // Delete (tombstone) — key only, no value
+      batch.push(...leVarint(p.key.length), ...p.key);
+      continue;
+    }
+    batch.push(1); // Put
+    batch.push(...leVarint(p.key.length), ...p.key);
+    batch.push(...leVarint(p.value.length), ...p.value);
+  }
+  // Physical log record: crc(4, ignored by reader) | length(2 LE) | type(1)=Full | data
+  const rec: number[] = [0, 0, 0, 0, batch.length & 0xff, (batch.length >> 8) & 0xff, 1, ...batch];
+  fs.writeFileSync(path.join(leveldbDir, '000001.log'), Buffer.from(rec));
+}
+
+/** Create the Chrome profile tree (with a Preferences file) and return the leveldb dir. */
+function profileIdbDir(home: string, folderName: string, profileName = 'Default'): string {
+  const profile = path.join(
+    home,
+    'Library',
+    'Application Support',
+    'Google',
+    'Chrome',
+    profileName
+  );
+  fs.mkdirSync(profile, { recursive: true });
+  fs.writeFileSync(path.join(profile, 'Preferences'), '{}');
+  return path.join(profile, 'IndexedDB', folderName);
+}
+
+/** Build a full Chrome-profile tree under `home` and return the leveldb dir. */
+function buildChromeProfile(home: string, folderName: string, pairs: KvPair[]): string {
+  const leveldbDir = profileIdbDir(home, folderName);
+  writeLevelDbLog(leveldbDir, pairs);
+  return leveldbDir;
+}
+
+/** The three metadata KV pairs (db id + MaximumObjectStoreId + StoreName) for one store. */
+function idbMetadata(
+  dbId: number,
+  origin: string,
+  dbName: string,
+  storeId: number,
+  storeName: string
+): KvPair[] {
+  return [
+    {
+      key: [
+        0,
+        0,
+        0,
+        0,
+        0xc9,
+        ...leVarint(origin.length),
+        ...utf16be(origin),
+        ...leVarint(dbName.length),
+        ...utf16be(dbName),
+      ],
+      value: leBytes(dbId),
+    },
+    { key: [...makePrefix(dbId, 0, 0), 3], value: leBytes(storeId) },
+    { key: [...makePrefix(dbId, 0, 0, [50]), ...leVarint(storeId), 0], value: utf16be(storeName) },
+  ];
+}
+
+/** One object-store data record with an arbitrary encoded IdbKey and a value. */
+function idbDataRecord(dbId: number, storeId: number, keyBytes: number[], value: unknown): KvPair {
+  return { key: [...makePrefix(dbId, storeId, 1), ...keyBytes], value: idbValue(value) };
+}
+
+/** Hand-build an all-literal Snappy block (no compressor needed). */
+function snappyLiteralBlock(data: number[]): number[] {
+  const n = data.length;
+  const header = [...leVarint(n)]; // uncompressed length prefix
+  if (n <= 60) {
+    header.push((n - 1) << 2); // literal length embedded in the tag
+  } else if (n <= 256) {
+    header.push(60 << 2, n - 1); // 8-bit literal length follows the tag
+  } else {
+    header.push(61 << 2, (n - 1) & 0xff, ((n - 1) >> 8) & 0xff); // 16-bit LE
+  }
+  return [...header, ...data];
+}
+
+/** Encode a single LevelDB table block: entries (shared=0) + restart array. */
+function encodeTableBlock(entries: KvPair[]): number[] {
+  const body: number[] = [];
+  for (const p of entries) {
+    body.push(
+      ...leVarint(0),
+      ...leVarint(p.key.length),
+      ...leVarint(p.value.length),
+      ...p.key,
+      ...p.value
+    );
+  }
+  body.push(0, 0, 0, 0); // single restart offset = 0
+  body.push(1, 0, 0, 0); // restart count = 1
+  return body;
 }
 
 /**
- * Compute the reference hash the same way the SUT does — 16-hex-char sha256
- * prefix of `JSON.stringify(origin.databases)`. Used by tests that assert on
- * the exact hash value rather than just shape.
+ * Write a minimal single-data-block LevelDB SSTable (`.ldb`). Keys become
+ * internal keys (user key + 8-byte trailer whose `key[-8]` byte is the type:
+ * 1 = Live). When `compress` is set, the data block is stored as a hand-built
+ * all-literal Snappy block so the reader's decompression path runs.
  */
-function referenceOriginHash(databases: unknown): string {
-  return crypto.createHash('sha256').update(JSON.stringify(databases)).digest('hex').slice(0, 16);
+function writeLevelDbSSTable(leveldbDir: string, pairs: KvPair[], compress = false): void {
+  fs.mkdirSync(leveldbDir, { recursive: true });
+  const blockHandle = (offset: number, length: number): number[] => [
+    ...leVarint(offset),
+    ...leVarint(length),
+  ];
+  // Trailer = [type=1 (Live), seq(7 bytes LE)] → key[-8] === 1.
+  const framed = pairs.map((p, i) => ({
+    key: [...p.key, 1, i + 1, 0, 0, 0, 0, 0, 0],
+    value: p.value,
+  }));
+
+  const rawData = encodeTableBlock(framed);
+  const dataBytes = compress ? snappyLiteralBlock(rawData) : rawData;
+  const out: number[] = [...dataBytes, compress ? 1 : 0, 0, 0, 0, 0]; // block + trailer(compression|crc)
+  const dataHandle = blockHandle(0, dataBytes.length);
+
+  const indexOffset = out.length;
+  const indexRaw = encodeTableBlock([{ key: framed[framed.length - 1].key, value: dataHandle }]);
+  out.push(...indexRaw, 0, 0, 0, 0, 0); // index block + trailer (uncompressed)
+  const indexHandle = blockHandle(indexOffset, indexRaw.length);
+
+  const footer: number[] = [...blockHandle(0, 0), ...indexHandle]; // metaindex(empty) + index
+  while (footer.length < 40) footer.push(0);
+  const magic = Buffer.alloc(8);
+  magic.writeBigUInt64LE(0xdb4775248b80fb57n, 0);
+  footer.push(...Array.from(magic));
+
+  fs.writeFileSync(path.join(leveldbDir, '000002.ldb'), Buffer.from([...out, ...footer]));
 }
 
-/** Drive the spawned process to success with the given JSON stdout payload. */
-function driveSuccess(stdoutJson: unknown): SpawnDriver {
-  return (proc) => {
-    proc.stdout.emit('data', Buffer.from(JSON.stringify(stdoutJson)));
-    proc.emitter.emit('close', 0);
-  };
-}
-
-/** Drive the spawned process to non-zero exit. */
-function driveExit(code: number, stderr = ''): SpawnDriver {
-  return (proc) => {
-    if (stderr) proc.stderr.emit('data', Buffer.from(stderr));
-    proc.emitter.emit('close', code);
-  };
-}
-
-/** Drive the spawned process to a raw-text stdout followed by close(0). */
-function driveRawStdout(text: string): SpawnDriver {
-  return (proc) => {
-    proc.stdout.emit('data', Buffer.from(text));
-    proc.emitter.emit('close', 0);
-  };
-}
-
-// ── Suite ───────────────────────────────────────────────────────────────────
+// ── Suite ────────────────────────────────────────────────────────────────────
 
 describe('indexed-db-reader blackbox', () => {
   let restoreFetch: (() => void) | null = null;
+  let tmp: string;
 
   beforeEach(() => {
     clearFetchCaptures();
-    resetCp();
     restoreFetch = installFetchCapture({});
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'idb-reader-'));
+    homeRef.dir = tmp;
   });
 
   afterEach(() => {
     restoreFetch?.();
     restoreFetch = null;
+    fs.rmSync(tmp, { recursive: true, force: true });
   });
 
   // ------------------------------------------------------------------
-  // auth boundary
+  // native decode
   // ------------------------------------------------------------------
-  describe('auth boundary', () => {
-    it('never shells out anywhere other than python3, never makes network calls', async () => {
-      setDriver(driveSuccess([]));
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-
-      await IndexedDBReader.readIndexedDB();
-
-      expect(spawnedProcs).toHaveLength(1);
-      expect(spawnedProcs[0].command).toBe('python3');
-      // cwd is always the user's home — never a system/root dir.
-      expect(spawnedProcs[0].cwd).toBe(TEST_HOME);
-      expect(fetchCaptures).toHaveLength(0);
-    });
-  });
-
-  // ------------------------------------------------------------------
-  // happy path
-  // ------------------------------------------------------------------
-  describe('happy path', () => {
-    it('parses the Python stdout JSON and returns origins + per-origin hashes', async () => {
-      const origins = [
-        {
+  describe('native decode', () => {
+    it('decodes databases, object stores, and records (multiple value types) from a real leveldb log', async () => {
+      const value = {
+        qty: 2,
+        name: 'widget',
+        active: true,
+        tags: ['a', 'b'],
+        note: null,
+        nested: { n: 7 },
+      };
+      const leveldbDir = buildChromeProfile(
+        tmp,
+        'https_www.amazon.com_0.indexeddb.leveldb',
+        idbRecords({
+          dbId: 1,
           origin: 'https://www.amazon.com',
-          databases: [
-            {
-              name: 'amazon-cart',
-              objectStores: [
-                {
-                  name: 'items',
-                  records: [
-                    { key: 'asin-1', value: { qty: 2 } },
-                    { key: 'asin-2', value: { qty: 1 } },
-                  ],
-                },
-              ],
-            },
+          dbName: 'cart-db',
+          storeId: 1,
+          storeName: 'items',
+          records: [
+            { key: 'asin-1', value },
+            { key: 'asin-2', value: 'plain-string' },
           ],
-        },
-        {
-          origin: 'https://mail.google.com',
-          databases: [
-            {
-              name: 'gmail-threads',
-              objectStores: [{ name: 'threads', records: [{ key: 1, value: { subject: 'hi' } }] }],
-            },
-          ],
-        },
-      ];
-      setDriver(driveSuccess(origins));
+        })
+      );
 
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const databases = readIndexedDbDatabases(leveldbDir);
 
-      // Origins preserved verbatim and in order.
-      expect(result.origins).toEqual(origins);
+      expect(databases).toHaveLength(1);
+      expect(databases[0].name).toBe('cart-db');
+      expect(databases[0].objectStores).toHaveLength(1);
+      const store = databases[0].objectStores[0];
+      expect(store.name).toBe('items');
+      expect(store.records).toHaveLength(2);
 
-      // Hashes are 16-hex sha256 prefixes per non-error origin, keyed by
-      // origin URL.
-      expect(Object.keys(result.hashes).sort()).toEqual([
-        'https://mail.google.com',
+      const byKey = new Map(store.records.map((r) => [r.key as string, r.value]));
+      expect(byKey.get('asin-1')).toEqual(value);
+      expect(byKey.get('asin-2')).toBe('plain-string');
+      expect(fetchCaptures).toHaveLength(0);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // service orchestration (discovery + filter + origin + hash)
+  // ------------------------------------------------------------------
+  describe('service orchestration', () => {
+    it('discovers the profile, filters by origin, derives the origin, and attaches a per-origin hash', async () => {
+      buildChromeProfile(
+        tmp,
+        'https_www.amazon.com_0.indexeddb.leveldb',
+        idbRecords({
+          dbId: 1,
+          origin: 'https://www.amazon.com',
+          dbName: 'db',
+          storeId: 1,
+          storeName: 's',
+          records: [{ key: 'k', value: { v: 1 } }],
+        })
+      );
+
+      const { IndexedDBReader } = await import('../../main/domains/indexed-db-reader/runtime');
+      const readIndexedDB = (f?: string) => IndexedDBReader.readIndexedDB(f);
+      const result = await readIndexedDB('amazon');
+
+      expect(result.origins).toHaveLength(1);
+      expect(result.origins[0].origin).toBe('https://www.amazon.com');
+      expect(result.origins[0].databases[0].objectStores[0].records[0].value).toEqual({ v: 1 });
+      expect(result.hashes['https://www.amazon.com']).toMatch(/^[a-f0-9]{16}$/);
+      expect(fetchCaptures).toHaveLength(0);
+    });
+
+    it('returns the same hash across calls for identical data and a different hash when data changes', async () => {
+      const build = (val: unknown): void => {
+        fs.rmSync(path.join(tmp, 'Library'), { recursive: true, force: true });
+        buildChromeProfile(
+          tmp,
+          'https_x.com_0.indexeddb.leveldb',
+          idbRecords({
+            dbId: 1,
+            origin: 'https://x.com',
+            dbName: 'd',
+            storeId: 1,
+            storeName: 's',
+            records: [{ key: 'k', value: val }],
+          })
+        );
+      };
+
+      const { IndexedDBReader } = await import('../../main/domains/indexed-db-reader/runtime');
+      const readIndexedDB = (f?: string) => IndexedDBReader.readIndexedDB(f);
+      build({ n: 1 });
+      const h1 = (await readIndexedDB('x.com')).hashes['https://x.com'];
+      build({ n: 1 });
+      const h2 = (await readIndexedDB('x.com')).hashes['https://x.com'];
+      build({ n: 2 });
+      const h3 = (await readIndexedDB('x.com')).hashes['https://x.com'];
+
+      expect(h1).toBe(h2);
+      expect(h1).not.toBe(h3);
+    });
+
+    it('returns an empty result when no IndexedDB folders match / no Chrome profile exists', async () => {
+      const { IndexedDBReader } = await import('../../main/domains/indexed-db-reader/runtime');
+      const readIndexedDB = (f?: string) => IndexedDBReader.readIndexedDB(f);
+
+      // No profile at all.
+      expect(await readIndexedDB('anything')).toEqual({ origins: [], hashes: {} });
+
+      // Profile exists but filter matches nothing.
+      buildChromeProfile(
+        tmp,
+        'https_www.amazon.com_0.indexeddb.leveldb',
+        idbRecords({
+          dbId: 1,
+          origin: 'https://www.amazon.com',
+          dbName: 'd',
+          storeId: 1,
+          storeName: 's',
+          records: [],
+        })
+      );
+      expect(await readIndexedDB('doordash')).toEqual({ origins: [], hashes: {} });
+      expect(fetchCaptures).toHaveLength(0);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // discovery
+  // ------------------------------------------------------------------
+  describe('folder discovery', () => {
+    it('finds and origin-decodes leveldb folders, filtering case-insensitively', async () => {
+      buildChromeProfile(tmp, 'https_www.amazon.com_0.indexeddb.leveldb', []);
+      const idbBase = path.join(
+        tmp,
+        'Library',
+        'Application Support',
+        'Google',
+        'Chrome',
+        'Default',
+        'IndexedDB'
+      );
+      fs.mkdirSync(path.join(idbBase, 'https_www.doordash.com_0.indexeddb.leveldb'), {
+        recursive: true,
+      });
+
+      const { findIndexedDbFolders, originFromFolderName } =
+        await import('../../main/domains/indexed-db-reader/native/discovery');
+      expect(originFromFolderName('https_www.amazon.com_0.indexeddb.leveldb')).toBe(
+        'https://www.amazon.com'
+      );
+      expect(originFromFolderName('http_localhost_5173.indexeddb.leveldb')).toBe(
+        'http://localhost'
+      );
+
+      const all = findIndexedDbFolders(tmp);
+      expect(all.map((f) => f.origin).sort()).toEqual([
         'https://www.amazon.com',
+        'https://www.doordash.com',
       ]);
-      for (const o of origins) {
-        expect(result.hashes[o.origin]).toMatch(/^[a-f0-9]{16}$/);
-        expect(result.hashes[o.origin]).toBe(referenceOriginHash(o.databases));
-      }
 
-      expect(fetchCaptures).toHaveLength(0);
+      const filtered = findIndexedDbFolders(tmp, 'AMAZON');
+      expect(filtered).toHaveLength(1);
+      expect(filtered[0].origin).toBe('https://www.amazon.com');
     });
 
-    it('invokes python3 with the bundled script path and no extra args when no filter given', async () => {
-      setDriver(driveSuccess([]));
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      await IndexedDBReader.readIndexedDB();
-
-      expect(spawnedProcs).toHaveLength(1);
-      expect(spawnedProcs[0].command).toBe('python3');
-      expect(spawnedProcs[0].args).toHaveLength(1);
-      expect(spawnedProcs[0].args[0].endsWith(EXPECTED_SCRIPT_SUFFIX)).toBe(true);
-    });
-
-    it('passes the origin filter through as the second python3 arg', async () => {
-      setDriver(driveSuccess([]));
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      await IndexedDBReader.readIndexedDB('amazon');
-
-      expect(spawnedProcs).toHaveLength(1);
-      expect(spawnedProcs[0].args).toHaveLength(2);
-      expect(spawnedProcs[0].args[0].endsWith(EXPECTED_SCRIPT_SUFFIX)).toBe(true);
-      expect(spawnedProcs[0].args[1]).toBe('amazon');
-    });
-
-    it('produces the same hash across two calls with identical databases (reproducibility)', async () => {
-      const origin = {
-        origin: 'https://reproducible.example.com',
-        databases: [
-          {
-            name: 'db',
-            objectStores: [{ name: 's', records: [{ key: 'k', value: 'v' }] }],
-          },
-        ],
-      };
-
-      setDriver(driveSuccess([origin]));
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const r1 = await IndexedDBReader.readIndexedDB();
-
-      resetCp();
-      setDriver(driveSuccess([origin]));
-      const r2 = await IndexedDBReader.readIndexedDB();
-
-      expect(r1.hashes[origin.origin]).toBe(r2.hashes[origin.origin]);
-    });
-
-    it('produces a different hash when the databases payload changes (invariant for cache invalidation)', async () => {
-      const base = {
-        origin: 'https://hash-sensitive.example.com',
-        databases: [
-          { name: 'db', objectStores: [{ name: 's', records: [{ key: 'a', value: 1 }] }] },
-        ],
-      };
-      const mutated = {
-        origin: 'https://hash-sensitive.example.com',
-        databases: [
-          { name: 'db', objectStores: [{ name: 's', records: [{ key: 'a', value: 2 }] }] },
-        ],
-      };
-
-      setDriver(driveSuccess([base]));
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const h1 = (await IndexedDBReader.readIndexedDB()).hashes[base.origin];
-
-      resetCp();
-      setDriver(driveSuccess([mutated]));
-      const h2 = (await IndexedDBReader.readIndexedDB()).hashes[mutated.origin];
-
-      expect(h1).not.toBe(h2);
-    });
-
-    it('skips hashing for per-origin error entries but keeps them in the origins array', async () => {
-      const good = {
-        origin: 'https://good.example.com',
-        databases: [{ name: 'db', objectStores: [] }],
-      };
-      const bad = {
-        origin: 'https://bad.example.com',
-        databases: [],
-        error: 'leveldb corrupt',
-      };
-
-      setDriver(driveSuccess([good, bad]));
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      // Both origins are preserved in the output…
-      expect(result.origins).toEqual([good, bad]);
-      // …but only the non-error origin has a cache hash.
-      expect(result.hashes).toEqual({
-        [good.origin]: referenceOriginHash(good.databases),
-      });
-      expect(result.hashes[bad.origin]).toBeUndefined();
-    });
-  });
-
-  // ------------------------------------------------------------------
-  // empty state
-  // ------------------------------------------------------------------
-  describe('empty state', () => {
-    it('returns { origins: [], hashes: {} } when python exits 1 with no stderr (no matching origins)', async () => {
-      setDriver(driveExit(1, ''));
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB('nonexistent-origin-filter');
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-      expect(fetchCaptures).toHaveLength(0);
-    });
-
-    it('returns { origins: [], hashes: {} } when python stdout is an empty array', async () => {
-      setDriver(driveSuccess([]));
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-    });
-  });
-
-  // ------------------------------------------------------------------
-  // error state
-  // ------------------------------------------------------------------
-  describe('error state', () => {
-    it('returns the empty shape when python exits non-zero with stderr (real failure, not silently rethrown)', async () => {
-      setDriver(
-        driveExit(2, 'Traceback (most recent call last):\nImportError: ccl_chromium_reader')
+    it('picks the most-recently-modified profile and resolves a sibling blob dir', async () => {
+      // Two profiles; the newer one wins.
+      const oldDir = profileIdbDir(tmp, 'https_a.com_0.indexeddb.leveldb', 'Default');
+      writeLevelDbLog(oldDir, idbMetadata(1, 'https://a.com', 'd', 1, 's'));
+      const newDir = profileIdbDir(tmp, 'https_b.com_0.indexeddb.leveldb', 'Profile 1');
+      writeLevelDbLog(newDir, idbMetadata(1, 'https://b.com', 'd', 1, 's'));
+      // Make Profile 1's Preferences the most recent.
+      const prefsNew = path.join(
+        tmp,
+        'Library',
+        'Application Support',
+        'Google',
+        'Chrome',
+        'Profile 1',
+        'Preferences'
       );
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-      expect(fetchCaptures).toHaveLength(0);
-    });
-
-    it('returns the empty shape when python emits a single-element [{error: ...}] payload', async () => {
-      setDriver(
-        driveSuccess([{ origin: '', databases: [], error: 'Chrome profile directory not found' }])
-      );
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-    });
-
-    it('returns the empty shape when python stdout is not valid JSON', async () => {
-      setDriver(driveRawStdout('this is not json at all'));
-
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-    });
-
-    it('returns the empty shape and never rejects when spawning python3 fails', async () => {
-      // Skip the happy-path driver and emit an `error` event on the child
-      // process instead — simulates python3 missing on $PATH.
-      setDriver((proc) => {
-        proc.emitter.emit('error', new Error('spawn python3 ENOENT'));
-        // Node's child_process also emits close after an ENOENT; emit it to
-        // mirror real behavior. The SUT's `close` handler sees code=1 with
-        // empty stderr and would resolve anyway, but `error` handler fires
-        // first.
-        proc.emitter.emit('close', 1);
+      fs.utimesSync(prefsNew, new Date(2030, 0, 1), new Date(2030, 0, 1));
+      // A sibling blob dir should be picked up.
+      fs.mkdirSync(path.join(path.dirname(newDir), 'https_b.com_0.indexeddb.blob'), {
+        recursive: true,
       });
 
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      const result = await IndexedDBReader.readIndexedDB();
-
-      expect(result).toEqual({ origins: [], hashes: {} });
-      expect(fetchCaptures).toHaveLength(0);
+      const { findIndexedDbFolders } =
+        await import('../../main/domains/indexed-db-reader/native/discovery');
+      const folders = findIndexedDbFolders(tmp);
+      expect(folders.map((f) => f.origin)).toEqual(['https://b.com']);
+      expect(folders[0].blobDir).not.toBeNull();
     });
   });
 
   // ------------------------------------------------------------------
-  // fetch-capture zero-HTTP invariant
+  // value + key type coverage
   // ------------------------------------------------------------------
-  describe('fetch-capture boundary invariant', () => {
-    it('makes zero outbound HTTP calls during readIndexedDB (happy path)', async () => {
-      setDriver(
-        driveSuccess([
-          {
-            origin: 'https://invariant.example.com',
-            databases: [{ name: 'db', objectStores: [] }],
-          },
-        ])
+  describe('value and key type decoding', () => {
+    it('round-trips the full structured-clone value matrix into the serialized shape', async () => {
+      const values: Record<string, unknown> = {
+        m: new Map<string, number>([['a', 1]]),
+        s: new Set<number>([1, 2]),
+        big: 123n,
+        date: new Date(1000),
+        nan: NaN,
+        inf: Infinity,
+        ninf: -Infinity,
+        arr: [1, 'two', false],
+        latin: 'café', // Latin-1 → V8 OneByteString → bytes
+      };
+      const records = Object.entries(values).map(([k, v]) =>
+        idbDataRecord(1, 1, idbStringKey(k), v)
       );
+      const leveldbDir = buildChromeProfile(tmp, 'https_x.com_0.indexeddb.leveldb', [
+        ...idbMetadata(1, 'https://x.com', 'd', 1, 'store'),
+        ...records,
+      ]);
 
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      await IndexedDBReader.readIndexedDB();
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const recs = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records;
+      const byKey = new Map(recs.map((r) => [r.key as string, r.value]));
 
-      expect(fetchCaptures).toHaveLength(0);
+      expect(byKey.get('m')).toEqual({ __type: 'Map', entries: [['a', 1]] });
+      expect(byKey.get('s')).toEqual({ __type: 'Set', values: [1, 2] });
+      expect(byKey.get('big')).toEqual({ __type: 'bigint', value: '123' });
+      expect(byKey.get('date')).toBe(new Date(1000).toISOString());
+      expect(byKey.get('nan')).toEqual({ __type: 'NaN' });
+      expect(byKey.get('inf')).toEqual({ __type: 'Infinity', sign: 1 });
+      expect(byKey.get('ninf')).toEqual({ __type: 'Infinity', sign: -1 });
+      expect(byKey.get('arr')).toEqual([1, 'two', false]);
+      expect(byKey.get('latin')).toMatchObject({ __type: 'bytes' });
     });
 
-    it('makes zero outbound HTTP calls even on python failure', async () => {
-      setDriver(driveExit(2, 'boom'));
+    it('decodes every IndexedDB primary-key type', async () => {
+      const records = [
+        idbDataRecord(1, 1, idbNumberKey(42), 'n'),
+        idbDataRecord(1, 1, idbDateKey(1000), 'd'),
+        idbDataRecord(1, 1, idbBinaryKey([1, 2, 3]), 'b'),
+        idbDataRecord(1, 1, idbArrayKey([idbStringKey('a'), idbNumberKey(7)]), 'arr'),
+      ];
+      const leveldbDir = buildChromeProfile(tmp, 'https_k.com_0.indexeddb.leveldb', [
+        ...idbMetadata(1, 'https://k.com', 'd', 1, 'store'),
+        ...records,
+      ]);
 
-      const { IndexedDBReader } = await import('../../main/services/indexedDBReader');
-      await IndexedDBReader.readIndexedDB('amazon');
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const keys = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records.map((r) => r.key);
+      expect(keys).toContainEqual(42);
+      expect(keys).toContainEqual(new Date(1000).toISOString());
+      expect(keys).toContainEqual('010203'); // binary → hex
+      expect(keys).toContainEqual(['a', 7]); // array key
+    });
 
-      expect(fetchCaptures).toHaveLength(0);
+    it('yields a null-valued record for a delete tombstone (empty value)', async () => {
+      const leveldbDir = buildChromeProfile(tmp, 'https_d.com_0.indexeddb.leveldb', [
+        ...idbMetadata(1, 'https://d.com', 'd', 1, 'store'),
+        { key: [...makePrefix(1, 1, 1), ...idbStringKey('gone')], value: [], del: true },
+      ]);
+
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const recs = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records;
+      expect(recs).toEqual([{ key: 'gone', value: null }]);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // LevelDB SSTable (.ldb) path
+  // ------------------------------------------------------------------
+  describe('SSTable (.ldb) reading', () => {
+    it('reads records from an uncompressed .ldb table file', async () => {
+      const leveldbDir = profileIdbDir(tmp, 'https_t.com_0.indexeddb.leveldb');
+      writeLevelDbSSTable(leveldbDir, [
+        ...idbMetadata(1, 'https://t.com', 'd', 1, 'store'),
+        idbDataRecord(1, 1, idbStringKey('k'), { v: 5 }),
+      ]);
+
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const recs = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records;
+      expect(recs).toEqual([{ key: 'k', value: { v: 5 } }]);
+    });
+
+    it('reads records from a Snappy-compressed .ldb block', async () => {
+      const leveldbDir = profileIdbDir(tmp, 'https_z.com_0.indexeddb.leveldb');
+      writeLevelDbSSTable(
+        leveldbDir,
+        [
+          ...idbMetadata(1, 'https://z.com', 'd', 1, 'store'),
+          idbDataRecord(1, 1, idbStringKey('c'), 'zipped'),
+        ],
+        true
+      );
+
+      const { readIndexedDbDatabases } =
+        await import('../../main/domains/indexed-db-reader/native/indexeddb');
+      const recs = readIndexedDbDatabases(leveldbDir)[0].objectStores[0].records;
+      expect(recs).toEqual([{ key: 'c', value: 'zipped' }]);
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Snappy decompressor (unit)
+  // ------------------------------------------------------------------
+  describe('snappy decompression', () => {
+    it('decompresses an all-literal block', () => {
+      const out = snappyDecompressBlock(Uint8Array.from(snappyLiteralBlock([10, 20, 30])));
+      expect(Array.from(out)).toEqual([10, 20, 30]);
+    });
+
+    it('decompresses a block with a one-byte copy back-reference', () => {
+      // uncompressed length 8: literal "abcd" then copy(len=4, offset=4) → "abcdabcd".
+      const block = [0x08, 0x0c, 0x61, 0x62, 0x63, 0x64, 0x01, 0x04];
+      const out = snappyDecompressBlock(Uint8Array.from(block));
+      expect(Buffer.from(out).toString('ascii')).toBe('abcdabcd');
     });
   });
 });

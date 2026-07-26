@@ -1,6 +1,6 @@
 import { createLogger } from '../../providers/logger';
 import { getVerifiedStripeMetricsClient } from '../../providers/stripe';
-import { ADMIN_HEALTH_ADDITIONAL_USER_IDS, ADMIN_HEALTH_EXCLUDED_USER_IDS } from './config';
+import { ADMIN_HEALTH_ADDITIONAL_PHONES, ADMIN_HEALTH_EXCLUDED_USER_IDS } from './config';
 import * as repo from './repo';
 import {
   buildSubscriberSeries,
@@ -43,7 +43,7 @@ export async function fetchStripeSubscribersByPeriod(
 
     const [subscriptionUsers, additionalUsers] = await Promise.all([
       repo.findSubscriptionUsersByCustomerIds(lifecycles.map((lifecycle) => lifecycle.customerId)),
-      repo.findUsersByIds(Array.from(ADMIN_HEALTH_ADDITIONAL_USER_IDS)),
+      repo.findUsersByPhones(Array.from(ADMIN_HEALTH_ADDITIONAL_PHONES)),
     ]);
     const userIdByCustomerId = new Map(
       subscriptionUsers.map((subscription) => [subscription.stripeCustomerId, subscription.userId])

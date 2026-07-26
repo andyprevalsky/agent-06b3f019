@@ -139,6 +139,62 @@ async function main(): Promise<void> {
     [{ status: 'consumed', limit: 100 }, { limit: 100 }, { status: 'consumed', limit: 100 }]
   );
 
+  const delayedReplayCalls: ToolCall[] = [];
+  let replayCount = 0;
+  const delayedReplayProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name, args) => {
+      delayedReplayCalls.push({ name, args });
+      if (name === 'create_card') {
+        replayCount += 1;
+        return toolResult({
+          status: 'created',
+          card_id: 'card-delayed-replay',
+          ...(replayCount > 1 ? { transfer_id: 'owt-delayed-replay' } : {}),
+        });
+      }
+      if (name === 'get_card_details') {
+        return toolResult({
+          pan: '4242424242429911',
+          cvv: '911',
+          expiry: '07/28',
+          balance_cents: 4396,
+          status: 'OPEN',
+        });
+      }
+      if (name === 'list_transfers') return toolResult({ transfers: [] });
+      if (name === 'close_card') throw new Error('a transfer visibility delay must not close card');
+      throw new Error(`unexpected delayed-replay tool ${name}`);
+    },
+    { attempts: 1, delayMs: 0 }
+  );
+  await assert.rejects(
+    () =>
+      delayedReplayProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:delayed-replay',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress' &&
+      'details' in error &&
+      error.details.cardId === 'card-delayed-replay'
+  );
+  const delayedReplayMint = await delayedReplayProvider.mintCard({
+    amountCents: 4396,
+    fundsSource: 'company_flow',
+    idempotencyKey: 'purchase:delayed-replay',
+  });
+  assert.strictEqual(delayedReplayMint.cardId, 'card-delayed-replay');
+  assert.strictEqual(delayedReplayMint.providerTransferId, 'owt-delayed-replay');
+  assert.strictEqual(
+    delayedReplayCalls.filter((call) => call.name === 'close_card').length,
+    0,
+    'the first transferless response must leave the exact-key replay card live'
+  );
+
   let orgMintCalls = 0;
   const routing = new AgentCardRoutingProvider('rose-user-123', {
     resolveOrgCardholderId: async () => 'cardholder-123',
@@ -336,6 +392,32 @@ async function main(): Promise<void> {
     (error: unknown) =>
       error instanceof Error && error.message === 'AgentCard Organization MCP failed'
   );
+
+  const proseKycCalls: string[] = [];
+  const proseKycProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
+    proseKycCalls.push(name);
+    if (name === 'create_card') {
+      return {
+        isError: true,
+        structuredContent: {
+          status: 'error',
+          message: 'upstream failed after create; kyc_required was mentioned in diagnostics',
+        },
+      };
+    }
+    throw new Error(`unexpected prose-KYC tool ${name}`);
+  });
+  await assert.rejects(
+    () =>
+      proseKycProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:prose-kyc',
+      }),
+    (error: unknown) =>
+      error instanceof Error && !('code' in error && error.code === 'agentcard_kyc_required')
+  );
+  assert.deepStrictEqual(proseKycCalls, ['create_card']);
 
   console.log('AgentCard organization MCP provider tests passed');
 }

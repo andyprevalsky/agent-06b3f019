@@ -5,6 +5,7 @@
  */
 
 import { BACKEND_BASE_URL, backendApiUrl } from '@/lib/backendUrl';
+export { ADMIN_USER_IDS } from '@/lib/adminAccounts';
 
 /** Backend API base URL (trailing slash stripped). Read once at module load. */
 export const API_URL = BACKEND_BASE_URL;
@@ -33,12 +34,6 @@ export const IS_DEV_MODE: boolean = import.meta.env.DEV === true;
 
 /** True when running inside Vitest (vitest sets `import.meta.env.VITEST`). */
 export const IS_VITEST: boolean = Boolean(import.meta.env.VITEST);
-
-/** Admin/test user IDs that unlock dev-only affordances on prod. */
-export const ADMIN_USER_IDS: readonly string[] = [
-  '1f85ff25-6e29-4c1b-8739-f917bd101a30', // Andy Prevalsky
-  '43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9', // Tamara Chayo
-];
 
 /** Admin phone numbers that unlock company-health dashboards in local/session state. */
 export const ADMIN_PHONE_DIGITS: readonly string[] = ['19729777432', '9729777432'];

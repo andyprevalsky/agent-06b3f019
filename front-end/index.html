@@ -1,36 +1,47 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, minimal-ui"
+    />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="apple-mobile-web-app-title" content="Rose">
+    <meta name="apple-mobile-web-app-title" content="Rose" />
     <link rel="icon" type="image/png" href="/favicon-96x96.png" sizes="96x96" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="shortcut icon" href="/favicon.ico" />
     <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <link rel="manifest" href="/site.webmanifest" />
-    
+
     <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Sans:wght@400;500;600;700&family=Geist:wght@100..900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    
-    <!-- React Grab - AI element selection tool (dev only) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,300;0,400;0,500;0,600;1,400&family=DM+Sans:wght@400;500;600;700&family=Geist:wght@100..900&family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+
+    <!-- React Grab - AI element selection tool (interactive dev server only) -->
     <script type="module">
-      if (import.meta.env.DEV) {
-        import("react-grab");
+      if (import.meta.env.DEV && import.meta.env.VITE_ENABLE_REACT_GRAB !== 'false') {
+        import('react-grab');
       }
     </script>
-    
+
     <title>Rose</title>
     <link rel="canonical" href="https://roselabs.ai/" />
     <meta name="description" content="Hi! I'm Rose." />
     <meta name="author" content="Rose" />
-    
+
     <!-- Preload critical hero image for fastest initial render -->
-    <link rel="preload" as="image" href="/navi-midnight-black-hero-background-low.png" fetchpriority="high" />
+    <link
+      rel="preload"
+      as="image"
+      href="/navi-midnight-black-hero-background-low.png"
+      fetchpriority="high"
+    />
 
     <!-- Preload feature master videos to accelerate non-linear seeking -->
     <link rel="preload" as="video" href="/navi-features-hevc.mov" />
@@ -41,11 +52,14 @@
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://roselabs.ai/" />
     <meta property="og:image" content="https://roselabs.ai/social/opengraph-1200x630.jpg" />
-    <meta property="og:image:secure_url" content="https://roselabs.ai/social/opengraph-1200x630.jpg" />
+    <meta
+      property="og:image:secure_url"
+      content="https://roselabs.ai/social/opengraph-1200x630.jpg"
+    />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:site_name" content="Rose" />
-    
+
     <!-- Video preview for iMessage and supported platforms -->
     <meta property="og:video" content="https://roselabs.ai/social/rose-preview.mp4" />
     <meta property="og:video:secure_url" content="https://roselabs.ai/social/rose-preview.mp4" />
@@ -63,21 +77,25 @@
     <script>
       // Hide Safari UI on iOS by scrolling slightly on load
       if (/iPhone|iPad|iPod/.test(navigator.userAgent)) {
-        window.addEventListener('load', function() {
-          setTimeout(function() {
+        window.addEventListener('load', function () {
+          setTimeout(function () {
             window.scrollTo(0, 1);
           }, 0);
         });
-        
+
         // Hide Safari UI on scroll
         let lastScrollTop = 0;
-        window.addEventListener('scroll', function() {
-          const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
-          if (scrollTop > lastScrollTop) {
-            // Scrolling down - Safari will auto-hide UI
-          }
-          lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
-        }, false);
+        window.addEventListener(
+          'scroll',
+          function () {
+            const scrollTop = window.pageYOffset || document.documentElement.scrollTop;
+            if (scrollTop > lastScrollTop) {
+              // Scrolling down - Safari will auto-hide UI
+            }
+            lastScrollTop = scrollTop <= 0 ? 0 : scrollTop;
+          },
+          false,
+        );
       }
     </script>
     <script type="module" src="/src/main.tsx"></script>

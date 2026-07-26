@@ -201,6 +201,7 @@ class MessagePersonManager(ToolManager):
             person_phone=person_phone,
             generated_message=generated_message,
             person_display=person_display,
+            world_model_mode=getattr(workflow_instance, "world_model_mode", "real"),
         )
         if isinstance(delivery_result, ToolEvent):
             yield delivery_result
@@ -529,6 +530,7 @@ class MessagePersonManager(ToolManager):
         person_phone: str | None,
         generated_message: str,
         person_display: str,
+        world_model_mode: str = "real",
     ) -> dict[str, Any] | ToolEvent:
         if channel == "email":
             return ToolEvent(
@@ -555,9 +557,12 @@ class MessagePersonManager(ToolManager):
                 context,
             )
             try:
+                activity_args = [user_id, agent_id, idempotency_key, person_phone, generated_message]
+                if world_model_mode != "real":
+                    activity_args.append(world_model_mode)
                 result = await workflow.execute_activity(
                     send_agent_sms_activity,
-                    args=[user_id, agent_id, idempotency_key, person_phone, generated_message],
+                    args=activity_args,
                     start_to_close_timeout=timedelta(seconds=45),
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
@@ -594,9 +599,12 @@ class MessagePersonManager(ToolManager):
             }
 
         try:
+            activity_args = [user_id, agent_id, tool_call_id, person_phone, generated_message]
+            if world_model_mode != "real":
+                activity_args.append(world_model_mode)
             result = await workflow.execute_activity(
                 queue_imessage_activity,
-                args=[user_id, agent_id, tool_call_id, person_phone, generated_message],
+                args=activity_args,
                 start_to_close_timeout=timedelta(seconds=150),
                 retry_policy=RetryPolicy(
                     maximum_attempts=3,

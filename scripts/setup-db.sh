@@ -11,6 +11,7 @@ if [ -z "$CONDUCTOR_PORT" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/workspace-env.sh"
 normalize_conductor_workspace_env
 
@@ -98,9 +99,21 @@ docker exec "$DB_CONTAINER" psql -U postgres -d victoria \
 
 echo "🐘 Syncing Prisma schema..."
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx prisma db push --skip-generate --accept-data-loss 2>&1 | tail -3)
+(cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+    DB_CONTAINER="$DB_CONTAINER" LOCAL_DB_NAME=victoria \
+    bash scripts/apply-local-workflow-ddl.sh)
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/ensure-agent-network-grep-indexes.ts)
 
 echo "🌱 Syncing production data to local database..."
 (cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" npx tsx scripts/seed-local.ts)
+
+echo "🗜️  Publishing synchronized DB for isolated local benchmarks..."
+BENCHMARK_SEED_PATH="$(
+    bash "$SCRIPT_DIR/benchmark-seed-cache" materialize \
+        "$REPO_ROOT/back-end/prisma/schema.prisma" \
+        "$REPO_ROOT/.context/benchmarks/seed-cache" \
+        "$DB_CONTAINER"
+)"
+echo "   ✅ Local benchmark seed dump: $BENCHMARK_SEED_PATH"
 
 echo "🐘 Local database setup complete."

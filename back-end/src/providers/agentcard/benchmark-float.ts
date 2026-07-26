@@ -1,202 +1,74 @@
-import { readFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import path from 'node:path';
+import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
+import { extractAgentCardOrgWallet } from './org-wallet-monitor';
 
-import {
-  getAgentCardOrgAccessToken,
-  hasAgentCardOrgClientCredentials,
-} from './org-runtime';
+/**
+ * Minimum sandbox pool the benchmark payment fixture requires, in cents.
+ *
+ * The four sandbox lifecycle tasks each hold at most one card at a time
+ * (max-concurrency 1) for up to ~$44, releasing the hold on abandon/close, so
+ * $100 is >2x the largest single reservation with margin for sequential runs.
+ * The retired v1 flow topped the wallet up to $500 via a `test-fund` REST
+ * endpoint; v2 has no programmatic sandbox funding (the pool is provisioned via
+ * the dashboard / USDC deposit), so this is a *verification* floor, not a
+ * top-up target. Override with BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS.
+ */
+const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 10_000;
 
-const DEFAULT_ADMIN_API_URL = 'https://api.agentcard.sh';
-const DEFAULT_SANDBOX_FLOAT_CENTS = 50_000;
+const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 
-type FetchLike = typeof fetch;
-
-interface AdminConfig {
-  apiUrl?: string;
-  accessToken?: string;
-  jwt?: string;
-  activeKeyId?: string;
-  lastApiKey?: string;
-  storedKeys?: Array<{ id?: string; key?: string }>;
+export interface AgentCardSandboxFloat {
+  balanceCents: number;
+  availableCents: number;
+  committedCents: number;
 }
 
-interface UserConfig {
-  apiUrl?: string;
-  accessToken?: string;
-  jwt?: string;
+function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {
+  const raw = env.BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS?.trim();
+  if (!raw) return DEFAULT_MIN_SANDBOX_FLOAT_CENTS;
+  const value = Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : DEFAULT_MIN_SANDBOX_FLOAT_CENTS;
 }
 
-interface WalletResponse {
-  settings?: { sandbox_balance_cents?: number };
-  sandboxWalletBalanceCents?: number;
+function formatUsd(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
-export interface AgentCardBenchmarkAdmin {
-  apiUrl: string;
-  token: string;
-  walletApiUrl?: string;
-  walletToken?: string;
-}
+/**
+ * Confirm the AgentCard sandbox company wallet holds enough float for the
+ * benchmark payment lifecycle.
+ *
+ * Authentication is machine-to-machine OAuth 2.1 client credentials
+ * (AGENTCARD_ORG_OAUTH_CLIENT_ID / AGENTCARD_ORG_OAUTH_CLIENT_SECRET), minted
+ * and refreshed non-interactively by {@link AgentCardOrgToolCaller}. Unlike the
+ * retired interactive admin/user JWT sessions (`~/.agent-cards*.json`), these
+ * credentials never require a browser magic-link re-auth, so the deploy gate no
+ * longer breaks when a session token silently expires.
+ */
+export async function ensureAgentCardSandboxFloat(
+  minCents: number = minSandboxFloatCents(),
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<AgentCardSandboxFloat> {
+  const wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
 
-class AgentCardSandboxFloatRequestError extends Error {
-  constructor(
-    message: string,
-    readonly status: number
-  ) {
-    super(message);
-  }
-}
-
-function activeStoredApiKey(config: AdminConfig): string | undefined {
-  const activeKeyId = config.activeKeyId?.trim();
-  if (!activeKeyId) return undefined;
-  return config.storedKeys?.find((entry) => entry.id?.trim() === activeKeyId)?.key?.trim();
-}
-
-export function selectAgentCardBenchmarkAdminToken(
-  config: AdminConfig,
-  env: Record<string, string | undefined> = process.env
-): string | undefined {
-  return (
-    env.AGENT_CARDS_ADMIN_JWT?.trim() ||
-    config.accessToken?.trim() ||
-    activeStoredApiKey(config) ||
-    config.lastApiKey?.trim() ||
-    config.jwt?.trim()
-  );
-}
-
-export function selectAgentCardBenchmarkWalletToken(
-  userConfig: UserConfig,
-  adminConfig: AdminConfig,
-  env: Record<string, string | undefined> = process.env
-): string | undefined {
-  return (
-    env.AGENT_CARDS_JWT?.trim() ||
-    userConfig.accessToken?.trim() ||
-    userConfig.jwt?.trim() ||
-    env.AGENT_CARDS_ADMIN_JWT?.trim() ||
-    adminConfig.accessToken?.trim() ||
-    adminConfig.jwt?.trim()
-  );
-}
-
-function asWalletResponse(value: unknown): WalletResponse {
-  return typeof value === 'object' && value !== null ? (value as WalletResponse) : {};
-}
-
-function errorBodySummary(body: WalletResponse): string {
-  const error = body as Record<string, unknown>;
-  const value = error.error ?? error.message ?? error.code;
-  return typeof value === 'string' && value.trim() !== '' ? `: ${value.slice(0, 200)}` : '';
-}
-
-async function adminRequest(
-  admin: AgentCardBenchmarkAdmin,
-  pathname: string,
-  init: RequestInit,
-  fetchImpl: FetchLike
-): Promise<WalletResponse> {
-  const response = await fetchImpl(`${admin.apiUrl}${pathname}`, {
-    ...init,
-    headers: {
-      authorization: `Bearer ${admin.token}`,
-      'content-type': 'application/json',
-      ...init.headers,
-    },
-  });
-  const body = asWalletResponse(await response.json().catch(() => ({})));
-  if (!response.ok) {
-    throw new AgentCardSandboxFloatRequestError(
-      `AgentCard sandbox float request ${pathname} failed with HTTP ${response.status}${errorBodySummary(body)}`,
-      response.status
+  if (wallet.livemode) {
+    throw new Error(
+      'AgentCard benchmark requires sandbox OAuth credentials; get_company_wallet resolved to a live wallet. ' +
+        'Point AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET at the sandbox org so the float never draws on live funds.'
     );
   }
-  return body;
-}
 
-export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkAdmin> {
-  // AgentCard retired static admin/JWT auth (2026-07-25); the org API now authenticates via OAuth
-  // client-credentials (auto-refreshed 1h tokens), exactly like the production org runtime. When
-  // those credentials are configured, acquire a live org token instead of the stale
-  // AGENT_CARDS_ADMIN_JWT so sandbox-float provisioning does not 401.
-  if (hasAgentCardOrgClientCredentials()) {
-    const token = await getAgentCardOrgAccessToken();
-    const apiUrl =
-      process.env.ADMIN_API_URL?.trim() ||
-      process.env.AGENT_CARDS_API_URL?.trim() ||
-      DEFAULT_ADMIN_API_URL;
-    return {
-      apiUrl,
-      token,
-      walletApiUrl: process.env.AGENT_CARDS_API_URL?.trim() || apiUrl,
-      walletToken: token,
-    };
+  if (wallet.availableCents < minCents) {
+    throw new Error(
+      `AgentCard sandbox pool too low: ${formatUsd(wallet.availableCents)} available ` +
+        `(< ${formatUsd(minCents)} required). v2 has no programmatic sandbox top-up; ` +
+        `re-up the org wallet in sandbox mode at ${AGENTCARD_DASHBOARD_URL} ` +
+        `(auth uses AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET — no interactive login needed).`
+    );
   }
 
-  let adminConfig: AdminConfig = {};
-  let userConfig: UserConfig = {};
-  try {
-    adminConfig = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards-admin.json'), 'utf8')
-    ) as AdminConfig;
-  } catch {
-    // The env token below supports CI and fresh developer machines.
-  }
-  try {
-    userConfig = JSON.parse(
-      await readFile(path.join(homedir(), '.agent-cards/config.json'), 'utf8')
-    ) as UserConfig;
-  } catch {
-    // The legacy admin config remains enough for older local setups.
-  }
-  const walletToken = selectAgentCardBenchmarkWalletToken(userConfig, adminConfig);
-  const token = selectAgentCardBenchmarkAdminToken(adminConfig) || walletToken;
-  if (!token) {
-    throw new Error('AgentCard admin login required; run npx agent-cards login');
-  }
   return {
-    apiUrl:
-      process.env.ADMIN_API_URL?.trim() || adminConfig.apiUrl?.trim() || DEFAULT_ADMIN_API_URL,
-    token,
-    walletApiUrl:
-      process.env.AGENT_CARDS_API_URL?.trim() ||
-      userConfig.apiUrl?.trim() ||
-      process.env.ADMIN_API_URL?.trim() ||
-      adminConfig.apiUrl?.trim() ||
-      DEFAULT_ADMIN_API_URL,
-    walletToken,
+    balanceCents: wallet.balanceCents,
+    availableCents: wallet.availableCents,
+    committedCents: wallet.committedCents,
   };
-}
-
-export async function ensureAgentCardSandboxFloat(
-  admin: AgentCardBenchmarkAdmin,
-  orgId: string,
-  targetCents = DEFAULT_SANDBOX_FLOAT_CENTS,
-  fetchImpl: FetchLike = fetch
-): Promise<{ previousCents: number; balanceCents: number; addedCents: number }> {
-  const walletAdmin = {
-    apiUrl: admin.walletApiUrl ?? admin.apiUrl,
-    token: admin.walletToken ?? admin.token,
-  };
-  const wallet = await adminRequest(walletAdmin, `/orgs/${orgId}/wallet`, {}, fetchImpl);
-  const previousCents = wallet.settings?.sandbox_balance_cents;
-  if (!Number.isInteger(previousCents) || previousCents === undefined || previousCents < 0) {
-    throw new Error('AgentCard wallet response omitted sandbox balance');
-  }
-  const addedCents = Math.max(0, targetCents - previousCents);
-  if (addedCents === 0) return { previousCents, balanceCents: previousCents, addedCents };
-
-  const funded = await adminRequest(
-    walletAdmin,
-    `/orgs/${orgId}/wallet/test-fund`,
-    { method: 'POST', body: JSON.stringify({ amountCents: addedCents }) },
-    fetchImpl
-  );
-  const balanceCents = funded.sandboxWalletBalanceCents;
-  if (!Number.isInteger(balanceCents) || balanceCents === undefined) {
-    throw new Error('AgentCard test-fund response omitted sandbox balance');
-  }
-  return { previousCents, balanceCents, addedCents };
 }

@@ -8,6 +8,16 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
+## Canonical human-approval format
+
+Every human approval request in this command—including prompt or
+agent-behavior approval, a gate override, credential/billing/environment
+escalation, a destructive action, or any other approval—must follow
+`.claude/shared/approval-format.md`. Read it completely immediately before
+composing the request. Its Detail, Before Behavior, After Behavior, and
+Downstream Implications sections are mandatory and additive to the
+deploy-specific telemetry, file-link, and snapshot rules below.
+
 ---
 
 # Step 0: Capture original Conductor workspace title
@@ -387,11 +397,13 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these eleven independent suites without
+The concurrent runner executes exactly these thirteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
+`bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
@@ -861,11 +873,11 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except the deploy-approved Claude Code credential-unavailable smoke skip described above
+- Skipping or disabling tests, except two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
 **Escalation is ONLY for:**
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded")
+- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate
 - Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
@@ -1230,6 +1242,8 @@ gh run watch "$FALLBACK_RUN_ID" --exit-status
 ```
 
 After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+
+**Review-provider usage exhaustion is a skippable gate.** The review gate exists to catch code defects, not to block on billing/quota state. When BOTH reviewers are unavailable specifically because their usage/credits/quota are exhausted — CodeRabbit reports a rate-limit/spending-cap/"Review limit reached" **and** the Claude fallback fails from provider usage exhaustion (e.g. `is_error:true` after ~1 turn / ~2s with an Anthropic "credit balance is too low"/400, a 429 rate limit, or a spending cap) — the review gate is **provider-blocked, not code-blocked**. Distinguish this from a repairable fallback failure (bad checkout, workflow bug, transient 5xx): those you fix and rerun. A usage-exhaustion block is not repairable by the agent (it is user-owned billing/quota, exactly like the warn-only Anthropic credential-health gate). In that case, record `Code Review | ⚠️ Skipped | both reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)` in `TEST_REPORT`, close the open review cycle as clean with a note, surface the exhaustion + its concrete risk (unreviewed diff) in the PR body and final handoff, and proceed. Prefer restoring a reviewer (top up Anthropic credits and rerun the Claude fallback, or wait out the CodeRabbit window) when the situation allows; only skip when neither reviewer can run. Never label an unavailable review as passing, and never use this path to skip a reviewer that *did* run and returned findings.
 
 Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
 

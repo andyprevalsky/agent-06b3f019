@@ -1,0 +1,28 @@
+#!/bin/bash
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SCRIPT_DIR/lib/seed-cache.sh"
+
+MODE="${1:-}"
+if [ -z "$MODE" ]; then
+    echo "usage: benchmark-seed-cache <path|materialize|wait> ..." >&2
+    exit 2
+fi
+shift
+
+case "$MODE" in
+    path)
+        benchmark_seed_dump_path "$@"
+        ;;
+    materialize)
+        materialize_benchmark_seed_dump "$@"
+        ;;
+    wait)
+        wait_for_benchmark_seed_publish "$@"
+        ;;
+    *)
+        echo "unknown benchmark seed-cache mode: $MODE" >&2
+        exit 2
+        ;;
+esac
