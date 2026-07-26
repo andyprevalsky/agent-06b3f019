@@ -2,6 +2,11 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
+import {
+  getAgentCardOrgAccessToken,
+  hasAgentCardOrgClientCredentials,
+} from './org-runtime';
+
 const DEFAULT_ADMIN_API_URL = 'https://api.agentcard.sh';
 const DEFAULT_SANDBOX_FLOAT_CENTS = 50_000;
 
@@ -112,6 +117,24 @@ async function adminRequest(
 }
 
 export async function loadAgentCardBenchmarkAdmin(): Promise<AgentCardBenchmarkAdmin> {
+  // AgentCard retired static admin/JWT auth (2026-07-25); the org API now authenticates via OAuth
+  // client-credentials (auto-refreshed 1h tokens), exactly like the production org runtime. When
+  // those credentials are configured, acquire a live org token instead of the stale
+  // AGENT_CARDS_ADMIN_JWT so sandbox-float provisioning does not 401.
+  if (hasAgentCardOrgClientCredentials()) {
+    const token = await getAgentCardOrgAccessToken();
+    const apiUrl =
+      process.env.ADMIN_API_URL?.trim() ||
+      process.env.AGENT_CARDS_API_URL?.trim() ||
+      DEFAULT_ADMIN_API_URL;
+    return {
+      apiUrl,
+      token,
+      walletApiUrl: process.env.AGENT_CARDS_API_URL?.trim() || apiUrl,
+      walletToken: token,
+    };
+  }
+
   let adminConfig: AdminConfig = {};
   let userConfig: UserConfig = {};
   try {

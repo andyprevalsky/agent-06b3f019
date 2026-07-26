@@ -94,6 +94,11 @@ export class AgentCardOrgRuntime {
     }
   }
 
+  /** Public accessor: reuse the runtime's cached client-credentials token (benchmark tooling). */
+  acquireAccessToken(): Promise<string> {
+    return this.getAccessToken();
+  }
+
   private async getAccessToken(forceClientCredentials = false): Promise<string> {
     const direct = directAccessToken();
     if (!forceClientCredentials && !hasClientCredentials() && direct !== undefined) return direct;
@@ -182,3 +187,23 @@ const runtime = new AgentCardOrgRuntime();
 
 export const callOrgTool: AgentCardOrgToolCaller = (toolName, args) =>
   runtime.callTool(toolName, args);
+
+/**
+ * True when the org runtime is configured for OAuth client-credentials auth
+ * (the mechanism that replaced the retired static admin/JWT tokens). Benchmark
+ * tooling uses this to decide whether to acquire a live org token instead of a
+ * stale static JWT.
+ */
+export function hasAgentCardOrgClientCredentials(): boolean {
+  return hasClientCredentials();
+}
+
+/**
+ * Acquire the org's client-credentials access token, reusing the runtime's
+ * cached (auto-refreshed) token. Exposed so benchmark sandbox-float provisioning
+ * authenticates the same way the production org runtime does, rather than via
+ * the retired static `AGENT_CARDS_ADMIN_JWT`.
+ */
+export function getAgentCardOrgAccessToken(): Promise<string> {
+  return runtime.acquireAccessToken();
+}
