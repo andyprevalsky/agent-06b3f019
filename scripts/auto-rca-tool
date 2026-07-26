@@ -1355,11 +1355,21 @@ PY
 }
 
 report_contract_passes() {
-  local report="$CONTEXT_DIR/pr-body-final.md" head
-  [ -s "$report" ] || return 1
+  local report="$CONTEXT_DIR/pr-body-final.md" head sections evidence_agent
+  # Each unmet condition names itself on stderr so a "blocked" run is
+  # self-diagnosing: the workflow log states exactly which of the seven
+  # completion requirements failed instead of a silent non-zero return.
+  if [ ! -s "$report" ]; then
+    printf 'rca-contract: incomplete — final report %s is missing or empty\n' "$report" >&2
+    return 1
+  fi
   head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
-  grep -Fq "<!-- rca-complete head=$head agent=$AGENT_ID -->" "$report" || return 1
-  python3 - "$report" <<'PY'
+  if ! grep -Fq "<!-- rca-complete head=$head agent=$AGENT_ID -->" "$report"; then
+    printf 'rca-contract: incomplete — no rca-complete marker bound to HEAD %s for agent %s\n' \
+      "$head" "$AGENT_ID" >&2
+    return 1
+  fi
+  if ! sections="$(python3 - "$report" <<'PY'
 import pathlib
 import re
 import sys
@@ -1377,10 +1387,28 @@ missing = [name for name, pattern in requirements.items() if not re.search(patte
 if missing:
     raise SystemExit("missing RCA report sections: " + ", ".join(missing))
 PY
-  [ "$(read_state evidence.agent 2>/dev/null || true)" = "$AGENT_ID" ] || return 1
-  repro_passed_for_head || return 1
-  gate_passed_for_head offline-gates || return 1
-  gate_passed_for_head smoke-gates || return 1
+  )"; then
+    printf 'rca-contract: incomplete — %s\n' "${sections:-report section check failed}" >&2
+    return 1
+  fi
+  evidence_agent="$(read_state evidence.agent 2>/dev/null || true)"
+  if [ "$evidence_agent" != "$AGENT_ID" ]; then
+    printf 'rca-contract: incomplete — evidence.agent (%s) does not match agent %s\n' \
+      "${evidence_agent:-<unset>}" "$AGENT_ID" >&2
+    return 1
+  fi
+  if ! repro_passed_for_head; then
+    printf 'rca-contract: incomplete — unchanged reproduction not attested for HEAD %s\n' "$head" >&2
+    return 1
+  fi
+  if ! gate_passed_for_head offline-gates; then
+    printf 'rca-contract: incomplete — offline-gates not attested for HEAD %s\n' "$head" >&2
+    return 1
+  fi
+  if ! gate_passed_for_head smoke-gates; then
+    printf 'rca-contract: incomplete — smoke-gates not attested for HEAD %s\n' "$head" >&2
+    return 1
+  fi
 }
 
 completion_status() {
