@@ -129,8 +129,10 @@ jobs:
           # NEVER strand the fleet — a failure here leaves the just-deployed LIVE
           # workers serving. Its only job is routing: a surface-unchanged deploy is a
           # pure no-op (needs only a DB pointer read — no Temporal); a surface CHANGE
-          # flips the routing pointer to the new generation and respawns open
-          # workflows onto it, with fail-safe rollback.
+          # flips the routing pointer to the new (already-live) generation and
+          # respawns open old-gen workflows onto it. There is deliberately NO
+          # pointer rollback on migration failure — the old generation's workers are
+          # gone, so routing must stay on the live new generation.
           release() {  # commit status for observers / the /deploy skill contract
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -X POST \
               -f state="$1" -f context="$RELEASE_CONTEXT" -f description="$2" >/dev/null || true
