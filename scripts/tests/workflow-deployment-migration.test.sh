@@ -211,16 +211,18 @@ WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
 WORKER="$ROOT/agents/worker.py"
 require_text "$WORKFLOW" '--env TEMPORAL_WORKER_BUILD_ID="${GITHUB_SHA}"' "Fly deploy must identify the exact candidate SHA"
 require_text "$WORKFLOW" '--env TEMPORAL_WORKER_DEPLOYMENT_TOKEN="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' "Fly deploy must identify the exact deployment attempt"
-require_text "$WORKFLOW" '--env TEMPORAL_WORKER_VALIDATION_TASK_QUEUE="navi-agent-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"' "Fly deploy must isolate exact-image validation by deployment attempt"
-require_text "$WORKFLOW" '--env TEMPORAL_WORKER_ACTIVATION_TIMEOUT_SECONDS="7200"' "standby lifetime must cover a 10k-agent cutover"
 require_text "$WORKFLOW" 'bash scripts/classify-agent-runtime-changes.sh' "Fly deploy must classify shipped runtime changes"
-require_text "$WORKFLOW" '--env TEMPORAL_WORKER_REQUIRE_ACTIVATION="${REQUIRE_ACTIVATION}"' "Fly runtime deploys must be activation-gated"
+# LIVE-AT-BOOT: workers poll their generation queue immediately (no standby), so a
+# failed cutover can never strand the fleet. This is the load-bearing safety fix.
+require_text "$WORKFLOW" '--env TEMPORAL_WORKER_REQUIRE_ACTIVATION="0"' "Fly workers must be live-at-boot (require_activation=0), never parked in standby"
+if grep -q 'TEMPORAL_WORKER_REQUIRE_ACTIVATION="\${REQUIRE_ACTIVATION}"' "$WORKFLOW"; then
+  fail "Fly deploy must NOT gate workers on require_activation (standby stranded prod on every deploy)"
+fi
 require_text "$WORKFLOW" 'group: deploy-agents-production' "agent deploys must share one production concurrency group"
 require_text "$WORKFLOW" 'cancel-in-progress: false' "a later agent deploy must queue without canceling the validated fleet"
 require_text "$WORKFLOW" 'Hold production deploy lock until exact cutover completes' "agent deploy workflow must hold serialization through cutover"
 require_text "$WORKFLOW" 'RELEASE_CONTEXT: agent-cutover/${{ github.run_id }}-${{ github.run_attempt }}' "deploy lock release must be scoped to the exact run attempt"
-require_text "$WORKFLOW" 'bash scripts/verify-agent-candidate-fleet.sh' "GitHub deploy must use the canonical exact-fleet gate"
-require_text "$WORKFLOW" 'if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi' "test-only agent deploys must not park workers in standby"
+require_text "$WORKFLOW" 'if [ -z "$CHANGED_RUNTIME$CHANGED_DEPLOY_WORKFLOW" ]; then REQUIRE_ACTIVATION=0; fi' "test-only agent deploys must not run the cutover step"
 require_text "$WORKFLOW" 'CHANGED_DEPLOY_WORKFLOW=' "deploy workflow changes must conservatively require activation"
 require_text "$WORKFLOW" "'!agents/tests/**'" "additive agent tests must not trigger a production worker replacement"
 require_text "$WORKFLOW" "'!agents/benchmarks/**'" "benchmarks must not trigger a production worker replacement"
@@ -351,9 +353,7 @@ migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'set-agent-queue-pointer.ts' \
   "deploy workflow must self-drive the routing-pointer flip"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'migrate-open-agent-workflows.ts --execute' \
-  "deploy workflow must self-drive the workflow respawn"
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'validate-candidate-workflow-image.ts --execute' \
-  "deploy workflow must validate the candidate image before routing any traffic"
+  "deploy workflow must self-drive the workflow respawn on a surface change"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
   "self-driving cutover must use the prod DB secret"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'rollback-' \
@@ -376,25 +376,22 @@ fi
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'statuses: write' \
   "deploy-agents must grant statuses: write so the self-driving cutover can post its release status"
 
-# Rolling-restart (same-generation) deploys still deploy standby workers, so the
-# no-op cutover path MUST release them from standby (activate) — otherwise a
-# surface-unchanged deploy strands prod. It must NOT run the full seal+respawn.
-ACTIVATE_CLI="$ROOT/back-end/scripts/activate-agent-worker-build.ts"
-[ -f "$ACTIVATE_CLI" ] || fail "activate-agent-worker-build.ts (no-op rolling-restart activation) must exist"
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'activate-agent-worker-build.ts' \
-  "no-op rolling-restart path must activate standby workers (not leave them parked)"
-# The activation path activates without sealing: it must post the marker + retire
-# superseded ones, never seal open workflows.
-require_text "$ACTIVATE_CLI" 'activateTemporalWorkerBuild' \
-  "activation CLI must post the worker build activation marker"
+# Live-at-boot: a surface-unchanged (no-op) deploy needs NO activation and NO
+# Temporal work — the workers are already serving their generation queue. The
+# no-op path must exit success on a pure DB pointer read, never seal/respawn.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'no routing change needed' \
+  "no-op (surface-unchanged) path must exit without touching Temporal (workers live at boot)"
+if grep -q 'activate-agent-worker-build.ts' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "live-at-boot workers need no activation; the cutover must not post an activation marker"
+fi
 
 # The CI cutover must wait for the Render backend (which reads the routing pointer)
 # to be live on this exact commit BEFORE flipping — otherwise the old backend
 # routes new workflow starts to the old queue while workers moved to the new
 # generation, stranding those agents.
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend to go live' \
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend live on' \
   "self-driving cutover must wait for the Render backend before flipping the routing pointer"
-render_wait_line=$(grep -n 'Render backend to go live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+render_wait_line=$(grep -n 'waiting for Render live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
 # The forward flip is uniquely marked by `--by "deploy-...` (rollback uses `rollback-`,
 # the pre-read uses `--read`), so target it specifically.
 agents_flip_line=$(grep -n 'deploy-${BUILD_ID}' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
