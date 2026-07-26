@@ -152,34 +152,38 @@ def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
     assert errors == []
 
 
-def test_agent_payment_evaluator_accepts_confirmed_paid_order_language():
-    """Alternate confirmation wording still requires grounded browser evidence."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+def test_agent_payment_output_blob_is_key_agnostic():
+    """The payment confirmation is now judged semantically (SEMANTIC_OUTPUT_EXPECTATIONS['agent-payment']
+    via _judge_output_recovers_expected_fields), so the blob extractor must surface the browser agent's
+    populated structured output regardless of the LLM-synthesized key name — the judge maps the grounded
+    tp_<8hex> id by meaning. This pins the exact regression: a genuinely-successful run emitting the id
+    under `order_id` (not `order_confirmation_id`) must still reach the judge."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
-    passed, reason = _evaluate_agent_payment_result(
-        {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": (
-                        "The payment was confirmed. The confirmation page shows: "
-                        "Order ID: tp_c5053b1b. Total charged: $43.96. "
-                        "The order was placed successfully."
-                    ),
-                    "metadata": {
-                        "toolName": "spawn_browser_agent",
-                        "toolStatus": "FINISHED",
-                        "structured_response": {
-                            "order_confirmation_id": "tp_c5053b1b",
-                            "total_price_paid": 43.96,
+    def blob_for(structured):
+        return _extract_agent_payment_output_blob(
+            {
+                "messages": [
+                    {
+                        "role": "TOOL",
+                        "metadata": {
+                            "toolName": "spawn_browser_agent",
+                            "toolStatus": "FINISHED",
+                            "structured_response": structured,
                         },
-                    },
-                },
-            ]
-        }
-    )
+                    }
+                ]
+            }
+        )
 
-    assert passed, reason
+    # The regression: agent emitted `order_id`, not `order_confirmation_id`.
+    assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
+    # Legacy/alternate key names surface too.
+    assert "tp_c5053b1b" in blob_for(
+        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
+    )
+    # No populated browser output → empty blob (the semantic gate fails closed on empty).
+    assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
 
 def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
@@ -10228,8 +10232,8 @@ async def run_all_tests():
         test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
     )
     r.record(
-        "agent_payment_accepts_confirmed_paid_order_language",
-        test_agent_payment_evaluator_accepts_confirmed_paid_order_language,
+        "agent_payment_output_blob_is_key_agnostic",
+        test_agent_payment_output_blob_is_key_agnostic,
     )
     r.record(
         "cloudbench_preserves_failure_without_passing",
