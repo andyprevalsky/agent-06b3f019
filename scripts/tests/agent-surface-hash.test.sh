@@ -22,14 +22,25 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/agents/workflows" "$TMP/agents/helpers"
 
 cat > "$TMP/agents/workflows/agent_workflow.py" <<'PY'
+from helpers import reexported
 from helpers.surfacemod import thing
 from helpers.pkg import other
 def run():
-    return thing() + other()
+    return thing() + other() + reexported()
 PY
 cat > "$TMP/agents/helpers/surfacemod.py" <<'PY'
 def thing():
     return 1
+PY
+# Package __init__ that re-exports a local module via a RELATIVE import. The
+# workflow imports the re-exported name from the package, never `helpers.relmod`
+# directly, so only relative-import resolution keeps relmod.py in the surface.
+cat > "$TMP/agents/helpers/__init__.py" <<'PY'
+from .relmod import reexported
+PY
+cat > "$TMP/agents/helpers/relmod.py" <<'PY'
+def reexported():
+    return 3
 PY
 mkdir -p "$TMP/agents/helpers/pkg"
 cat > "$TMP/agents/helpers/pkg/__init__.py" <<'PY'
@@ -51,7 +62,18 @@ LIST=$(hash_of "$TMP" --list)
 grep -q 'workflows/agent_workflow.py' <<<"$LIST" || fail "surface must include the workflow entry"
 grep -q 'helpers/surfacemod.py'       <<<"$LIST" || fail "surface must include a directly-imported module"
 grep -q 'helpers/pkg/__init__.py'     <<<"$LIST" || fail "surface must follow imported packages"
+grep -q 'helpers/relmod.py'           <<<"$LIST" || fail "surface must resolve relative-import re-exports (else a change slips past the hash)"
 grep -q 'helpers/offmod.py'           <<<"$LIST" && fail "surface must NOT include un-imported files"
+
+# A change in a module reached ONLY via a package __init__'s relative re-export
+# must move the hash — this is the under-inclusion CodeRabbit flagged.
+echo "# touched" >> "$TMP/agents/helpers/relmod.py"
+[ "$(hash_of "$TMP")" != "$BASE" ] || fail "editing a relative-import re-exported module did not change the hash (MISSED rollover)"
+cat > "$TMP/agents/helpers/relmod.py" <<'PY'
+def reexported():
+    return 3
+PY
+[ "$(hash_of "$TMP")" = "$BASE" ] || fail "reverting the re-exported module did not restore the hash"
 
 # Editing a SURFACE file must move the hash (rollover fires).
 echo "# touched" >> "$TMP/agents/helpers/surfacemod.py"

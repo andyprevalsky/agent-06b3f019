@@ -67,13 +67,30 @@ def _resolve_local_module(
     return candidates
 
 
-def _imported_modules(tree: ast.AST) -> set[str]:
-    """Return every top-level dotted module name referenced by import statements.
+def _package_of(path: Path, agents_dir: Path) -> str:
+    """Return the dotted package a file's relative imports resolve against.
+
+    `agents/helpers/__init__.py` -> "helpers"   (a package; `.x` -> helpers.x)
+    `agents/helpers/llm.py`      -> "helpers"   (module; `.x` -> helpers.x)
+    `agents/tools/web_search/handler.py` -> "tools.web_search"
+    """
+    rel = path.resolve().relative_to(agents_dir.resolve())
+    # The containing directory (relative to agents/) is the package for both a
+    # regular module and a package __init__.py (Python resolves `.` to the
+    # package that contains the current module).
+    return ".".join(rel.parent.parts)
+
+
+def _imported_modules(tree: ast.AST, current_package: str) -> set[str]:
+    """Every top-level dotted module name referenced by import statements.
 
     For `from helpers import a, b` we emit `helpers`, `helpers.a`, `helpers.b`
     so a re-exported submodule (`agents/helpers/a.py`) is captured even when the
-    package `__init__` does not itself import it. Relative imports are not used
-    in the workflow surface here, but are handled defensively.
+    package `__init__` does not itself import it. **Relative imports are resolved
+    against `current_package`** — `agents/helpers/__init__.py` doing
+    `from .llm import x` (or `from . import llm`) re-exports a local module that
+    IS part of the replay surface; dropping it would let a change slip past the
+    hash (under-inclusion → a missed rollover → nondeterministic replay in prod).
     """
     modules: set[str] = set()
     for node in ast.walk(tree):
@@ -81,10 +98,17 @@ def _imported_modules(tree: ast.AST) -> set[str]:
             for alias in node.names:
                 modules.add(alias.name)
         elif isinstance(node, ast.ImportFrom):
-            if node.level and node.level > 0:
-                # Relative import — skip; workflow surface uses absolute imports.
-                continue
-            base = node.module
+            level = node.level or 0
+            if level > 0:
+                # Resolve the relative anchor: level 1 = current package, each
+                # extra level strips one trailing package component.
+                parts = current_package.split(".") if current_package else []
+                if level - 1 > len(parts):
+                    continue  # escapes the agents/ root — not a local module
+                anchor = ".".join(parts[: len(parts) - (level - 1)])
+                base = f"{anchor}.{node.module}" if node.module else anchor
+            else:
+                base = node.module
             if not base:
                 continue
             modules.add(base)
@@ -110,7 +134,7 @@ def surface_files(root: Path, agents_dir: Path) -> list[Path]:
             # A file we cannot parse still contributes its bytes to the hash via
             # `visited`; we just cannot follow its imports.
             continue
-        for module in _imported_modules(tree):
+        for module in _imported_modules(tree, _package_of(current, agents_dir)):
             for resolved in _resolve_local_module(module, agents_dir):
                 if resolved not in visited:
                     queue.append(resolved)
