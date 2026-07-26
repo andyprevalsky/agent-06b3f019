@@ -300,6 +300,51 @@ async def test_prepare_browser_auth_uses_unified_realm_endpoint() -> None:
     assert call["requestHeaders"]["x-user-id"] == "user-1"
 
 
+async def test_passkey_injection_reenables_virtual_environment_at_use_boundary() -> None:
+    """Kernel can drop WebAuthn state after connect but before credential hydration."""
+    from browser_tools.dom_service import DOMService
+
+    calls: list[str] = []
+    webauthn_enabled = False
+
+    async def send(method: str, params: dict):
+        nonlocal webauthn_enabled
+        calls.append(method)
+        if method == "WebAuthn.enable":
+            webauthn_enabled = True
+            return {}
+        if method == "WebAuthn.addVirtualAuthenticator":
+            if not webauthn_enabled:
+                raise RuntimeError(
+                    {
+                        "code": -32000,
+                        "message": "The Virtual Authenticator Environment has not been enabled for this session",
+                    }
+                )
+            return {"authenticatorId": "authenticator-1"}
+        if method == "WebAuthn.addCredential":
+            return {}
+        if method == "WebAuthn.getCredentials":
+            return {"credentials": [{"credentialId": "credential-google", "signCount": 0}]}
+        raise AssertionError(method)
+
+    dom = DOMService(cdp_url="")
+    dom._webauthn_cdp = SimpleNamespace(send=send)
+    seeded = await dom.inject_passkeys(
+        [
+            {
+                "credentialId": "credential-google",
+                "privateKey": "private-google",
+                "rpId": "google.com",
+                "signCount": 0,
+            }
+        ]
+    )
+
+    assert seeded == 1
+    assert calls[:2] == ["WebAuthn.enable", "WebAuthn.addVirtualAuthenticator"]
+
+
 async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> None:
     from browser_tools.dom_service import DOMService
 
@@ -308,6 +353,8 @@ async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> N
 
     async def send(method: str, params: dict):
         calls.append(method)
+        if method == "WebAuthn.enable":
+            return {}
         if method == "WebAuthn.addVirtualAuthenticator":
             return {"authenticatorId": "authenticator-1"}
         if method == "WebAuthn.addCredential":
@@ -341,6 +388,7 @@ async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> N
     )
 
     assert first == 1 and second == 1
+    assert calls.count("WebAuthn.enable") == 1
     assert calls.count("WebAuthn.addVirtualAuthenticator") == 1
     assert [credential["credentialId"] for credential in credentials] == [
         "credential-a",
@@ -374,6 +422,10 @@ async def run_all_tests():
     await runner.record_async(
         "prepare_browser_auth_uses_unified_realm_endpoint",
         test_prepare_browser_auth_uses_unified_realm_endpoint,
+    )
+    await runner.record_async(
+        "passkey_injection_reenables_virtual_environment_at_use_boundary",
+        test_passkey_injection_reenables_virtual_environment_at_use_boundary,
     )
     await runner.record_async(
         "passkeys_from_multiple_realms_share_one_live_authenticator",

@@ -101,6 +101,20 @@ If an isolated worktree fails, return it to `/descend` preparation. Do not run
 `scripts/setup-db.sh` with an inherited parent identity and do not borrow a
 different worktree's database.
 
+An approval wait or any other pause can outlive the isolated worktree's lease.
+Whenever control returns after a pause, and before running the next deploy
+action from an isolated worktree, atomically reactivate its ownership and
+reprovision anything cleanup may have reclaimed:
+
+```bash
+bash scripts/prepare-deploy-worktree.sh --resume
+```
+
+This resume gate must finish successfully before continuing. It waits when
+cleanup already owns the manifest lock; it never overwrites an in-progress
+reclamation. Primary Conductor worktrees have no deploy manifest and skip this
+isolated-worktree-only resume command.
+
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -181,7 +195,7 @@ CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
   bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
-CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
@@ -415,9 +429,14 @@ changing their assertions or test counts: `bash scripts/tests/workspace-env.test
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
+bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
+  bash scripts/tests/seed-cache-decision.test.sh
 ```
 
 These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+The separately logged seed-cache decision suite preserves the atomic shared-dump
+and Prisma-freshness contract introduced before the concurrent structural
+runner.
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -499,7 +518,7 @@ bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env'
+  -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env'
 cd agents && python scripts/run_blackbox_tests.py benchmark
 ```
 

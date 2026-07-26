@@ -166,15 +166,19 @@ async def persist_terminal_output(
     output: str,
     agent_id: str,
     code_provider: str = "claude",
+    credential_feedback: Optional[list[dict[str, str]]] = None,
 ) -> None:
     """Persist filtered terminal output to DB."""
     config = load_config()
+    body: dict[str, Any] = {"output": output}
+    if credential_feedback is not None:
+        body["credential_feedback"] = credential_feedback
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             output_response = await client.post(
                 f"{config.backend.api_url}{_session_base_path(code_provider)}/{task_id}/output",
                 headers={"x-api-key": config.backend.api_key or ""},
-                json={"output": output},
+                json=body,
             )
             logger.info(
                 "[ClaudeCode] Output persisted",

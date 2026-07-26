@@ -29,10 +29,13 @@ Implications sections.
    or hide a failed primary path behind a fallback. If a task contract appears
    wrong, do not edit it; represent that proposal as a HARNESS row at
    HARNESS_FIX_DECISION.
-2. **No RCA without the hard proof pair.** A completed RCA requires a local
-   repro actually observed failing on the buggy code and the identical repro
-   passing after the fix, with the assertion unchanged. Otherwise its status is
-   Open observability gap.
+2. **No RCA without the hard proof pair.** Before any benchmark rerun, the RCA
+   must have a local owning-boundary repro actually observed failing on the
+   buggy code and the identical repro passing after the fix, with the assertion
+   unchanged. For a benchmark failure, that is causal proof—not the final
+   outcome proof. The RCA becomes outcome-complete only after the exact
+   unchanged post-fix benchmark rerun passes. Otherwise its status is Causal
+   proof; outcome pending, or Open observability gap when causal proof is absent.
 3. **Every fix is cemented.** Promote the repro into the consistently-run suite
    that owns the first-bad boundary.
 4. **Actively drive asynchronous work.** Poll benchmark controllers and deploy
@@ -62,6 +65,15 @@ Implications sections.
     `agents/benchmarks/history/descend_steps.jsonl` ledger; `.context` holds
     only active clocks. A state transition is incomplete if its timing command
     did not succeed.
+11. **RCA before benchmark rerun.** Every failed task must enter its own `/RCA`
+   cycle before any benchmark rerun. Gather the runtime evidence, identify the
+   first-bad boundary, run the unchanged owning-boundary repro red then green,
+   and cement it first. A HARNESS fix must then have Andy's fix approval before
+   the exact post-fix benchmark rerun; an INFRA fix does not require approval.
+   That exact rerun supplies `/RCA`'s benchmark outcome proof and is what moves
+   the RCA from Causal proof; outcome pending to Complete. When the slice is
+   executed one task at a time, finish this full RCA → approval when required →
+   exact rerun cycle before starting another original-slice task.
 
 ## Issue clusters
 
@@ -117,15 +129,20 @@ back-end/src/domains/benchmarks/hubCatalogService.ts against
 agents/benchmarks/tasks.json. Print the resolved list and count before running.
 
 For explicit task names, use them verbatim. The reported slice must exactly
-equal the executed slice; never silently add, remove, fold in, or substitute
-another workstream's results.
+equal the originally requested and resolved task set; never silently add,
+remove, fold in, or substitute another workstream's results. Executing that
+slice one task at a time, rerunning a failed subset, or running a diagnostic
+subset does not change the original slice name, task list, or denominator.
+Record and report every executed subset separately from overall slice progress.
 
 ## Persistent state
 
 Create .context/descend/<run-id>/state.json and update it after every state
 transition. It must contain:
 
-- slice name and exact task list;
+- original resolved slice name, exact task list, and total task count;
+- latest executed subset and its exact task list;
+- cumulative latest accepted status for every original task;
 - controller PID, dashboard, run artifact, agent IDs, and FE links;
 - current state and epoch;
 - actual benchmark started_at, finished_at, and duration;
@@ -353,6 +370,13 @@ Only after an infra-clean run:
 8. Assign exactly one issue cluster from the pinned taxonomy and record the
    exact, untruncated `task.prompt` for every HARNESS row.
 
+At this boundary the owning-boundary RCA is causally proven, but the benchmark
+RCA is not outcome-complete yet. Do not run the exact benchmark here and do not
+label the row Complete. Enter HARNESS_FIX_DECISION with Causal proof; outcome
+pending. After approval, the exact unchanged benchmark rerun either supplies
+the missing outcome proof and completes the RCA or becomes new primary evidence
+that returns the row to CLASSIFY_RESULTS.
+
 Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 
 ## Stop 1 — HARNESS_FIX_DECISION
@@ -360,14 +384,17 @@ Do not stop to ask which RCA to run first. Use all safe parallel capacity.
 Enter this state only when:
 
 - the latest benchmark run is infra-clean; and
-- every HARNESS failure has a completed RCA; and
+- every HARNESS failure has complete causal RCA proof (evidence, unchanged
+  owning-boundary repro red then green, and a cemented test); and
 - all independent RCA workers have returned.
 
 Never enter HARNESS_FIX_DECISION with an open observability gap. If evidence is
 incomplete, remain in RCA_HARNESS_FAILURES_IN_PARALLEL and keep gathering it
-autonomously until every RCA has the unchanged failing/passing proof pair and a
-cemented regression test. An exhausted external blocker follows Hard rule 7;
-it does not become a user-response gate.
+autonomously until every RCA has the unchanged owning-boundary failing/passing
+proof pair and a cemented regression test. The exact post-fix benchmark outcome
+remains explicitly pending until after Andy approves the harness fix. An
+exhausted external blocker follows Hard rule 7; it does not become a
+user-response gate.
 
 Emit the complete sorted lifecycle ledger using the response contract below.
 Andy responds to each HARNESS row with approve, edit, or reject. Infra rows use
@@ -386,6 +413,13 @@ admin approval. Those approvals are snapshot-scoped inside /deploy.
 Rerun at least the previously failing subset after applying Andy's decisions.
 Run `/sync` before every subset or full-slice rerun. The final acceptance run
 covers the entire original slice.
+
+For each approved HARNESS row, this is `/RCA`'s mandatory exact outcome-proof
+run. Keep the prompt, evaluator, expected tools, fixture, timeout, and pass
+criteria identical to the failing run except for the exact approved fix. A pass
+moves RCA to Complete and Real rerun to Confirmed. A failure moves Real rerun to
+Failed and returns to CLASSIFY_RESULTS; never call the RCA complete from its
+owning-boundary proxy proof alone.
 
 A fix earns deployment only after:
 
@@ -445,8 +479,8 @@ do not turn them into ad hoc prioritization questions.
 Every /descend response uses real rendered Markdown. Never put the header,
 lifecycle table, or approval content in a code block. Do not include an ASCII
 banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
-header count. Emit exactly one table row per issue/fix, including the full infra
-ledger and current HARNESS fixes.
+overall-slice header count. Emit exactly one table row per issue/fix, including
+the full infra ledger and current HARNESS fixes.
 
 ### Header
 
@@ -457,19 +491,43 @@ Use a Markdown heading and a human-readable status. The only status labels are:
 - ✅ Complete
 - 🔴 Blocked
 
-Put the run result and benchmark timing directly beneath it. Read timing from
-the controller artifact; never estimate it.
+Put overall original-slice progress first, then the latest run result and
+benchmark timing directly beneath it. Read latest-run counts and timing from
+the controller artifact; never estimate them.
+
+`total_original` is fixed when the requested slice is first resolved.
+`passed_original` is the number of distinct original tasks whose latest
+accepted, infra-clean, real result in this descent is a pass. A later accepted
+failure replaces an earlier pass for that task. `passed_run` and `total_run`
+describe only the latest executed subset.
+Never put the latest subset denominator in the Overall slice field.
+
+Use these two labeled lines in every active, stopped, blocked, and completed
+response:
+
+Overall slice: **<passed_original>/<total_original> passed**
+
+Latest run: **<passed_run>/<total_run> passed** · **<actual duration>**
 
 For a completed run:
 
 ## /descend daily
 ### 🟡 Fix approval needed
 
-**Epoch 3** · **39/42 passed** · **42m 46s**
+**Epoch 3**
+
+Overall slice: **39/42 passed**
+
+Latest run: **3/3 passed** · **42m 46s**
 
 Bench run: **Jul 20, 2026 · 10:14:22–10:57:08 PDT**
 
-For an active run, show the actual start timestamp and elapsed duration:
+For an active run, keep both denominators visible and show the actual start
+timestamp and elapsed duration:
+
+Overall slice: **36/42 passed**
+
+Latest run: **2/3 passed** · **18m 42s elapsed**
 
 Bench run: **Started Jul 20, 2026 · 10:14:22 PDT** · **18m 42s elapsed**
 
@@ -496,7 +554,7 @@ person, so there is exactly one Approval column.
 
 Lifecycle values:
 
-- **RCA:** ✅ Complete | ⚠️ Open gap
+- **RCA:** ✅ Complete | 🧪 Causal proof; outcome pending | ⚠️ Open gap
 - **Fix:** ✅ Passes | ⏳ In progress | 🗑 Dropped
 - **Test:** ✅ Cemented | ⏳ Pending | — Not applicable for an open gap
 - **Approval:** ⏳ Fix approval | ✅ Fix approved | ✏️ Edit requested |

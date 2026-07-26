@@ -174,6 +174,69 @@ def test_check_fatal_errors_rate_limit_options():
     assert "rate-limited" in msg
 
 
+def test_codex_oauth_usage_limit_is_terminal_only_after_failed_fallback():
+    """OAuth exhaustion may recover through the funded-key fallback."""
+    from domains.spawn_claude_code_agent.service import (
+        check_fatal_errors,
+        check_terminal_fatal_error,
+    )
+
+    output = (
+        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
+        "to purchase more credits or try again at Jul 30th, 2026 3:23 PM."
+    )
+    assert check_fatal_errors(output) is None
+    assert check_terminal_fatal_error(output, code_provider="codex", exit_code=0) is None
+    msg = check_terminal_fatal_error(output, code_provider="codex", exit_code=1)
+    assert msg is not None and "runtime fallback" in msg
+
+
+def test_check_fatal_errors_codex_funded_key_quota():
+    """Quota wording may recover, but remains terminal after a failed process."""
+    from domains.spawn_claude_code_agent.service import (
+        check_fatal_errors,
+        check_terminal_fatal_error,
+    )
+
+    output = "Quota exceeded. Check your plan and billing details."
+    assert check_fatal_errors(output) is None
+    assert check_terminal_fatal_error(output, code_provider="codex", exit_code=0) is None
+    msg = check_terminal_fatal_error(output, code_provider="codex", exit_code=1)
+    assert msg is not None and "out of quota" in msg
+
+
+def test_build_codex_credential_feedback_preserves_fallback_order():
+    """Structured feedback retains both sources independently of terminal rows."""
+    from domains.spawn_claude_code_agent.service import build_codex_credential_feedback
+
+    events = [
+        {
+            "provider": "codex",
+            "type": "error",
+            "message": "Quota exceeded. Check your plan and billing details.",
+        },
+        {
+            "provider": "codex",
+            "type": "auth_fallback",
+            "from": "chatgpt_oauth",
+            "to": "openai_api_key",
+            "reason": "usage_limit_reached",
+        },
+        {
+            "provider": "codex",
+            "type": "error",
+            "message": "insufficient_quota",
+        },
+    ]
+    assert build_codex_credential_feedback(events) == [
+        {
+            "source": "oauth",
+            "reason": "Quota exceeded. Check your plan and billing details.",
+        },
+        {"source": "funded_api_key", "reason": "insufficient_quota"},
+    ]
+
+
 def test_verifier_activity_timeout_allows_llm_call():
     """Claude Code verifier uses the standard LLM activity budget."""
     from domains.spawn_claude_code_agent.service import VERIFIER_ACTIVITY_TIMEOUT_SECONDS
@@ -846,18 +909,33 @@ async def test_repo_create_e2b_session_raises_on_error():
 
 
 async def test_repo_persist_terminal_output_happy():
-    """persist_terminal_output POSTs filtered output."""
+    """persist_terminal_output POSTs filtered output and compact credential feedback."""
     setup_mock({
-        "/api/claude-code-session/": {"status": 200, "json": {"ok": True}},
+        "/api/codex-code-session/": {"status": 200, "json": {"ok": True}},
     })
     from domains.spawn_claude_code_agent.repo import persist_terminal_output
 
-    await persist_terminal_output(task_id="task-1", output="lots of logs", agent_id="agent-1")
-
-    call = assert_captured_call(url_contains="/api/claude-code-session/task-1/output", method="POST")
+    await persist_terminal_output(
+        task_id="task-1",
+        output="lots of logs",
+        agent_id="agent-1",
+        code_provider="codex",
+        credential_feedback=[
+            {
+                "source": "oauth",
+                "reason": "Quota exceeded. Check your plan and billing details.",
+            }
+        ],
+    )
+    call = assert_captured_call(url_contains="/api/codex-code-session/", method="POST")
     body = json.loads(call["requestBody"])
     assert body["output"] == "lots of logs"
-
+    assert body["credential_feedback"] == [
+        {
+            "source": "oauth",
+            "reason": "Quota exceeded. Check your plan and billing details.",
+        }
+    ]
 
 async def test_repo_persist_terminal_output_swallows_errors():
     """Persist swallows HTTP errors."""
@@ -1811,6 +1889,215 @@ async def test_spawn_activity_fast_exit_auth_failure_is_terminal():
     fake_collector.stop.assert_awaited()
 
 
+async def test_spawn_activity_codex_oauth_fallback_success_continues():
+    """A successful funded-key fallback survives the retained OAuth error banner."""
+    from domains.spawn_claude_code_agent import service
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+
+    fake_collector = AsyncMock()
+    fake_collector.start = AsyncMock()
+    fake_collector.stop = AsyncMock()
+    persisted = AsyncMock()
+    close_session = AsyncMock(return_value={"output_files": [], "usage": {}})
+    verifier = AsyncMock(return_value=(1.0, "fallback completed", {}, 0, 0))
+
+    async def fake_create_session(**_kwargs):
+        return {
+            "task_id": "codex-fallback-success",
+            "sandbox_id": "codex-fallback-success-sandbox",
+            "ws_url": "wss://x",
+            "uploaded_files": [],
+            "github_repo_url": None,
+        }
+
+    async def fake_loop(**kwargs):
+        kwargs["terminal"].feed(
+            "[Codex] Error: Quota exceeded. Check your plan and billing details.\n"
+            "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n"
+            + "".join(f"normal fallback output {index}\n" for index in range(650))
+            + "CODEX_E2B_DONE\n"
+        )
+        return (
+            0,
+            False,
+            [],
+            0,
+            0,
+            [
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "error",
+                    "message": "Quota exceeded. Check your plan and billing details.",
+                },
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "auth_fallback",
+                    "from": "chatgpt_oauth",
+                    "to": "openai_api_key",
+                },
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "final",
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+            ],
+        )
+
+    with (
+        patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
+        patch.object(service, "create_e2b_session", side_effect=fake_create_session),
+        patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
+        patch.object(service, "_run_verifier", verifier),
+        patch.object(service, "persist_terminal_output", persisted),
+        patch.object(service, "close_e2b_session", close_session),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+        patch(
+            "helpers.model_pricing.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        result = await service.spawn_claude_code_activity(
+            user_id="u",
+            agent_id="a",
+            goal="g",
+            tool_call_id="tc",
+            output_schema={"fields": []},
+            code_provider="codex",
+        )
+
+    assert result["status"] == "completed"
+    verifier.assert_awaited_once()
+    persisted.assert_awaited_once()
+    assert "CODEX_E2B_DONE" in persisted.await_args.args[1]
+    assert "ChatGPT OAuth unavailable" not in persisted.await_args.args[1]
+    assert persisted.await_args.kwargs["credential_feedback"] == [
+        {
+            "source": "oauth",
+            "reason": "Quota exceeded. Check your plan and billing details.",
+        }
+    ]
+    close_session.assert_awaited_once()
+    fake_collector.stop.assert_awaited()
+
+
+async def test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted():
+    """OAuth then funded-key exhaustion stops before verifier with both errors persisted."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.spawn_claude_code_agent import service
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"saved": True}}})
+
+    fake_collector = AsyncMock()
+    fake_collector.start = AsyncMock()
+    fake_collector.stop = AsyncMock()
+    persisted = AsyncMock()
+    close_session = AsyncMock(return_value={})
+    verifier = AsyncMock()
+
+    async def fake_create_session(**_kwargs):
+        return {
+            "task_id": "codex-double-exhaustion",
+            "sandbox_id": "codex-double-exhaustion-sandbox",
+            "ws_url": "wss://x",
+            "uploaded_files": [],
+            "github_repo_url": None,
+        }
+
+    async def fake_loop(**kwargs):
+        kwargs["terminal"].feed(
+            "[Codex] Error: Quota exceeded. Check your plan and billing details.\n"
+            "[Codex] ChatGPT OAuth unavailable — retrying with funded OpenAI API key\n"
+            + "".join(f"normal fallback output {index}\n" for index in range(650))
+            + "[Codex] Error code: insufficient_quota\n"
+        )
+        return (
+            1,
+            False,
+            [],
+            0,
+            0,
+            [
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "error",
+                    "message": "Quota exceeded. Check your plan and billing details.",
+                },
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "auth_fallback",
+                    "from": "chatgpt_oauth",
+                    "to": "openai_api_key",
+                },
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "error",
+                    "message": "insufficient_quota",
+                },
+                {
+                    "version": 1,
+                    "provider": "codex",
+                    "type": "final",
+                    "status": "failed",
+                    "exit_code": 1,
+                },
+            ],
+        )
+
+    with (
+        patch.object(service, "SandboxLogCollector", lambda *a, **kw: fake_collector),
+        patch.object(service, "create_e2b_session", side_effect=fake_create_session),
+        patch.object(service, "_run_agentic_loop", side_effect=fake_loop),
+        patch.object(service, "_run_verifier", verifier),
+        patch.object(service, "persist_terminal_output", persisted),
+        patch.object(service, "close_e2b_session", close_session),
+        patch.object(service, "_resolve_claude_token_for_activity", AsyncMock(return_value=None)),
+        patch(
+            "helpers.model_pricing.get_model_pricing_with_fallback",
+            AsyncMock(return_value={"input_cents_per_1k": 0, "output_cents_per_1k": 0}),
+        ),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        try:
+            await service.spawn_claude_code_activity(
+                user_id="u",
+                agent_id="a",
+                goal="g",
+                tool_call_id="tc",
+                output_schema={"fields": []},
+                code_provider="codex",
+            )
+            raise AssertionError("double credential exhaustion must terminate the activity")
+        except ApplicationError as error:
+            assert error.non_retryable is True
+            assert error.type == "CLAUDE_CODE_FATAL"
+            assert "out of quota" in str(error)
+
+    verifier.assert_not_awaited()
+    persisted.assert_awaited_once()
+    persisted_output = persisted.await_args.args[1]
+    assert "Quota exceeded. Check your plan and billing details." not in persisted_output
+    assert "insufficient_quota" in persisted_output
+    assert persisted.await_args.kwargs["credential_feedback"] == [
+        {
+            "source": "oauth",
+            "reason": "Quota exceeded. Check your plan and billing details.",
+        },
+        {"source": "funded_api_key", "reason": "insufficient_quota"},
+    ]
+    close_session.assert_awaited_once()
+    fake_collector.stop.assert_awaited()
+
+
 async def test_spawn_activity_cancelled_cleanup():
     """CancelledError triggers cleanup path and returns 'cancelled' status."""
     from domains.spawn_claude_code_agent import service
@@ -2262,6 +2549,15 @@ async def run_all_tests():
     r.record("check_fatal_credit_balance", test_check_fatal_errors_credit_balance)
     r.record("check_fatal_credit_balance_real_wording", test_check_fatal_errors_credit_balance_real_wording)
     r.record("check_fatal_rate_limit_options", test_check_fatal_errors_rate_limit_options)
+    r.record(
+        "check_codex_oauth_terminal_after_failed_fallback",
+        test_codex_oauth_usage_limit_is_terminal_only_after_failed_fallback,
+    )
+    r.record("check_fatal_codex_funded_key_quota", test_check_fatal_errors_codex_funded_key_quota)
+    r.record(
+        "codex_credential_feedback_order",
+        test_build_codex_credential_feedback_preserves_fallback_order,
+    )
     r.record("verifier_timeout_standard_llm_budget", test_verifier_activity_timeout_allows_llm_call)
     r.record("safe_time_ok", test_safe_time_returns_float)
     r.record("safe_time_fallback", test_safe_time_handles_exception)
@@ -2373,6 +2669,14 @@ async def run_all_tests():
     await r.record_async(
         "spawn_activity_fast_exit_auth_failure",
         test_spawn_activity_fast_exit_auth_failure_is_terminal,
+    )
+    await r.record_async(
+        "spawn_activity_codex_oauth_fallback_success",
+        test_spawn_activity_codex_oauth_fallback_success_continues,
+    )
+    await r.record_async(
+        "spawn_activity_codex_double_exhaustion",
+        test_spawn_activity_codex_double_exhaustion_is_terminal_and_persisted,
     )
     await r.record_async("spawn_activity_cancelled", test_spawn_activity_cancelled_cleanup)
     await r.record_async("spawn_activity_error_reraises", test_spawn_activity_error_reraises_after_cleanup)

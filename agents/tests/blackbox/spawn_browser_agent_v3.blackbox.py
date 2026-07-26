@@ -17,7 +17,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -8050,7 +8050,11 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
         ]
     )
 
-    webauthn.enable.assert_awaited_once_with(params={"enableUI": False}, session_id="cdp-session")
+    assert webauthn.enable.await_count == 2
+    assert webauthn.enable.await_args_list == [
+        call(params={"enableUI": False}, session_id="cdp-session"),
+        call(params={"enableUI": False}, session_id="cdp-session"),
+    ]
     webauthn.addVirtualAuthenticator.assert_awaited_once()
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
@@ -12786,6 +12790,10 @@ async def run_all_tests():
     )
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
+    await r.record_async(
+        "dom_service_passkey_webauthn_uses_cdp_client_session_api",
+        test_dom_service_passkey_webauthn_uses_cdp_client_session_api,
+    )
     await r.record_async(
         "passkey_usage_recorded_before_completion",
         test_passkey_usage_is_recorded_once_before_browser_task_completion,
