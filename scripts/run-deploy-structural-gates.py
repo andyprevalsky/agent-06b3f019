@@ -49,6 +49,10 @@ GATES = (
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
     ),
+    Gate(
+        "agent-surface-hash",
+        ("bash", "scripts/tests/agent-surface-hash.test.sh"),
+    ),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
     Gate("deploy-review-cycle", ("python3", "scripts/tests/deploy-review-cycle.test.py")),
