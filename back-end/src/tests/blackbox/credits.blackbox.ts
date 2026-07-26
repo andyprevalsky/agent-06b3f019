@@ -62,6 +62,7 @@ const UsageResponse = z.object({
   remaining: z.number(),
   tier: z.number().nullable(),
   upgradeOptions: z.array(UpgradeOption),
+  unlimited: z.boolean(),
 });
 
 const InitializeResponse = z.object({
@@ -254,6 +255,32 @@ async function testUsage_responseShape() {
   }
   if (body.used < 0) {
     throw new Error(`Expected non-negative used, got ${body.used}`);
+  }
+  if (body.unlimited !== false) {
+    throw new Error(`Anonymous (non-admin) user should not be unlimited, got ${body.unlimited}`);
+  }
+}
+
+// An admin (ADMIN_USER_IDS) reports `unlimited: true` so the worker credit check never gates them,
+// regardless of balance. A fresh non-admin reports `unlimited: false`.
+async function testUsage_adminUnlimited() {
+  const ADMIN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30'; // Andy Prevalsky — ADMIN_USER_IDS
+  const adminRes = await request(`${BASE_URL}/api/credits/usage?userId=${ADMIN_USER_ID}`, {
+    headers: apiKeyHeaders(),
+  });
+  assertStatus(adminRes.status, 200, adminRes.data);
+  const adminBody = assertSchema(UsageResponse, adminRes.data, 'GET /usage (admin)');
+  if (adminBody.unlimited !== true) {
+    throw new Error(`Admin user should be unlimited, got ${adminBody.unlimited}`);
+  }
+
+  const nonAdminRes = await request(`${BASE_URL}/api/credits/usage?userId=${ctx.userId}`, {
+    headers: apiKeyHeaders(),
+  });
+  assertStatus(nonAdminRes.status, 200, nonAdminRes.data);
+  const nonAdminBody = assertSchema(UsageResponse, nonAdminRes.data, 'GET /usage (non-admin)');
+  if (nonAdminBody.unlimited !== false) {
+    throw new Error(`Non-admin user should not be unlimited, got ${nonAdminBody.unlimited}`);
   }
 }
 
@@ -453,6 +480,10 @@ async function runAll() {
     { name: 'GET /credits/usage -- happy path (JWT)', fn: testUsage_happyJwt },
     { name: 'GET /credits/usage -- happy path (API key)', fn: testUsage_happyApiKey },
     { name: 'GET /credits/usage -- response shape', fn: testUsage_responseShape },
+    {
+      name: 'GET /credits/usage -- admin is unlimited, non-admin is not',
+      fn: testUsage_adminUnlimited,
+    },
     { name: 'GET /credits/subscription -- happy path', fn: testSubscription_happy },
     {
       name: 'GET /credits/subscription -- fresh user null tier',

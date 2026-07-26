@@ -6,11 +6,16 @@ import {
   createInitialCredit,
 } from '../../providers/credits';
 import { createLogger } from '../../providers/logger';
+import { isAdminUser } from '../../utils/adminAccess';
 
 const log = createLogger('Credits');
 
 /**
  * Get usage, tier, and upgrade options for a user.
+ *
+ * Admins (ADMIN_USER_IDS — Andy + Tamy) are never blocked by the free-credit / subscription gate.
+ * We surface an additive `unlimited` flag (rather than faking the balance) that the worker credit
+ * check honors so `has_credits` is always true for them. Blast radius = 2 userIds.
  */
 export async function getUsageSummary(userId: string) {
   const [usage, tier] = await Promise.all([getUserUsage(userId), getSubscriptionTier(userId)]);
@@ -21,6 +26,7 @@ export async function getUsageSummary(userId: string) {
     remaining: usage.remaining,
     tier: tier,
     upgradeOptions: getUpgradeOptions(tier),
+    unlimited: isAdminUser(userId),
   };
 }
 

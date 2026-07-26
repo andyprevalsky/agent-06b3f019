@@ -16,7 +16,7 @@ import {
 import { PurchaseError } from './errors';
 import { kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
-import { chargeAndIssueCard } from './charge';
+import { resolveAndIssuePurchaseCard } from './issueCard';
 import {
   ensureAllLegacyFingerprintsIndexed,
   ensureRecentLegacyFingerprintsIndexed,
@@ -322,18 +322,13 @@ export async function mintPurchaseCard(
     throw kycRequiredPurchaseError();
   }
 
-  const subscription = await repo.findSubscriptionByUserId(input.userId);
-  const stripeCustomerId = subscription?.stripeCustomerId;
-  if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
-    await repo.updatePurchaseStatus(
-      purchase.id,
-      resumedPurchase === null ? PurchaseSpendStatus.FAILED : PurchaseSpendStatus.FUNDING_PENDING
-    );
-    throw new PurchaseError('User does not have a Stripe billing customer', 402);
-  }
-
-  if (resumedPurchase === null) {
-    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
-  }
-  return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
+  // Admins bypass the subscription / card-on-file gate (company-funded no-charge card); everyone
+  // else goes through the standard Stripe-customer check. Funding-resume state is threaded through.
+  return resolveAndIssuePurchaseCard(
+    purchase,
+    input,
+    resumedPurchase,
+    cardProvider,
+    walletFundingProvider
+  );
 }

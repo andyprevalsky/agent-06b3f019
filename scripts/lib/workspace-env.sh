@@ -60,3 +60,19 @@ resolve_temporal_task_queue() {
   local workspace_name="$1"
   printf '%s\n' "${TEMPORAL_TASK_QUEUE:-navi-agent-tasks-$workspace_name}"
 }
+
+# Given the intended local DB container name, its target host port, and the
+# output of `docker ps --format '{{.Names}} {{.Ports}}'`, print the name of a
+# DIFFERENT running container that already binds that host port (empty if none).
+#
+# This guards against a foreign CONDUCTOR_PORT (e.g. one leaked into a shell by
+# a /descend or benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
+# normalized away here) deriving the wrong LOCAL_DB_PORT and clobbering a
+# sibling workspace's database. Only running containers actually bind the host
+# port, so `docker ps` (not `-a`) is the correct input.
+db_port_conflict_owner() {
+  local self="$1" port="$2" ps_output="$3"
+  printf '%s\n' "$ps_output" | awk -v self="$self" -v pat=":${port}->" '
+    index($0, pat) { if ($1 != self) { print $1; exit } }
+  '
+}

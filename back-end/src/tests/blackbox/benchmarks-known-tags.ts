@@ -50,6 +50,7 @@ export const KNOWN_TAGS = [
   'real-llm',
   'gate',
   'subscription',
+  'admin-bypass',
   'kyc',
   'source',
   'response-schema',

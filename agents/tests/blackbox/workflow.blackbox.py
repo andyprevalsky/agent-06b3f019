@@ -3417,11 +3417,14 @@ async def test_workflow_check_credits_free_credits_exhausted_raises_subscription
 
 
 async def test_workflow_check_credits_free_credit_checkout_failure_pauses():
-    """Once usage proves free credits are exhausted, checkout failures must fail closed."""
+    """Checkout URL failures still raise the blocking subscription gate with its default action."""
+    import workflows.agent_workflow as workflow_module
+
     wf = _bare_workflow_instance()
     wf.user_id = "u-free-credit"
     wf.agent_id = "a-free-credit"
     fake = _FakeWorkflowModule()
+    raised = {}
 
     async def fake_exec(fn, args=None, **kwargs):
         name = getattr(fn, "__name__", "")
@@ -3437,13 +3440,29 @@ async def test_workflow_check_credits_free_credit_checkout_failure_pauses():
             raise RuntimeError("subscription checkout unavailable")
         return None
 
+    async def fake_raise_gate(workflow_instance, gate, gate_key):
+        raised["workflow"] = workflow_instance
+        raised["gate"] = gate
+        raised["gate_key"] = gate_key
+        raised["paused_at_raise"] = workflow_instance.is_paused
+        return "resolved"
+
     fake.execute_activity = fake_exec
     original = _patch_workflow(fake)
+    original_raise_gate = workflow_module.raise_gate_direct
+    workflow_module.raise_gate_direct = fake_raise_gate
     try:
         await wf._check_credits()
         assert wf._has_credits is False
-        assert wf.is_paused is True
+        assert wf.is_paused is False
+        assert raised["workflow"] is wf
+        assert raised["gate_key"] == "subscription"
+        assert raised["paused_at_raise"] is True
+        assert raised["gate"]["type"] == "subscription"
+        assert raised["gate"]["severity"] == "blocking"
+        assert raised["gate"]["action"]["url"] == "https://roselabs.ai/subscribe"
     finally:
+        workflow_module.raise_gate_direct = original_raise_gate
         _restore_workflow(original)
 
 

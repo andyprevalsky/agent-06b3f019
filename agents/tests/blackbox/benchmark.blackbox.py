@@ -5634,15 +5634,25 @@ def test_benchmark_env_override_can_disable_approval_handling():
 
 
 def test_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Source-connect gate benchmarks must start workers with non-purchase gates enabled."""
+    """Any task whose canonical contract expects source_connect must enable its worker gate."""
+    from dataclasses import replace
+
+    from benchmarks import benchmark_tasks
     from benchmarks import local as local_bench
 
     previous = os.environ.get("NON_PURCHASE_GATES_ENABLED")
+    original_tasks = benchmark_tasks._cached_tasks
     try:
+        source_task = replace(
+            benchmark_tasks.get_task_by_name("gate-source-connect-gmail"),
+            name="future-source-connect-benchmark",
+        )
+        benchmark_tasks._cached_tasks = [source_task]
         os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
-        local_bench.configure_task_environment(["gate-source-connect-gmail"])
+        local_bench.configure_task_environment(["future-source-connect-benchmark"])
         assert os.environ.get("NON_PURCHASE_GATES_ENABLED") == "1"
     finally:
+        benchmark_tasks._cached_tasks = original_tasks
         if previous is None:
             os.environ.pop("NON_PURCHASE_GATES_ENABLED", None)
         else:
@@ -5650,12 +5660,39 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
 
 def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Cloudbench must pass the same source-connect gate env into run.sh workers."""
-    script = (Path(__file__).resolve().parents[3] / "scripts" / "cloudbench-run.sh").read_text()
+    """Cloudbench's executable task-env resolution must export the worker gate flag."""
+    import subprocess
 
-    assert "gate-source-connect-gmail" in script
-    assert "BENCH_ENABLE_NON_PURCHASE_GATES" in script
-    assert "NON_PURCHASE_GATES_ENABLED=1" in script
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+    base_env = {
+        **os.environ,
+        "CLOUDBENCH_REPO_DIR": str(repo_root),
+        "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+        "CLOUDBENCH_PRINT_TASK_ENV": "1",
+    }
+    enabled = subprocess.run(
+        ["bash", str(script)],
+        env={**base_env, "BENCH_TASKS": "gate-source-connect-gmail"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    disabled = subprocess.run(
+        ["bash", str(script)],
+        env={**base_env, "BENCH_TASKS": "chat-mode"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert enabled.returncode == 0, enabled.stderr
+    assert enabled.stdout.splitlines() == [
+        "stack:NON_PURCHASE_GATES_ENABLED=1",
+        "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
+    ]
+    assert disabled.returncode == 0, disabled.stderr
+    assert disabled.stdout == ""
 
 
 def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():
@@ -6339,10 +6376,6 @@ def test_runner_fixtures_use_isolated_system_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
-def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
-    """A Fly guest must source live credentials from its verified backend env, not its restored target."""
-
-
 def test_runner_fixtures_retry_transient_local_database_probe_timeout():
     """One bounded psql stall must not abort the benchmark before agent creation."""
     from types import SimpleNamespace
@@ -6909,7 +6942,8 @@ def test_local_port_range_allocation_is_reserved_across_processes():
         child_base_text = child.stdout.readline().strip()
         assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
         child_base = int(child_base_text)
-        occupied = lambda base: {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
+        def occupied(base):
+            return {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
 
         overlapping_base = local_bench.allocate_port_range(child_base - 1)
         parent_bases.append(overlapping_base)
@@ -8185,7 +8219,11 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     assert wrong_spawn_failure is not None
     assert "spawn_general_purpose_agent" in wrong_spawn_failure
 
-    no_final_failure = _validate_user_data_prod_grep_messages(
+    # Gate A no longer parses the final structured checklist (H-01): four completed
+    # source='documents' greps via a completed explore spawn PASS the mechanical gate even without
+    # a completionSummary. The final-answer PASS/VERIFY quality is judged semantically instead
+    # (see test_user_data_prod_grep_final_answer_semantic_judge).
+    no_final_pass = _validate_user_data_prod_grep_messages(
         [
             {
                 "metadata": {
@@ -8200,8 +8238,167 @@ def test_user_data_prod_grep_requires_all_provider_filters():
             grep_msg("obsidian"),
         ]
     )
-    assert no_final_failure is not None
-    assert "provider_validation_checklist" in no_final_failure
+    assert no_final_pass is None
+
+
+def test_user_data_prod_grep_final_answer_semantic_judge():
+    """H-01: the final answer is judged by a REUSABLE, key-name-agnostic semantic output judge over
+    the agent's POPULATED output schema (completion-summary outputs + generated response_schema), not
+    a rigid structured parse and not free-text assistant prose.
+
+    response_schema auto-generates at agent-create and its shape varies, so the old rigid parse
+    produced false 'Seen: []' failures. The judge now asks only whether each required field is
+    recoverable from the populated output regardless of key name."""
+    import asyncio
+    from unittest.mock import AsyncMock, patch
+    from benchmarks.run_benchmark import (
+        SEMANTIC_OUTPUT_EXPECTATIONS,
+        _extract_agent_structured_output,
+        _judge_output_recovers_expected_fields,
+    )
+
+    # The agent's POPULATED output (arbitrary key names) — NOT the four expected field names.
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "text": "here is my summary",
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [
+                        {
+                            "key": "provider_audit",  # deliberately not our expected key names
+                            "value": [
+                                {"who": "chatgpt", "note": "no synced document evidence"},
+                                {"who": "claude", "path": "documents/claude/session.json"},
+                                {"who": "apple_notes", "path": "documents/apple_notes/note:1"},
+                                {"who": "obsidian", "path": "documents/obsidian/vault/note.md"},
+                            ],
+                        }
+                    ]
+                }
+            },
+        },
+    ]
+    root_data = {"agent": {"response_schema": {"fields": [{"name": "provider_audit"}]}}}
+
+    blob = _extract_agent_structured_output(messages, root_data)
+    assert "provider_audit" in blob and "documents/claude/session.json" in blob
+    # The extractor judges the populated output schema, not free-text prose.
+    assert "here is my summary" not in blob
+
+    schema = SEMANTIC_OUTPUT_EXPECTATIONS["user-data-prod-grep"]
+    # The expectation is a response_schema the verifier must POPULATE before scoring.
+    assert schema["fields"] and all("type" in f for f in schema["fields"])
+
+    # The judge passes the expected schema to check_progress as response_schema (populate-first)
+    # and uses the standard verifier prompt — assert that wiring, not just the score.
+    def _assert_populate_then_score(**kwargs):
+        assert kwargs["response_schema"] == schema  # verifier must populate THIS schema
+        assert "grounded tool evidence" in kwargs["verifier_system_prompt"]  # approved verifier
+        return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
+
+    with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
+        result = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
+        )
+    assert result is None
+
+    # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
+    with patch(
+        "helpers.llm.check_progress",
+        new=AsyncMock(
+            return_value={
+                "score": 0.5,
+                "reasoning": "could not recover obsidian_evidence",
+                "output": {"obsidian_evidence": None},
+            }
+        ),
+    ):
+        failure = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
+        )
+    assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
+
+    # No populated output → judged as missing without an LLM call.
+    empty = asyncio.run(
+        _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
+    )
+    assert empty is not None and "no populated output schema" in empty
+
+    # REUSABLE / not overfitted: the same judge works for a totally different task's schema
+    # (receipt id + cost) with arbitrary agent key names — proving it isn't pinned to one task.
+    receipt_messages = [
+        {
+            "metadata": {
+                "completionSummary": {
+                    "outputs": [{"key": "order", "value": {"confirmation": "tp_c505", "paid": 43.96}}]
+                }
+            }
+        }
+    ]
+    receipt_blob = _extract_agent_structured_output(receipt_messages, None)
+    receipt_schema = {
+        "fields": [
+            {"name": "receipt_id", "type": "str", "description": "order/receipt/confirmation id"},
+            {"name": "cost", "type": "float", "description": "total amount paid, any key name"},
+        ]
+    }
+    with patch(
+        "helpers.llm.check_progress",
+        new=AsyncMock(
+            return_value={"score": 1.0, "reasoning": "both present", "output": {"receipt_id": "tp_c505", "cost": 43.96}}
+        ),
+    ):
+        receipt_ok = asyncio.run(
+            _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_schema, "receipt-task")
+        )
+    assert receipt_ok is None
+
+
+def test_admin_bypass_card_mint_variant_wiring():
+    """The admin-bypass card-mint benchmark inverts the gate contract: same depleted fixture, a
+    synthetic ADMIN run user, and an assertion that a card is minted with NO subscription gate."""
+    from benchmarks.run_benchmark import (
+        GATE_FIXTURE_TASK_MODES,
+        GATE_FIXTURE_TASK_USER_IDS,
+        PURCHASE_SUBSCRIPTION_GATE_TASK_NAME,
+        PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME,
+        PURCHASE_SUBSCRIPTION_GATE_USER_ID,
+        ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
+    )
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    # Both variants share the depleted purchase-subscription fixture...
+    assert (
+        GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == "purchase-subscription"
+    )
+    assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == "purchase-subscription"
+    # ...but run as different users: a synthetic admin vs a plain non-admin.
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    )
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME]
+        == PURCHASE_SUBSCRIPTION_GATE_USER_ID
+    )
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID != PURCHASE_SUBSCRIPTION_GATE_USER_ID
+
+    non_admin = get_task_by_name(PURCHASE_SUBSCRIPTION_GATE_TASK_NAME)
+    admin = get_task_by_name(PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME)
+
+    # Non-admin still expects the blocking subscription gate.
+    assert non_admin.expected_gate and non_admin.expected_gate.get("type") == "subscription"
+    non_admin_checks = {c["type"] for e in non_admin.evaluators for c in e.get("checks", [])}
+    assert "expected_gate" in non_admin_checks
+
+    # Admin variant expects NO gate — instead a minted-card payment receipt.
+    assert getattr(admin, "expected_gate", None) is None
+    assert admin.expected_payment_receipt is True
+    admin_checks = {c["type"] for e in admin.evaluators for c in e.get("checks", [])}
+    assert "expected_gate" not in admin_checks
+    assert "expected_payment_receipt" in admin_checks
 
 
 def test_parallel_tool_calls_smoke_requires_explore_sub_agents():

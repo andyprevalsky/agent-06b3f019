@@ -40,6 +40,19 @@ fi
 if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -q .; then
     EXISTING_PORT=$(docker port "$DB_CONTAINER" 5432/tcp 2>/dev/null | head -1 | awk -F: '{print $NF}' || true)
     if [ "$EXISTING_PORT" != "$LOCAL_DB_PORT" ]; then
+        # Never destroy the working container to bind a port another workspace's
+        # container already owns. A foreign CONDUCTOR_PORT (leaked from a
+        # /descend or benchmark shell whose CONDUCTOR_WORKSPACE_NAME was
+        # normalized away above) derives the wrong LOCAL_DB_PORT; recreating
+        # would clobber a sibling workspace's DB and then fail to bind, leaving
+        # THIS workspace with no database. Abort loudly instead.
+        CONFLICT_OWNER="$(db_port_conflict_owner "$DB_CONTAINER" "$LOCAL_DB_PORT" "$(docker ps --format '{{.Names}} {{.Ports}}')")"
+        if [ -n "$CONFLICT_OWNER" ]; then
+            echo "❌ Target DB port $LOCAL_DB_PORT is already bound by container '$CONFLICT_OWNER' (a different workspace)." >&2
+            echo "   Refusing to recreate '$DB_CONTAINER': that would clobber another workspace's DB and leave this one without one." >&2
+            echo "   Likely cause: a foreign CONDUCTOR_PORT ($CONDUCTOR_PORT) leaked into this shell. Re-run from this workspace's own Conductor shell, or export its correct CONDUCTOR_PORT." >&2
+            exit 1
+        fi
         echo "🐘 Postgres container port drift ($EXISTING_PORT → $LOCAL_DB_PORT), recreating..."
         docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
         docker run -d \
