@@ -40,11 +40,13 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
     ),
+    Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
     Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),

@@ -218,9 +218,17 @@ fi
 # Try the Conductor-assigned port first
 assign_ports "$CONDUCTOR_PORT"
 
-# If any port in our range is held by another process, find a safe range
+# If any port in our range is held by another process, find a safe range.
+# WMH only binds WMH_PORT when it will actually be served (mirrors
+# should_serve_world_model, which is defined later): a run that skips the World
+# Model Harness never touches WMH_PORT, so an unrelated process occupying it
+# (e.g. Spotify's local port) must not block the strict Conductor port range.
+PORTS_TO_CHECK="$BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $NGROK_WEB_PORT"
+if [ "${ENVIRONMENT:-}" != "production" ] && [ "${BENCHMARK_SKIP_WMH_BUILD:-}" != "1" ]; then
+    PORTS_TO_CHECK="$PORTS_TO_CHECK $WMH_PORT"
+fi
 COLLISION=false
-for port in $BACKEND_PORT $FRONTEND_PORT $HEALTH_PORT $MAC_APP_PORT $SDK_METRICS_PORT $LOCAL_DB_PORT $WMH_PORT $NGROK_WEB_PORT; do
+for port in $PORTS_TO_CHECK; do
     if port_requires_reassign "$port"; then
         COLLISION=true
         break
@@ -724,6 +732,23 @@ _SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
 grep -qE '^R2_BUCKET_TRACE_ARCHIVE=.' back-end/.env 2>/dev/null && _SEED_CACHE_ENABLED=1
+_SEED_LOCK_HELD=0
+release_seed_lock_if_held() {
+    if [ "${_SEED_LOCK_HELD:-0}" = "1" ]; then
+        release_benchmark_seed_lock "$_SEED_DUMP"
+        _SEED_LOCK_HELD=0
+    fi
+}
+trap release_seed_lock_if_held EXIT
+
+# BEGIN BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
+# Hold the pair lock through decision, optional R2 replacement, and synchronous
+# pg_restore. Merely waiting for a producer and then reading was a TOCTOU race:
+# another producer could replace the pair between the wait and restore.
+if [ -n "$_SEED_DUMP" ]; then
+    acquire_benchmark_seed_lock "$_SEED_DUMP"
+    _SEED_LOCK_HELD=1
+fi
 # Decide where the seeded DB comes from (scripts/lib/seed-cache.sh). A stale dump
 # baked into the warm snapshot must fall through to the shared cache, NOT shadow
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
@@ -767,6 +792,8 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         fi
     fi
 fi
+release_seed_lock_if_held
+# END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION
 
 if $DB_RESTORED; then
     # A restored dump USUALLY already carries the Message trgm/grep indexes, but a
@@ -834,6 +861,8 @@ fi
 # instead of re-seeding. Best-effort; the schemahash guards against schema drift.
 if [ -n "$_SEED_DUMP" ]; then
     echo "🗜️  Saving seed dump for fast future warm-starts ($_SEED_DUMP)..."
+    acquire_benchmark_seed_lock "$_SEED_DUMP"
+    _SEED_LOCK_HELD=1
     _SEED_DUMP_CONTAINER=""
     if ! $USE_SYSTEM_PG; then
         _SEED_DUMP_CONTAINER="$DB_CONTAINER"
@@ -854,6 +883,7 @@ if [ -n "$_SEED_DUMP" ]; then
     else
         echo "   ⚠️ seed dump save failed; no partial archive was published"
     fi
+    release_seed_lock_if_held
 fi
 
 fi   # end: if $DB_RESTORED / else (push + seed + dump)
@@ -865,7 +895,9 @@ fi   # end: if $DB_RESTORED / else (push + seed + dump)
 
 # ── Pre-flight: ensure node_modules exist for all JS services ──
 JS_SVC_DIRS=(back-end front-end)
-$IS_MAC && JS_SVC_DIRS+=(mac-app)
+if ! $BENCHMARK_MODE && $IS_MAC; then
+    JS_SVC_DIRS+=(mac-app)
+fi
 bash "$SCRIPT_DIR/ensure-workspace-dependencies.sh" "${JS_SVC_DIRS[@]}"
 
 # ── Pre-flight: ensure agents venv exists with deps installed ──
@@ -1399,7 +1431,7 @@ cleanup() {
     [ -n "$FAIL_DIR" ] && rm -rf "$FAIL_DIR"
     wait 2>/dev/null
 }
-trap cleanup EXIT
+trap 'release_seed_lock_if_held; cleanup' EXIT
 
 # Wrapper: run a service and write its exit code to a temp file on failure
 FAIL_DIR=$(mktemp -d)
@@ -1623,7 +1655,8 @@ if $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]; then
             ;;
     esac
     (cd front-end && rm -f "$FRONTEND_LOG_FILE" && \
-        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" VITE_REALTIME_PRIVATE=false \
+        NODE_OPTIONS="$FRONTEND_BUILD_NODE_OPTIONS" VITE_BACKEND_API_URL="$PUBLIC_BASE_URL" \
+        VITE_ENABLE_REACT_GRAB=false VITE_REALTIME_PRIVATE=false \
         npx vite build --outDir "$FRONTEND_DIST_DIR" --emptyOutDir > "$FRONTEND_LOG_FILE" 2>&1)
 fi
 launch_backend_service

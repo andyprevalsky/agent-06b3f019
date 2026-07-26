@@ -14,6 +14,7 @@ import structlog
 from temporalio import activity
 
 from helpers.tracing import traced
+from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 
 logger = structlog.get_logger()
 
@@ -30,6 +31,39 @@ IMESSAGE_ACK_POLL_INTERVAL_SECONDS = 2
 @activity.defn
 @traced("queue_imessage_activity")
 async def queue_imessage_activity(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    phone_number: str,
+    message: str,
+    world_model_mode: str | None = None,
+) -> dict[str, Any]:
+    async def real_executor(
+        _tool_name: str,
+        _tool_args: dict[str, Any],
+        _tool_call_id: str,
+    ) -> dict[str, Any]:
+        return await _queue_imessage_real(user_id, agent_id, tool_call_id, phone_number, message)
+
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
+        "message_transport_send",
+        {
+            "channel": "imessage",
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "phone_number": phone_number,
+            "message": message,
+        },
+        tool_call_id,
+        real_executor,
+        allow_real_fallback=world_model_mode is None,
+    )
+
+
+async def _queue_imessage_real(
     user_id: str,
     agent_id: str,
     tool_call_id: str,
@@ -168,6 +202,39 @@ async def queue_imessage_activity(
 @activity.defn
 @traced("send_agent_sms_activity")
 async def send_agent_sms_activity(
+    user_id: str,
+    agent_id: str,
+    tool_call_id: str,
+    phone_number: str,
+    message: str,
+    world_model_mode: str | None = None,
+) -> dict[str, Any]:
+    async def real_executor(
+        _tool_name: str,
+        _tool_args: dict[str, Any],
+        _tool_call_id: str,
+    ) -> dict[str, Any]:
+        return await _send_agent_sms_real(user_id, agent_id, tool_call_id, phone_number, message)
+
+    return await WorldModelToolExecutionAdapter.from_env(
+        agent_id=agent_id,
+        mode=world_model_mode,
+    ).execute(
+        "message_transport_send",
+        {
+            "channel": "agent_sms",
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "phone_number": phone_number,
+            "message": message,
+        },
+        tool_call_id,
+        real_executor,
+        allow_real_fallback=world_model_mode is None,
+    )
+
+
+async def _send_agent_sms_real(
     user_id: str,
     agent_id: str,
     tool_call_id: str,

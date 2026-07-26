@@ -160,6 +160,7 @@ require_text "$DEPLOY_ENV" 'export LOCAL_DB_PORT=$((conductor_port + 5))' "/depl
 require_text "$DEPLOY_ENV" 'export RUN_SH_STRICT_CONDUCTOR_PORT=1' "/deploy must reject silent runtime port reassignment"
 require_text "$RUN_SH" 'if ! port_range_can_reassign; then' "run.sh must honor strict deploy port mode"
 require_text "$RUN_SH" '[ "${RUN_SH_STRICT_CONDUCTOR_PORT:-0}" = "1" ] || { $BENCHMARK_MODE && [ "${BENCHMARK_BUNDLED_FRONTEND:-false}" = "true" ]' "bundled deploy stacks must preserve strict ports across shell boundaries"
+require_text "$RUN_SH" 'if ! $BENCHMARK_MODE && $IS_MAC; then' "benchmark stacks must not install unused mac-app dependencies"
 require_text "$RUN_SH" 'VITE_REALTIME_PRIVATE=false \' "bundled local frontends must not request production-only private realtime authorization"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_BUNDLED_FRONTEND=true' "/deploy launch must carry strict-port mode across shell boundaries"
 require_text "$DEPLOY_COMMAND" 'BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8' "/deploy semantic stack must retain enough workers for concurrent lifecycle checks"

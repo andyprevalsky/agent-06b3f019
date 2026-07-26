@@ -524,6 +524,8 @@ async function main(): Promise<void> {
     const ordinary = buildAgentWorkflowArgs(base);
     assert.strictEqual(ordinary.length, 16);
     assert.strictEqual(ordinary[11], 'plan');
+    const explicitReal = buildAgentWorkflowArgs({ ...base, worldModelMode: 'real' });
+    assert.strictEqual(explicitReal.length, 16);
 
     const resumeState = {
       version: 1 as const,
@@ -562,6 +564,24 @@ async function main(): Promise<void> {
     assert.strictEqual(replacement[12], 20);
     assert.deepStrictEqual(replacement[14], { network: false });
     assert.strictEqual(replacement[16], resumeState);
+
+    const simulated = buildAgentWorkflowArgs({
+      ...base,
+      worldModelMode: 'simulate',
+    });
+    assert.strictEqual(simulated.length, 18);
+    assert.strictEqual(simulated[16], null);
+    assert.strictEqual(simulated[17], 'simulate');
+
+    const simulatedReplacement = buildAgentWorkflowArgs({
+      ...base,
+      startPhase: 'resume',
+      resumeState,
+      worldModelMode: 'simulate',
+    });
+    assert.strictEqual(simulatedReplacement.length, 18);
+    assert.strictEqual(simulatedReplacement[16], resumeState);
+    assert.strictEqual(simulatedReplacement[17], 'simulate');
   });
 
   await test('historical workflow inputs recover deploy-critical configuration without replay', async () => {

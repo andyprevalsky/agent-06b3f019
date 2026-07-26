@@ -41,6 +41,7 @@ export function assertExistingDescendantRequestMatches(
       body.fast_mode_cache_enabled ?? false,
       existing.fastModeCacheEnabled,
     ],
+    ['world_model_mode', body.world_model_mode ?? 'real', existing.worldModelMode],
   ];
   const mismatch = fields.find(
     ([, requestValue, storedValue]) => !isDeepStrictEqual(requestValue, storedValue)
@@ -82,6 +83,7 @@ export async function startSubAgentWorkflow(
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
+    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     rejectDuplicateWorkflowId: true,
   };
   const execution = await executeDescendantWorkflowStart(
@@ -122,6 +124,7 @@ export async function resumeExistingSubAgent(
     status_message: existing.statusMessage,
     temporal_workflow_id: workflowId,
     fast_mode_cache_enabled: existing.fastModeCacheEnabled,
+    world_model_mode: existing.worldModelMode,
     created_at: existing.createdAt,
     updated_at: existing.updatedAt,
     available_endpoints: getX402Endpoints(existing.id),

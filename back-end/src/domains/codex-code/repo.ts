@@ -33,6 +33,17 @@ export async function persistSessionOutput(taskId: string, output: string) {
   });
 }
 
+export async function findSessionById(taskId: string) {
+  return prisma.claudeCodeSession.findUnique({
+    where: { id: taskId },
+    select: {
+      id: true,
+      claudeTokenSource: true,
+      claudeTokenIntegrationId: true,
+    },
+  });
+}
+
 export async function findAgentFastModeCache(agentId: string): Promise<boolean> {
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },

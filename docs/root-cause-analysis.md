@@ -12,6 +12,11 @@ These guidelines define how to diagnose bugs in this codebase. Follow this metho
 > **Never come back with a theory.** "It's probably load / a race / a 404 / third-party state" is not a deliverable. If you cannot reproduce it, you have *preliminary findings + an observability gap* — say so and keep the RCA open; do not present code-reading or correlation as a finished RCA.
 >
 > **Beware fake failures:** running a test the wrong way (wrong `DATABASE_URL`, missing env, stale/leftover services) produces failures that aren't the bug. Reproduce the harness's real conditions and confirm the repro is valid before diagnosing.
+>
+> **Benchmark failures require two different proofs.** An owning-boundary test
+> proves causality; the exact unchanged local benchmark proves the reported task
+> outcome. Neither substitutes for the other. Do not call a benchmark fixed from
+> a unit test, mocked browser state, simulator, replay, or other proxy test.
 
 ## System Architecture (request flow)
 
@@ -76,6 +81,40 @@ The isolated reproduction should:
 
 If a unit-level reproduction would lose the behavior under investigation, use the narrowest local integration test, recorded-response replay, or benchmark checkpoint that preserves it. Do not use a full benchmark as the only reproduction when a smaller local test can prove the same causal mechanism.
 
+### Exact benchmark outcome gate
+
+When the symptom being diagnosed is a benchmark failure, the isolated
+reproduction above is necessary but not sufficient. It answers "did we fix the
+suspected mechanism?" It does not answer "does the reported benchmark now pass?"
+
+Before describing a benchmark issue as fixed, approval-ready, verified, or
+complete, run the exact task through the canonical local entrypoint on both sides
+of the change:
+
+```bash
+scripts/run-bench --local <exact-existing-task-name>
+```
+
+Required evidence:
+
+1. On the buggy revision, the exact task fails locally with the reported outcome
+   or the same first-bad causal boundary.
+2. On the fixed revision, the exact same command and task definition pass.
+3. The prompt, evaluator, expected tools, fixtures, timeout, and pass criteria are
+   byte-for-byte unchanged between those runs.
+4. The run artifacts and working FE link are recorded for both runs.
+
+Unit tests, blackbox tests, mocked browser states, simulators, recorded-response
+replays, and benchmark checkpoints remain valuable causal and regression proof,
+but they are **proxy evidence** for the task outcome. A proxy test may never be
+reported as proof that the benchmark passes. A test whose fixture simply supplies
+the desired post-fix result proves only that the harness can consume that result.
+
+If the buggy revision cannot reproduce the exact failure locally, record an
+outcome-reproduction gap and keep the RCA open. If the fixed revision still fails
+the benchmark, treat that run as new primary evidence and continue iterating; do
+not stop at the passing proxy test.
+
 ### Permanent deploy regression coverage
 
 A scratch test, executable repro script, benchmark checkpoint, or fixture replay may be useful while reducing the failure, but it is not sufficient regression coverage. Once the reproduction fails for the diagnosed bug, preserve it as a checked-in blackbox test in the suite owned by the first-bad boundary:
@@ -107,6 +146,9 @@ An RCA is **incomplete** until all of the following are true:
 6. If a fix is made, the reproduction is preserved as a checked-in test in the owning boundary's permanent blackbox suite; a scratch artifact alone is not sufficient.
 7. The full blackbox runner that `/deploy` uses discovers and passes the new regression test.
 8. `/deploy` is wired to run that blackbox runner whenever the affected production surface changes.
+9. For a benchmark failure, the exact unchanged canonical local benchmark has
+   been observed failing on the buggy revision and passing on the fixed revision;
+   both artifacts and FE links are recorded.
 
 ### Fix approval and verification handoff
 
@@ -122,6 +164,9 @@ After the user agrees on the fix:
    alongside the recorded pre-fix failure.
 4. If the reproduction still fails, the fix is not complete; continue the fix-and-test loop
    rather than reporting success.
+5. For a benchmark failure, run the exact canonical local benchmark after the
+   owning-boundary repro passes. Continue iterating until that exact task passes;
+   do not hand off a proxy-test pass as benchmark verification.
 
 Changing or weakening the reproduction so the fix appears to pass does not satisfy this
 handoff. If new evidence proves the original reproduction targeted the wrong boundary, explain

@@ -26,6 +26,7 @@ import {
   WaitlistInviteInProgressError,
 } from './service.waitlist-finalization';
 import { resolveInviteGate } from './service.waitlist-gate';
+import { DEFAULT_WAITLIST_PAGE_SIZE, type WaitlistPagination } from './service.waitlist-pagination';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPeopleResponse } from './types';
 
 export {
@@ -202,9 +203,14 @@ function normalizePhoneDigits(phone: string | null | undefined): string {
   return (phone ?? '').replace(/\D/g, '');
 }
 
-/** Return every actionable phone-bearing waitlist signup with gate state. */
-export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> {
-  const rows = await repo.findWaitlistPeople();
+/** Return one bounded page of actionable phone-bearing signups with gate state. */
+export async function getWaitlistPeople(
+  pagination: WaitlistPagination = { page: 1, pageSize: DEFAULT_WAITLIST_PAGE_SIZE }
+): Promise<AdminWaitlistPeopleResponse> {
+  const { rows, total } = await repo.findWaitlistPeople({
+    skip: (pagination.page - 1) * pagination.pageSize,
+    take: pagination.pageSize,
+  });
   const accounts = await repo.findAccountsByPhones(rows.map((row) => row.phone));
   const accountByDigits = new Map<string, repo.AccountGateRecord>();
   for (const account of accounts) {
@@ -219,6 +225,7 @@ export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> 
     return {
       id: row.id,
       name: row.name,
+      email: row.email,
       phone: row.phone,
       variant: row.variant,
       joinedAt: row.createdAt.toISOString(),
@@ -227,7 +234,13 @@ export async function getWaitlistPeople(): Promise<AdminWaitlistPeopleResponse> 
       isGated,
     };
   });
-  return { people, total: people.length };
+  return {
+    people,
+    total,
+    page: pagination.page,
+    pageSize: pagination.pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pagination.pageSize)),
+  };
 }
 
 function preferredRecipientEmail(waitlistEmail: string | null, accountEmail: string | null) {

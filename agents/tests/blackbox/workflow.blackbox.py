@@ -355,7 +355,13 @@ async def mock_get_agent_source(agent_id: str) -> str:
 
 
 @activity.defn(name="notify_sms_event_activity")
-async def mock_notify_sms_event_activity(user_id: str, event_type: str, agent_id: str, payload: dict) -> None:
+async def mock_notify_sms_event_activity(
+    user_id: str,
+    event_type: str,
+    agent_id: str,
+    payload: dict,
+    world_model_mode: str | None = None,
+) -> None:
     return None
 
 
@@ -1339,6 +1345,11 @@ def test_workflow_continuation_state_round_trips_complete_runtime():
     assert restored.user_context_section == "cached user context"
     assert restored.context == context
     assert restored._continuation_resume_state(context) == state
+    wf.world_model_mode = "simulate"
+    simulated_args = wf._continuation_args(context)
+    assert len(simulated_args) == 18
+    assert simulated_args[16]["kind"] == "continuation"
+    assert simulated_args[17] == "simulate"
     state_with_historical_counts = {
         **state,
         "child_tool_counts": {"web_search": 1, "web_fetch": 2},

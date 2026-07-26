@@ -127,7 +127,7 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
             for key in keys
         }
 
-    async def slow_archive(*args, **kwargs):
+    async def blocked_archive(*args, **kwargs):
         archive_started.set()
         await archive_release.wait()
 
@@ -135,7 +135,7 @@ def test_cache_get_record_does_not_wait_for_read_archive(monkeypatch):
         reset_client_state()
         monkeypatch.setattr(client, "_GET_BATCH_DELAY_S", 0.001)
         monkeypatch.setattr(client, "_fetch_cache_records_many", fake_fetch)
-        monkeypatch.setattr(client, "_archive_cache_read", slow_archive)
+        monkeypatch.setattr(client, "_archive_cache_read", blocked_archive)
 
         result = await asyncio.wait_for(
             client.cache_get_record("k1"), timeout=EVENT_TIMEOUT_S

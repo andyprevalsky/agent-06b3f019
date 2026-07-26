@@ -243,7 +243,7 @@ Run `/factory-review` (canonical behavior in `.claude/commands/factory-review.md
 
 5. **Zod schema changes require approval** - Propose changes before implementing
 
-6. **Follow RCA methodology for every bug** - Invoke `/RCA` (or read `docs/root-cause-analysis.md`) and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, never rationalize a failure as "pre-existing". **HARD GATE: never report a root cause without a LOCAL REPRO you ran and watched fail, plus a fix that makes that same repro pass. A theory ("probably load/a race/a 404") is not a deliverable — reproduce it or classify it as an open observability gap.**
+6. **Follow RCA methodology for every bug** - Invoke `/RCA` (or read `docs/root-cause-analysis.md`) and follow the steps exactly. Never skip the evidence-gathering step (Step 0), never fix a symptom without tracing the critical path, never rationalize a failure as "pre-existing". **HARD GATE: never report a root cause without a LOCAL REPRO you ran and watched fail, plus a fix that makes that same repro pass. A theory ("probably load/a race/a 404") is not a deliverable — reproduce it or classify it as an open observability gap. For a benchmark failure, proxy tests do not prove the outcome: the exact unchanged task must also fail locally on the buggy revision and pass locally on the fixed revision via `scripts/run-bench --local <task>`.**
 
 7. **Search before implementing** - When adding new features, first search the codebase for similar patterns (e.g., when adding a new tool, study existing tools)
 

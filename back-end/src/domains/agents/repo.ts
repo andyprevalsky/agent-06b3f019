@@ -56,6 +56,7 @@ export async function findTopLevelAgents(userId: string) {
       contextSize: true,
       messageCount: true,
       fastModeCacheEnabled: true,
+      worldModelMode: true,
       createdAt: true,
       updatedAt: true,
     },
@@ -233,14 +234,15 @@ export async function findUserDeliveryAddress(userId: string) {
   });
 }
 
-/** Fetch parent Fast Mode flags in bulk for batch-created sub-agents. */
-export async function findFastModeFlagsByIds(agentIds: string[]) {
+/** Fetch parent execution-mode flags in bulk for batch-created sub-agents. */
+export async function findExecutionModeFlagsByIds(agentIds: string[]) {
   if (agentIds.length === 0) return [];
   return prisma.agent.findMany({
     where: { id: { in: agentIds }, deletedAt: null },
     select: {
       id: true,
       fastModeCacheEnabled: true,
+      worldModelMode: true,
     },
   });
 }
