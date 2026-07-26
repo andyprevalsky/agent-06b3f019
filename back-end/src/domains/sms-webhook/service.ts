@@ -11,7 +11,12 @@
 
 import * as repo from './repo';
 import { SURGE_SIGNING_SECRET, IS_PRODUCTION } from './config';
-import { validateSurgeSignature, parseSurgePayload } from './service.validation';
+import {
+  validateSurgeSignature,
+  parseSurgePayload,
+  parseSurgeDeliveryEvent,
+  type SurgeDeliveryStatusEvent,
+} from './service.validation';
 import type { SurgeAttachment } from './types';
 import { getTemporalClient } from '../../providers/temporal';
 import { sendSms } from '../../providers/smsQueue';
@@ -247,6 +252,57 @@ async function handleSupervisorFailure(input: SupervisorFailureInput): Promise<v
 /* c8 ignore stop */
 
 // ---------------------------------------------------------------------------
+// Outbound delivery-status receipts (message.sent / delivered / failed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a Surge outbound delivery-status event. Logs every terminal status and
+ * loudly alerts when the carrier FILTERED a message (`message_filtered`) — the
+ * silent failure that dropped every link-bearing SMS. Other failure reasons
+ * (opted_out, invalid_mobile_number) are expected per-recipient outcomes and are
+ * logged, not alerted, so Slack does not firehose at scale.
+ *
+ * Prereq: Surge must be subscribed to these events in the dashboard webhook
+ * config (the API exposes no webhook-subscription endpoint). Until then we
+ * receive only message.received and this never fires.
+ */
+export function recordSurgeDeliveryStatus(event: SurgeDeliveryStatusEvent): void {
+  const toPreview =
+    event.toPhone !== null && event.toPhone !== ''
+      ? event.toPhone.substring(0, 7) + '****'
+      : 'unknown';
+  log.info('SMS delivery status', {
+    type: event.type,
+    messageId: event.messageId,
+    to: toPreview,
+    failureReason: event.failureReason,
+    failedAt: event.failedAt,
+    bodyPreview: event.bodyPreview?.substring(0, 100),
+  });
+
+  if (event.type !== 'message.failed') return;
+
+  log.error('Outbound SMS failed to deliver', {
+    messageId: event.messageId,
+    failureReason: event.failureReason,
+    to: toPreview,
+    bodyPreview: event.bodyPreview?.substring(0, 100),
+  });
+
+  if (event.failureReason === 'message_filtered') {
+    alertError({
+      source: 'sms',
+      message: `Outbound SMS carrier-filtered (message_filtered): message ${event.messageId}. A link/content deliverability regression is dropping messages.`,
+      context: {
+        messageId: event.messageId,
+        failureReason: event.failureReason,
+        bodyPreview: event.bodyPreview,
+      },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main inbound handler (orchestrates all paths)
 // ---------------------------------------------------------------------------
 
@@ -292,6 +348,16 @@ export async function handleInboundSms(input: InboundSmsInput): Promise<InboundS
     contactKeys: contact !== undefined ? Object.keys(contact) : [],
     raw: JSON.stringify(body).substring(0, 500),
   });
+
+  // Delivery-status receipts (message.sent/delivered/failed) report the fate of
+  // an OUTBOUND message. Handle and acknowledge them here — they are not inbound
+  // user text and must never reach the supervisor. This is the only channel
+  // through which we learn a message was carrier-filtered.
+  const deliveryEvent = parseSurgeDeliveryEvent(body);
+  if (deliveryEvent) {
+    recordSurgeDeliveryStatus(deliveryEvent);
+    return { ok: true };
+  }
 
   const parsed = parseSurgePayload(input.body);
 

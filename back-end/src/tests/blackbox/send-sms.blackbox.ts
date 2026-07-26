@@ -222,6 +222,24 @@ function assertAgentLinkPresent(message: string, agentId: string): void {
 }
 
 /**
+ * Every outbound Surge request MUST disable link shortening. Left at the account
+ * default, Surge rewrites our branded roselabs.ai deep link into a generic
+ * `srgv.co` shortlink, which carriers filter as "unwanted or malicious"
+ * (failure_reason `message_filtered`) — silently dropping every link-bearing
+ * SMS. Regression guard for that prod failure.
+ */
+function assertLinkShorteningDisabled(body: Record<string, unknown>): void {
+  const settings = body.settings as Record<string, unknown> | undefined;
+  assert(
+    settings?.link_shortening === 'disabled',
+    `Expected settings.link_shortening="disabled" on the Surge request (else the ` +
+      `branded link is shortened to srgv.co and carrier-filtered), got: ${JSON.stringify(
+        body.settings
+      )}`
+  );
+}
+
+/**
  * The agent deep link is the ONLY URL allowed to survive sanitization; all
  * merchant/product/page URLs must still be stripped for carrier deliverability.
  */
@@ -1099,6 +1117,7 @@ async function testBoundary_notifyAgentStartedCallsSurgeApi() {
     );
     assertNoRoutingLeaks(body.body, agent.id);
     assertAgentLinkPresent(body.body, agent.id);
+    assertLinkShorteningDisabled(body);
   } finally {
     await prisma.agent.deleteMany({ where: { id: agent.id } });
   }
