@@ -12,6 +12,19 @@ import { archiveJson } from './traceArchive';
 
 const log = createLogger('SMS');
 
+/**
+ * Per-message Surge overrides applied to every outbound send.
+ *
+ * `link_shortening: 'disabled'` stops Surge rewriting our branded roselabs.ai
+ * links into generic `srgv.co` shortlinks. Carriers filter generic shortener
+ * domains as "unwanted or malicious" (Surge failure_reason `message_filtered`),
+ * which silently dropped every link-bearing SMS (agent_started/completion/
+ * auth/agentcard). Sending the branded link verbatim matches the domain the
+ * A2P campaign is registered under and clears the carrier filter.
+ * See back-end/scripts/repro-surge-link-shortening.ts.
+ */
+const SURGE_MESSAGE_SETTINGS = { link_shortening: 'disabled' } as const;
+
 interface SurgeMessageResponse {
   id: string;
   body?: string;
@@ -87,6 +100,7 @@ export async function sendSms(
   const requestBody = {
     to: phoneNumber,
     body: message,
+    settings: SURGE_MESSAGE_SETTINGS,
   };
 
   try {
@@ -174,6 +188,7 @@ export async function sendMms(
     to: phoneNumber,
     body: message,
     attachments: [{ url: mediaUrl }],
+    settings: SURGE_MESSAGE_SETTINGS,
   };
 
   try {
