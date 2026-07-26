@@ -36,7 +36,7 @@ const log = createLogger('Purchases');
 type StripePaymentIntent = Awaited<ReturnType<typeof stripe.paymentIntents.create>>;
 
 /** Mutable side-effect state shared across the charge/mint/rollback steps. */
-interface ChargeState {
+export interface ChargeState {
   paymentIntentId?: string;
   paymentIntentCaptured: boolean;
   paymentReversalFailed: boolean;
@@ -105,7 +105,7 @@ async function authorizeStripeHold(
  * entirely by the AgentCard company transfer (Rose fronts the cost) and there is no Stripe hold to
  * capture.
  */
-async function mintCaptureAndIssue(
+export async function mintCaptureAndIssue(
   state: ChargeState,
   purchase: PurchaseSpend,
   input: MintPurchaseInput,
@@ -243,7 +243,7 @@ async function reverseStripePaymentOnFailure(
 }
 
 /** Undo every side effect after a failed mint, then throw a typed purchase error. */
-async function rollbackChargeFailure(
+export async function rollbackChargeFailure(
   state: ChargeState,
   purchase: PurchaseSpend,
   input: MintPurchaseInput,
@@ -350,36 +350,3 @@ export async function chargeAndIssueCard(
  * capture or reverse. On failure the issued card is closed and its funding reclaimed, exactly like
  * the charged flow, but no payment reversal is attempted (nothing was charged).
  */
-export async function issueAdminCompanyCard(
-  purchase: PurchaseSpend,
-  input: MintPurchaseInput,
-  cardProvider?: CardProvider,
-  walletFundingProvider?: WalletFundingProvider
-): Promise<MintPurchaseResult> {
-  // No Stripe hold exists on the admin no-charge path, so there is never a payment intent to
-  // capture or a stale-charging retry to resume — the card is fully company-funded.
-  const state: ChargeState = {
-    paymentIntentCaptured: false,
-    paymentReversalFailed: false,
-    walletWasFunded: false,
-    walletReclaimFailed: false,
-    walletFundingPrepared: false,
-    fundingResumeRequired: false,
-    fundingRetryClaimed: false,
-    providerCallStarted: false,
-    stripeAuthorizationStarted: false,
-    issuedStaticCard: false,
-  };
-  try {
-    return await mintCaptureAndIssue(
-      state,
-      purchase,
-      input,
-      undefined,
-      cardProvider,
-      walletFundingProvider
-    );
-  } catch (error) {
-    return await rollbackChargeFailure(state, purchase, input, error);
-  }
-}

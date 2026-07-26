@@ -1,7 +1,12 @@
 import { type CardProvider } from '../../providers/card-provider';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import { isAdminUser } from '../../utils/adminAccess';
-import { chargeAndIssueCard, issueAdminCompanyCard } from './charge';
+import {
+  chargeAndIssueCard,
+  mintCaptureAndIssue,
+  rollbackChargeFailure,
+  type ChargeState,
+} from './charge';
 import { PurchaseError } from './errors';
 import * as repo from './repo';
 import {
@@ -46,4 +51,40 @@ export async function resolveAndIssuePurchaseCard(
     await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
   }
   return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
+}
+
+/**
+ * Admin no-charge card: mint the company-funded card with NO Stripe hold. There is never a payment
+ * intent to capture or a stale-charging retry to resume — the card is fully company-funded.
+ */
+export async function issueAdminCompanyCard(
+  purchase: PurchaseSpend,
+  input: MintPurchaseInput,
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
+): Promise<MintPurchaseResult> {
+  const state: ChargeState = {
+    paymentIntentCaptured: false,
+    paymentReversalFailed: false,
+    walletWasFunded: false,
+    walletReclaimFailed: false,
+    walletFundingPrepared: false,
+    fundingResumeRequired: false,
+    fundingRetryClaimed: false,
+    providerCallStarted: false,
+    stripeAuthorizationStarted: false,
+    issuedStaticCard: false,
+  };
+  try {
+    return await mintCaptureAndIssue(
+      state,
+      purchase,
+      input,
+      undefined,
+      cardProvider,
+      walletFundingProvider
+    );
+  } catch (error) {
+    return await rollbackChargeFailure(state, purchase, input, error);
+  }
 }
