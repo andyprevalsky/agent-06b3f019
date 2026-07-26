@@ -1,4 +1,4 @@
-import { IntegrationStatus, type AgentStatus } from '@prisma/client';
+import { IntegrationStatus, Prisma, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 
@@ -88,12 +88,24 @@ export async function findConnectedConnectors(): Promise<ConnectedConnectorRecor
   });
 }
 
-export async function findUsersByIds(userIds: string[]): Promise<UserCreatedRecord[]> {
-  if (userIds.length === 0) return [];
-  return prisma.user.findMany({
-    where: { userId: { in: userIds }, isAnonymous: false },
-    select: { userId: true, createdAt: true },
+// Resolve the explicit core-team allowlist (see ADMIN_HEALTH_ADDITIONAL_PHONES) by
+// phone. isAnonymous is intentionally NOT filtered here: the dev/test account is
+// flagged anonymous but is a real person we always want counted. One user per phone
+// (earliest-created) guards against a phone that later gains a second account
+// double-counting in the "# of Users" set.
+export async function findUsersByPhones(phones: string[]): Promise<UserCreatedRecord[]> {
+  if (phones.length === 0) return [];
+  const rows = await prisma.user.findMany({
+    where: { phone: { in: phones } },
+    select: { userId: true, phone: true, createdAt: true },
+    orderBy: { createdAt: 'asc' },
   });
+  const byPhone = new Map<string, UserCreatedRecord>();
+  for (const { userId, phone, createdAt } of rows) {
+    if (phone === null || byPhone.has(phone)) continue;
+    byPhone.set(phone, { userId, createdAt });
+  }
+  return Array.from(byPhone.values());
 }
 
 export async function findSubscriptionUsersByCustomerIds(
@@ -132,36 +144,52 @@ export interface WaitlistPersonRow {
   invitedAt: Date | null;
 }
 
+export interface WaitlistPeoplePage {
+  rows: WaitlistPersonRow[];
+  total: number;
+}
+
 /**
- * All actionable waitlist people — the same phone-bearing population the
- * signup metric counts. Newest first. Email-only legacy rows (no phone) are
- * excluded because they can't be texted.
+ * One bounded page of actionable waitlist people — the same phone-bearing
+ * population the signup metric counts. Newest first, with id as the stable
+ * tie-breaker. Email-only legacy rows (no phone) are excluded because they
+ * can't be texted.
  */
-export async function findWaitlistPeople(): Promise<WaitlistPersonRow[]> {
-  const rows = await prisma.waitlist.findMany({
-    where: { phone: { not: null } },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      variant: true,
-      createdAt: true,
-      invitedAt: true,
-    },
-    orderBy: { createdAt: 'desc' },
-  });
-  return rows
-    .filter((row) => (row.phone ?? '').trim() !== '')
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      email: row.email,
-      phone: row.phone as string,
-      variant: row.variant,
-      createdAt: row.createdAt,
-      invitedAt: row.invitedAt,
-    }));
+export async function findWaitlistPeople(params: {
+  skip: number;
+  take: number;
+}): Promise<WaitlistPeoplePage> {
+  const [rows, total] = await prisma.$transaction(
+    [
+      prisma.$queryRaw<WaitlistPersonRow[]>`
+        SELECT
+          "id",
+          "name",
+          "email",
+          "phone",
+          "variant",
+          "created_at" AS "createdAt",
+          "invited_at" AS "invitedAt"
+        FROM "Waitlist"
+        WHERE "phone" IS NOT NULL
+          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+        ORDER BY "created_at" DESC, "id" DESC
+        OFFSET ${params.skip}
+        LIMIT ${params.take}
+      `,
+      prisma.$queryRaw<Array<{ count: number }>>`
+        SELECT COUNT(*)::int AS "count"
+        FROM "Waitlist"
+        WHERE "phone" IS NOT NULL
+          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+      `,
+    ],
+    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
+  );
+  return {
+    rows,
+    total: total[0]?.count ?? 0,
+  };
 }
 
 export async function findWaitlistPersonById(id: string): Promise<WaitlistPersonRow | null> {

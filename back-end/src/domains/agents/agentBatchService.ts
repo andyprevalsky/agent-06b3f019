@@ -15,6 +15,7 @@
 
 import { startAgentWorkflowExecution } from '../../providers/temporal';
 import { createLogger } from '../../providers/logger';
+import { resolvePromptSecrets } from './agentLifecycleService';
 import {
   executeDescendantWorkflowStart,
   readDescendantWorkflowStartState,
@@ -22,10 +23,12 @@ import {
 } from '../../providers/descendantWorkflowStart';
 import { assertExistingDescendantRequestMatches } from './agentDescendantStartService';
 import {
-  applyFastModeInheritance,
   applyFastModeDefault,
-  resolvePromptSecrets,
-} from './agentLifecycleService';
+  applyFastModeInheritance,
+  applyWorldModelModeInheritance,
+  assertWorldModelModeAccess,
+  disableFastModeForWorldModel,
+} from './agentExecutionMode';
 import { resolveCreateMetadata } from './agentCreateMetadata';
 import type { CreateAgentBody } from './types';
 import * as repo from './repo';
@@ -83,6 +86,7 @@ function buildBatchItem(
     ...(body.fast_mode_cache_enabled !== undefined
       ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
       : {}),
+    ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
     verifierType,
     ...(body.attachments !== undefined
       ? { attachments: body.attachments as Array<Record<string, unknown>> }
@@ -125,6 +129,7 @@ async function startBatchWorkflow(
       ...(body.fast_mode_cache_enabled !== undefined
         ? { fastModeCacheEnabled: body.fast_mode_cache_enabled }
         : {}),
+      ...(body.world_model_mode !== undefined ? { worldModelMode: body.world_model_mode } : {}),
       rejectDuplicateWorkflowId: true,
     },
     deadlineAtMs
@@ -237,23 +242,28 @@ async function resolveAllMetadata(
   return out;
 }
 
-async function applyFastModeInheritanceForBatch(bodies: CreateAgentBody[]): Promise<void> {
+async function applyExecutionModeInheritanceForBatch(bodies: CreateAgentBody[]): Promise<void> {
   const parentIds = Array.from(
     new Set(
       bodies
         .filter(
-          (body) => body.fast_mode_cache_enabled === undefined && body.parent_agent_id !== undefined
+          (body) =>
+            body.parent_agent_id !== undefined &&
+            (body.fast_mode_cache_enabled === undefined || body.world_model_mode === undefined)
         )
         .map((body) => body.parent_agent_id!)
     )
   );
   if (parentIds.length === 0) return;
 
-  const parents = await repo.findFastModeFlagsByIds(parentIds);
-  const parentFlagById = new Map(parents.map((parent) => [parent.id, parent.fastModeCacheEnabled]));
+  const parents = await repo.findExecutionModeFlagsByIds(parentIds);
+  const parentById = new Map(parents.map((parent) => [parent.id, parent]));
   for (const body of bodies) {
     if (body.parent_agent_id === undefined) continue;
-    applyFastModeInheritance(body, parentFlagById.get(body.parent_agent_id));
+    const parent = parentById.get(body.parent_agent_id);
+    applyFastModeInheritance(body, parent?.fastModeCacheEnabled);
+    applyWorldModelModeInheritance(body, parent?.worldModelMode);
+    disableFastModeForWorldModel(body);
   }
 }
 
@@ -265,7 +275,11 @@ export async function createAgentsBatch(args: BatchCreateAgentsArgs): Promise<Ba
     for (const body of bodies) body.goal = resolvePromptSecrets(body.goal);
   }
   for (const body of bodies) applyFastModeDefault(body, userId);
-  await applyFastModeInheritanceForBatch(bodies);
+  await applyExecutionModeInheritanceForBatch(bodies);
+  for (const body of bodies) {
+    disableFastModeForWorldModel(body);
+    assertWorldModelModeAccess(body, userId);
+  }
 
   // Idempotency: existing rows are returned untouched.
   const allAgentIds = bodies.map((b) => b.agent_id!);

@@ -16,6 +16,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createLogger } from '../../providers/logger';
 import { StaleParentWorkflowGenerationError } from '../../providers/workflowGeneration';
 import * as batchService from './agentBatchService';
+import { WorldModelModeAccessError } from './agentExecutionMode';
 import { batchCreateAgentsSchema } from './types';
 import { rejectAnonymousCreate, rejectGatedCreate } from './routes.guards';
 
@@ -30,6 +31,10 @@ function handleRouteError(res: Response, error: unknown, msg: string): void {
   }
   if (error instanceof StaleParentWorkflowGenerationError) {
     res.status(409).json({ error: error.message });
+    return;
+  }
+  if (error instanceof WorldModelModeAccessError) {
+    res.status(403).json({ error: error.message });
     return;
   }
   log.error(msg, { error: error instanceof Error ? error.message : String(error) });

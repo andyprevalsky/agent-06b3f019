@@ -75,7 +75,11 @@ require_text "$CANDIDATE_VALIDATOR" "workflowTaskFailedEventAttributes != null" 
 require_text "$CANDIDATE_VALIDATOR" "activityTaskScheduledEventAttributes != null" "candidate validator must count only real initialization activities"
 require_text "$PROD_VALIDATOR" "workflowTaskFailedEventAttributes != null" "production validator must ignore protobuf nulls while rejecting real workflow-task failures"
 require_text "$PROD_VALIDATOR" "assertSameInstant" "production validator must compare restored timestamps as instants, not format strings"
-require_text "$PROD_VALIDATOR" "tokensIn: 1_360" "production validator must model legacy subtree token counters"
+require_text "$PROD_VALIDATOR" "prisma.toolUsage.createMany" "production validator must seed durable accounting checkpoints"
+require_text "$PROD_VALIDATOR" "tokenCountCheckpoint: 950" "production validator must preserve the durable context checkpoint"
+require_text "$PROD_VALIDATOR" "tokensInCheckpoint: 680" "production validator must preserve the durable input-token checkpoint"
+require_text "$PROD_VALIDATOR" "tokensOutCheckpoint: 270" "production validator must preserve the durable output-token checkpoint"
+require_text "$PROD_VALIDATOR" "DEPLOYMENT_LEASE_WAIT_MS = 10 * 60_000" "production validator must bound deployment-lease contention"
 require_text "$PROD_VALIDATOR" 'WorkflowType="RoseWorkerDeploymentActivationMarker" AND ExecutionStatus="Running"' "production validator must wait with the same visibility query used by marker cleanup"
 require_text "$CANDIDATE_VALIDATOR" "toolUsage.count" "candidate validator must prove no LLM/tool usage was billed"
 require_text "$CANDIDATE_VALIDATOR" "candidate_fixture_cleanup" "candidate validator must report fixture cleanup"
@@ -88,6 +92,7 @@ require_text "$SCRIPT" 'preflightAgentWorkflowReplacement' "migration must prefl
 require_text "$SCRIPT" 'loadOrCreateWorkflowDeploymentManifest' "migration must persist and reuse the exact frozen generation set"
 require_text "$SCRIPT" "cutover.haltedAfter === 'preflight'" "migration must halt before preparation on any preflight failure"
 require_text "$SCRIPT" 'expectedWorkflowId: candidate.workflowId' "migration must fence each frozen workflow generation"
+require_text "$SCRIPT" 'deploymentAttempt' "migration claims must be scoped to one exact deployment attempt"
 require_text "$SCRIPT" 'prepareAgentWorkflowReplacement' "migration must seal workflow generations before activation"
 require_text "$SCRIPT" 'assertNoUnsafeOpenDescendantWorkflows' "migration must fail closed on orphan descendants"
 require_text "$SCRIPT" 'drainPendingDescendantWorkflowStarts' "migration must reconcile ambiguous descendant starts"
@@ -96,6 +101,7 @@ require_text "$SCRIPT" 'assertNoPendingTerminalAgentWorkflowCleanup' "migration 
 require_text "$SCRIPT" 'activateTemporalWorkerBuild' "migration must explicitly activate the standby build"
 require_text "$SCRIPT" 'cleanupSupersededWorkerActivationMarkers' "successful migration must retire superseded activation markers"
 require_text "$SCRIPT" 'waitForWorkflowReplacementBootstrap' "migration must wait for durable candidate readiness"
+require_text "$SCRIPT" 'requireInitialized: true' "migration must validate the final restored ACTIVE state, not the frozen snapshot status"
 require_text "$SCRIPT" 'Workflow migration canary failed' "migration must stop after a failed canary"
 require_text "$SCRIPT" "if (summary.failed > 0 || summary.prepared > 0) process.exitCode = 1" "migration failures or unstarted claims must fail /deploy"
 require_text "$PREFLIGHT" "Agent has no verifier configured" "preflight must reject malformed verifier-less roots"
@@ -139,6 +145,8 @@ require_text "$PROD_VALIDATOR" "http_single_lost_201_retry_reuses_exact_child" "
 require_text "$PROD_VALIDATOR" "http_batch_changed_payload_is_rejected" "production matrix must exercise real HTTP immutable payload rejection"
 require_text "$PROD_VALIDATOR" "http_batch_mixed_retry_reconciles_each_child_once" "production matrix must exercise a real mixed batch retry"
 require_text "$PROD_VALIDATOR" "same_sha_old_marker_is_retired_without_retiring_current_attempt" "production matrix must exercise deployment-attempt marker isolation"
+require_text "$PROD_VALIDATOR" "failed_candidate_next_deploy_rotates_generation" "production matrix must rotate an accepted non-ready candidate on the next deploy"
+require_text "$PROD_VALIDATOR" "late_stale_replacement_start_is_compensated" "production matrix must terminate a stale start accepted after a newer generation wins"
 require_text "$PROD_VALIDATOR" "known_massive_zombie_generations_are_not_running" "production matrix must prove known zombies are gone"
 require_text "$PROD_VALIDATOR" "production_fleet_has_no_stuck_cutover_state" "production matrix must prove the fleet has no stuck cutover state"
 
@@ -187,7 +195,10 @@ initial_candidate_validation_line=$(grep -n 'npx tsx scripts/validate-candidate-
   fail "candidate image must validate before the old-backend drain and every workflow tombstone"
 fleet_recheck_line=$(grep -n 'bash "$DEPLOY_ROOT/scripts/verify-agent-candidate-fleet.sh"' "$DEPLOY" | cut -d: -f1)
 lock_recheck_line=$(grep -n 'Exact production deploy lock is no longer held' "$DEPLOY" | cut -d: -f1)
-release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | cut -d: -f1)
+# Two success-releases exist: the CI-already-cut-over short-circuit and the
+# fallback local driver. The ordering invariant applies to the fallback driver
+# (migrate → release), which is the last occurrence.
+release_line=$(grep -n 'release_agent_cutover_lock success' "$DEPLOY" | tail -1 | cut -d: -f1)
 [[ $render_drain_line -lt $fleet_recheck_line &&
    $fleet_recheck_line -lt $candidate_validation_line &&
    $candidate_validation_line -lt $lock_recheck_line &&
@@ -296,5 +307,98 @@ production_validation_line=$(grep -n '## Step 13ac: Validate workflow replacemen
 semantic_line=$(grep -n '## Step 13b: Production semantic' "$DEPLOY" | cut -d: -f1)
 [[ $health_line -lt $migration_line && $migration_line -lt $production_validation_line && $production_validation_line -lt $semantic_line ]] || \
   fail "workflow migration and production matrix must run after backend health and before production semantic verification"
+
+# ── Zero-downtime generation-queue cutover contract ──────────────────────────
+# Each build polls a replay-surface-hashed generation queue; the deploy flips a
+# routing pointer to that generation before respawning open workflows so new work
+# and every respawn land on the just-activated generation with no dark-queue gap.
+SURFACE_TOOL="$ROOT/scripts/agent_workflow_surface_hash.py"
+POINTER_PROVIDER="$ROOT/back-end/src/providers/agentQueuePointer.ts"
+POINTER_CLI="$ROOT/back-end/scripts/set-agent-queue-pointer.ts"
+WORKER_GENERATION="$ROOT/agents/helpers/worker_generation.py"
+DEPLOY_AGENTS_WORKFLOW="$ROOT/.github/workflows/deploy-agents.yml"
+
+[ -f "$SURFACE_TOOL" ] || fail "replay-surface generation hash tool must exist"
+[ -f "$POINTER_PROVIDER" ] || fail "agent queue pointer provider must exist"
+[ -f "$POINTER_CLI" ] || fail "agent queue pointer flip CLI must exist"
+[ -f "$WORKER_GENERATION" ] || fail "worker generation-queue resolver must exist"
+
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'scripts/agent_workflow_surface_hash.py' \
+  "deploy-agents workflow must compute the replay-surface generation hash"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'TEMPORAL_WORKER_SURFACE_HASH=' \
+  "deploy-agents workflow must pass the surface hash so workers poll their generation queue"
+
+require_text "$WORKER_GENERATION" 'def resolve_production_task_queue' \
+  "worker must resolve a generation-scoped production queue"
+
+require_text "$TEMPORAL" 'getCurrentAgentQueue' \
+  "workflow start must resolve the routing pointer (so respawns land on the current generation)"
+
+require_text "$DEPLOY" 'set-agent-queue-pointer.ts' \
+  "cutover must flip the agent queue pointer to the new generation"
+require_text "$DEPLOY" 'agent_workflow_surface_hash.py' \
+  "cutover must compute the generation hash it flips the pointer to"
+# The pointer flip must happen BEFORE the workflow migration so every respawn
+# (which resolves its queue through the pointer) lands on the new generation.
+pointer_flip_line=$(grep -n 'set-agent-queue-pointer.ts' "$DEPLOY" | tail -1 | cut -d: -f1)
+migrate_exec_line=$(grep -n 'migrate-open-agent-workflows.ts --execute' "$DEPLOY" | tail -1 | cut -d: -f1)
+[[ -n "$pointer_flip_line" && -n "$migrate_exec_line" && $pointer_flip_line -lt $migrate_exec_line ]] || \
+  fail "cutover must flip the routing pointer BEFORE respawning open workflows"
+
+# Self-driving CI cutover: the deploy workflow drives its own validate → flip →
+# migrate so a bare `gh pr merge` can never strand the fleet in standby (the
+# incident this redesign fixes). No external-driver hold, and a fail-safe rollback.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'set-agent-queue-pointer.ts' \
+  "deploy workflow must self-drive the routing-pointer flip"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'migrate-open-agent-workflows.ts --execute' \
+  "deploy workflow must self-drive the workflow respawn"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'validate-candidate-workflow-image.ts --execute' \
+  "deploy workflow must validate the candidate image before routing any traffic"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
+  "self-driving cutover must use the prod DB secret"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'rollback-' \
+  "self-driving cutover must fail-safe roll the routing pointer back on failure"
+if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
+fi
+require_text "$DEPLOY" 'CI already cut over' \
+  "skill cutover must short-circuit when CI already rolled over (no double-drive)"
+
+# The self-driving cutover installs back-end deps in CI. back-end is an npm
+# workspace and the root lockfile is not committed, so a plain `npm ci` in the
+# workspace fails (EUSAGE) — it must pin to the committed back-end lockfile.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'npm ci --workspaces=false' \
+  "self-driving cutover must install back-end deps with --workspaces=false (root lockfile is not committed)"
+if grep -qE '^\s+npm ci\s*$' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "self-driving cutover must not use a bare 'npm ci' (fails in the back-end workspace without the root lockfile)"
+fi
+# release() posts an agent-cutover commit status, which needs statuses: write.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'statuses: write' \
+  "deploy-agents must grant statuses: write so the self-driving cutover can post its release status"
+
+# Rolling-restart (same-generation) deploys still deploy standby workers, so the
+# no-op cutover path MUST release them from standby (activate) — otherwise a
+# surface-unchanged deploy strands prod. It must NOT run the full seal+respawn.
+ACTIVATE_CLI="$ROOT/back-end/scripts/activate-agent-worker-build.ts"
+[ -f "$ACTIVATE_CLI" ] || fail "activate-agent-worker-build.ts (no-op rolling-restart activation) must exist"
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'activate-agent-worker-build.ts' \
+  "no-op rolling-restart path must activate standby workers (not leave them parked)"
+# The activation path activates without sealing: it must post the marker + retire
+# superseded ones, never seal open workflows.
+require_text "$ACTIVATE_CLI" 'activateTemporalWorkerBuild' \
+  "activation CLI must post the worker build activation marker"
+
+# The CI cutover must wait for the Render backend (which reads the routing pointer)
+# to be live on this exact commit BEFORE flipping — otherwise the old backend
+# routes new workflow starts to the old queue while workers moved to the new
+# generation, stranding those agents.
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend to go live' \
+  "self-driving cutover must wait for the Render backend before flipping the routing pointer"
+render_wait_line=$(grep -n 'Render backend to go live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+# The forward flip is uniquely marked by `--by "deploy-...` (rollback uses `rollback-`,
+# the pre-read uses `--read`), so target it specifically.
+agents_flip_line=$(grep -n 'deploy-${BUILD_ID}' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
+[[ -n "$render_wait_line" && -n "$agents_flip_line" && $render_wait_line -lt $agents_flip_line ]] || \
+  fail "CI cutover must wait for the Render backend live BEFORE flipping the routing pointer"
 
 echo "workflow deployment migration structural tests: PASS"

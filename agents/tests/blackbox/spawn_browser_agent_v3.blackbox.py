@@ -17,7 +17,7 @@ from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -7091,6 +7091,82 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
     assert recorder.entries == {}
 
 
+async def test_network_recorder_does_not_reject_successful_fingerprint_warning():
+    """A detector warning inside an accepted response is not a provider exit.
+
+    This is the exact response shape captured from FCaptcha immediately before
+    the browser runtime unnecessarily replaced its next action with challenge
+    recovery.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._max_body_bytes = 262_144
+    recorder._body_index = 0
+    recorder._started_at = 0.0
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "mime_type": "application/json",
+            "url": "https://fcaptcha.webdecoy.com/api/verify",
+        }
+    }
+    accepted_body = {
+        "success": True,
+        "score": 0.087,
+        "recommendation": "allow",
+        "categoryScores": {"fingerprint": 0.6},
+        "detections": [
+            {
+                "category": "fingerprint",
+                "score": 0.6,
+                "confidence": 0.6,
+                "reason": "IP has used many different fingerprints",
+            }
+        ],
+    }
+    get_body = AsyncMock(return_value={"body": json.dumps(accepted_body), "base64Encoded": False})
+    client = SimpleNamespace(send=SimpleNamespace(Network=SimpleNamespace(getResponseBody=get_body)))
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", client)
+
+    assert recorder.pop_provider_exit_rejection() is None
+    assert recorder._rejected_network_generations == set()
+    assert recorder.entries == {}
+
+    recorder.entries["1:r2"] = {
+        "browser_generation": 1,
+        "mime_type": "application/json",
+        "url": "https://shop.test/provider-exit",
+    }
+    get_body.return_value = {
+        "body": json.dumps(
+            {
+                **accepted_body,
+                "providerExit": {
+                    "category": "fingerprint",
+                    "reason": "IP has used many different fingerprints",
+                },
+            }
+        ),
+        "base64Encoded": False,
+    }
+    await recorder._fetch_response_body("1:r2", "r2", "cdp-1", client)
+
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "ip has used many different fingerprints",
+        "url": "https://shop.test/provider-exit",
+        "browser_generation": 1,
+    }
+
+
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
     import tempfile
@@ -8015,7 +8091,11 @@ async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
         ]
     )
 
-    webauthn.enable.assert_awaited_once_with(params={"enableUI": False}, session_id="cdp-session")
+    assert webauthn.enable.await_count == 2
+    assert webauthn.enable.await_args_list == [
+        call(params={"enableUI": False}, session_id="cdp-session"),
+        call(params={"enableUI": False}, session_id="cdp-session"),
+    ]
     webauthn.addVirtualAuthenticator.assert_awaited_once()
     webauthn.addCredential.assert_awaited_once()
     page.setInterceptFileChooserDialog.assert_awaited_once_with(params={"enabled": True}, session_id="cdp-session")
@@ -9453,7 +9533,16 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     dom = MagicMock()
     dom.session = session
 
-    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+    monotonic_time = 0.0
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+    ):
         out = await service_actions.wait_for_navigation_ready(
             dom_service=dom,
             url="https://x.com/app",
@@ -9508,7 +9597,16 @@ async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     dom = MagicMock()
     dom.session = session
 
-    with patch.object(service_actions.asyncio, "sleep", AsyncMock()):
+    monotonic_time = 0.0
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+    ):
         out = await service_actions.wait_for_navigation_ready(
             dom_service=dom,
             url="https://x.com/app",
@@ -12408,6 +12506,52 @@ async def test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks():
     assert activity_calls.count("mint_purchase_card_activity") == 2
 
 
+async def test_manager_payment_gate_retries_company_funding_and_mints():
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": 5,
+            },
+            {
+                "status": "HELD",
+                "purchaseId": "purchase-1",
+                "cardId": "card-1",
+                "pan": "4242424242424242",
+                "cvv": "123",
+                "expiry": "12/30",
+                "last4": "4242",
+            },
+        ]
+    )
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+    assert not any(getattr(e, "title", "") == "Payment funding is delayed" for e in events)
+
+
+def test_manager_payment_gate_normalizes_company_funding_retry_delay():
+    from domains.spawn_browser_agent_v3.handler import _normalize_funding_retry_seconds
+
+    for invalid in (True, False, None, "5", float("nan"), float("inf"), 0, -1):
+        assert _normalize_funding_retry_seconds(invalid) == 5.0
+    assert _normalize_funding_retry_seconds(0.001) == 1.0
+    assert _normalize_funding_retry_seconds(5) == 5.0
+    assert _normalize_funding_retry_seconds(600) == 60.0
+
+
+async def test_manager_payment_gate_reports_company_funding_deadline():
+    events, activity_calls, _, _ = await _drive_payment_card_gate(
+        mint_results=[
+            {
+                "status": "agentcard_company_funding_in_progress",
+                "retryAfterSeconds": 5,
+            }
+        ]
+    )
+    assert activity_calls.count("mint_purchase_card_activity") == 2
+    delayed = next(e for e in events if getattr(e, "title", "") == "Payment funding is delayed")
+    assert delayed.metadata["action_type"] == "purchase_funding_delayed"
+
+
 # ========================================
 # Runner
 # ========================================
@@ -12571,9 +12715,111 @@ async def test_browser_agent_yields_until_user_hands_control_back():
     assert heartbeat.call_count == 2
 
 
+_TOAST_PAYMENT_CARD_ARGS = {
+    "merchant": "Nopa Fish Market",
+    "line_items": [
+        {
+            "name": "Fish & Chips",
+            "quantity": 1,
+            "unit_price_cents": 2500,
+            "line_total_cents": 2500,
+            # Toast is a single-URL food-ordering SPA: no product-detail page,
+            # no star rating, no reviews. This is the exact class of args prod
+            # agent 847adea5 produced and got rejected 5x on.
+            "product_url": "https://order.toasttab.com/online/nopafish/checkout/12345678-1234-4fab-8043-436e74cc34a9",
+            "rating": "No rating displayed on Toast ordering page",
+            "review_count": "No reviews displayed on Toast ordering page",
+        }
+    ],
+    "subtotal_cents": 2500,
+    "total_cents": 2851,
+}
+
+
+def test_payment_card_tool_args_raise_typed_validation_error():
+    """RCA repro (agent 847adea5): unsatisfiable request_payment_card args on a Toast
+    food-ordering page must surface as a typed BrowserToolArgsValidationError — a
+    model-output error the loop feeds back — not a bare pydantic ValidationError that
+    the loop's infra-failure handler would swallow into a mislabeled 'Max Steps'."""
+    from pydantic import ValidationError
+
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+
+    try:
+        validate_browser_tool_args("request_payment_card", _TOAST_PAYMENT_CARD_ARGS)
+        raise AssertionError("expected validation to reject the Toast checkout args")
+    except BrowserToolArgsValidationError as err:
+        assert err.tool_name == "request_payment_card"
+        assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
+        # The feedback the model receives must name all three unsatisfiable fields.
+        assert "product_url" in err.detail
+        assert "rating" in err.detail
+        assert "review_count" in err.detail
+        # It must be a distinct type, not a bare pydantic ValidationError.
+        assert not isinstance(err, ValidationError)
+
+
+async def test_browser_tool_validation_error_feeds_back_through_normal_path():
+    """A rejected tool call must be routed through the normal tool-result path:
+    recorded in action history, appended to the next-turn context so the model can
+    self-correct, and shown in the trajectory — never swallowed. Guards the RCA fix."""
+    from browser_tools.dom_service import ActionHistory
+    from browser_tools.schemas import BrowserToolArgsValidationError, validate_browser_tool_args
+    from domains.spawn_browser_agent_v3.handler import _feed_browser_tool_validation_error_back
+
+    try:
+        validate_browser_tool_args("request_payment_card", _TOAST_PAYMENT_CARD_ARGS)
+        raise AssertionError("expected BrowserToolArgsValidationError")
+    except BrowserToolArgsValidationError as err:
+        err.thinking = "I need a card to pay for the order."
+        validation_error = err
+
+    action_history = ActionHistory()
+    browser_turn_messages: list = []
+
+    with patch(
+        "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+        new=AsyncMock(),
+    ) as save_mock:
+        await _feed_browser_tool_validation_error_back(
+            error=validation_error,
+            action_history=action_history,
+            browser_turn_messages=browser_turn_messages,
+            dom_service=MagicMock(),
+            browser_state={"url": "https://order.toasttab.com/online/nopafish/checkout/abc"},
+            task_prompt="order fish and chips",
+            iteration=12,
+            agent_id="agent-1",
+            task_id="task-1",
+            browser_url="https://order.toasttab.com/online/nopafish/checkout/abc",
+        )
+
+    # 1) Fed back to the model as a tool result in the next-turn context (not swallowed).
+    tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
+    assert tool_msgs, "validation error was not appended to browser_turn_messages"
+    tool_blob = json.dumps(tool_msgs[-1])
+    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    # 2) Recorded in action history as a failed attempt the model can see.
+    entries = action_history.get_entries()
+    assert entries and entries[-1]["action"] == "request_payment_card"
+    assert entries[-1]["result"]["success"] is False
+    # 3) Visible in the trajectory as its own row.
+    save_mock.assert_awaited_once()
+    assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
+
+    r.record(
+        "payment_card_tool_args_raise_typed_validation_error",
+        test_payment_card_tool_args_raise_typed_validation_error,
+    )
+    await r.record_async(
+        "browser_tool_validation_error_feeds_back_through_normal_path",
+        test_browser_tool_validation_error_feeds_back_through_normal_path,
+    )
 
     r.record(
         "payment_card_verifier_evidence_only_last_four",
@@ -12585,6 +12831,10 @@ async def run_all_tests():
     )
 
     await r.record_async("cdp_use_websocket_direct", test_cdp_use_websocket_patch_disables_proxy_discovery)
+    await r.record_async(
+        "dom_service_passkey_webauthn_uses_cdp_client_session_api",
+        test_dom_service_passkey_webauthn_uses_cdp_client_session_api,
+    )
     await r.record_async(
         "passkey_usage_recorded_before_completion",
         test_passkey_usage_is_recorded_once_before_browser_task_completion,
@@ -13120,6 +13370,10 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_fingerprint_exit_rejection",
         test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_per_browser,
+    )
+    await r.record_async(
+        "network_recorder_accepted_fingerprint_warning",
+        test_network_recorder_does_not_reject_successful_fingerprint_warning,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",
@@ -13775,6 +14029,18 @@ async def run_all_tests():
     await r.record_async(
         "manager_payment_gate_kyc_still_incomplete",
         test_manager_payment_gate_kyc_still_incomplete_after_retry_blocks,
+    )
+    await r.record_async(
+        "manager_payment_gate_company_funding_retry",
+        test_manager_payment_gate_retries_company_funding_and_mints,
+    )
+    r.record(
+        "manager_payment_gate_company_funding_retry_delay",
+        test_manager_payment_gate_normalizes_company_funding_retry_delay,
+    )
+    await r.record_async(
+        "manager_payment_gate_company_funding_deadline",
+        test_manager_payment_gate_reports_company_funding_deadline,
     )
     r.record(
         "transient_session_init_failure_classification",

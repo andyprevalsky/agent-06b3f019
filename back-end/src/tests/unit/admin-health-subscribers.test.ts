@@ -2,7 +2,7 @@
 
 import assert from 'node:assert';
 import {
-  ADMIN_HEALTH_ADDITIONAL_USER_IDS,
+  ADMIN_HEALTH_ADDITIONAL_PHONES,
   ADMIN_HEALTH_EXCLUDED_USER_IDS,
   ADMIN_USER_IDS,
 } from '../../domains/admin-health/config';
@@ -117,9 +117,12 @@ assert.deepStrictEqual(series, [
 ]);
 
 assert.ok(ADMIN_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
-// Andy and Tamara are both counted in the task-completion (subscriber-scoped) metrics.
-assert.ok(ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
-assert.ok(ADMIN_HEALTH_ADDITIONAL_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
+// Me, Tamy, and Aman are all seeded into the subscriber-scoped "# of Users" metric
+// by phone (isAnonymous-agnostic), so the dev/test account isn't silently dropped.
+assert.strictEqual(ADMIN_HEALTH_ADDITIONAL_PHONES.size, 3);
+assert.ok(ADMIN_HEALTH_ADDITIONAL_PHONES.has('+19729777432'));
+assert.ok(ADMIN_HEALTH_ADDITIONAL_PHONES.has('+12028803603'));
+assert.ok(ADMIN_HEALTH_ADDITIONAL_PHONES.has('+17134712306'));
 assert.ok(!ADMIN_HEALTH_EXCLUDED_USER_IDS.has('1f85ff25-6e29-4c1b-8739-f917bd101a30'));
 assert.ok(!ADMIN_HEALTH_EXCLUDED_USER_IDS.has('43c2f6ae-37c0-42d0-bd88-2d6fc335b9e9'));
 

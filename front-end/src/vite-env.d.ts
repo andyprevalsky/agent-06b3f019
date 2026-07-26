@@ -1,6 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
+  readonly VITE_ENABLE_REACT_GRAB?: 'true' | 'false';
   readonly VITE_REALTIME_PRIVATE?: 'true' | 'false';
 }
 

@@ -174,6 +174,8 @@ require_text "$RCA_TOOL" 'keep the PR draft, Slack blocked, and the workflow red
 require_absent "$RCA_TOOL" "trap 'rm -f \"\$raw_file\" \"\$scrubbed_file\"' RETURN" "gate failure cleanup must not leak a RETURN trap into its caller"
 require_text "$RCA_TOOL" 'record_running_timeline_detail "$detail"' "failed deploy gates must identify their exact failing substep"
 require_text "$RCA_TOOL" 'rca-environment' "dependency hydration must support exact failure-substep reporting"
+require_text "$WORKFLOW" 'agents/venv/bin/python -m playwright install --with-deps chromium' "the RCA runner must provision the agent browser runtime so browser blackbox domains stop failing on a missing Chromium"
+require_text "$RCA_TOOL" "checkout -- '.github/workflows/'" "a stray investigator harness edit must be discarded before checkpoint so the scope-limited RCA push token is never rejected"
 require_text "$RCA_TOOL" 'AUTO_RCA_SKIP_CLOUD_CONTROLLER_REGRESSION="$skip_controller_regression"' "runtime-only RCA smoke must skip unrelated controller regressions"
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" '::rca-stage::' "cloud smoke must publish an exact active substep"
 require_text "$ROOT_DIR/scripts/run-predeploy-cloud" 'cloud multi-workstream concurrency regression' "normal deploy must retain its controller concurrency regression"

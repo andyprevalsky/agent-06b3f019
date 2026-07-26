@@ -861,14 +861,24 @@ def normalize_browser_use_tool_call(
     normalized_name = _ACTION_NAME_MAP.get(name, name)
     # Keep the same lazy-import boundary as build_browser_use_tools; importing
     # browser_tools at providers.rose module load time creates a package cycle.
-    from browser_tools.schemas import BROWSER_TOOL_MODELS, validate_browser_tool_args
+    from browser_tools.schemas import (
+        BROWSER_TOOL_MODELS,
+        BrowserToolArgsValidationError,
+        validate_browser_tool_args,
+    )
 
     if normalized_name in BROWSER_TOOL_MODELS:
-        args = validate_browser_tool_args(
-            normalized_name,
-            args,
-            context=validation_context,
-        )
+        try:
+            args = validate_browser_tool_args(
+                normalized_name,
+                args,
+                context=validation_context,
+            )
+        except BrowserToolArgsValidationError as validation_error:
+            # Carry the model's reasoning so the browser loop can render the
+            # rejected turn accurately when it feeds the error back to the model.
+            validation_error.thinking = thinking
+            raise
 
     return normalize_browser_use_response(
         {

@@ -788,6 +788,74 @@
     "group": "daily"
   },
   {
+    "name": "gate-subscription-card-mint-admin-bypass",
+    "title": "Gate — Admin Bypasses Card-Mint Subscription",
+    "description": "Local fixture: the SAME depleted account state as gate-subscription-card-mint (free credits, no active subscription), but the run user is a synthetic ADMIN (ADMIN_USER_IDS_EXTRA). Admins bypass the subscription / card-on-file requirement, so the browser agent must mint a company-funded card and complete checkout with NO subscription gate.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "timeout_seconds": 360,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "subscription",
+      "payment",
+      "browser",
+      "admin-bypass",
+      "local-only"
+    ],
+    "price_limit_cents": 75,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "start_phase": "execute",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "attention_requests"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Reuses the purchase-subscription gate fixture (gate-benchmark-fixture.ts) applied to the synthetic admin user 00000000-0000-4000-8000-000000000105, which must be listed in the backend ADMIN_USER_IDS_EXTRA so isAdminUser() treats it as an admin. Proves the admin no-charge company-funded card path (issueAdminCompanyCard)."
+    },
+    "evaluators": [
+      {
+        "id": "admin-card-mint-bypass",
+        "method": "static_check",
+        "criteria": [
+          "The admin run user bypasses the subscription / card-on-file requirement",
+          "A company-funded payment card is minted and the purchase completes with a receipt",
+          "No blocking subscription attention gate is raised"
+        ],
+        "checks": [
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "no_browser_agent_failures"
+          }
+        ]
+      }
+    ],
+    "source": [
+      "sms-onboarding-gates:card-mint-subscription-gate",
+      "fixture:back-end/scripts/gate-benchmark-fixture.ts"
+    ],
+    "bench": "pipeline-e2e",
+    "group": "daily",
+    "expected_payment_receipt": true
+  },
+  {
     "name": "gate-kyc-card-mint",
     "title": "Gate — Card Mint Requires KYC",
     "description": "Local fixture: a benchmark account has enough free credits and an active subscription, but the purchase-card mint endpoint returns the benchmark AgentCard KYC-required response; the agent must raise a KYC gate.",
@@ -2566,6 +2634,9 @@
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 1
+    },
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
@@ -2624,6 +2695,9 @@
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
+    "min_steps": {
+      "browser": 1
+    },
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
@@ -3156,6 +3230,16 @@
       "fees": []
     },
     "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "stripePaymentIntentCount": 1,
+        "cardCount": 1,
+        "stripeProviderPaymentIntentCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "agentCardProviderUnlinkedTransferCount": 0
+      },
       "purchase": {
         "status": "VOIDED",
         "merchant": "Rose Labs Test Payment",
@@ -3181,7 +3265,7 @@
       "orgTransfer": {
         "status": "reclaimed",
         "amountCents": 100,
-        "transferredCents": 100,
+        "transferredCents": 0,
         "releasedCents": 100,
         "livemode": true
       },

@@ -142,9 +142,12 @@ async function main(): Promise<void> {
 
     await seedAgentCardConnection(prisma, userId);
 
+    // The org identity now travels in the client-credential token itself
+    // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
     const sandboxFloat = await ensureAgentCardSandboxFloat();
     console.log(
-      `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available`
+      `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
+        `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
     );
 
     console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);

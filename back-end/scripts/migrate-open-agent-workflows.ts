@@ -57,9 +57,10 @@ function candidateDeadline(): number {
   return Math.min(Date.now() + candidateTimeoutMs, cutoverDeadlineAtMs);
 }
 
-async function prepareOne(candidate: WorkflowDeploymentCandidate) {
+async function prepareOne(candidate: WorkflowDeploymentCandidate, deploymentAttempt: string) {
   const result = await prepareAgentWorkflowReplacement(candidate.agentId, undefined, {
     expectedWorkflowId: candidate.workflowId,
+    deploymentAttempt,
     deadlineAtMs: candidateDeadline(),
   });
   if ('error' in result) {
@@ -71,9 +72,10 @@ async function prepareOne(candidate: WorkflowDeploymentCandidate) {
   return { outcome: 'prepared' as const, prepared: result };
 }
 
-async function preflightOne(candidate: WorkflowDeploymentCandidate) {
+async function preflightOne(candidate: WorkflowDeploymentCandidate, deploymentAttempt: string) {
   const result = await preflightAgentWorkflowReplacement(candidate.agentId, undefined, {
     expectedWorkflowId: candidate.workflowId,
+    deploymentAttempt,
     deadlineAtMs: candidateDeadline(),
   });
   if (result.outcome === 'failed') {
@@ -115,7 +117,9 @@ async function waitUntilReady(
       remainingMs,
       positiveInteger(process.env.WORKFLOW_MIGRATION_BOOTSTRAP_TIMEOUT_MS, 120_000)
     ),
-    requireInitialized: candidate.status === 'ACTIVE',
+    // The frozen manifest status can differ from the status restored after
+    // claim-time pause/resume races or a failed-candidate rotation.
+    requireInitialized: true,
   });
   startDeadlines.delete(candidate.agentId);
 }
@@ -149,6 +153,7 @@ async function executeLeasedCutover(params: {
   );
   const snapshotAt = new Date(loaded.manifest.snapshotAt);
   const candidates = loaded.manifest.candidates;
+  const deploymentAttempt = `${buildId}:${deploymentToken}`;
   const expectedCandidateMs = positiveInteger(
     process.env.WORKFLOW_MIGRATION_EXPECTED_CANDIDATE_MS,
     5_000
@@ -169,11 +174,11 @@ async function executeLeasedCutover(params: {
     {
       preflight: async (candidate) => {
         await assertLease();
-        return preflightOne(candidate);
+        return preflightOne(candidate, deploymentAttempt);
       },
       prepare: async (candidate) => {
         await assertLease();
-        return prepareOne(candidate);
+        return prepareOne(candidate, deploymentAttempt);
       },
       activate: async () => {
         await assertLease();

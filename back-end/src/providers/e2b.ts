@@ -18,6 +18,7 @@ import {
 import { isAnthropicApiKeyOnCooldown } from './computeCredentials';
 import {
   fetchGptCodeCredentialsWithMeta,
+  isGptApiKeyOnCooldown,
   type GptCodeCredentialEnvelopeResult,
 } from './gptCredentials';
 import {
@@ -204,9 +205,13 @@ export function resolveClaudeCodeTokenSource(
  */
 export function resolveCodexCodeAuthEnvs(
   credentialMeta: GptCodeCredentialEnvelopeResult | null,
-  openaiApiKey: string | undefined
+  openaiApiKey: string | undefined,
+  openaiApiKeyOnCooldown = false
 ): Record<string, string> {
-  const fundedKey = openaiApiKey !== undefined && openaiApiKey !== '' ? openaiApiKey : undefined;
+  const fundedKey =
+    !openaiApiKeyOnCooldown && openaiApiKey !== undefined && openaiApiKey !== ''
+      ? openaiApiKey
+      : undefined;
   if (credentialMeta) {
     const envs: Record<string, string> = { CODEX_AUTH_JSON: credentialMeta.credentials };
     if (fundedKey !== undefined) {
@@ -480,7 +485,14 @@ export async function createCodexCodeSession(
   // null) falls back to the funded OpenAI API key, mirroring the Claude Code
   // path and the Rose completions fallback. GPT_API_KEY is the same funded key
   // the in-process Rose client uses when compute tokens are exhausted.
-  const authEnvs = resolveCodexCodeAuthEnvs(credentialMeta, process.env.GPT_API_KEY);
+  const fundedKeyConfigured =
+    process.env.GPT_API_KEY !== undefined && process.env.GPT_API_KEY !== '';
+  const fundedKeyOnCooldown = fundedKeyConfigured ? await isGptApiKeyOnCooldown() : false;
+  const authEnvs = resolveCodexCodeAuthEnvs(
+    credentialMeta,
+    process.env.GPT_API_KEY,
+    fundedKeyOnCooldown
+  );
 
   const envs: Record<string, string> = {
     CODEX_GOAL: goal,
@@ -627,7 +639,7 @@ export async function createCodexCodeSession(
       status: 'ACTIVE',
       claudeTokenSource: credentialMeta?.source ?? null,
       claudeTokenIntegrationId:
-        credentialMeta?.source === 'pool' ? (credentialMeta.poolTokenId ?? null) : null,
+        credentialMeta?.integrationId ?? credentialMeta?.poolTokenId ?? null,
     },
   });
 

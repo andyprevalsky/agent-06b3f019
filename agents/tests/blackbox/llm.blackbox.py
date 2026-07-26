@@ -788,7 +788,7 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
         }
     )
 
-    with patch("temporalio.activity.heartbeat"):
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": ""}), patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity(
@@ -817,6 +817,56 @@ async def test_fetch_compute_token_activity_passes_lineage_params():
     assert "rootAgentId=root-1" in call["url"]
     assert "fastCacheAffinityKey=affinity-1" in call["url"]
     assert "tokenType=" not in call["url"]
+
+
+async def test_fetch_compute_token_activity_pins_benchmark_provider():
+    """Predeploy cache measurements lease one provider across repeated calls."""
+    setup_mock(
+        {
+            "/api/integrations/compute-code/credentials/token": {
+                "status": 200,
+                "json": {
+                    "type": "claude",
+                    "accessToken": "claude-token",
+                    "source": "pool",
+                    "poolTokenId": "pool-claude-1",
+                },
+            },
+        }
+    )
+
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
+        "temporalio.activity.heartbeat"
+    ):
+        from helpers.llm import fetch_compute_token_activity
+
+        result = await fetch_compute_token_activity("user-1")
+
+    assert result is not None
+    assert result["type"] == "claude"
+    call = assert_captured_call(
+        url_contains="/api/integrations/compute-code/credentials/token",
+        method="GET",
+    )
+    assert "tokenType=claude" in call["url"]
+
+
+def test_benchmark_compute_token_type_rejects_conflicting_provider_policy():
+    """A Claude pin cannot silently defeat an explicit Anthropic exclusion."""
+    from providers.rose.policy import benchmark_compute_token_type
+
+    with patch.dict(
+        os.environ,
+        {
+            "BENCHMARK_COMPUTE_TOKEN_TYPE": "claude",
+            "ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1",
+        },
+    ):
+        try:
+            benchmark_compute_token_type()
+            raise AssertionError("conflicting provider policies were accepted")
+        except ValueError as exc:
+            assert "conflicts" in str(exc)
 
 
 async def test_fetch_compute_token_activity_excludes_claude_tokens_by_policy():
@@ -5952,6 +6002,18 @@ async def run_all_tests():
     )
     await r.record_async(
         "fetch_claude_max_token_activity_missing_token_field", test_fetch_claude_max_token_activity_missing_token_field
+    )
+    await r.record_async(
+        "fetch_compute_token_activity_passes_lineage_params",
+        test_fetch_compute_token_activity_passes_lineage_params,
+    )
+    await r.record_async(
+        "fetch_compute_token_activity_pins_benchmark_provider",
+        test_fetch_compute_token_activity_pins_benchmark_provider,
+    )
+    r.record(
+        "benchmark_compute_token_type_rejects_conflicting_provider_policy",
+        test_benchmark_compute_token_type_rejects_conflicting_provider_policy,
     )
     await r.record_async(
         "fetch_compute_token_activity_excludes_claude_tokens_by_policy",

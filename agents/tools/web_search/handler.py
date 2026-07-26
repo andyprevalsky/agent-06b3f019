@@ -63,6 +63,7 @@ class WebSearchManager(ToolManager):
         fast_mode_cache_enabled: bool = False,
         fast_mode_goal: Optional[str] = None,
         fast_mode_cache_write_enabled: bool = False,
+        world_model_mode: str = "real",
     ) -> dict[str, Any]:
         """Execute web search and post events via handle_tool_event.
 
@@ -105,9 +106,18 @@ class WebSearchManager(ToolManager):
         # 2. Execute web search activity
         try:
             logger.info("Calling web_search_activity", query_type=type(query).__name__, query_len=len(query))
+            activity_args = [
+                query,
+                max_tokens,
+                fast_mode_cache_enabled,
+                fast_mode_goal,
+                fast_mode_cache_write_enabled,
+            ]
+            if world_model_mode != "real":
+                activity_args.extend([agent_id, world_model_mode])
             result = await execute_activity(
                 web_search_activity,
-                args=[query, max_tokens, fast_mode_cache_enabled, fast_mode_goal, fast_mode_cache_write_enabled],
+                args=activity_args,
                 start_to_close_timeout=timedelta(seconds=ACTIVITY_TIMEOUT_SECONDS),
                 retry_policy=RetryPolicy(
                     maximum_attempts=RETRY_MAX_ATTEMPTS,
@@ -120,9 +130,10 @@ class WebSearchManager(ToolManager):
             # 3. Calculate elapsed time and cost
             elapsed_time = _safe_time() - start_time
             cache_hit = isinstance(result, dict) and bool(result.get(FAST_CACHE_HIT_FIELD))
+            simulated = isinstance(result, dict) and bool(result.get("world_model_simulated"))
             if cache_hit:
                 result = {k: v for k, v in result.items() if k != FAST_CACHE_HIT_FIELD}
-            total_cost_cents = 0 if cache_hit else COST_CENTS_PER_QUERY
+            total_cost_cents = 0 if cache_hit or simulated else COST_CENTS_PER_QUERY
 
             message = format_tool_message(
                 params=tool_call, result=result, time_elapsed=elapsed_time, cost_cents=total_cost_cents
@@ -147,7 +158,9 @@ class WebSearchManager(ToolManager):
                 "usage": {
                     "llm": [],
                     "service": (
-                        [] if cache_hit else [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}]
+                        []
+                        if cache_hit or simulated
+                        else [{"cost_cents": total_cost_cents, "provider": "Parallel AI Search"}]
                     ),
                 },
             }
@@ -160,7 +173,9 @@ class WebSearchManager(ToolManager):
             await handle_tool_event(
                 event=ToolEvent(
                     type=EventType.POST_MESSAGE,
-                    title=f"\u274c Web search failed for {display_query}" if display_query else "\u274c Web search failed",
+                    title=f"\u274c Web search failed for {display_query}"
+                    if display_query
+                    else "\u274c Web search failed",
                     message=error_message,
                     status=MessageStatus.ERROR,
                 ),
@@ -203,6 +218,7 @@ async def web_search(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    world_model_mode: str = "real",
 ) -> dict[str, Any]:
     """Execute web search tool.
 
@@ -226,6 +242,7 @@ async def web_search(
         fast_mode_cache_enabled=fast_mode_cache_enabled,
         fast_mode_goal=fast_mode_goal,
         fast_mode_cache_write_enabled=fast_mode_cache_write_enabled,
+        world_model_mode=world_model_mode,
     )
 
 
@@ -242,6 +259,8 @@ async def web_search_activity(
     fast_mode_cache_enabled: bool = False,
     fast_mode_goal: Optional[str] = None,
     fast_mode_cache_write_enabled: bool = False,
+    agent_id: Optional[str] = None,
+    world_model_mode: Optional[str] = None,
 ) -> dict[str, Any]:
     """Activity: Perform a web search for quick facts and current information.
 
@@ -263,9 +282,7 @@ async def web_search_activity(
     """
     read_cache = fast_mode_cache_enabled and bool(fast_mode_goal)
     write_cache = (fast_mode_cache_enabled or fast_mode_cache_write_enabled) and bool(fast_mode_goal)
-    cache_key = (
-        fast_cache_normalize.web_search_key(fast_mode_goal, query, max_tokens) if write_cache else None
-    )
+    cache_key = fast_cache_normalize.web_search_key(fast_mode_goal, query, max_tokens) if write_cache else None
     if cache_key is not None and read_cache:
         stored = await fast_cache_client.cache_get(cache_key)
         if stored is not None:
@@ -285,11 +302,15 @@ async def web_search_activity(
         return await execute_search(query=query, max_tokens=max_tokens)
 
     try:
-        result = await WorldModelToolExecutionAdapter.from_env().execute(
+        result = await WorldModelToolExecutionAdapter.from_env(
+            agent_id=agent_id,
+            mode=world_model_mode,
+        ).execute(
             "web_search",
             {"query": query, "max_tokens": max_tokens},
             "web_search_activity",
             real_executor,
+            allow_real_fallback=world_model_mode is None,
         )
     except Exception:
         logger.error("Web search failed", query=query)

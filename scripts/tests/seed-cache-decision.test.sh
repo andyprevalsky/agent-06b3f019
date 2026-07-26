@@ -98,6 +98,170 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ run.sh does not give warm-restored boxes the long backend budget"
 fi
 
+echo
+echo "local isolated seed materialization — /sync must publish the dump"
+echo "that scripts/run-bench --local requires before starting an agent."
+
+FAKE_BIN="$TMP/fake-bin"
+SCHEMA_FILE="$TMP/schema.prisma"
+LOCAL_CACHE="$TMP/local-cache"
+SEED_CLI="$ROOT_DIR/scripts/benchmark-seed-cache"
+PYTHON_BIN="$ROOT_DIR/agents/venv/bin/python"
+[ -x "$PYTHON_BIN" ] || PYTHON_BIN=python
+mkdir -p "$FAKE_BIN"
+printf '%s\n' \
+    '#!/bin/sh' \
+    '[ "$1" = exec ] || exit 91' \
+    '[ "$2" = victoria-db-test ] || exit 92' \
+    '[ "$3" = pg_dump ] || exit 93' \
+    '[ "${FAKE_DOCKER_FAIL:-0}" = 0 ] || exit 94' \
+    'sleep "${FAKE_DOCKER_DELAY:-0}"' \
+    'printf "seed-dump-from-%s\\n" "$2"' \
+    > "$FAKE_BIN/docker"
+chmod +x "$FAKE_BIN/docker"
+printf 'model Agent { id String @id }\n' > "$SCHEMA_FILE"
+
+set +e
+MATERIALIZED_PATH="$(
+    PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" victoria-db-test 20260723
+)"
+MATERIALIZE_STATUS=$?
+set -e
+
+EXPECTED_PATH="$(bash "$SEED_CLI" path "$SCHEMA_FILE" "$LOCAL_CACHE" 20260723)"
+CONSUMED_PATH="$(
+    PYTHONPATH="$ROOT_DIR/agents" "$PYTHON_BIN" -c \
+        'import sys; from pathlib import Path; from benchmarks.local import local_seed_dump_path; print(local_seed_dump_path(Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]))' \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" 20260723
+)"
+EXPECTED_HASH="${EXPECTED_PATH##*/}"
+EXPECTED_HASH="${EXPECTED_HASH%%-*}"
+if [ "$MATERIALIZE_STATUS" -eq 0 ] \
+   && [ "$MATERIALIZED_PATH" = "$EXPECTED_PATH" ] \
+   && [ "$CONSUMED_PATH" = "$EXPECTED_PATH" ] \
+   && [ "$(cat "$EXPECTED_PATH" 2>/dev/null)" = "seed-dump-from-victoria-db-test" ] \
+   && [ "$(cat "${EXPECTED_PATH}.schemahash" 2>/dev/null)" = "$EXPECTED_HASH" ]; then
+    PASS=$((PASS+1)); echo "  ✅ setup producer and local.py consumer share one schema/day path contract"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ producer/consumer seed contract failed: status=$MATERIALIZE_STATUS produced='$MATERIALIZED_PATH' consumed='$CONSUMED_PATH'"
+fi
+
+# The setup boundary must actually call the materializer after synchronization.
+if grep -q 'benchmark-seed-cache" materialize' "$ROOT_DIR/scripts/setup-db.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ setup-db invokes the tested materialization boundary"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ setup-db never invokes the tested materialization boundary"
+fi
+
+# Lock ownership is PID-bound, so acquire/release cannot be separate CLI
+# processes. Consumers source seed-cache.sh and hold the lock in one shell.
+set +e
+bash "$SEED_CLI" acquire "$EXPECTED_PATH" >/dev/null 2>&1
+ACQUIRE_CLI_STATUS=$?
+bash "$SEED_CLI" release "$EXPECTED_PATH" >/dev/null 2>&1
+RELEASE_CLI_STATUS=$?
+set -e
+if [ "$ACQUIRE_CLI_STATUS" -ne 0 ] && [ "$RELEASE_CLI_STATUS" -ne 0 ]; then
+    PASS=$((PASS+1)); echo "  ✅ PID-bound acquire/release are not exposed as separate CLI processes"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ seed-cache CLI still exposes PID-invalid acquire/release commands"
+fi
+
+# Producer-first ordering: a consumer arriving during publication must acquire
+# the same lock and see the complete pair, never a half-published result.
+rm -f "$EXPECTED_PATH" "${EXPECTED_PATH}.schemahash"
+FAKE_DOCKER_DELAY=1 PATH="$FAKE_BIN:$PATH" \
+    bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" victoria-db-test 20260723 \
+        > "$TMP/race-result" &
+PUBLISH_PID=$!
+for _ in $(seq 1 50); do
+    [ -L "${EXPECTED_PATH}.publish.lock" ] && break
+    sleep 0.02
+done
+PRODUCER_FIRST_LOCK_SEEN=0
+[ -L "${EXPECTED_PATH}.publish.lock" ] && PRODUCER_FIRST_LOCK_SEEN=1
+acquire_benchmark_seed_lock "$EXPECTED_PATH" 50
+PRODUCER_FIRST_DECISION="$(seed_cache_decision "$EXPECTED_PATH" "$EXPECTED_HASH" 0)"
+PRODUCER_FIRST_DUMP="$(cat "$EXPECTED_PATH" 2>/dev/null || true)"
+PRODUCER_FIRST_HASH="$(cat "${EXPECTED_PATH}.schemahash" 2>/dev/null || true)"
+release_benchmark_seed_lock "$EXPECTED_PATH"
+wait "$PUBLISH_PID"
+if [ "$PRODUCER_FIRST_LOCK_SEEN" -eq 1 ] \
+   && [ "$PRODUCER_FIRST_DECISION" = "restore-local" ] \
+   && [ "$PRODUCER_FIRST_DUMP" = "seed-dump-from-victoria-db-test" ] \
+   && [ "$PRODUCER_FIRST_HASH" = "$EXPECTED_HASH" ]; then
+    PASS=$((PASS+1)); echo "  ✅ producer-first ordering fences decision + pair read"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ producer-first ordering exposed incomplete seed state"
+fi
+
+# Consumer-first ordering: publication must wait until the consumer finishes its
+# decision + read/mutation handoff, then replace the pair as one fenced update.
+printf 'consumer-visible-dump\n' > "$EXPECTED_PATH"
+printf '%s' "$EXPECTED_HASH" > "${EXPECTED_PATH}.schemahash"
+acquire_benchmark_seed_lock "$EXPECTED_PATH" 50
+PATH="$FAKE_BIN:$PATH" \
+    bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" victoria-db-test 20260723 \
+        > "$TMP/consumer-first-result" &
+WAITING_PRODUCER_PID=$!
+sleep 0.2
+CONSUMER_FIRST_PRODUCER_WAITING=0
+kill -0 "$WAITING_PRODUCER_PID" 2>/dev/null && CONSUMER_FIRST_PRODUCER_WAITING=1
+CONSUMER_FIRST_DECISION="$(seed_cache_decision "$EXPECTED_PATH" "$EXPECTED_HASH" 0)"
+CONSUMER_FIRST_DUMP="$(cat "$EXPECTED_PATH")"
+release_benchmark_seed_lock "$EXPECTED_PATH"
+wait "$WAITING_PRODUCER_PID"
+if [ "$CONSUMER_FIRST_PRODUCER_WAITING" -eq 1 ] \
+   && [ "$CONSUMER_FIRST_DECISION" = "restore-local" ] \
+   && [ "$CONSUMER_FIRST_DUMP" = "consumer-visible-dump" ] \
+   && [ "$(cat "$EXPECTED_PATH")" = "seed-dump-from-victoria-db-test" ] \
+   && [ "$(cat "${EXPECTED_PATH}.schemahash")" = "$EXPECTED_HASH" ]; then
+    PASS=$((PASS+1)); echo "  ✅ consumer-first ordering fences restore handoff from publication"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ consumer-first ordering allowed publication during the consumer handoff"
+fi
+
+# Wiring guard: run.sh must keep decision, optional remote replacement, and the
+# synchronous restore inside one consumer critical section.
+CRITICAL_SECTION="$(sed -n '/BEGIN BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION/,/END BENCHMARK_SEED_CONSUMER_CRITICAL_SECTION/p' "$ROOT_DIR/scripts/run.sh")"
+ACQUIRE_LINE="$(printf '%s\n' "$CRITICAL_SECTION" | grep -n 'acquire_benchmark_seed_lock' | head -1 | cut -d: -f1)"
+DECISION_LINE="$(printf '%s\n' "$CRITICAL_SECTION" | grep -n '_SEED_DECISION=' | head -1 | cut -d: -f1)"
+RESTORE_LINE="$(printf '%s\n' "$CRITICAL_SECTION" | grep -n 'scripts/restore-seed-dump.sh' | head -1 | cut -d: -f1)"
+RELEASE_LINE="$(printf '%s\n' "$CRITICAL_SECTION" | grep -n '^release_seed_lock_if_held$' | head -1 | cut -d: -f1)"
+if [ -n "$ACQUIRE_LINE" ] && [ -n "$DECISION_LINE" ] \
+   && [ -n "$RESTORE_LINE" ] && [ -n "$RELEASE_LINE" ] \
+   && [ "$ACQUIRE_LINE" -lt "$DECISION_LINE" ] \
+   && [ "$DECISION_LINE" -lt "$RESTORE_LINE" ] \
+   && [ "$RESTORE_LINE" -lt "$RELEASE_LINE" ]; then
+    PASS=$((PASS+1)); echo "  ✅ run.sh holds one seed lock across decision, replacement, and restore"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ run.sh seed consumer critical section is incomplete"
+fi
+
+# A failed pg_dump must preserve the last valid pair and release all lock/temp state.
+printf 'previous-valid-dump\n' > "$EXPECTED_PATH"
+printf '%s' "$EXPECTED_HASH" > "${EXPECTED_PATH}.schemahash"
+set +e
+FAKE_DOCKER_FAIL=1 PATH="$FAKE_BIN:$PATH" \
+    bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" victoria-db-test 20260723 \
+        > /dev/null 2>&1
+FAILED_PUBLISH_STATUS=$?
+set -e
+if [ "$FAILED_PUBLISH_STATUS" -ne 0 ] \
+   && [ "$(cat "$EXPECTED_PATH")" = "previous-valid-dump" ] \
+   && [ "$(cat "${EXPECTED_PATH}.schemahash")" = "$EXPECTED_HASH" ] \
+   && [ ! -e "${EXPECTED_PATH}.publish.lock" ] \
+   && [ ! -L "${EXPECTED_PATH}.publish.lock" ] \
+   && ! find "$LOCAL_CACHE" -type f -name '*.tmp.*' -print -quit | grep -q .; then
+    PASS=$((PASS+1)); echo "  ✅ failed publication preserves the prior pair and releases lock/temp state"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ failed publication corrupted state or leaked lock/temp files"
+fi
+
 echo "RESULTS: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 echo "PASS: seed-cache decision routes stale/absent dumps to the shared cache; valid dumps restore locally"

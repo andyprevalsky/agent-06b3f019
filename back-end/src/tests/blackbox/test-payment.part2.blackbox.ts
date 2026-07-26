@@ -99,6 +99,8 @@ const tests: Array<[string, () => Promise<void>]> = [
             walletFunding: null,
           }) as never,
         findAttentionRequests: async () => [] as never,
+        searchStripeHolds: async () => ({ data: [] }),
+        getOrgCardholderId: async () => undefined,
       });
 
       assert(result.purchase?.status === 'PENDING_APPROVAL', 'expected the pending purchase');
@@ -133,6 +135,8 @@ const tests: Array<[string, () => Promise<void>]> = [
           }) as never,
         findAttentionRequests: async () => [] as never,
         getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
+        searchStripeHolds: async () => ({ data: [] }),
+        getOrgCardholderId: async () => undefined,
         listOrgTransfers: async () => ({
           content: [
             {
@@ -185,6 +189,8 @@ const tests: Array<[string, () => Promise<void>]> = [
             }) as never,
           findAttentionRequests: async () => [] as never,
           getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
+          searchStripeHolds: async () => ({ data: [] }),
+          getOrgCardholderId: async () => undefined,
           listOrgTransfers: async () => ({
             structuredContent: {
               transfers: [
@@ -230,6 +236,8 @@ const tests: Array<[string, () => Promise<void>]> = [
             }) as never,
           findAttentionRequests: async () => [] as never,
           getCardSummary: async () => ({ status: 'CLOSED', balanceCents: 0 }),
+          searchStripeHolds: async () => ({ data: [] }),
+          getOrgCardholderId: async () => undefined,
           listOrgTransfers: async () => ({
             structuredContent: {
               transfers: [

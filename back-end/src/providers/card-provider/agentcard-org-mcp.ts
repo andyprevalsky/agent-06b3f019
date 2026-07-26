@@ -254,21 +254,36 @@ function findUrl(value: unknown): string | undefined {
   return undefined;
 }
 
+const EXPLICIT_GATE_CODES = new Set([
+  'funding_in_progress',
+  'kyc_required',
+  'org_onboarding_required',
+  'org_wallet_funding_required',
+  'wallet_funding_required',
+  'payment_method_required',
+]);
+
+function normalizedExplicitCode(value: string): string {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/^agentcard_/, '');
+  return EXPLICIT_GATE_CODES.has(normalized) ? normalized : value.trim().toLowerCase();
+}
+
+/**
+ * Provider gates that are safe to compensate immediately must come from a structured code/status
+ * field. Never promote free-form error prose into a safe KYC/setup outcome: a 500 response can
+ * mention KYC after create_card already committed.
+ *
+ * A text-only funding_in_progress signal is deliberately the sole exception. Treating that signal
+ * as ambiguous and retryable preserves the Stripe hold and exact AgentCard idempotency key, so a
+ * false positive cannot discard an externally-created card or transfer.
+ */
 function errorCode(record: Record<string, unknown>, text: string): string | undefined {
-  const explicitCode = optionalString(record, ['code', 'error'])?.toLowerCase();
-  const message = optionalString(record, ['message']);
-  const normalized = [explicitCode, message, text].filter(Boolean).join('\n').toLowerCase();
-  const knownCode = [
-    'funding_in_progress',
-    'kyc_required',
-    'org_onboarding_required',
-    'org_wallet_funding_required',
-    'wallet_funding_required',
-    'payment_method_required',
-  ].find((code) => normalized.includes(code));
-  if (knownCode !== undefined) return knownCode;
-  if (explicitCode !== undefined) return explicitCode;
-  return optionalString(record, ['status'])?.toLowerCase();
+  const explicitCode = optionalString(record, ['code', 'error', 'status']);
+  if (explicitCode !== undefined) return normalizedExplicitCode(explicitCode);
+  return /\bfunding_in_progress\b/i.test(text) ? 'funding_in_progress' : undefined;
 }
 
 function throwForGate(record: Record<string, unknown>, result: unknown): void {
@@ -336,7 +351,14 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
 export class AgentCardOrgMcpProvider implements CardProvider {
   constructor(
     private readonly cardholderId: string,
-    private readonly toolCaller: AgentCardOrgToolCaller = callOrgTool
+    private readonly toolCaller: AgentCardOrgToolCaller = callOrgTool,
+    private readonly transferLookup: {
+      attempts: number;
+      delayMs: number;
+    } = {
+      attempts: TRANSFER_LOOKUP_ATTEMPTS,
+      delayMs: TRANSFER_LOOKUP_DELAY_MS,
+    }
   ) {
     if (cardholderId.trim() === '') {
       throw new AgentCardProviderError('AgentCard organization cardholder id is required');
@@ -398,9 +420,17 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     if (fundsSource === 'company_flow' && transferId === undefined) {
       transferId = await this.findCompanyTransferId(cardId);
       if (transferId === undefined) {
-        await this.closeCard(cardId);
         throw new AgentCardProviderError(
-          'AgentCard company-flow card was issued without an observable organization transfer'
+          'AgentCard company funding is in progress',
+          409,
+          undefined,
+          'agentcard_company_funding_in_progress',
+          {
+            agentcardStatus: 'funding_in_progress',
+            cardId,
+            retryAfterSeconds: 5,
+            agentcardResult: record,
+          }
         );
       }
     }
@@ -411,7 +441,9 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       spendLimitCents:
         optionalNumber(record, ['amount_cents', 'amountCents', 'balance_cents', 'balanceCents']) ??
         request.amountCents,
-      status: optionalString(record, ['cardStatus', 'status']) ?? details.status,
+      // get_card_details is the current source of truth on an idempotency replay. create_card may
+      // still say "created" even if a prior attempt closed the returned card.
+      status: details.status,
       ...(transferId !== undefined ? { providerTransferId: transferId, metadata: record } : {}),
     };
   }
@@ -458,7 +490,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
   }
 
   private async findCompanyTransferId(cardId: string): Promise<string | undefined> {
-    for (let attempt = 1; attempt <= TRANSFER_LOOKUP_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= this.transferLookup.attempts; attempt += 1) {
       let observedTransferCount = 0;
       for (const args of [{ status: 'consumed', limit: 100 }, { limit: 100 }]) {
         const result = await this.toolCaller('list_transfers', args);
@@ -482,14 +514,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
           return transferId;
         }
       }
-      if (attempt < TRANSFER_LOOKUP_ATTEMPTS) {
+      if (attempt < this.transferLookup.attempts) {
         if (attempt === 1) {
           log.info('Waiting for AgentCard organization transfer visibility', {
             card_id: maskId(cardId),
             observed_transfer_count: observedTransferCount,
           });
         }
-        await delay(TRANSFER_LOOKUP_DELAY_MS);
+        await delay(this.transferLookup.delayMs);
       }
     }
     return undefined;

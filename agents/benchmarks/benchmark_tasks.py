@@ -246,6 +246,17 @@ def get_task_by_name(name: str) -> BenchmarkTask:
     raise ValueError(f"Unknown benchmark task: {name}")
 
 
+def selected_tasks_require_gate_type(task_names: List[str], gate_type: str) -> bool:
+    """Return whether any selected task canonically expects the given gate type."""
+    selected = set(task_names)
+    return any(
+        task.name in selected
+        and isinstance(task.expected_gate, dict)
+        and task.expected_gate.get("type") == gate_type
+        for task in all_tasks()
+    )
+
+
 def get_tasks_by_tag(tag: str) -> List[BenchmarkTask]:
     aliases = {
         "attachments": "attachment",

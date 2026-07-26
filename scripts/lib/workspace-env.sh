@@ -11,10 +11,13 @@ normalize_conductor_workspace_env() {
 
   pwd_physical="$(cd "$PWD" && pwd -P)"
   deploy_worktree_env="$pwd_physical/.context/deploy-worktree.env"
-  if [ -f "$deploy_worktree_env" ]; then
+  if [ -f "$deploy_worktree_env" ] && [ "${BENCHMARK_ISOLATED_RUN:-false}" != "true" ]; then
     # /descend-created deploy worktrees are not registered with Conductor and
     # otherwise inherit their controller's identity and port range. Rehydrate
     # the durable child identity on every new shell before resolving resources.
+    # A nested benchmark run already owns a separately reserved identity and
+    # port range; rehydrating the parent here would collapse both stacks onto
+    # the deploy database.
     . "$deploy_worktree_env"
     if [ "${ROSE_DEPLOY_WORKTREE_PATH:-}" != "$pwd_physical" ]; then
       echo "Deploy worktree config belongs to ${ROSE_DEPLOY_WORKTREE_PATH:-unknown}, not $pwd_physical." >&2
@@ -56,4 +59,20 @@ normalize_conductor_workspace_env() {
 resolve_temporal_task_queue() {
   local workspace_name="$1"
   printf '%s\n' "${TEMPORAL_TASK_QUEUE:-navi-agent-tasks-$workspace_name}"
+}
+
+# Given the intended local DB container name, its target host port, and the
+# output of `docker ps --format '{{.Names}} {{.Ports}}'`, print the name of a
+# DIFFERENT running container that already binds that host port (empty if none).
+#
+# This guards against a foreign CONDUCTOR_PORT (e.g. one leaked into a shell by
+# a /descend or benchmark run whose mismatched CONDUCTOR_WORKSPACE_NAME was
+# normalized away here) deriving the wrong LOCAL_DB_PORT and clobbering a
+# sibling workspace's database. Only running containers actually bind the host
+# port, so `docker ps` (not `-a`) is the correct input.
+db_port_conflict_owner() {
+  local self="$1" port="$2" ps_output="$3"
+  printf '%s\n' "$ps_output" | awk -v self="$self" -v pat=":${port}->" '
+    index($0, pat) { if ($1 != self) { print $1; exit } }
+  '
 }

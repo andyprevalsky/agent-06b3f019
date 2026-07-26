@@ -2,77 +2,85 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import {
-  ensureAgentCardSandboxFloat,
-  sandboxFloatTargetCents,
-} from '../../providers/agentcard/benchmark-float';
+import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
 
-function walletResult(wallet: {
-  livemode: boolean;
-  balance_cents: number;
-  available_cents: number;
+function walletResult(cents: {
+  balance: number;
+  committed?: number;
+  available: number;
+  livemode?: boolean;
 }): unknown {
   return {
     structuredContent: {
       wallet: {
         object: 'org_wallet',
-        committed_cents: 0,
-        ...wallet,
+        livemode: cents.livemode ?? false,
+        balance_cents: cents.balance,
+        committed_cents: cents.committed ?? 0,
+        available_cents: cents.available,
+        stablecoin: 'usdc',
       },
     },
   };
 }
 
 async function main(): Promise<void> {
-  // Reads the v2 sandbox company wallet via get_company_wallet and returns its
-  // balance when the available headroom clears the floor. No funding call: the
-  // sandbox wallet is pre-provisioned, so a single get_company_wallet is enough.
-  const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
-  const funded = await ensureAgentCardSandboxFloat(200_000, async (tool, args) => {
-    calls.push({ tool, args });
-    return walletResult({ livemode: false, balance_cents: 100_966_476, available_cents: 100_966_476 });
-  });
-  assert.deepEqual(funded, { balanceCents: 100_966_476, availableCents: 100_966_476 });
-  assert.equal(calls.length, 1, 'a single get_company_wallet read, no top-up');
-  assert.equal(calls[0].tool, 'get_company_wallet');
+  // A sufficiently funded sandbox pool reads clean via client-credential MCP.
+  {
+    const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const callOrgTool = async (name: string, args: Record<string, unknown>) => {
+      calls.push({ name, args });
+      return walletResult({ balance: 32_416, available: 32_416 });
+    };
+    const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool);
+    assert.deepEqual(float, { balanceCents: 32_416, availableCents: 32_416, committedCents: 0 });
+    assert.equal(calls.length, 1, 'reads the wallet exactly once');
+    assert.equal(calls[0].name, 'get_company_wallet');
+    assert.deepEqual(calls[0].args, {}, 'org identity travels in the client-credential token');
+  }
 
-  // Fails closed on a LIVE wallet so a misconfigured benchmark cannot draw real funds.
-  await assert.rejects(
-    ensureAgentCardSandboxFloat(200_000, async () =>
-      walletResult({ livemode: true, balance_cents: 100_966_476, available_cents: 100_966_476 })
-    ),
-    /LIVE AgentCard org wallet/
-  );
+  // Committed holds are surfaced but available is what gates the floor.
+  {
+    const callOrgTool = async () =>
+      walletResult({ balance: 20_000, committed: 4_396, available: 15_604 });
+    const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool);
+    assert.deepEqual(float, {
+      balanceCents: 20_000,
+      availableCents: 15_604,
+      committedCents: 4_396,
+    });
+  }
 
-  // Fails when the sandbox wallet is somehow below the required floor.
-  await assert.rejects(
-    ensureAgentCardSandboxFloat(200_000, async () =>
-      walletResult({ livemode: false, balance_cents: 1_000, available_cents: 1_000 })
-    ),
-    /below the required floor/
-  );
+  // A pool below the floor fails loud and early with an actionable, non-interactive message.
+  {
+    const callOrgTool = async () => walletResult({ balance: 5_000, available: 5_000 });
+    await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /sandbox pool too low/i);
+      assert.match(message, /\$50\.00 available/);
+      assert.match(message, /\$100\.00 required/);
+      assert.match(message, /no interactive login/i);
+      return true;
+    });
+  }
 
-  // Concurrency-headroom floor: the default target must exceed a single run's
-  // worst-case reservation by a wide margin so concurrent benchmark runs sharing
-  // one org wallet cannot starve each other. Override raises it; a too-small or
-  // invalid override is clamped up to the floor (never below).
-  assert.equal(sandboxFloatTargetCents({}), 200_000, 'default float floor');
-  assert.equal(
-    sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: '500000' }),
-    500_000,
-    'override raises the floor'
-  );
-  assert.equal(
-    sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: '10000' }),
-    200_000,
-    'override below the floor is clamped up'
-  );
-  for (const bad of ['', '  ', 'abc', '0', '-5']) {
-    assert.equal(
-      sandboxFloatTargetCents({ BENCHMARK_AGENTCARD_FLOAT_CENTS: bad }),
-      200_000,
-      `invalid override "${bad}" falls back to the floor`
-    );
+  // A malformed wallet response is rejected rather than silently passing.
+  {
+    const callOrgTool = async () => ({ structuredContent: {} });
+    await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), /no structured wallet/i);
+  }
+
+  // A live wallet is rejected before the floor check so the benchmark never draws
+  // on live funds, even when it is amply funded.
+  {
+    const callOrgTool = async () =>
+      walletResult({ balance: 1_000_000, available: 1_000_000, livemode: true });
+    await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /live wallet/i);
+      assert.match(message, /sandbox/i);
+      return true;
+    });
   }
 
   console.log('AgentCard benchmark sandbox float tests passed');

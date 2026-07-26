@@ -6,6 +6,7 @@ import {
   WorkflowNotFoundError,
 } from '@temporalio/client';
 import { createLogger } from './logger';
+import { getCurrentAgentQueue } from './agentQueuePointer';
 import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
 
 const log = createLogger('Temporal');
@@ -209,6 +210,7 @@ export interface StartAgentWorkflowParams {
     shared_files?: boolean;
   };
   fastModeCacheEnabled?: boolean; // Optional: Fast Mode aggressive cache (own flag, not a gate)
+  worldModelMode?: 'real' | 'simulate' | 'shadow'; // Per-agent provider/environment execution mode
   workflowId?: string; // Optional preclaimed generation-specific workflow ID
   resumeState?: WorkflowResumeState; // Durable state captured before deployment replacement
   rejectDuplicateWorkflowId?: boolean; // Durable child-start outbox uses one immutable ID.
@@ -303,9 +305,18 @@ export function buildAgentWorkflowArgs(params: StartAgentWorkflowParams): unknow
     params.contextGates || null,
     params.fastModeCacheEnabled ?? false,
   ];
-  // Keep ordinary starts compatible with the previous 16-argument worker.
-  // Only a candidate worker handling a deployment replacement receives #17.
-  if (params.resumeState !== undefined) args.push(params.resumeState);
+  // Keep ordinary real-mode starts compatible with the previous 16-argument
+  // worker. Deployment state remains #17; Simulator mode uses #18 so it does
+  // not change the durable replacement contract.
+  if (
+    params.resumeState !== undefined ||
+    (params.worldModelMode !== undefined && params.worldModelMode !== 'real')
+  ) {
+    args.push(params.resumeState ?? null);
+  }
+  if (params.worldModelMode !== undefined && params.worldModelMode !== 'real') {
+    args.push(params.worldModelMode);
+  }
   return args;
 }
 
@@ -390,26 +401,21 @@ export async function startAgentWorkflowExecutionWithClient(
   params: StartAgentWorkflowParams,
   deadlineAtMs?: number
 ): Promise<TemporalWorkflowExecutionRef> {
-  // Use provided task queue or default to environment-specific queue
-  const taskQueue = params.taskQueue || process.env.TEMPORAL_TASK_QUEUE;
-  if (!taskQueue) {
-    throw new Error(
-      'TEMPORAL_TASK_QUEUE is not set — run.sh must derive it from CONDUCTOR_WORKSPACE_NAME'
-    );
-  }
   const workflowId = params.workflowId ?? params.agentId;
-
-  log.info('Starting agent workflow', {
-    workflowId,
-    taskQueue,
-  });
 
   let execution: TemporalWorkflowExecutionRef;
   try {
     const handle = await withTemporalControlDeadline(
       client,
-      () =>
-        client.workflow.start('AgentWorkflow', {
+      async () => {
+        // Explicit override (descendants inherit the parent's generation queue;
+        // tests isolate) wins; otherwise resolve the current cutover generation
+        // via the AgentQueuePointer, which falls back to TEMPORAL_TASK_QUEUE when
+        // unset. Resolved UNDER the control deadline so a cache-miss Prisma read
+        // cannot block the start past the caller's deadline.
+        const taskQueue = params.taskQueue || (await getCurrentAgentQueue());
+        log.info('Starting agent workflow', { workflowId, taskQueue });
+        return client.workflow.start('AgentWorkflow', {
           taskQueue,
           workflowId,
           args: buildAgentWorkflowArgs(params),
@@ -419,7 +425,8 @@ export async function startAgentWorkflowExecutionWithClient(
                 workflowIdConflictPolicy: 'FAIL' as const,
               }
             : {}),
-        }),
+        });
+      },
       deadlineAtMs
     );
     execution = {

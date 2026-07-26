@@ -15,23 +15,25 @@ import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client
 import { prisma } from '../../providers/database';
 import {
   cleanupAgentPurchaseCards,
+  reconcileAbandonedPurchaseFunding,
   reconcileDissolvedPurchaseHolds,
   reconcileFailedPurchaseFundingReclaims,
   reconcileFailedPurchaseRefunds,
   reconcileStaleChargingPurchases,
   reconcileTerminalAgentPurchaseCards,
 } from '../../providers/purchaseCleanup';
+import { WalletFundingProviderError } from '../../providers/wallet-funding';
 import {
-  WalletFundingProviderError,
-  type WalletFundingReclaimRequest,
-  type WalletFundingResult,
-} from '../../providers/wallet-funding';
-import {
+  capturedPaymentIntent,
   FailingDetailsCardProvider,
   FakeWalletFundingProvider,
   StubCardStateProvider,
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
+import {
+  ConcurrentlyVoidedWalletProvider,
+  ReclaimErrorWalletProvider,
+} from './purchase-cleanup.testkit';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -45,41 +47,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
   } catch (error) {
     failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     process.stdout.write(`  FAIL ${name}\n`);
-  }
-}
-
-class ReclaimErrorWalletProvider extends FakeWalletFundingProvider {
-  constructor(private readonly error: Error) {
-    super();
-  }
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    throw this.error;
-  }
-}
-
-class ConcurrentlyVoidedWalletProvider extends FakeWalletFundingProvider {
-  async reclaimUserWalletFunding(
-    request: WalletFundingReclaimRequest
-  ): Promise<WalletFundingResult> {
-    this.reclaimCalls.push(request);
-    await prisma.$transaction([
-      prisma.purchaseWalletFunding.update({
-        where: { purchaseId: request.purchaseId },
-        data: { status: PurchaseWalletFundingStatus.RECLAIMED },
-      }),
-      prisma.purchaseSpend.update({
-        where: { id: request.purchaseId },
-        data: { status: PurchaseSpendStatus.VOIDED },
-      }),
-    ]);
-    throw new WalletFundingProviderError(
-      'stale concurrent reclaim result',
-      409,
-      'agentcard_company_transfer_consumed_during_reclaim'
-    );
   }
 }
 
@@ -117,6 +84,22 @@ async function seedHeld(
   return row.id;
 }
 
+async function seedStaleCharging(userId: string) {
+  return prisma.purchaseSpend.create({
+    data: {
+      userId,
+      fingerprint: `fp-${randomUUID()}`,
+      merchant: 'Stale Merchant',
+      lineItemsJson: { totalCents: 1080 },
+      totalCents: 1080,
+      status: PurchaseSpendStatus.CHARGING,
+      cardId: `card-${randomUUID()}`,
+      stripePaymentIntentId: `pi_${randomUUID()}`,
+      updatedAt: new Date(Date.now() - 60 * 60 * 1000),
+    },
+  });
+}
+
 async function seedFunding(
   purchaseId: string,
   userId: string,
@@ -140,8 +123,12 @@ async function statusOf(purchaseId: string): Promise<PurchaseSpendStatus | undef
   return row?.status;
 }
 
-function capturedPaymentIntent(id: string) {
-  return { id, status: 'succeeded', amount_capturable: 0, amount_received: 1080 };
+async function reconcileFailed(wallet: FakeWalletFundingProvider, userId: string): Promise<void> {
+  await reconcileFailedPurchaseFundingReclaims(
+    wallet,
+    { userId },
+    new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 })
+  );
 }
 
 async function main(): Promise<void> {
@@ -276,11 +263,25 @@ async function main(): Promise<void> {
   await test('reconcileFailedPurchaseRefunds retries and marks REFUNDED', async () => {
     const userId = await seedUser();
     const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
+    await withFakeStripe(
+      async (calls) => {
+        await reconcileFailedPurchaseRefunds({ userId });
+        assert.equal(calls.refunds.length, 1);
+      },
+      { retrievePaymentIntent: capturedPaymentIntent }
+    );
+    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUNDED);
+  });
+
+  await test('reconcileFailedPurchaseRefunds cancels an uncaptured hold and marks FAILED', async () => {
+    const userId = await seedUser();
+    const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
     await withFakeStripe(async (calls) => {
       await reconcileFailedPurchaseRefunds({ userId });
-      assert.equal(calls.refunds.length, 1);
+      assert.equal(calls.cancels.length, 1);
+      assert.equal(calls.refunds.length, 0);
     });
-    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUNDED);
+    assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.FAILED);
   });
 
   await test('reconcileFailedPurchaseFundingReclaims reclaims then voids', async () => {
@@ -292,7 +293,7 @@ async function main(): Promise<void> {
     const wallet = new FakeWalletFundingProvider();
     await withFakeStripe(
       async (calls) => {
-        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        await reconcileFailed(wallet, userId);
         assert.equal(calls.refunds.length, 1);
       },
       { retrievePaymentIntent: capturedPaymentIntent }
@@ -301,27 +302,22 @@ async function main(): Promise<void> {
     assert.equal(wallet.reclaimCalls.length, 1);
   });
 
-  await test('reconcileStaleChargingPurchases reclaims, cancels the hold, and fails the row', async () => {
+  await test('stale issued-card compensation reclaims, cancels the hold, and voids', async () => {
     const userId = await seedUser();
-    const row = await prisma.purchaseSpend.create({
-      data: {
-        userId,
-        fingerprint: `fp-${randomUUID()}`,
-        merchant: 'Stale Merchant',
-        lineItemsJson: { totalCents: 1080 },
-        totalCents: 1080,
-        status: PurchaseSpendStatus.CHARGING,
-        stripePaymentIntentId: `pi_${randomUUID()}`,
-        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
-      },
-    });
+    const row = await seedStaleCharging(userId);
     await seedFunding(row.id, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new FakeWalletFundingProvider();
     await withFakeStripe(async (calls) => {
       await reconcileStaleChargingPurchases(wallet, { userId });
+      assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_ABANDONED);
+      await reconcileAbandonedPurchaseFunding(
+        new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
+        wallet,
+        { userId }
+      );
       assert.equal(calls.cancels.length, 1, 'the stale hold must be canceled');
     });
-    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FAILED);
+    assert.equal(await statusOf(row.id), PurchaseSpendStatus.VOIDED);
   });
 
   await test('reconcileDissolvedPurchaseHolds voids an unspent dissolved hold', async () => {
@@ -424,14 +420,14 @@ async function main(): Promise<void> {
         assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.HELD);
         assert.equal(wallet.reclaimCalls.length, 0);
         assert.equal(calls.refunds.length, 0);
-        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        await reconcileFailed(wallet, userId);
         assert.equal(wallet.reclaimCalls.length, 0, 'minute cron must skip a fresh reclaim owner');
 
         await prisma.purchaseWalletFunding.update({
           where: { purchaseId },
           data: { updatedAt: new Date(Date.now() - 3 * 60 * 1000) },
         });
-        await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+        await reconcileFailed(wallet, userId);
         assert.equal(calls.refunds.length, 1);
       },
       { retrievePaymentIntent: capturedPaymentIntent }
@@ -445,6 +441,7 @@ async function main(): Promise<void> {
     const purchaseId = await seedHeld(userId, { status: PurchaseSpendStatus.REFUND_FAILED });
     await withFakeStripe(async () => await reconcileFailedPurchaseRefunds({ userId }), {
       refundError: new Error('still failing'),
+      retrievePaymentIntent: capturedPaymentIntent,
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.REFUND_FAILED);
   });
@@ -463,7 +460,7 @@ async function main(): Promise<void> {
       )
     );
     await withFakeStripe(async () => {
-      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+      await reconcileFailed(wallet, userId);
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.CLEARED);
   });
@@ -476,7 +473,7 @@ async function main(): Promise<void> {
     await seedFunding(purchaseId, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new ReclaimErrorWalletProvider(new Error('mcp down'));
     await withFakeStripe(async () => {
-      await reconcileFailedPurchaseFundingReclaims(wallet, { userId });
+      await reconcileFailed(wallet, userId);
     });
     assert.equal(await statusOf(purchaseId), PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
   });
@@ -563,18 +560,7 @@ async function main(): Promise<void> {
 
   await test('reconcileStaleChargingPurchases records CAPTURE_FAILED on consumed-during-reclaim', async () => {
     const userId = await seedUser();
-    const row = await prisma.purchaseSpend.create({
-      data: {
-        userId,
-        fingerprint: `fp-${randomUUID()}`,
-        merchant: 'Stale Merchant',
-        lineItemsJson: { totalCents: 1080 },
-        totalCents: 1080,
-        status: PurchaseSpendStatus.CHARGING,
-        stripePaymentIntentId: `pi_${randomUUID()}`,
-        updatedAt: new Date(Date.now() - 60 * 60 * 1000),
-      },
-    });
+    const row = await seedStaleCharging(userId);
     await seedFunding(row.id, userId, PurchaseWalletFundingStatus.FUNDED);
     const wallet = new ReclaimErrorWalletProvider(
       new WalletFundingProviderError(
@@ -585,11 +571,32 @@ async function main(): Promise<void> {
     );
     await withFakeStripe(async () => {
       await reconcileStaleChargingPurchases(wallet, { userId });
+      await reconcileAbandonedPurchaseFunding(
+        new StubCardStateProvider({ status: 'CLOSED', balanceCents: 0 }),
+        wallet,
+        { userId }
+      );
     });
     assert.equal(await statusOf(row.id), PurchaseSpendStatus.CAPTURE_FAILED);
   });
 
-  await test('reconcileStaleChargingPurchases records FUNDING_RECLAIM_FAILED on a generic error', async () => {
+  await test('stale issued-card compensation remains abandoned on a reclaim error', async () => {
+    const userId = await seedUser();
+    const row = await seedStaleCharging(userId);
+    await seedFunding(row.id, userId, PurchaseWalletFundingStatus.FUNDED);
+    const wallet = new ReclaimErrorWalletProvider(new Error('mcp down'));
+    await withFakeStripe(async () => {
+      await reconcileStaleChargingPurchases(wallet, { userId });
+      await reconcileAbandonedPurchaseFunding(
+        new StubCardStateProvider({ status: 'OPEN', balanceCents: 1080 }),
+        wallet,
+        { userId }
+      );
+    });
+    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_ABANDONED);
+  });
+
+  await test('reconcileStaleChargingPurchases preserves a pre-card funding attempt', async () => {
     const userId = await seedUser();
     const row = await prisma.purchaseSpend.create({
       data: {
@@ -603,12 +610,14 @@ async function main(): Promise<void> {
         updatedAt: new Date(Date.now() - 60 * 60 * 1000),
       },
     });
-    await seedFunding(row.id, userId, PurchaseWalletFundingStatus.FUNDED);
-    const wallet = new ReclaimErrorWalletProvider(new Error('mcp down'));
-    await withFakeStripe(async () => {
+    await seedFunding(row.id, userId, PurchaseWalletFundingStatus.PENDING);
+    const wallet = new FakeWalletFundingProvider();
+    await withFakeStripe(async (calls) => {
       await reconcileStaleChargingPurchases(wallet, { userId });
+      assert.equal(calls.cancels.length, 0);
     });
-    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_RECLAIM_FAILED);
+    assert.equal(wallet.reclaimCalls.length, 0);
+    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_PENDING);
   });
 
   process.stdout.write(

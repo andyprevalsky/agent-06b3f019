@@ -553,11 +553,7 @@ def test_grounded_export_uses_real_browser_results_and_excludes_unavailable_llm_
                     "agent_id": root,
                     "dump_id": "dump",
                     "messages": [],
-                    "output": {
-                        "tool_calls": [
-                            {"id": "call", "name": "web_search", "arguments": {"q": "unavailable"}}
-                        ]
-                    },
+                    "output": {"tool_calls": [{"id": "call", "name": "web_search", "arguments": {"q": "unavailable"}}]},
                 },
             )
             archive_json(
@@ -2087,11 +2083,13 @@ async def test_spawn_browser_routes_simulation_without_calling_real_browser():
                     }
                 ]
             },
+            world_model_mode="simulate",
         )
     assert result == simulated_result
     from_env.assert_called_once_with(
         agent_id="agent-1:browser:tool-browser",
         inherit_explicit_session=False,
+        mode="simulate",
     )
     simulated.assert_awaited_once()
     real.assert_not_awaited()
@@ -2158,9 +2156,7 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
             "screenshot": oversized_media,
             "frame": {"src": oversized_media},
         },
-        action_entries=[
-            {"step": step, "result": {"image_url": oversized_media, "ok": True}} for step in range(50)
-        ],
+        action_entries=[{"step": step, "result": {"image_url": oversized_media, "ok": True}} for step in range(50)],
         turn_messages=[{"role": "TOOL", "content": oversized_media} for _ in range(40)],
         recording_ref="/tmp/recordings/agent/task/frames.checkpoint.json",
         frame_count=51,
@@ -2182,9 +2178,7 @@ def test_simulated_browser_resume_payload_is_compact_and_media_free():
     assert len(payload["simulated_visited_urls"]) == 50
     assert payload["simulated_recording_frame_count"] == 51
     assert payload["simulated_action_entry_count"] == 50
-    assert payload["simulated_usage_by_model"] == {
-        "gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}
-    }
+    assert payload["simulated_usage_by_model"] == {"gpt-5.6-sol-gpt": {"input_tokens": 123, "output_tokens": 45}}
     assert len(encoded) < 100_000
 
 
@@ -2625,6 +2619,27 @@ def test_browser_adapter_can_ignore_run_wide_world_model_session():
                 os.environ[key] = value
 
 
+def test_per_agent_world_model_mode_overrides_process_default():
+    """A product agent's persisted mode wins over the worker-wide benchmark default."""
+
+    from helpers.world_model_runtime import WorldModelToolExecutionAdapter
+
+    old_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        adapter = WorldModelToolExecutionAdapter.from_env(
+            agent_id="product-agent",
+            mode="simulate",
+        )
+        assert adapter.mode == "simulate"
+        assert adapter.should_simulate("web_search") is True
+    finally:
+        if old_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = old_mode
+
+
 async def test_world_model_tool_execution_adapter_simulate_and_shadow_modes():
     from benchmarks.world_model_harness import (
         WMHHttpClient,
@@ -2975,6 +2990,10 @@ async def run_all_tests():
     r.record(
         "browser_adapter_can_ignore_run_wide_world_model_session",
         test_browser_adapter_can_ignore_run_wide_world_model_session,
+    )
+    r.record(
+        "per_agent_world_model_mode_overrides_process_default",
+        test_per_agent_world_model_mode_overrides_process_default,
     )
     r.record(
         "wmh_http_clients_allow_slow_grounded_transitions",

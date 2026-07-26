@@ -11,6 +11,7 @@ import { broadcastAgentModeStarted } from '../../providers/chat';
 import { createLogger } from '../../providers/logger';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import * as repo from './repo';
+import { normalizeWorldModelMode } from './agentExecutionMode';
 
 export { updateAgentConfig } from './agentConfigService';
 export { updateAgentStatus } from './agentStatusService';
@@ -130,6 +131,7 @@ export async function startAgentMode(agentId: string, userId: string) {
     },
     priceLimitCents: agent.priceLimitCents,
     fastModeCacheEnabled: agent.fastModeCacheEnabled,
+    worldModelMode: normalizeWorldModelMode(agent.worldModelMode),
     ...(agent.workflowMaxIterations !== null ? { maxIterations: agent.workflowMaxIterations } : {}),
     ...(agent.workflowContextGates !== null
       ? {

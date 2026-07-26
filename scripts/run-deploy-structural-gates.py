@@ -40,14 +40,20 @@ GATES = (
         "deploy-worktree-preflight",
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
+    Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "agent-behavior-approval",
         ("bash", "scripts/tests/check-agent-behavior-approval.test.sh"),
     ),
+    Gate("approval-format", ("bash", "scripts/tests/approval-format.test.sh")),
     Gate(
         "workflow-deployment-migration",
         ("bash", "scripts/tests/workflow-deployment-migration.test.sh"),
+    ),
+    Gate(
+        "agent-surface-hash",
+        ("bash", "scripts/tests/agent-surface-hash.test.sh"),
     ),
     Gate("factory-review", ("python3", "scripts/tests/factory-review.test.py")),
     Gate("wait-for-code-review", ("python3", "scripts/tests/wait-for-code-review.test.py")),
@@ -58,6 +64,7 @@ GATES = (
         ("python3", "scripts/tests/run-deploy-structural-gates.test.py"),
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
+    Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
 )
 
 

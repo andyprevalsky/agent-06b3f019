@@ -8,6 +8,23 @@ RUN_CONTEXT_SRC="$ROOT_DIR/scripts/lib/run-context.sh"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# Hermeticity: this suite sets the exact identity/trust inputs it asserts on
+# inside each subshell. A deploy shell (or a /descend deploy worktree that has
+# sourced .context/deploy-worktree.env) legitimately exports these same vars —
+# most notably ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 — which would otherwise leak
+# in and make normalize_conductor_workspace_env preserve a stale name that the
+# untrusted-normalization assertions expect to be overridden. Clear them here so
+# the test result never depends on the caller's ambient identity environment.
+unset ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME \
+  CONDUCTOR_WORKSPACE_NAME \
+  CONDUCTOR_WORKSPACE_PATH \
+  CONDUCTOR_PORT \
+  BENCHMARK_ISOLATED_RUN \
+  ROSE_DEPLOY_WORKTREE \
+  ROSE_DEPLOY_WORKTREE_PATH \
+  ROSE_DEPLOY_SOURCE_WORKSPACE \
+  TEMPORAL_TASK_QUEUE 2>/dev/null || true
+
 expect_eq() {
   local actual="$1"
   local expected="$2"
@@ -58,6 +75,29 @@ trusted_name="$(
   bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s' \"\$CONDUCTOR_WORKSPACE_NAME\""
 )"
 expect_eq "$trusted_name" "custom-name" "explicit trust flag preserves custom workspace name"
+
+deploy_child="$TMP_ROOT/deploy-child"
+mkdir -p "$deploy_child/.context"
+cat >"$deploy_child/.context/deploy-worktree.env" <<ENV
+export ROSE_DEPLOY_WORKTREE=1
+export ROSE_DEPLOY_WORKTREE_PATH=$deploy_child
+export CONDUCTOR_WORKSPACE_PATH=$deploy_child
+export CONDUCTOR_WORKSPACE_NAME=deploy-child
+export CONDUCTOR_PORT=56020
+ENV
+isolated_benchmark_env="$(
+  cd "$deploy_child"
+  BENCHMARK_ISOLATED_RUN=true \
+  ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
+  CONDUCTOR_WORKSPACE_NAME=deploy-child-bench-run-123 \
+  CONDUCTOR_WORKSPACE_PATH="$deploy_child" \
+  CONDUCTOR_PORT=56220 \
+  bash -c ". '$HELPER_SRC'; normalize_conductor_workspace_env >/dev/null; printf '%s\\n' \"\$CONDUCTOR_WORKSPACE_NAME\" \"\$CONDUCTOR_PORT\""
+)"
+isolated_benchmark_name=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '1p')
+isolated_benchmark_port=$(printf '%s\n' "$isolated_benchmark_env" | sed -n '2p')
+expect_eq "$isolated_benchmark_name" "deploy-child-bench-run-123" "isolated benchmark preserves its child identity"
+expect_eq "$isolated_benchmark_port" "56220" "isolated benchmark preserves its reserved port range"
 
 cloud_workspace="$TMP_ROOT/cloud-checkout"
 mkdir -p "$cloud_workspace"
@@ -139,5 +179,26 @@ resolved_absolute_wmh_log="$(
   bash -c ". '$RUN_CONTEXT_SRC'; resolve_run_context_file '$workspace' '$run_context' 'absolute-wmh-serve-log.txt'"
 )"
 expect_eq "$resolved_absolute_wmh_log" "$run_context/absolute-wmh-serve-log.txt" "absolute run-context paths remain unchanged"
+
+# db_port_conflict_owner guards setup-db.sh from clobbering a sibling
+# workspace's DB when a foreign CONDUCTOR_PORT derives a colliding LOCAL_DB_PORT.
+ps_output="victoria-db-cape-town 0.0.0.0:55005->5432/tcp, [::]:55005->5432/tcp
+victoria-db-canberra 0.0.0.0:55015->5432/tcp, [::]:55015->5432/tcp"
+
+conflict_owner="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55005 \"\$1\"" _ "$ps_output"
+)"
+expect_eq "$conflict_owner" "victoria-db-cape-town" "db port conflict names the sibling container binding the target port"
+
+no_conflict="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55060 \"\$1\"" _ "$ps_output"
+)"
+expect_eq "$no_conflict" "" "db port with no running binder reports no conflict"
+
+self_only="victoria-db-lagos 0.0.0.0:55005->5432/tcp, [::]:55005->5432/tcp"
+self_conflict="$(
+  bash -c ". '$HELPER_SRC'; db_port_conflict_owner victoria-db-lagos 55005 \"\$1\"" _ "$self_only"
+)"
+expect_eq "$self_conflict" "" "the workspace's own container is never treated as a conflict"
 
 echo "All workspace env tests passed."

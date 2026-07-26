@@ -3,8 +3,7 @@
  * Black-box tests (part 5) for the purchases domain.
  *
  * Exercises the charge/rollback compensation branches, the mint recovery guards, the Stripe
- * customer resolver, KYC classification, and the wallet-funding collection helper — all through
- * fake card/wallet providers + local Postgres, so no live AgentCard or Stripe network is touched.
+ * KYC and wallet-funding helpers through local fakes, so no live provider is touched.
  * Split from purchases.blackbox.ts to stay under the max-lines cap.
  */
 
@@ -115,7 +114,7 @@ async function expectThrow(fn: () => Promise<unknown>): Promise<Error> {
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
-    'mint fails and cancels the hold when the card is issued without a company transfer id',
+    'mint preserves an ambiguous provider result without opening a second external attempt',
     async () => {
       const userId = await createSubscribedUser('no-transfer-id');
       const provider = new NoTransferIdCardProvider();
@@ -131,16 +130,25 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(
-          error.code === 'agentcard_company_transfer_missing',
-          `expected transfer-missing code, got ${error.code}`
+          error.code === 'agentcard_company_funding_in_progress',
+          `expected funding-in-progress code, got ${error.code}`
         );
-        assert(provider.closeCalls === 1, 'the issued card must be closed on rollback');
+        assert(
+          provider.closeCalls === 0,
+          'an unpersisted provider result must be replayed, not guessed'
+        );
         assert(calls.captures.length === 0, 'a card without a transfer must never be captured');
-        assert(calls.cancels.length === 1, 'the authorized hold must be canceled');
+        assert(
+          calls.cancels.length === 0,
+          'the hold stays while the exact provider key is retryable'
+        );
         assert(calls.refunds.length === 0, 'an uncaptured hold is canceled, not refunded');
 
         const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
-        assert(row?.status === PurchaseSpendStatus.FAILED, `expected FAILED, got ${row?.status}`);
+        assert(
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
       });
     },
   ],
@@ -161,13 +169,13 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(error.message.includes('card details failed'), 'the mint failure must surface');
-        // Card was minted + funding recorded + charge captured, then getDetails failed. The
-        // compensating close throws, so the payment reversal is deliberately skipped for manual
-        // reconciliation.
+        // Card was minted and funding recorded, then getDetails failed before capture. The
+        // compensating close throws, so the hold is deliberately preserved until funding
+        // reconciliation can safely release it.
         assert(provider.closeCalls === 1, 'rollback must attempt to close the issued card');
-        assert(calls.captures.length === 1, 'the hold was captured before the failure');
-        assert(calls.cancels.length === 0, 'a captured charge is never canceled');
-        assert(calls.refunds.length === 0, 'reversal is skipped when the card close fails');
+        assert(calls.captures.length === 0, 'card details must be verified before capture');
+        assert(calls.cancels.length === 0, 'the hold stays while funding reclaim is unresolved');
+        assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
         const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
         assert(
@@ -178,7 +186,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'mint records REFUND_FAILED when the captured charge cannot be reversed',
+    'mint records REFUND_FAILED when the uncaptured hold cannot be canceled',
     async () => {
       const userId = await createSubscribedUser('refund-fail');
       const provider = new FailingDetailsCardProvider();
@@ -195,15 +203,16 @@ const tests: Array<[string, () => Promise<void>]> = [
             )
           );
           assert(error.message.includes('card details failed'), 'the mint failure must surface');
-          // Card minted + captured, getDetails failed; the card closed cleanly and its funding was
-          // reclaimed, so the captured charge must be refunded — but the refund fails here.
+          // Card minted, then getDetails failed before capture. The card closed cleanly and its
+          // funding was reclaimed, so the hold must be canceled — but cancellation fails here.
           assert(provider.closeCalls === 1, 'the issued card must be closed on rollback');
           assert(
             walletProvider.reclaimCalls.length === 1,
             'the recorded funding must be reclaimed before the refund attempt'
           );
-          assert(calls.captures.length === 1, 'the hold was captured before the failure');
-          assert(calls.refunds.length === 0, 'the refund attempt threw, so none was recorded');
+          assert(calls.captures.length === 0, 'card details must be verified before capture');
+          assert(calls.cancels.length === 0, 'the cancel attempt threw, so none was recorded');
+          assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
           const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
           assert(
@@ -211,12 +220,12 @@ const tests: Array<[string, () => Promise<void>]> = [
             `expected REFUND_FAILED, got ${row?.status}`
           );
         },
-        { refundError: new Error('temporary Stripe refund failure') }
+        { cancelError: new Error('temporary Stripe cancellation failure') }
       );
     },
   ],
   [
-    'mint flags funding reclaim required when company funding stays in progress with no transfer',
+    'mint preserves a resumable purchase when company funding stays in progress with no transfer',
     async () => {
       const userId = await createSubscribedUser('funding-in-progress-no-transfer');
       const provider = new FundingInProgressNoTransferCardProvider();
@@ -232,20 +241,27 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(
-          error.message.includes('company funding is in progress'),
-          'the in-progress funding error must surface'
+          error instanceof PurchaseError && error.code === 'agentcard_company_funding_in_progress',
+          'the typed in-progress funding error must surface'
         );
-        // No card was issued and the funding is treated as reclaim-required, so Stripe must not be
-        // reversed automatically.
+        // No card was issued, but the provider may still finish the idempotent request. Preserve
+        // both the hold and its durable funding marker for a same-purchase retry.
         assert(provider.closeCalls === 0, 'no card was issued, so none should be closed');
         assert(calls.captures.length === 0, 'the hold must not be captured');
-        assert(calls.cancels.length === 0, 'reversal is deferred to manual reconciliation');
-        assert(calls.refunds.length === 0, 'reversal is deferred to manual reconciliation');
+        assert(calls.cancels.length === 0, 'the hold must survive the resumable provider attempt');
+        assert(calls.refunds.length === 0, 'an uncaptured hold is never refunded');
 
-        const row = await prisma.purchaseSpend.findFirst({ where: { userId, fingerprint } });
+        const row = await prisma.purchaseSpend.findFirst({
+          where: { userId, fingerprint },
+          include: { walletFunding: true },
+        });
         assert(
-          row?.status === PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
-          `expected FUNDING_RECLAIM_FAILED, got ${row?.status}`
+          row?.status === PurchaseSpendStatus.FUNDING_PENDING,
+          `expected FUNDING_PENDING, got ${row?.status}`
+        );
+        assert(
+          row?.walletFunding?.status === PurchaseWalletFundingStatus.PENDING,
+          `expected PENDING funding marker, got ${row?.walletFunding?.status}`
         );
       });
     },
@@ -288,7 +304,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'stale-charging recovery that cannot reclaim funding surfaces a 409 for manual reconciliation',
+    'request recovery leaves an interrupted issued card to the cron compensator',
     async () => {
       const userId = await createSubscribedUser('stale-reclaim-fail');
       const fingerprint = `stale-reclaim-fail-${randomUUID()}`;
@@ -300,6 +316,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           lineItemsJson: { totalCents: 1000 },
           totalCents: 1000,
           status: PurchaseSpendStatus.CHARGING,
+          cardId: `card_stale_${randomUUID()}`,
           stripePaymentIntentId: `pi_stale_${randomUUID()}`,
           updatedAt: new Date(Date.now() - 60 * 60 * 1000),
         },
@@ -327,20 +344,18 @@ const tests: Array<[string, () => Promise<void>]> = [
           )
         );
         assert(error.statusCode === 409, `expected 409, got ${error.statusCode}`);
-        assert(
-          error.message.includes('manual reconciliation'),
-          'error should ask for manual reconciliation'
-        );
+        assert(error.code === 'purchase_funding_reconciliation_in_progress');
         const row = await prisma.purchaseSpend.findUnique({ where: { id: stale.id } });
         assert(
-          row?.status === PurchaseSpendStatus.FUNDING_RECLAIM_FAILED,
-          `expected FUNDING_RECLAIM_FAILED, got ${row?.status}`
+          row?.status === PurchaseSpendStatus.CHARGING,
+          `expected CHARGING, got ${row?.status}`
         );
+        assert(walletProvider.reclaimCalls.length === 0, 'HTTP recovery must not own card cleanup');
       });
     },
   ],
   [
-    'stale-charging recovery tolerates a failed Stripe hold cancel and still re-mints',
+    'stale recovery blocks a new purchase while Stripe cancellation is failing',
     async () => {
       const userId = await createSubscribedUser('stale-cancel-fail');
       const fingerprint = `stale-cancel-fail-${randomUUID()}`;
@@ -365,24 +380,26 @@ const tests: Array<[string, () => Promise<void>]> = [
           throw new Error('stripe cancel unavailable');
         };
         try {
-          const result = await purchasesService.mintPurchaseCard(
-            mintBody(userId, { fingerprint }) as never,
-            provider,
-            walletProvider
+          const error = await expectPurchaseError(() =>
+            purchasesService.mintPurchaseCard(
+              mintBody(userId, { fingerprint }) as never,
+              provider,
+              walletProvider
+            )
           );
-          assert(result.cardId === provider.cardId, 'recovery should still mint a fresh card');
+          assert(error.code === 'purchase_stripe_reconciliation_in_progress');
         } finally {
           (stripe.paymentIntents as unknown as { cancel: unknown }).cancel = originalCancel;
         }
         const staleRow = await prisma.purchaseSpend.findUnique({ where: { id: stale.id } });
         assert(
-          staleRow?.status === PurchaseSpendStatus.FAILED,
-          `stale row should be FAILED, got ${staleRow?.status}`
+          staleRow?.status === PurchaseSpendStatus.CHARGING,
+          `stale row should remain CHARGING, got ${staleRow?.status}`
         );
         const held = await prisma.purchaseSpend.findFirst({
           where: { userId, fingerprint, status: PurchaseSpendStatus.HELD },
         });
-        assert(held !== null, 'a fresh HELD purchase should exist after recovery');
+        assert(held === null, 'a failed cancellation must not allow a fresh purchase');
       });
     },
   ],
@@ -580,10 +597,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           failingProvider
         )
       );
-      assert(
-        providerError.message.includes('provider unavailable'),
-        'a provider failure must propagate'
-      );
+      assert(providerError.message.includes('provider unavailable'));
       const failedRow = await prisma.purchaseWalletFunding.findUnique({
         where: { purchaseId: pending.id },
       });

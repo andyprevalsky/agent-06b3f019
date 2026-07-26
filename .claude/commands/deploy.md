@@ -8,6 +8,16 @@ Push the current branch, create a PR, obtain a CodeRabbit review (or Claude Code
 
 **This is a loop. Do NOT stop until the PR is merged and deploys are complete (or the user tells you to stop).**
 
+## Canonical human-approval format
+
+Every human approval request in this command—including prompt or
+agent-behavior approval, a gate override, credential/billing/environment
+escalation, a destructive action, or any other approval—must follow
+`.claude/shared/approval-format.md`. Read it completely immediately before
+composing the request. Its Detail, Before Behavior, After Behavior, and
+Downstream Implications sections are mandatory and additive to the
+deploy-specific telemetry, file-link, and snapshot rules below.
+
 ---
 
 # Step 0: Capture original Conductor workspace title
@@ -91,6 +101,20 @@ If an isolated worktree fails, return it to `/descend` preparation. Do not run
 `scripts/setup-db.sh` with an inherited parent identity and do not borrow a
 different worktree's database.
 
+An approval wait or any other pause can outlive the isolated worktree's lease.
+Whenever control returns after a pause, and before running the next deploy
+action from an isolated worktree, atomically reactivate its ownership and
+reprovision anything cleanup may have reclaimed:
+
+```bash
+bash scripts/prepare-deploy-worktree.sh --resume
+```
+
+This resume gate must finish successfully before continuing. It waits when
+cleanup already owns the manifest lock; it never overwrites an in-progress
+reclamation. Primary Conductor worktrees have no deploy manifest and skip this
+isolated-worktree-only resume command.
+
 **You must fix ALL non-overridden failing tests, even if they are not caused by the changes in this branch.** The deploy flow defaults to keeping main green. If a test was already broken before your branch, that is now your responsibility to fix before merging unless the user explicitly overrides that exact gate. This includes infrastructure issues, flaky tests, timeout tuning, missing credentials, third-party integration problems, and anything else.
 
 Run all checks locally. If any step fails, fix the issue and re-run that step. If fixing required code changes, re-run the entire Test Loop from the top.
@@ -171,7 +195,7 @@ CHANGED_AGENT_RUNTIME=$(printf '%s\n' "$CHANGED_AGENTS" |
   bash "$(git rev-parse --show-toplevel)/scripts/classify-agent-runtime-changes.sh")
 CHANGED_FRONTEND=$(echo "$CHANGED" | grep -E '^front-end/' || true)
 CHANGED_MAC_APP=$(echo "$CHANGED" | grep -E '^mac-app/' || true)
-CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
+CHANGED_CLOUDBENCH=$(echo "$CHANGED" | grep -E '^(scripts/(run\.sh|setup-db\.sh|run-in-new-session\.py|run-bench-cloud|run-bench-fleet|run-predeploy-(cloud|local)|create-worktree-patch\.sh|cloudbench-|lib/cloudbench-env\.sh|tests/cloudbench-)|agents/benchmarks/cloudbench_dependency_sync_test\.py)' || true)
 CHANGED_RUNTIME_SURFACE=$([ -n "$CHANGED_BACKEND$CHANGED_AGENTS" ] && echo "yes" || echo "")
 CHANGED_AGENTCARD_PAYMENT=$(echo "$CHANGED" | grep -E '^(back-end/(scripts/setup-benchmark-payment\.ts|src/domains/(agentcard|purchases|test-payment)/|src/providers/(agentcard/|card-provider/|purchaseCleanup\.ts|purchase-wallet-funding|wallet-funding\.ts))|agents/(benchmarks/|domains/request_payment_card/|tools/request_payment_card\.py)|front-end/src/features/test-payment/|scripts/(run\.sh|run-agentcard-lifecycle-task\.sh))' || true)
 
@@ -387,11 +411,13 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these eleven independent suites without
+The concurrent runner executes exactly these thirteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
+`bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
@@ -403,9 +429,14 @@ changing their assertions or test counts: `bash scripts/tests/workspace-env.test
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
+bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
+  bash scripts/tests/seed-cache-decision.test.sh
 ```
 
 These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+The separately logged seed-cache decision suite preserves the atomic shared-dump
+and Prisma-freshness contract introduced before the concurrent structural
+runner.
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -488,7 +519,7 @@ bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/cloudbench-multi-workstream.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
-  -k 'cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env'
+  -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete'
 cd agents && python scripts/run_blackbox_tests.py benchmark
 ```
 
@@ -862,11 +893,11 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 - Changing the nature/intent of a test (e.g., weakening assertions, changing what the test validates)
 - Changing timeouts without explicit user permission — instead, diagnose which parts of the agent lifecycle and LLM requests are causing the most latency, and reduce them precisely in a generalizable way that won't create downstream issues
-- Skipping or disabling tests, except the deploy-approved Claude Code credential-unavailable smoke skip described above
+- Skipping or disabling tests, except two deploy-approved provider-funding smoke skips: (1) the Claude Code credential-unavailable smoke skip described above, and (2) the Codex E2B smoke (`codex-code` blackbox `smoke -- Codex completes task in real E2B sandbox`) when **every** Codex credential path (ChatGPT OAuth + the funded OpenAI key) is out of credits/quota. The Codex skip is automatic and self-verifying: `codexSmokeCreditSkipReason` (in `back-end/src/tests/blackbox/codex-credit-skip.ts`) converts that specific out-of-funds terminal state into a loud `SKIP` (never a silent pass) so the gate is not blocked by an external funding state, while every other Codex failure mode — crash, timeout, wrong output, and bare OAuth/token revocation (a re-auth issue, not a funding issue) — still hard-fails. Do NOT reach for the coarse `BLACKBOX_TEST_SKIP_DOMAINS=codex-code` bypass for the funding case; the in-test skip keeps the rest of the codex-code domain strict.
 
 **Escalation is ONLY for:**
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded")
+- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate
 - Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
@@ -1231,6 +1262,8 @@ gh run watch "$FALLBACK_RUN_ID" --exit-status
 ```
 
 After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+
+**Review-provider usage exhaustion is a skippable gate.** The review gate exists to catch code defects, not to block on billing/quota state. When BOTH reviewers are unavailable specifically because their usage/credits/quota are exhausted — CodeRabbit reports a rate-limit/spending-cap/"Review limit reached" **and** the Claude fallback fails from provider usage exhaustion (e.g. `is_error:true` after ~1 turn / ~2s with an Anthropic "credit balance is too low"/400, a 429 rate limit, or a spending cap) — the review gate is **provider-blocked, not code-blocked**. Distinguish this from a repairable fallback failure (bad checkout, workflow bug, transient 5xx): those you fix and rerun. A usage-exhaustion block is not repairable by the agent (it is user-owned billing/quota, exactly like the warn-only Anthropic credential-health gate). In that case, record `Code Review | ⚠️ Skipped | both reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)` in `TEST_REPORT`, close the open review cycle as clean with a note, surface the exhaustion + its concrete risk (unreviewed diff) in the PR body and final handoff, and proceed. Prefer restoring a reviewer (top up Anthropic credits and rerun the Claude fallback, or wait out the CodeRabbit window) when the situation allows; only skip when neither reviewer can run. Never label an unavailable review as passing, and never use this path to skip a reviewer that *did* run and returned findings.
 
 Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
 
@@ -1739,6 +1772,22 @@ if [ "$AGENT_CUTOVER_REQUIRED" = "1" ]; then
   git cat-file -e "${DEPLOY_MERGED_SHA}^{commit}" ||
     { echo "❌ Exact deploy merge commit is unavailable: $DEPLOY_MERGED_SHA"; exit 1; }
   cd "$(git rev-parse --show-toplevel)/back-end" && source .env
+  # Self-driving CI is the primary cutover driver (deploy-agents.yml runs
+  # validate → flip pointer → migrate itself, so a bare `gh pr merge` can never
+  # strand the fleet). If CI already rolled over to this build's generation, the
+  # local drive below is redundant: short-circuit to a verify-only pass. This is
+  # the fallback path for when CI could not self-drive (e.g. cutover secrets
+  # absent). Both paths are idempotent, so double-driving is harmless.
+  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
+  AGENT_LIVE_GENERATION=$(npx tsx scripts/set-agent-queue-pointer.ts --read 2>/dev/null \
+    | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s.trim());process.stdout.write(o&&o.surfaceHash?o.surfaceHash:"")}catch{process.stdout.write("")}})' || true)
+  if [ "$AGENT_LIVE_GENERATION" = "$AGENT_SURFACE_HASH" ]; then
+    echo "✅ CI already cut over to generation $AGENT_SURFACE_HASH; verifying and skipping the local drive"
+    release_agent_cutover_lock success "Cutover completed by self-driving CI"
+    trap - EXIT
+    gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
+    python3 scripts/record_factory_event.py deploy production-finish fly
+  else
   # Before sealing even one production history, prove the exact candidate image
   # can construct its full worker and run real workflow initialization. Only
   # this deployment attempt polls this isolated queue. The validation stops at
@@ -1830,6 +1879,25 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   [ "$AGENT_DEPLOY_HOLD_STATUS" = "in_progress" ] ||
     { echo "❌ Exact production deploy lock is no longer held"; exit 1; }
 
+  # Zero-downtime routing flip. Compute this build's replay-surface generation and
+  # point NEW agent workflows at its generation queue (`navi-agent-tasks@<hash>`)
+  # BEFORE respawning open workflows. Every replacement resolves its queue through
+  # the same pointer (providers/agentQueuePointer.ts, wired into
+  # startAgentWorkflowExecution), so respawns and all new traffic land on the
+  # just-activated generation while the old generation keeps serving until each
+  # workflow is migrated off it. The flip is atomic and instantly reversible
+  # (flip back to the previous generation = rollback, no redeploy).
+  AGENT_SURFACE_HASH=$(python3 "$(git rev-parse --show-toplevel)/scripts/agent_workflow_surface_hash.py")
+  AGENT_GENERATION_QUEUE="navi-agent-tasks@${AGENT_SURFACE_HASH}"
+  echo "Flipping agent queue pointer to generation ${AGENT_GENERATION_QUEUE}"
+  npx tsx scripts/set-agent-queue-pointer.ts \
+    --queue "$AGENT_GENERATION_QUEUE" \
+    --surface-hash "$AGENT_SURFACE_HASH" \
+    --by "deploy-${DEPLOY_MERGED_SHA}"
+  # Wait past the pointer cache TTL so every backend instance routes new workflows
+  # to the new generation before we start draining the old one.
+  sleep 6
+
   TEMPORAL_TASK_QUEUE=navi-agent-tasks \
     TEMPORAL_WORKER_BUILD_ID="$DEPLOY_MERGED_SHA" \
     TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$AGENT_DEPLOYMENT_TOKEN" \
@@ -1846,6 +1914,7 @@ print(max(0, math.ceil(float(os.environ["RENDER_OLD_INSTANCE_DRAIN_SECONDS"]) - 
   trap - EXIT
   gh run watch "$AGENT_DEPLOY_RUN_ID" --exit-status
   python3 scripts/record_factory_event.py deploy production-finish fly
+  fi
 fi
 ```
 

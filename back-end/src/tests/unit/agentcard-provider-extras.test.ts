@@ -1,7 +1,6 @@
 #!/usr/bin/env tsx
 /**
  * Unit tests for the remaining AgentCard provider surfaces:
- *  - `benchmark-float.ts` — v2 sandbox-wallet precondition via get_company_wallet.
  *  - `org-wallet-monitor.ts` — wallet extraction error branches, the fallback
  *    deposit-address message, the DB-backed alert store, and the disabled monitor.
  *  - `sandbox-settlement.ts` — the real markPurchaseCleared Postgres transaction.
@@ -11,7 +10,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
-import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
 import {
   createAgentCardOrgWalletAlertStore,
   extractAgentCardOrgWallet,
@@ -37,14 +35,6 @@ async function test(name: string, fn: () => Promise<void> | void): Promise<void>
   }
 }
 
-function walletToolResult(wallet: {
-  livemode: boolean;
-  balance_cents: number;
-  available_cents: number;
-}): unknown {
-  return { structuredContent: { wallet: { committed_cents: 0, ...wallet } } };
-}
-
 async function seedUser(): Promise<string> {
   const userId = `agentcard-extras-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
@@ -55,40 +45,8 @@ async function seedUser(): Promise<string> {
 async function main(): Promise<void> {
   process.stdout.write('Running AgentCard provider-extras unit tests...\n');
 
-  // ── benchmark-float (v2 get_company_wallet precondition) ──
-  await test('ensureAgentCardSandboxFloat reads the sandbox wallet once, no top-up', async () => {
-    const tools: string[] = [];
-    const result = await ensureAgentCardSandboxFloat(200_000, async (tool) => {
-      tools.push(tool);
-      return walletToolResult({
-        livemode: false,
-        balance_cents: 100_966_476,
-        available_cents: 100_966_476,
-      });
-    });
-    assert.deepEqual(result, { balanceCents: 100_966_476, availableCents: 100_966_476 });
-    assert.deepEqual(tools, ['get_company_wallet'], 'single read, no funding call');
-  });
-
-  await test('ensureAgentCardSandboxFloat fails closed on a LIVE wallet', async () => {
-    await assert.rejects(
-      () =>
-        ensureAgentCardSandboxFloat(200_000, async () =>
-          walletToolResult({ livemode: true, balance_cents: 100_000_000, available_cents: 100_000_000 })
-        ),
-      /LIVE AgentCard org wallet/
-    );
-  });
-
-  await test('ensureAgentCardSandboxFloat rejects a sandbox wallet below the floor', async () => {
-    await assert.rejects(
-      () =>
-        ensureAgentCardSandboxFloat(200_000, async () =>
-          walletToolResult({ livemode: false, balance_cents: 1_000, available_cents: 1_000 })
-        ),
-      /below the required floor/
-    );
-  });
+  // benchmark-float.ts is covered by agentcard-benchmark-float.test.ts
+  // (client-credential get_company_wallet float verification).
 
   // ── org-wallet-monitor extraction + message ──
   await test('extractAgentCardOrgWallet rejects missing wallet and missing numbers', () => {

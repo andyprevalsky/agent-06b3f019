@@ -60,7 +60,7 @@ while IFS= read -r file; do
     .github/workflows/auto-rca.yml)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
-    CLAUDE.md|AGENTS.md|.claude/commands/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
+    CLAUDE.md|AGENTS.md|.claude/*.md|.cursor/rules/*.mdc|*/CLAUDE.md|*/AGENTS.md|*/SKILL.md)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
     */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*prompt*.txt|*system-prompt*|*system_prompt*|*strategy_override*.txt)

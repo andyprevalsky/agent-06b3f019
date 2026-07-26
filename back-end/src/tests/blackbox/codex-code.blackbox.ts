@@ -4,6 +4,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
+import { prisma } from '../../providers/database';
+import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
+import {
+  CredentialExhaustionSkip,
+  codexSmokeCreditSkipReason,
+  testCreditExhaustion_neverOverridesSuccessSentinel,
+  testDetectCreditExhaustion_negative,
+  testDetectCreditExhaustion_positive,
+} from './codex-credit-skip';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -15,6 +24,8 @@ const ErrorResponse = z.object({ error: z.string() });
 interface TestResult {
   name: string;
   passed: boolean;
+  skipped?: boolean;
+  skipReason?: string;
   error?: string;
   duration: number;
 }
@@ -56,6 +67,17 @@ async function runTest(name: string, fn: () => Promise<void>): Promise<TestResul
     await fn();
     return { name, passed: true, duration: Date.now() - start };
   } catch (error) {
+    if (error instanceof CredentialExhaustionSkip) {
+      // Not a failure: the third-party account is out of credits/quota. Report
+      // as a loud SKIP so the deploy gate is not blocked by external funding.
+      return {
+        name,
+        passed: true,
+        skipped: true,
+        skipReason: error.message,
+        duration: Date.now() - start,
+      };
+    }
     return {
       name,
       passed: false,
@@ -278,6 +300,112 @@ function testResolveCodexAuthEnvs_emptyKeyThrows() {
   assert(threw, 'throws when the api-key fallback is an empty string');
 }
 
+function testResolveCodexAuthEnvs_cooldownExcludesFundedKey() {
+  const oauthEnvs = resolveCodexCodeAuthEnvs(CODEX_OAUTH_META, 'sk-proj-funded-key', true);
+  assert(
+    oauthEnvs.CODEX_AUTH_JSON !== undefined && oauthEnvs.OPENAI_API_KEY === undefined,
+    'cooled funded key must be withheld while a usable OAuth credential remains'
+  );
+
+  let threw = false;
+  try {
+    resolveCodexCodeAuthEnvs(null, 'sk-proj-funded-key', true);
+  } catch {
+    threw = true;
+  }
+  assert(threw, 'cooled funded key must not launch an API-key-only Codex sandbox');
+}
+
+async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
+  const userId = crypto.randomUUID();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gpt_code',
+      type: 'TOOL_SETUP',
+      status: 'CONNECTED',
+      isActive: true,
+    },
+  });
+  const taskId = crypto.randomUUID();
+  await prisma.claudeCodeSession.create({
+    data: {
+      id: taskId,
+      agentId: crypto.randomUUID(),
+      sandboxId: `codex-funded-exhaustion-${taskId}`,
+      goal: 'captured Codex OAuth-to-funded-key exhaustion replay',
+      status: 'ACTIVE',
+      claudeTokenSource: 'user',
+      claudeTokenIntegrationId: integration.id,
+    },
+  });
+
+  try {
+    const output =
+      Array.from({ length: 650 }, (_, index) => `normal fallback output ${index}`).join('\n') +
+      '\n[Codex] Error code: insufficient_quota\n';
+    const res = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({
+        output,
+        credential_feedback: [
+          {
+            source: 'oauth',
+            reason: 'Quota exceeded. Check your plan and billing details.',
+          },
+          { source: 'funded_api_key', reason: 'insufficient_quota' },
+        ],
+      }),
+    });
+    assertStatus(res.status, 200, res.data);
+
+    const persistedIntegration = await prisma.integration.findUnique({
+      where: { id: integration.id },
+    });
+    assert(
+      persistedIntegration?.rateLimitedUntil instanceof Date &&
+        persistedIntegration.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the exact selected OAuth integration'
+    );
+
+    const cooldown = await prisma.integration.findUnique({
+      where: {
+        userId_name: {
+          userId: '00000000-0000-0000-0000-000000000000',
+          name: 'gpt_api_key_cooldown',
+        },
+      },
+    });
+    assert(
+      cooldown?.rateLimitedUntil instanceof Date &&
+        cooldown.rateLimitedUntil.getTime() > Date.now(),
+      'failed OAuth-to-funded-key fallback must cool the shared funded credential'
+    );
+  } finally {
+    await prisma.claudeCodeSession.deleteMany({ where: { id: taskId } });
+    await prisma.integration.deleteMany({ where: { id: integration.id } });
+    await prisma.integration.deleteMany({
+      where: {
+        userId: '00000000-0000-0000-0000-000000000000',
+        name: 'gpt_api_key_cooldown',
+      },
+    });
+  }
+}
+
+async function testPersistOutput_rejectsInvalidCredentialFeedback() {
+  const res = await request(`${BASE_URL}/api/codex-code-session/${crypto.randomUUID()}/output`, {
+    method: 'POST',
+    headers: apiKeyHeaders(),
+    body: JSON.stringify({
+      output: 'terminal output',
+      credential_feedback: [{ source: 'funded_api_key', reason: '' }],
+    }),
+  });
+  assertStatus(res.status, 400, res.data);
+}
+
 async function testSmoke_codexCompletesE2bTask() {
   assert(API_KEY !== '', 'BACKEND_API_KEY is required');
   assert(
@@ -308,6 +436,22 @@ async function testSmoke_codexCompletesE2bTask() {
     sandboxId = body.sandbox_id;
 
     const { output, events, exitCode } = await waitForCodexOutput(body.ws_url);
+    const outputRes = await request(`${BASE_URL}/api/codex-code-session/${taskId}/output`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify({ output }),
+    });
+    assertStatus(outputRes.status, 200, outputRes.data);
+    // Before treating a missing sentinel as a hard failure, check whether the
+    // run simply ran out of credits on EVERY credential path (OAuth + funded
+    // key). That is an external funding state, not a code regression, so it is
+    // a deploy-approved SKIP rather than a FAIL.
+    const creditSkip = codexSmokeCreditSkipReason(output, events);
+    if (creditSkip) {
+      throw new CredentialExhaustionSkip(
+        `Codex credentials exhausted (out of credits/quota) on all paths; smoke SKIPPED without failing the deploy gate. Signal: ${creditSkip}. exit=${exitCode ?? 'unknown'}`
+      );
+    }
     assert(
       output.includes('CODEX_E2B_DONE'),
       `Codex output did not include CODEX_E2B_DONE. exit=${exitCode ?? 'unknown'} events=${JSON.stringify(events).slice(-800)} Tail: ${output.slice(-1200)}`
@@ -416,6 +560,34 @@ async function runAll() {
       name: 'auth -- throws when funded key is empty',
       fn: async () => testResolveCodexAuthEnvs_emptyKeyThrows(),
     },
+    {
+      name: 'auth -- cooled funded key is excluded before sandbox creation',
+      fn: async () => testResolveCodexAuthEnvs_cooldownExcludesFundedKey(),
+    },
+    {
+      name: 'feedback -- captured OAuth exhaustion cools exact credential',
+      fn: testPersistOutput_coolsExhaustedOAuthCredential,
+    },
+    {
+      name: 'feedback -- failed OAuth fallback cools OAuth and funded credentials',
+      fn: testPersistOutput_coolsBothCredentialsAfterFailedFallback,
+    },
+    {
+      name: 'feedback -- invalid structured credential event is rejected',
+      fn: testPersistOutput_rejectsInvalidCredentialFeedback,
+    },
+    {
+      name: 'smoke-skip -- credit exhaustion detected across output and events',
+      fn: async () => testDetectCreditExhaustion_positive(),
+    },
+    {
+      name: 'smoke-skip -- healthy run and bare re-auth error are NOT fundless skips',
+      fn: async () => testDetectCreditExhaustion_negative(),
+    },
+    {
+      name: 'smoke-skip -- success sentinel is never overridden by exhaustion',
+      fn: async () => testCreditExhaustion_neverOverridesSuccessSentinel(),
+    },
   ];
   if (process.env.BACKEND_CODEX_SMOKE_SKIP === '1') {
     console.log(
@@ -432,15 +604,22 @@ async function runAll() {
   for (const test of tests) {
     const result = await runTest(test.name, test.fn);
     results.push(result);
-    const icon = result.passed ? '  PASS' : '  FAIL';
-    console.log(
-      `${icon}  ${result.name}${result.passed ? '' : ` -- ${result.error}`} (${result.duration}ms)`
-    );
+    const icon = result.skipped ? '  SKIP' : result.passed ? '  PASS' : '  FAIL';
+    const suffix = result.skipped
+      ? ` -- ${result.skipReason}`
+      : result.passed
+        ? ''
+        : ` -- ${result.error}`;
+    console.log(`${icon}  ${result.name}${suffix} (${result.duration}ms)`);
   }
 
   const failed = results.filter((r) => !r.passed);
+  const skipped = results.filter((r) => r.skipped);
+  const passed = results.filter((r) => r.passed && !r.skipped);
   console.log('\n' + '='.repeat(50));
-  console.log(`\nResults: ${results.length - failed.length} passed, ${failed.length} failed`);
+  console.log(
+    `\nResults: ${passed.length} passed, ${failed.length} failed, ${skipped.length} skipped`
+  );
   if (failed.length > 0) {
     process.exit(1);
   }

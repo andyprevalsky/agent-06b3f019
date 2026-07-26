@@ -195,15 +195,20 @@ wait_for_benchmark_frontend_url() {
 # ── Normalize the task list (comma OR space separated) into an array ────────
 # The controller may pass "a,b,c" or "a b c"; accept both.
 read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
-BENCH_ENABLE_NON_PURCHASE_GATES=0
+TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
+if PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" python3 - "${BENCH_TASK_LIST[@]}" <<'PY'
+import sys
+
+from benchmarks.benchmark_tasks import selected_tasks_require_gate_type
+
+raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 1)
+PY
+then
+    TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+fi
 for task_name in "${BENCH_TASK_LIST[@]}"; do
-    case "$task_name" in
-        gate-source-connect-gmail)
-            BENCH_ENABLE_NON_PURCHASE_GATES=1
-            ;;
-    esac
     case "$task_name" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
@@ -211,6 +216,31 @@ for task_name in "${BENCH_TASK_LIST[@]}"; do
             ;;
     esac
 done
+
+render_task_worker_exports() {
+    local entry
+    if [ "${#TASK_WORKER_ENV[@]}" -eq 0 ]; then
+        return
+    fi
+    for entry in "${TASK_WORKER_ENV[@]}"; do
+        printf 'export %q\n' "$entry"
+    done
+}
+TASK_WORKER_EXPORTS="$(render_task_worker_exports)"
+
+if [ "${CLOUDBENCH_PRINT_TASK_ENV:-0}" = "1" ]; then
+    if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
+        for entry in "${TASK_WORKER_ENV[@]}"; do
+            printf 'stack:%s\n' "$entry"
+        done
+    fi
+    if [ -n "$TASK_WORKER_EXPORTS" ]; then
+        while IFS= read -r entry; do
+            printf 'benchmark:%s\n' "$entry"
+        done <<< "$TASK_WORKER_EXPORTS"
+    fi
+    exit 0
+fi
 
 emit_report_and_result() {
     # Always surface whatever report card / run results exist, even on failure,
@@ -580,8 +610,8 @@ fi
 if [ -n "$BENCHMARK_VM_USD_PER_HOUR" ]; then
     STACK_ENV+=("BENCHMARK_VM_USD_PER_HOUR=$BENCHMARK_VM_USD_PER_HOUR")
 fi
-if [ "$BENCH_ENABLE_NON_PURCHASE_GATES" = "1" ]; then
-    STACK_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+if [ "${#TASK_WORKER_ENV[@]}" -gt 0 ]; then
+    STACK_ENV+=("${TASK_WORKER_ENV[@]}")
 fi
 if [ "$BENCH_NEEDS_BUNDLED_FRONTEND" = "1" ]; then
     STACK_ENV+=("BENCHMARK_BUNDLED_FRONTEND=true")
@@ -817,9 +847,7 @@ if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
 else
   unset AGENTCARD_ONBOARDING_RETURN_URL
 fi
-if [ '$BENCH_ENABLE_NON_PURCHASE_GATES' = '1' ]; then
-  export NON_PURCHASE_GATES_ENABLED=1
-fi
+$TASK_WORKER_EXPORTS
 if [ '$BENCH_SIMULATE' = '1' ]; then
   export BENCHMARK_WORLD_MODEL_MODE='simulate'
   export WMH_BASE_URL='http://localhost:$WMH_PORT'

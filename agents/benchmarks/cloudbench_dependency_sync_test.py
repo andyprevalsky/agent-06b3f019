@@ -2832,7 +2832,10 @@ machine_storage_ready machine-1
         text=True,
         capture_output=True,
         check=False,
-        timeout=2,
+        # The helper owns a 0.2s process deadline plus a 1s termination grace.
+        # Leave scheduler headroom when this regression runs beside every
+        # repository coverage suite; an unbounded 30s read still fails closed.
+        timeout=5,
     )
 
     assert result.returncode == 1, result.stderr

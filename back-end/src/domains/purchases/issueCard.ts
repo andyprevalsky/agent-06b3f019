@@ -1,0 +1,90 @@
+import { type CardProvider } from '../../providers/card-provider';
+import { type WalletFundingProvider } from '../../providers/wallet-funding';
+import { isAdminUser } from '../../utils/adminAccess';
+import {
+  chargeAndIssueCard,
+  mintCaptureAndIssue,
+  rollbackChargeFailure,
+  type ChargeState,
+} from './charge';
+import { PurchaseError } from './errors';
+import * as repo from './repo';
+import {
+  PurchaseSpendStatus,
+  type MintPurchaseInput,
+  type MintPurchaseResult,
+  type PurchaseSpend,
+} from './types';
+
+/**
+ * Choose the funding path for a purchase and issue the card. Admins (ADMIN_USER_IDS) bypass the
+ * subscription / card-on-file requirement via a company-funded no-charge card; everyone else must
+ * have a Stripe billing customer and is charged normally. KYC is enforced upstream in the caller.
+ */
+export async function resolveAndIssuePurchaseCard(
+  purchase: PurchaseSpend,
+  input: MintPurchaseInput,
+  resumedPurchase: PurchaseSpend | null,
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
+): Promise<MintPurchaseResult> {
+  // A resumed purchase already holds a wallet-funding claim; only a fresh purchase transitions to
+  // CHARGING here (a resume re-enters mid-flight). Mirrors the non-admin path below.
+  if (isAdminUser(input.userId)) {
+    if (resumedPurchase === null) {
+      await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+    }
+    return issueAdminCompanyCard(purchase, input, cardProvider, walletFundingProvider);
+  }
+
+  const subscription = await repo.findSubscriptionByUserId(input.userId);
+  const stripeCustomerId = subscription?.stripeCustomerId;
+  if (stripeCustomerId === undefined || stripeCustomerId === null || stripeCustomerId === '') {
+    await repo.updatePurchaseStatus(
+      purchase.id,
+      resumedPurchase === null ? PurchaseSpendStatus.FAILED : PurchaseSpendStatus.FUNDING_PENDING
+    );
+    throw new PurchaseError('User does not have a Stripe billing customer', 402);
+  }
+
+  if (resumedPurchase === null) {
+    await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
+  }
+  return chargeAndIssueCard(purchase, input, stripeCustomerId, cardProvider, walletFundingProvider);
+}
+
+/**
+ * Admin no-charge card: mint the company-funded card with NO Stripe hold. There is never a payment
+ * intent to capture or a stale-charging retry to resume — the card is fully company-funded.
+ */
+export async function issueAdminCompanyCard(
+  purchase: PurchaseSpend,
+  input: MintPurchaseInput,
+  cardProvider?: CardProvider,
+  walletFundingProvider?: WalletFundingProvider
+): Promise<MintPurchaseResult> {
+  const state: ChargeState = {
+    paymentIntentCaptured: false,
+    paymentReversalFailed: false,
+    walletWasFunded: false,
+    walletReclaimFailed: false,
+    walletFundingPrepared: false,
+    fundingResumeRequired: false,
+    fundingRetryClaimed: false,
+    providerCallStarted: false,
+    stripeAuthorizationStarted: false,
+    issuedStaticCard: false,
+  };
+  try {
+    return await mintCaptureAndIssue(
+      state,
+      purchase,
+      input,
+      undefined,
+      cardProvider,
+      walletFundingProvider
+    );
+  } catch (error) {
+    return await rollbackChargeFailure(state, purchase, input, error);
+  }
+}

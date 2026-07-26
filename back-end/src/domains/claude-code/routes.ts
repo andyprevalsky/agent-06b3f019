@@ -16,7 +16,7 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { createSessionSchema, closeSessionSchema } from './types';
 import type { FilePointer } from '../../providers/storage';
 import * as service from './service';
-import { MissingUserIdError, GitHubAccessDeniedError } from './service';
+import { AgentOwnerMismatchError, MissingUserIdError, GitHubAccessDeniedError } from './service';
 
 const log = createLogger('ClaudeCodeRoutes');
 const router = Router();
@@ -60,6 +60,13 @@ router.post(
         res.status(403).json({
           error: error.detail,
           code: 'GITHUB_ACCESS_DENIED',
+        });
+        return;
+      }
+      if (error instanceof AgentOwnerMismatchError) {
+        res.status(403).json({
+          error: error.message,
+          code: 'AGENT_OWNER_MISMATCH',
         });
         return;
       }
