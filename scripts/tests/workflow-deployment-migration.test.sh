@@ -356,8 +356,14 @@ require_text "$DEPLOY_AGENTS_WORKFLOW" 'migrate-open-agent-workflows.ts --execut
   "deploy workflow must self-drive the workflow respawn on a surface change"
 require_text "$DEPLOY_AGENTS_WORKFLOW" 'secrets.PROD_DATABASE_URL' \
   "self-driving cutover must use the prod DB secret"
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'rollback-' \
-  "self-driving cutover must fail-safe roll the routing pointer back on failure"
+# Live-at-boot: on a surface-change migrate failure the cutover must NOT roll the
+# pointer back to the old generation — those workers were replaced at boot, so
+# rolling back would strand new agents. Routing stays on the live new generation.
+if grep -q 'rollback-' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "cutover must NOT roll the routing pointer back to a drained generation on migrate failure"
+fi
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'routing kept on live new generation' \
+  "migrate failure must keep routing on the live new generation (never strand new agents)"
 if grep -Fq 'timeout-minutes: 125' "$DEPLOY_AGENTS_WORKFLOW"; then
   fail "the 125-minute external-driver hold must be gone (replaced by a self-driving cutover)"
 fi
@@ -385,17 +391,15 @@ if grep -q 'activate-agent-worker-build.ts' "$DEPLOY_AGENTS_WORKFLOW"; then
   fail "live-at-boot workers need no activation; the cutover must not post an activation marker"
 fi
 
-# The CI cutover must wait for the Render backend (which reads the routing pointer)
-# to be live on this exact commit BEFORE flipping — otherwise the old backend
-# routes new workflow starts to the old queue while workers moved to the new
-# generation, stranding those agents.
-require_text "$DEPLOY_AGENTS_WORKFLOW" 'Render backend live on' \
-  "self-driving cutover must wait for the Render backend before flipping the routing pointer"
-render_wait_line=$(grep -n 'waiting for Render live' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
-# The forward flip is uniquely marked by `--by "deploy-...` (rollback uses `rollback-`,
-# the pre-read uses `--read`), so target it specifically.
-agents_flip_line=$(grep -n 'deploy-${BUILD_ID}' "$DEPLOY_AGENTS_WORKFLOW" | head -1 | cut -d: -f1)
-[[ -n "$render_wait_line" && -n "$agents_flip_line" && $render_wait_line -lt $agents_flip_line ]] || \
-  fail "CI cutover must wait for the Render backend live BEFORE flipping the routing pointer"
+# Live-at-boot needs NO Render-wait before flipping: the AgentQueuePointer table is
+# permanent (created by an earlier migration) and the pointer-reading backend code
+# is already deployed, so the flip is safe even while the old backend serves. A
+# Render-wait would also hang forever on a surface-change deploy that ships no
+# back-end change (Render never redeploys that commit).
+if grep -q 'waiting for Render live' "$DEPLOY_AGENTS_WORKFLOW"; then
+  fail "live-at-boot cutover must not block on a Render-live wait before flipping the pointer"
+fi
+require_text "$DEPLOY_AGENTS_WORKFLOW" 'flipping routing to the live new generation' \
+  "surface-change cutover must flip routing to the already-live new generation"
 
 echo "workflow deployment migration structural tests: PASS"
