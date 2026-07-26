@@ -117,8 +117,6 @@ jobs:
           TEMPORAL_ADDRESS: ${{ secrets.TEMPORAL_ADDRESS }}
           TEMPORAL_NAMESPACE: ${{ secrets.TEMPORAL_NAMESPACE }}
           TEMPORAL_API_KEY: ${{ secrets.TEMPORAL_API_KEY }}
-          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
-          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
           SURFACE_HASH: ${{ steps.surface.outputs.hash }}
           GENERATION_QUEUE: ${{ steps.surface.outputs.queue }}
           BUILD_ID: ${{ github.sha }}
@@ -131,8 +129,10 @@ jobs:
           # NEVER strand the fleet — a failure here leaves the just-deployed LIVE
           # workers serving. Its only job is routing: a surface-unchanged deploy is a
           # pure no-op (needs only a DB pointer read — no Temporal); a surface CHANGE
-          # flips the routing pointer to the new generation and respawns open
-          # workflows onto it, with fail-safe rollback.
+          # flips the routing pointer to the new (already-live) generation and
+          # respawns open old-gen workflows onto it. There is deliberately NO
+          # pointer rollback on migration failure — the old generation's workers are
+          # gone, so routing must stay on the live new generation.
           release() {  # commit status for observers / the /deploy skill contract
             gh api "repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" -X POST \
               -f state="$1" -f context="$RELEASE_CONTEXT" -f description="$2" >/dev/null || true
@@ -164,40 +164,31 @@ jobs:
             release success "generation unchanged (no rollover)"; trap - ERR; exit 0
           fi
 
-          # Surface CHANGED -> roll routing over to the new generation. Wait for the
-          # Render backend to be live on THIS commit first: Render's `migrate deploy`
-          # creates/updates the pointer table + ships the pointer-reading code, and
-          # the flip must not precede it. Bounded ~15m; on timeout we DO NOT flip
-          # (fail-safe: old generation keeps serving; new workers idle-but-live).
-          echo "Surface generation changed ('${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH'); waiting for Render live on ${BUILD_ID:0:7}..."
-          RENDER_LIVE=""
-          for i in $(seq 1 90); do
-            STATUS_COMMIT=$(curl -fsS --connect-timeout 10 --max-time 20 -H "Authorization: Bearer $RENDER_API_KEY" \
-              "https://api.render.com/v1/services/$RENDER_SERVICE_ID/deploys?limit=5" 2>/dev/null \
-              | BUILD_ID="$BUILD_ID" node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const a=JSON.parse(s);const want=(process.env.BUILD_ID||"").slice(0,7);const live=a.find(x=>x.deploy&&x.deploy.status==="live"&&((x.deploy.commit||{}).id||"").slice(0,7)===want);const failed=a.find(x=>x.deploy&&/failed|canceled/.test(x.deploy.status||"")&&((x.deploy.commit||{}).id||"").slice(0,7)===want);process.stdout.write(live?"live":(failed?"failed":"pending"))}catch{process.stdout.write("pending")}})' || echo pending)
-            if [ "$STATUS_COMMIT" = "live" ]; then RENDER_LIVE=1; echo "Render backend live on ${BUILD_ID:0:7}"; break; fi
-            if [ "$STATUS_COMMIT" = "failed" ]; then echo "❌ Render deploy failed for ${BUILD_ID:0:7}; not flipping" >&2; break; fi
-            echo "  Render backend not yet live (${STATUS_COMMIT}) — waiting ($i/90)"; sleep 10
-          done
-          [ "$RENDER_LIVE" = "1" ] || { echo "❌ Render backend not live on ${BUILD_ID:0:7}; not flipping (old generation keeps serving)"; release failure "cutover skipped: Render backend not live"; trap - ERR; exit 1; }
-
-          # Flip routing to the new generation, then respawn every open workflow onto
-          # it (respawns resolve their queue through the same pointer). FAIL-SAFE: on
-          # any failure, flip the pointer back to the previous generation.
+          # Surface CHANGED -> roll routing over to the new generation. The new
+          # workers are already LIVE on their generation queue (require_activation=0),
+          # so this only repoints new-agent routing at them and respawns open old-gen
+          # workflows onto the new queue. No Render-wait is needed: the
+          # AgentQueuePointer table is permanent (created by an earlier migration) and
+          # the pointer-reading backend code is already deployed, so the flip is safe
+          # even while the old backend is still serving — it reads the same pointer.
+          echo "Surface generation changed ('${CURRENT_HASH:-<none>}' -> '$SURFACE_HASH'); flipping routing to the live new generation"
           npx tsx scripts/set-agent-queue-pointer.ts \
             --queue "$GENERATION_QUEUE" --surface-hash "$SURFACE_HASH" --by "deploy-${BUILD_ID}"
           sleep 6   # cross-instance pointer-cache convergence (TTL is 5s)
+
+          # Respawn open OLD-generation workflows onto the new queue. On failure we do
+          # NOT roll the pointer back: the old generation's workers were replaced at
+          # boot, so pointing at it would strand NEW agents. New agents already route
+          # to the live new generation; a failed respawn only leaves some old-gen
+          # workflows unmigrated (idempotently retriable) — a smaller, bounded problem
+          # than stranding all new traffic.
           if ! TEMPORAL_TASK_QUEUE=navi-agent-tasks \
                TEMPORAL_WORKER_BUILD_ID="$BUILD_ID" \
                TEMPORAL_WORKER_DEPLOYMENT_TOKEN="$DEPLOYMENT_TOKEN" \
                WORKFLOW_MIGRATION_CONCURRENCY="${WORKFLOW_MIGRATION_CONCURRENCY:-16}" \
                npx tsx scripts/migrate-open-agent-workflows.ts --execute; then
-            echo "❌ migration failed — rolling routing pointer back to ${CURRENT_QUEUE:-<none>}" >&2
-            if [ -n "$CURRENT_QUEUE" ] && [ -n "$CURRENT_HASH" ]; then
-              npx tsx scripts/set-agent-queue-pointer.ts \
-                --queue "$CURRENT_QUEUE" --surface-hash "$CURRENT_HASH" --by "rollback-${BUILD_ID}" || true
-            fi
-            release failure "cutover migration failed; routing rolled back"; trap - ERR; exit 1
+            echo "❌ old-generation workflow respawn failed — routing STAYS on the live new generation ($GENERATION_QUEUE); re-run the migration to respawn stragglers" >&2
+            release failure "cutover migration failed (routing kept on live new generation)"; trap - ERR; exit 1
           fi
 
           echo "✅ Routing cut over to generation $SURFACE_HASH"
