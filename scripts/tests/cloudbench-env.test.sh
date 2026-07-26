@@ -92,6 +92,220 @@ termination_elapsed=$((SECONDS - termination_start))
 [ "$termination_elapsed" -lt 2 ] ||
   fail "an empty PID list must return immediately (elapsed=${termination_elapsed}s)"
 
+# A durable supervisor waits on an identity-fenced detached process rather than
+# pulling that process back into its vulnerable launcher session. Preserve exact
+# nonzero status (including the poller's typed capacity-busy code), forward
+# cooperative cancellation, and fail promptly when a wrapper exits without the
+# promised status marker.
+tracked_owner="$TMP_ROOT/tracked.owner"
+tracked_status="$TMP_ROOT/tracked.status"
+tracked_log="$TMP_ROOT/tracked.log"
+cloudbench_detach_reexec_tracked "$tracked_owner" "$tracked_log" \
+  bash -c 'printf "75\n" > "$1"; exit 75' tracked-exit "$tracked_status"
+tracked_rc=0
+cloudbench_wait_tracked_detached "$tracked_owner" "$tracked_status" || tracked_rc=$?
+[ "$tracked_rc" -eq "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE" ] ||
+  fail "detached rendezvous changed capacity-busy exit 75 to $tracked_rc"
+
+missing_owner="$TMP_ROOT/missing.owner"
+missing_status="$TMP_ROOT/missing.status"
+missing_recovered="$TMP_ROOT/missing.recovered"
+cloudbench_detach_reexec_tracked "$missing_owner" "$TMP_ROOT/missing.log" \
+  bash -c 'exit 0'
+missing_started="$SECONDS"
+missing_rc=0
+cloudbench_wait_tracked_detached "$missing_owner" "$missing_status" \
+  bash -c ': > "$1"' tracked-recovery "$missing_recovered" \
+  >/dev/null 2>&1 || missing_rc=$?
+[ "$missing_rc" -eq 1 ] ||
+  fail "a detached wrapper without status must fail closed (exit=$missing_rc)"
+[ -e "$missing_recovered" ] ||
+  fail "a dead detached wrapper must invoke durable ownership recovery"
+[ $((SECONDS - missing_started)) -lt 10 ] ||
+  fail "a detached wrapper without status caused an unbounded wait"
+
+cancel_owner="$TMP_ROOT/cancel.owner"
+cancel_status="$TMP_ROOT/cancel.status"
+cancel_recovered="$TMP_ROOT/cancel.recovered"
+cloudbench_detach_reexec_tracked "$cancel_owner" "$TMP_ROOT/cancel.log" \
+  bash -c '
+    status_file="$1"
+    status=1
+    trap '"'"'printf "%s\n" "$status" > "$status_file"'"'"' EXIT
+    trap '"'"'status=143; exit 143'"'"' TERM
+    sleep 30
+    status=0
+  ' tracked-cancel "$cancel_status"
+( sleep 1; kill -TERM "$$" ) &
+cancel_signal_pid=$!
+cancel_started="$SECONDS"
+cancel_rc=0
+cloudbench_wait_tracked_detached "$cancel_owner" "$cancel_status" \
+  bash -c ': > "$1"' tracked-recovery "$cancel_recovered" \
+  >/dev/null 2>&1 || cancel_rc=$?
+wait "$cancel_signal_pid" 2>/dev/null || true
+[ "$cancel_rc" -eq 143 ] ||
+  fail "detached rendezvous did not preserve forwarded TERM status (exit=$cancel_rc)"
+[ -e "$cancel_recovered" ] ||
+  fail "forwarded detached cancellation must invoke durable ownership recovery"
+[ $((SECONDS - cancel_started)) -lt 10 ] ||
+  fail "forwarded TERM did not stop the detached process group promptly"
+
+# A wrapper may publish its cooperative 143 while a TERM-resistant descendant
+# remains in the owned group. The marker must not let the waiter return early:
+# escalation and group drain remain part of the cancellation contract.
+lingering_owner="$TMP_ROOT/lingering.owner"
+lingering_status="$TMP_ROOT/lingering.status"
+lingering_child_pid_file="$TMP_ROOT/lingering-child.pid"
+cloudbench_detach_reexec_tracked "$lingering_owner" "$TMP_ROOT/lingering.log" \
+  bash -c '
+    status_file="$1"
+    child_pid_file="$2"
+    status=1
+    trap '"'"'printf "%s\n" "$status" > "$status_file"'"'"' EXIT
+    trap '"'"'status=143; exit 143'"'"' TERM
+    (
+      trap "" TERM
+      printf "%s\n" "${BASHPID:-$$}" > "$child_pid_file"
+      sleep 30
+    ) &
+    wait
+  ' tracked-lingering "$lingering_status" "$lingering_child_pid_file"
+for _ in $(seq 1 100); do
+  [ -s "$lingering_child_pid_file" ] && break
+  sleep 0.01
+done
+[ -s "$lingering_child_pid_file" ] ||
+  fail "the TERM-resistant detached descendant must become ready"
+lingering_child_pid="$(head -1 "$lingering_child_pid_file")"
+( sleep 1; kill -TERM "$$" ) &
+lingering_signal_pid=$!
+lingering_started="$SECONDS"
+lingering_rc=0
+CLOUDBENCH_DETACHED_RECOVERY_SECONDS=2 \
+  cloudbench_wait_tracked_detached "$lingering_owner" "$lingering_status" \
+  bash -c 'exit 0' \
+  >/dev/null 2>&1 || lingering_rc=$?
+wait "$lingering_signal_pid" 2>/dev/null || true
+[ "$lingering_rc" -eq 143 ] ||
+  fail "group-drained cancellation changed the wrapper's 143 status (exit=$lingering_rc)"
+[ $((SECONDS - lingering_started)) -ge 2 ] ||
+  fail "the waiter accepted status 143 before the detached group drained"
+[ $((SECONDS - lingering_started)) -lt 10 ] ||
+  fail "a lingering TERM-resistant descendant caused an unbounded wait"
+if kill -0 "$lingering_child_pid" 2>/dev/null; then
+  fail "the TERM-resistant detached descendant survived KILL escalation"
+fi
+
+# Cooperative cancellation must also be bounded when every process in the
+# detached group ignores TERM. A status marker must not be required for KILL
+# escalation, and the waiter must not return until the owned group is drained.
+resistant_owner="$TMP_ROOT/resistant.owner"
+resistant_status="$TMP_ROOT/resistant.status"
+cloudbench_detach_reexec_tracked "$resistant_owner" "$TMP_ROOT/resistant.log" \
+  bash -c 'trap "" TERM; sleep 30'
+resistant_pgid="$(cloudbench_tracked_owner_value "$resistant_owner" pgid)"
+( sleep 1; kill -TERM "$$" ) &
+resistant_signal_pid=$!
+resistant_started="$SECONDS"
+resistant_rc=0
+CLOUDBENCH_DETACHED_RECOVERY_SECONDS=2 \
+  cloudbench_wait_tracked_detached "$resistant_owner" "$resistant_status" \
+  bash -c 'exit 0' \
+  >/dev/null 2>&1 || resistant_rc=$?
+wait "$resistant_signal_pid" 2>/dev/null || true
+[ "$resistant_rc" -eq 1 ] ||
+  fail "a TERM-resistant detached group without status must fail closed (exit=$resistant_rc)"
+[ $((SECONDS - resistant_started)) -lt 10 ] ||
+  fail "a TERM-resistant detached process group caused an unbounded wait"
+if cloudbench_process_group_exists "$resistant_pgid"; then
+  fail "the TERM-resistant detached process group survived KILL escalation"
+fi
+
+# A tracked autoscaler can be blocked inside a nested provider command. Killing
+# only its direct shell reparents that descendant, allowing it to mutate durable
+# ownership after controller cleanup returns. Tree teardown must kill the full
+# captured process forest, including a TERM-resistant leaf.
+tree_ready="$TMP_ROOT/tree-ready"
+tree_leaf_pid="$TMP_ROOT/tree-leaf.pid"
+tree_leaked="$TMP_ROOT/tree-leaked"
+bash -c '
+  trap "exit 0" TERM
+  (
+    trap "" TERM
+    printf "%s\n" "${BASHPID:-$$}" > "$1"
+    : > "$2"
+    sleep 30
+    : > "$3"
+  ) &
+  wait
+' tree-test "$tree_leaf_pid" "$tree_ready" "$tree_leaked" &
+tree_root_pid=$!
+for _ in $(seq 1 100); do
+  [ -e "$tree_ready" ] && break
+  sleep 0.01
+done
+[ -e "$tree_ready" ] || fail "the descendant-tree test child must become ready"
+tree_leaf="$(cat "$tree_leaf_pid")"
+cloudbench_terminate_tree_and_wait 1 "$tree_root_pid"
+if kill -0 "$tree_root_pid" 2>/dev/null || kill -0 "$tree_leaf" 2>/dev/null; then
+  fail "tracked controller descendants must not survive tree cleanup"
+fi
+[ ! -e "$tree_leaked" ] ||
+  fail "an orphaned descendant mutated state after controller cleanup"
+
+# A completed job's numeric PID is stale ownership, even if another process now
+# has that PID. The helper must intersect roots with this shell's live job table
+# before it ever calls kill.
+stale_signal_log="$TMP_ROOT/stale-signals.log"
+(
+  kill() {
+    printf '%s\n' "$*" >> "$stale_signal_log"
+  }
+  cloudbench_terminate_tree_and_wait 0 999999
+)
+[ ! -e "$stale_signal_log" ] ||
+  fail "tree cleanup signaled a stale root that is not a live shell job"
+
+# A descendant may exit after TERM while a resistant sibling holds the grace
+# period open. Deterministically model PID reuse at that boundary: the initial
+# snapshot and first identity read name the owned process, then every later read
+# reports a different birth time. Escalation must not SIGKILL the replacement.
+identity_signal_log="$TMP_ROOT/identity-signals.log"
+identity_ps_count="$TMP_ROOT/identity-ps-count"
+printf '0\n' > "$identity_ps_count"
+(
+  jobs() {
+    printf '4242\n'
+  }
+  ps() {
+    if [ "${1:-}" = "-axo" ]; then
+      printf '4242 1 Mon Jan  1 00:00:00 2001\n'
+      return
+    fi
+    count="$(cat "$identity_ps_count")"
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$identity_ps_count"
+    if [ "$count" -eq 1 ]; then
+      printf 'Mon Jan  1 00:00:00 2001\n'
+    else
+      printf 'Tue Jan  2 00:00:00 2001\n'
+    fi
+  }
+  kill() {
+    printf '%s\n' "$*" >> "$identity_signal_log"
+  }
+  wait() {
+    return 0
+  }
+  cloudbench_terminate_tree_and_wait 0 4242
+)
+[ "$(wc -l < "$identity_signal_log" | tr -d ' ')" = "1" ] ||
+  fail "tree cleanup signaled a PID after its birth identity changed"
+if grep -q -- '-KILL' "$identity_signal_log"; then
+  fail "tree cleanup SIGKILLed a reused PID"
+fi
+
 # A local bind collision is not a remote/DNS readiness failure. The proxy
 # launcher must classify it immediately so its caller can abandon the poisoned
 # lease and choose another port instead of retrying that port until the barrier
@@ -325,6 +539,7 @@ clone_args="$TMP_ROOT/primary-clone.args"
 fleet_registry_record_name() { return 0; }
 fleet_registry_record_id() { return 0; }
 fleet_registry_release_name() { return 0; }
+machine_volume_id() { printf 'vol-primary-owned'; }
 machine_storage_ready() { return 0; }
 machine_storage_failed() { return 1; }
 fly_with_timeout() {
@@ -344,7 +559,7 @@ primary_cpus="$(sed -nE 's/.*--vm-size ([^ ]+).*/\1/p' "$clone_args" | sed -nE '
 [ $((16 + 37 * primary_cpus)) -le 160 ] ||
   fail "daily fleet primary shape exceeds the observed Fly CPU governor ceiling"
 unset -f clone_machine_target fleet_registry_record_name fleet_registry_record_id \
-  fleet_registry_release_name machine_storage_ready machine_storage_failed fly_with_timeout \
+  fleet_registry_release_name machine_volume_id machine_storage_ready machine_storage_failed fly_with_timeout \
   worker_ledger_lock_acquire worker_ledger_lock_release fleet_production_function
 
 resize_function_source="$(awk '

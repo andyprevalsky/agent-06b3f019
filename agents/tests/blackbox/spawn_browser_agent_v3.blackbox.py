@@ -5384,6 +5384,47 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
         assert f"{handle} = None" in disconnected_slice
 
 
+def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
+    """A target reset (proxy rotation) must re-seed passkeys, not just storage.
+
+    The CDP virtual authenticator is scoped to the live target: rotation attaches
+    a fresh, empty authenticator. Passkeys must be restored on that new target the
+    same way cookies/localStorage are, through the single seeding helper — so the
+    passkey surface can never again be the one injected state silently lost on
+    reset (H-04). All passkey seeding must funnel through one choke point (no
+    duplicated `inject_passkeys` call sites).
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+
+    # 1. A single seeding choke point exists, backed by a retained union of every
+    #    passkey ever seeded (so a fresh authenticator can be fully restored).
+    assert "async def sync_passkeys_onto_target(" in source
+    assert "seeded_decrypted_passkeys_by_credential_id" in source
+
+    # 2. No seeding happens outside the helper — the only inject_passkeys call in
+    #    the whole activity is the one inside sync_passkeys_onto_target.
+    assert source.count("dom_service.inject_passkeys(") == 1
+    helper_start = source.index("async def sync_passkeys_onto_target(")
+    assert source.index("dom_service.inject_passkeys(") > helper_start
+
+    # 3. Bootstrap and realm transitions seed through the helper.
+    assert 'context="session start"' in source
+    assert "realm transition to " in source
+
+    # 4. The rotation recovery path re-seeds the held passkeys AFTER restoring the
+    #    cookie/localStorage state — parity with the storage restore.
+    recovery_block = source.split('if action_name == "recover_from_challenge":', 1)[1].split(
+        'if action_name == "send_message_to_user":', 1
+    )[0]
+    restore_storage = recovery_block.index("await _restore_rotation_storage_state(")
+    reseed_passkeys = recovery_block.index('sync_passkeys_onto_target(context="after proxy rotation")')
+    assert restore_storage < reseed_passkeys
+
+
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
     from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
 
@@ -13165,6 +13206,10 @@ async def run_all_tests():
     r.record(
         "recovery_reconnect_failure_drops_handles",
         test_recovery_reconnect_failure_drops_disconnected_browser_handles,
+    )
+    r.record(
+        "passkeys_reseed_on_target_reset",
+        test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage,
     )
     await r.record_async(
         "provider_handoff_replaces_humanizer",

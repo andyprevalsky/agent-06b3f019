@@ -404,9 +404,17 @@ async def execute_action(  # noqa: C901
                         [*(trusted_page_urls or []), current_url],
                     )
             except ValueError as error:
+                hint = ""
+                if any(term in str(error).lower() for term in ("rating", "review")):
+                    hint = (
+                        " If this page genuinely has no rating/reviews (e.g. a service, ticket, "
+                        "or event booking), pass rating '0 stars' and review_count '0 reviews', "
+                        "do not use 'N/A', 'none', or a made-up number, and do not keep searching "
+                        "for a rating that is not shown."
+                    )
                 return {
                     "success": False,
-                    "error": f"request_payment_card receipt is incomplete: {error}",
+                    "error": f"request_payment_card receipt is incomplete: {error}.{hint}",
                 }
             return {
                 "status": "awaiting_payment_card_approval",

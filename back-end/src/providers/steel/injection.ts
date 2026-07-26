@@ -4,6 +4,7 @@
 
 import { prisma } from '../database';
 import { canonicalAuthRealm } from '../authRealm';
+import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
 import {
@@ -67,11 +68,6 @@ function cookieDomainWhere(authRealm: string) {
   };
 }
 
-function benchmarkSavedBrowserAuthDisabled(): boolean {
-  return ['1', 'true', 'yes', 'on'].includes(
-    (process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH ?? '').trim().toLowerCase()
-  );
-}
 
 function envEnabled(name: string, defaultValue = true): boolean {
   const raw = process.env[name];
@@ -346,7 +342,8 @@ export async function injectUserData(
   }
 
   let cookies: Awaited<ReturnType<typeof prisma.cookie.findMany>> = [];
-  const steelContextId = dbSession.provider === 'steel' ? dbSession.context.contextId : null;
+  const steelContextId =
+    dbSession.provider === 'steel' ? (dbSession.providerProfileId ?? null) : null;
   const steelAuthForVerification =
     steelContextId !== null && authRealm !== ''
       ? await prisma.steelSessionAuth.findUnique({

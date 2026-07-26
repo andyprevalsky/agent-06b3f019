@@ -27,6 +27,8 @@ import {
 import { canonicalAuthRealm } from '../../providers/authRealm';
 import { getAuthOptions } from '../../providers/authOptions';
 import * as repo from './repo';
+import { validateSessionFilePath } from './service.file-path';
+import { findRequiredSteelProfileForStart } from './service.profile-binding';
 import {
   injectLocalStorage,
   SessionNoUserError,
@@ -41,35 +43,16 @@ export {
   setBrowserControlState,
 } from './service.control';
 export { injectLocalStorage, SessionNotFoundError, SessionNoUserError };
+export { InvalidSessionFilePathError } from './service.file-path';
 export { CdpInjectionError, SessionNoWsUrlError } from './types';
 
 const log = createLogger('BrowserSession');
-const SAFE_ABSOLUTE_FILE_ROOTS = ['/tmp/downloads/', '/tmp/rose-uploads/', '/home/oai/share/'];
-
-export class InvalidSessionFilePathError extends Error {
-  constructor() {
-    super('Invalid session file path');
-    this.name = 'InvalidSessionFilePathError';
-  }
-}
 
 async function requireSessionOwner(sessionId: string, userId?: string): Promise<void> {
   if (userId === undefined) return;
   const session = await repo.findSessionBySessionId(sessionId);
   if (session === null || session.context.userId !== userId) {
     throw new SessionNotFoundError();
-  }
-}
-
-function validateSessionFilePath(filePath: string): void {
-  const canonical = filePath.replace(/\\/g, '/');
-  if (
-    canonical.includes('\0') ||
-    canonical.split('/').includes('..') ||
-    (canonical.startsWith('/') &&
-      !SAFE_ABSOLUTE_FILE_ROOTS.some((root) => canonical.startsWith(root)))
-  ) {
-    throw new InvalidSessionFilePathError();
   }
 }
 
@@ -136,7 +119,9 @@ export async function prepareSessionCredentials(
   }
 
   const [authOptions, storedPasswords, passkeys] = await Promise.all([
-    getAuthOptions(userId, authRealm),
+    getAuthOptions(userId, authRealm, {
+      steelContextId: session.provider === 'steel' ? (session.providerProfileId ?? null) : null,
+    }),
     repo.findPasswords(userId),
     repo.reservePasskeysForRealm(userId, authRealm),
   ]);
@@ -188,11 +173,12 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   // Phase 1: Fetch session-independent data in parallel. Realm-scoped
   // credentials are collected by the same preparation boundary used for JIT
   // navigation after the provider session exists.
-  const [agent, contextId, user, fingerprintInjection] = await Promise.all([
+  const [agent, contextId, user, fingerprintInjection, requiredSteelProfileId] = await Promise.all([
     repo.findAgentProxy(agentId),
     getOrCreateContext(userId),
     repo.findUserSettings(userId),
     getFingerprintInjectionData(userId),
+    findRequiredSteelProfileForStart(userId, startUrl),
   ]);
 
   const proxyGeo: ProxyGeoLocation =
@@ -219,6 +205,7 @@ export async function initSession(userId: string, agentId: string, startUrl: str
   // CDP connection open so injection can reuse it (a fresh handshake is 3-5s).
   const session = await createSessionWithContext(contextId, agentId, proxyGeo, startUrl, {
     keepValidationConnection: true,
+    ...(requiredSteelProfileId !== null ? { requiredSteelProfileId } : {}),
   });
 
   // Phase 3: Resolve and inject every credential/state type for the start realm.

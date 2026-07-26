@@ -101,7 +101,7 @@ export async function completeAuthAssistanceForUser(
         },
         include: { context: true },
       });
-      const steelContextId = session?.context.contextId;
+      const steelContextId = session?.provider === 'steel' ? session.providerProfileId : null;
       if (
         session === null ||
         session === undefined ||

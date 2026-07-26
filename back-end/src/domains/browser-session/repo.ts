@@ -16,6 +16,19 @@ export async function findAgentProxy(agentId: string) {
 }
 
 /**
+ * Resolve the authenticated Steel snapshot for a new realm-scoped session.
+ * The user predicate is intentional: provider profile IDs are not credentials
+ * that may be borrowed across owners.
+ */
+export async function findEnabledSteelSessionAuth(userId: string, authRealm: string) {
+  return prisma.steelSessionAuth.findFirst({
+    where: { userId, authRealm, disabledAt: null },
+    orderBy: { authenticatedAt: 'desc' },
+    select: { contextId: true },
+  });
+}
+
+/**
  * Find a user's settings fields for the init response.
  */
 export async function findUserSettings(userId: string) {

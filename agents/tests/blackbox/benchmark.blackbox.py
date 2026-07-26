@@ -152,34 +152,38 @@ def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
     assert errors == []
 
 
-def test_agent_payment_evaluator_accepts_confirmed_paid_order_language():
-    """Alternate confirmation wording still requires grounded browser evidence."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+def test_agent_payment_output_blob_is_key_agnostic():
+    """The payment confirmation is now judged semantically (SEMANTIC_OUTPUT_EXPECTATIONS['agent-payment']
+    via _judge_output_recovers_expected_fields), so the blob extractor must surface the browser agent's
+    populated structured output regardless of the LLM-synthesized key name — the judge maps the grounded
+    tp_<8hex> id by meaning. This pins the exact regression: a genuinely-successful run emitting the id
+    under `order_id` (not `order_confirmation_id`) must still reach the judge."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
-    passed, reason = _evaluate_agent_payment_result(
-        {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": (
-                        "The payment was confirmed. The confirmation page shows: "
-                        "Order ID: tp_c5053b1b. Total charged: $43.96. "
-                        "The order was placed successfully."
-                    ),
-                    "metadata": {
-                        "toolName": "spawn_browser_agent",
-                        "toolStatus": "FINISHED",
-                        "structured_response": {
-                            "order_confirmation_id": "tp_c5053b1b",
-                            "total_price_paid": 43.96,
+    def blob_for(structured):
+        return _extract_agent_payment_output_blob(
+            {
+                "messages": [
+                    {
+                        "role": "TOOL",
+                        "metadata": {
+                            "toolName": "spawn_browser_agent",
+                            "toolStatus": "FINISHED",
+                            "structured_response": structured,
                         },
-                    },
-                },
-            ]
-        }
-    )
+                    }
+                ]
+            }
+        )
 
-    assert passed, reason
+    # The regression: agent emitted `order_id`, not `order_confirmation_id`.
+    assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
+    # Legacy/alternate key names surface too.
+    assert "tp_c5053b1b" in blob_for(
+        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
+    )
+    # No populated browser output → empty blob (the semantic gate fails closed on empty).
+    assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
 
 def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
@@ -227,6 +231,29 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "create-worktree-patch.sh" in controller
     assert "remote-logs/cloudbench-driver.log" in controller
     assert "logs/worker.log" in controller
+
+
+def test_cloud_fleet_controller_detaches_by_default():
+    """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
+    repo_root = Path(__file__).resolve().parents[3]
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    detach_default = next(
+        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
+    )
+
+    assert detach_default == 'DETACH="1"', (
+        f"fleet launch mode was {detach_default}; paid runs must detach by default"
+    )
+    assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
+    assert '--foreground)     DETACH="0"' in fleet
+    assert "--recover-stale-owner)" in fleet
+    assert "recover_exact_stale_fleet_owner" in fleet
+    assert "volume_id=%s" in fleet
+    assert "Never sweep app-global unattached" in fleet
+    assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
+        "cloudbench_controller_lock_acquire"
+    )
 
 
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
@@ -10205,8 +10232,8 @@ async def run_all_tests():
         test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
     )
     r.record(
-        "agent_payment_accepts_confirmed_paid_order_language",
-        test_agent_payment_evaluator_accepts_confirmed_paid_order_language,
+        "agent_payment_output_blob_is_key_agnostic",
+        test_agent_payment_output_blob_is_key_agnostic,
     )
     r.record(
         "cloudbench_preserves_failure_without_passing",
@@ -10219,6 +10246,10 @@ async def run_all_tests():
     await r.record_async(
         "required_attachment_upload_failure_is_fatal",
         test_required_attachment_upload_failure_is_fatal,
+    )
+    r.record(
+        "cloud_fleet_controller_detaches_by_default",
+        test_cloud_fleet_controller_detaches_by_default,
     )
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",

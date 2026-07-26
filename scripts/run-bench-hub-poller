@@ -272,6 +272,11 @@ process_request() {  # process_request <request_json>
     read -r -a task_args <<< "$task_names"
     runner_args+=("${task_args[@]}")
     [ "$LOCAL_RUNNER" = "1" ] && runner_args+=(--run-id "hub-$req_id")
+    # The poller needs synchronous status/final-bundle semantics, but it must
+    # not make paid fleet ownership depend on the poller or predeploy session
+    # surviving. --wait keeps the controller detached in its own session while
+    # this process waits on its atomic exit-status rendezvous.
+    [ "$LOCAL_RUNNER" != "1" ] && runner_args+=(--wait)
     # --sim-on is a cloud-fleet flag; the local runner derives sim from the
     # task catalog (world_model_mode), so only pass it through for fleet runs.
     if [ -n "$sim_on" ] && [ "$LOCAL_RUNNER" != "1" ]; then
