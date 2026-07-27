@@ -34,3 +34,6 @@ export const CODEX_LOGIN_TIMEOUT_MS = 300_000;
  * a broken npm install would freeze the whole UI.
  */
 export const SHELL_PROBE_TIMEOUT_MS = 10_000;
+
+/** Grace period between SIGTERM and SIGKILL when reaping a timed-out child. */
+export const KILL_ESCALATION_GRACE_MS = 5_000;

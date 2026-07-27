@@ -20,6 +20,7 @@ import {
   CODEX_LOGIN_TIMEOUT_MS,
   CODEX_NPM_PACKAGE,
   CODEX_VERSION_PROBE_TIMEOUT_MS,
+  KILL_ESCALATION_GRACE_MS,
   NPM_INSTALL_TIMEOUT_MS,
   SHELL_PROBE_TIMEOUT_MS,
 } from './config';
@@ -145,7 +146,19 @@ export function codexCliIsUsable(): boolean {
 function killTree(proc: ChildProcess): void {
   try {
     if (proc.pid !== undefined) {
-      process.kill(-proc.pid, 'SIGTERM');
+      const pid = proc.pid;
+      process.kill(-pid, 'SIGTERM');
+      // SIGTERM alone is fire-and-forget: a wedged npm/codex child that ignores
+      // it keeps mutating the global prefix (or holding the OAuth port) long
+      // after the caller's promise rejected. Escalate. `unref` so a pending
+      // timer never keeps the app alive.
+      setTimeout(() => {
+        try {
+          process.kill(-pid, 'SIGKILL');
+        } catch {
+          // Already exited — nothing to escalate to.
+        }
+      }, KILL_ESCALATION_GRACE_MS).unref();
       return;
     }
   } catch {

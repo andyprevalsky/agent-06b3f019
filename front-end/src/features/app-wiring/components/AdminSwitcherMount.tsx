@@ -33,6 +33,10 @@ function accountLabel(user: { id?: string; phone?: string; email?: string } | nu
 }
 
 export function AdminSwitcherMount() {
-  const { user } = useAuth();
+  // Passive: this component only READS the signed-in identity. A non-passive
+  // useAuth() starts a second auth instance and registers another
+  // AUTH_SESSION_CHANGED_EVENT listener — and since this is always mounted in
+  // AppShell, that would race the app's real auth owner during login/session init.
+  const { user } = useAuth({ passive: true });
   return <AdminAccountSwitcher isAdmin={isAdminUser(user)} ownAccountLabel={accountLabel(user)} />;
 }
