@@ -162,6 +162,10 @@ async function loadAdminHealth(
   const previousCohort = buildSignupCohort(input.verifiedUsers, input.tasks, previousPeriod);
   const retentionThrough = new Date(new Date(currentPeriod.end).getTime() - 1);
   const verifiedUserIds = new Set(input.verifiedUsers.map((user) => user.userId));
+  // The latest subscriber-series point IS the current in-app population, so the
+  // adoption denominator can never drift from the "People in App" card.
+  const inAppUserIds =
+    input.subscribers[input.subscribers.length - 1]?.userIds ?? new Set<string>();
   const retentionFirstTasks = input.firstTasks.filter((task) => verifiedUserIds.has(task.userId));
   const retentionTasks = input.tasks.filter((task) => verifiedUserIds.has(task.userId));
   const currentFunnel = buildFunnelSteps(
@@ -191,7 +195,11 @@ async function loadAdminHealth(
     series,
     retentionCohorts: buildRetentionCohorts(retentionFirstTasks, retentionTasks, retentionThrough),
     funnel: compareFunnelSteps(currentFunnel, previousFunnel),
-    connectorAdoption: buildConnectorAdoption(verifiedUserIds, input.connectedConnectors),
+    // Adoption is scoped to people IN THE APP — the exact population the
+    // "People in App" card counts (subscribers + invite-code redeemers + core
+    // team). Verified signups still sitting behind the invite gate have never
+    // reached a connector screen, so counting them read every rate as ~0%.
+    connectorAdoption: buildConnectorAdoption(inAppUserIds, input.connectedConnectors),
     velocity: input.velocity.current,
   };
 }

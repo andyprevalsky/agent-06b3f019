@@ -20,8 +20,5 @@ export const IS_BLACKBOX_TEST = process.env.BLACKBOX_TEST_CAPTURE_OUTBOUND === '
  */
 export const BENCHMARK_ALLOW_DEV_OTP_LOGIN = process.env.BENCHMARK_ALLOW_DEV_OTP_LOGIN === '1';
 
-/** Access token expiry: 90 days in seconds */
-export const SESSION_EXPIRES_IN = 7776000;
-
-/** Refresh token expiry: 180 days in seconds */
-export const REFRESH_TOKEN_EXPIRES_IN = 15552000;
+// Token expiries live with the canonical minter (providers/sessionTokens.ts) and
+// are re-exported from ./service.session. config.ts may not import providers.

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   clearFetchCaptures,
@@ -5,6 +6,7 @@ import {
   installFetchCapture,
   type MockResponder,
 } from './fetch-capture';
+import type { BrowserWindow } from 'electron';
 import type { AuthSession } from '../../shared/types/ipc';
 
 vi.mock('../../main/base/config', () => ({
@@ -33,15 +35,83 @@ vi.mock('../../main/services/sync/IntegrationCache', () => ({
 
 const fsExistsSync = vi.hoisted(() => vi.fn<(path: string) => boolean>(() => false));
 const fsReadFileSync = vi.hoisted(() => vi.fn<(path: string, encoding: string) => string>());
+const fsReaddirSync = vi.hoisted(() => vi.fn<(path: string) => string[]>(() => []));
+const fsWriteFileSync = vi.hoisted(() =>
+  vi.fn<(path: string, data: string, opts?: unknown) => void>()
+);
+const fsChmodSync = vi.hoisted(() => vi.fn<(path: string, mode: number) => void>());
 
-vi.mock('fs', () => ({
-  default: {
+vi.mock('fs', () => {
+  const mod = {
     existsSync: fsExistsSync,
     readFileSync: fsReadFileSync,
-  },
-  existsSync: fsExistsSync,
-  readFileSync: fsReadFileSync,
+    readdirSync: fsReaddirSync,
+    writeFileSync: fsWriteFileSync,
+    chmodSync: fsChmodSync,
+  };
+  return { ...mod, default: mod };
+});
+
+// --- child_process stub ---------------------------------------------------
+// The connect flow shells out to `npm` and `codex`. Tests must observe which
+// commands run AND drive the spawn lifecycle for install / login.
+interface ExecCall {
+  fn: 'execSync';
+  command: string;
+}
+
+interface SpawnedProc {
+  args: readonly string[];
+  emitter: EventEmitter;
+  stdout: EventEmitter;
+  stderr: EventEmitter;
+}
+
+type ExecHandler = (command: string) => string | Buffer;
+
+const cp = vi.hoisted(() => ({
+  execCalls: [] as ExecCall[],
+  spawnedProcs: [] as SpawnedProc[],
+  state: { execSyncHandler: (() => '') as ExecHandler },
 }));
+
+const { execCalls, spawnedProcs } = cp;
+
+const setExecSyncHandler = (handler: ExecHandler): void => {
+  cp.state.execSyncHandler = handler;
+};
+
+vi.mock('child_process', async () => {
+  const { EventEmitter: Emitter } = await vi.importActual<typeof import('events')>('events');
+  const execSync = (command: string) => {
+    cp.execCalls.push({ fn: 'execSync', command });
+    return cp.state.execSyncHandler(command);
+  };
+  const spawn = (_command: string, args: readonly string[]) => {
+    const stdout = new Emitter();
+    const stderr = new Emitter();
+    const emitter = new Emitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      kill: () => void;
+    };
+    emitter.stdout = stdout;
+    emitter.stderr = stderr;
+    emitter.kill = () => {};
+    cp.spawnedProcs.push({ args, emitter, stdout, stderr });
+    return emitter;
+  };
+  // Route execFileSync through the same handler as execSync so probes keep the
+  // same observable contract regardless of which primitive the repo layer uses
+  // (the `codex --version` health probe uses execFileSync to avoid shell parsing).
+  const execFileSync = (file: string, args: readonly string[] = []) => {
+    const command = [file, ...args].join(' ');
+    cp.execCalls.push({ fn: 'execSync', command });
+    return cp.state.execSyncHandler(command);
+  };
+  const mod = { execSync, spawn, execFileSync };
+  return { ...mod, default: mod };
+});
 
 import { AuthService } from '../../main/services/auth';
 import { IntegrationCache } from '../../main/services/sync/IntegrationCache';
@@ -73,12 +143,39 @@ const happyUpload: MockResponder = () =>
 describe('gpt-credential-sync blackbox', () => {
   let restoreFetch: (() => void) | null = null;
 
+  /** Contents the fake ~/.codex/auth.json currently holds (null = absent). */
+  let authFileContents: string | null = null;
+  /** Whether `codex --version` succeeds. */
+  let codexUsable = true;
+
   beforeEach(() => {
     clearFetchCaptures();
-    fsExistsSync.mockReset().mockReturnValue(false);
-    fsReadFileSync.mockReset().mockImplementation(() => {
+    authFileContents = null;
+    codexUsable = true;
+    execCalls.length = 0;
+    spawnedProcs.length = 0;
+
+    fsExistsSync
+      .mockReset()
+      .mockImplementation((p) => p === CODEX_AUTH_PATH && authFileContents !== null);
+    fsReadFileSync.mockReset().mockImplementation((p) => {
+      if (p === CODEX_AUTH_PATH && authFileContents !== null) return authFileContents;
       throw new Error('ENOENT: no such file');
     });
+    fsReaddirSync.mockReset().mockReturnValue([]);
+    fsWriteFileSync.mockReset();
+    fsChmodSync.mockReset();
+
+    setExecSyncHandler((command) => {
+      if (command.includes('--version')) {
+        if (!codexUsable) throw new Error('spawn codex ENOENT');
+        return 'codex-cli 0.0.0';
+      }
+      if (command === 'npm config get prefix') return '/fake/npm';
+      if (command === 'which npm') return '/fake/npm/bin/npm';
+      return '';
+    });
+
     vi.mocked(AuthService.getSession).mockReset();
     vi.mocked(IntegrationCache.invalidate).mockReset();
     vi.mocked(IntegrationCache.getIntegration).mockReset().mockResolvedValue({
@@ -100,8 +197,23 @@ describe('gpt-credential-sync blackbox', () => {
   };
 
   const wireCodexAuthFile = (contents = VALID_CODEX_AUTH): void => {
-    fsExistsSync.mockReturnValue(true);
-    fsReadFileSync.mockReturnValue(contents);
+    authFileContents = contents;
+  };
+
+  const findProc = (arg: string): SpawnedProc | undefined =>
+    spawnedProcs.find((p) => p.args.includes(arg));
+
+  /**
+   * Wait for `codex login` to be spawned, then complete it. When `writes` is
+   * given, the login "writes" that content to auth.json before exiting 0.
+   */
+  const completeCodexLogin = async (writes: string | null = VALID_CODEX_AUTH): Promise<void> => {
+    await vi.waitFor(() => {
+      expect(findProc('login')).toBeDefined();
+    });
+    const proc = findProc('login')!;
+    if (writes !== null) authFileContents = writes;
+    proc.emitter.emit('close', 0);
   };
 
   describe('auth boundary', () => {
@@ -216,32 +328,236 @@ describe('gpt-credential-sync blackbox', () => {
     });
   });
 
-  describe('empty state', () => {
-    it('returns a login instruction and skips upload when ~/.codex/auth.json cannot be read', async () => {
+  // ------------------------------------------------------------------
+  // connect flow — the app must be able to *obtain* a ChatGPT login, not
+  // just report on one the user is expected to create in Terminal.
+  // ------------------------------------------------------------------
+  describe('connect flow (no ChatGPT credentials yet)', () => {
+    it('runs codex login, re-reads auth.json, and uploads when no auth file exists', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
-      fsReadFileSync.mockImplementation(() => {
-        throw new Error('ENOENT: no such file');
-      });
       installUpload();
 
-      const result = await GptCredentialSync.syncCredentials();
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      const result = await syncPromise;
+
+      expect(result).toEqual({ success: true });
+      expect(findProc('login')).toBeDefined();
+      expect(fetchCaptures).toHaveLength(1);
+      expect(vi.mocked(IntegrationCache.invalidate)).toHaveBeenCalledTimes(1);
+    });
+
+    it('runs codex login instead of dead-ending when Codex is in API-key mode', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(
+        JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-proj-existing-key' })
+      );
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      const result = await syncPromise;
+
+      expect(result).toEqual({ success: true });
+      expect(fetchCaptures).toHaveLength(1);
+    });
+
+    it('backs up an existing API-key auth.json before codex login overwrites it', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      const existing = JSON.stringify({
+        auth_mode: 'apikey',
+        OPENAI_API_KEY: 'sk-proj-existing-key',
+      });
+      wireCodexAuthFile(existing);
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      await syncPromise;
+
+      expect(fsWriteFileSync).toHaveBeenCalledWith(
+        `${CODEX_AUTH_PATH}.apikey.bak`,
+        existing,
+        expect.objectContaining({ mode: 0o600 })
+      );
+    });
+
+    it('installs the Codex CLI first when `codex --version` fails (missing or broken binary)', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      codexUsable = false;
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+
+      await vi.waitFor(() => {
+        expect(findProc('@openai/codex')).toBeDefined();
+      });
+      const installProc = findProc('@openai/codex')!;
+      expect(installProc.args).toEqual(['install', '-g', '--force', '@openai/codex']);
+      codexUsable = true;
+      installProc.emitter.emit('close', 0);
+
+      await completeCodexLogin();
+      const result = await syncPromise;
+
+      expect(result).toEqual({ success: true });
+      expect(fetchCaptures).toHaveLength(1);
+    });
+
+    it('reports a manual install command when the CLI is still unusable after install', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      codexUsable = false;
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+
+      await vi.waitFor(() => {
+        expect(findProc('@openai/codex')).toBeDefined();
+      });
+      findProc('@openai/codex')!.emitter.emit('close', 0);
+
+      const result = await syncPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.message).toBe(
+        'Codex installation failed. Please install manually: npm install -g @openai/codex'
+      );
+      expect(fetchCaptures).toHaveLength(0);
+    });
+
+    it('surfaces a login failure without uploading when codex login exits non-zero', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+
+      await vi.waitFor(() => {
+        expect(findProc('login')).toBeDefined();
+      });
+      const proc = findProc('login')!;
+      proc.stderr.emit('data', Buffer.from('user cancelled'));
+      proc.emitter.emit('close', 1);
+
+      const result = await syncPromise;
+
+      expect(result.success).toBe(false);
+      expect(result.message).toMatch(/codex login failed/);
+      expect(fetchCaptures).toHaveLength(0);
+      expect(vi.mocked(IntegrationCache.invalidate)).not.toHaveBeenCalled();
+    });
+
+    it('reports a clear failure when login succeeds but writes no credentials', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin(null);
+      const result = await syncPromise;
 
       expect(result).toEqual({
         success: false,
-        message: 'Codex credentials not found. Please run codex login in Terminal.',
+        message:
+          'ChatGPT sign-in completed but no Codex credentials were written. Please try again.',
       });
       expect(fetchCaptures).toHaveLength(0);
-      expect(vi.mocked(IntegrationCache.invalidate)).not.toHaveBeenCalled();
+    });
+
+    it('streams gpt:setupStatus progress to the BrowserWindow during login', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      installUpload();
+
+      const send = vi.fn();
+      const window = {
+        webContents: { send },
+        isDestroyed: () => false,
+      } as unknown as BrowserWindow;
+      const syncPromise = GptCredentialSync.syncCredentials(window);
+      await completeCodexLogin();
+      await syncPromise;
+
+      const events = send.mock.calls
+        .filter(([channel]) => channel === 'gpt:setupStatus')
+        .map(([, status]) => status);
+      expect(events).toContain('Opening browser to sign in to ChatGPT...');
+      expect(events).toContain('Uploading credentials...');
+      expect(events[events.length - 1]).toBe('');
+    });
+
+    it('keeps syncing when the BrowserWindow is destroyed mid-flow', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      installUpload();
+
+      // A destroyed window is non-null and throws on send. Progress reporting is
+      // advisory and must never abort a login that is otherwise succeeding.
+      const send = vi.fn(() => {
+        throw new Error('Object has been destroyed');
+      });
+      const window = {
+        webContents: { send },
+        isDestroyed: () => true,
+      } as unknown as BrowserWindow;
+
+      const syncPromise = GptCredentialSync.syncCredentials(window);
+      await completeCodexLogin();
+      const result = await syncPromise;
+
+      expect(result).toEqual({ success: true });
+      expect(send).not.toHaveBeenCalled();
+      expect(fetchCaptures).toHaveLength(1);
+    });
+
+    it('sanitizes auth_mode so a backup cannot escape the codex directory', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(JSON.stringify({ auth_mode: '../../evil/path', OPENAI_API_KEY: 'sk-x' }));
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      await syncPromise;
+
+      const [backupPath] = fsWriteFileSync.mock.calls[0];
+      expect(backupPath).not.toContain('..');
+      expect(backupPath).toBe(`${CODEX_AUTH_PATH}.evilpath.bak`);
+    });
+
+    it('forces 0600 on the credential backup even when it already exists', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-x' }));
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      await syncPromise;
+
+      // writeFileSync's `mode` only applies on creation, so an already-present
+      // backup would keep its old (possibly world-readable) permissions.
+      expect(fsChmodSync).toHaveBeenCalledWith(`${CODEX_AUTH_PATH}.apikey.bak`, 0o600);
+    });
+
+    it('never launches a login from the non-interactive periodic refresh', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-proj-key' }));
+      installUpload();
+
+      const result = await GptCredentialSync.syncExistingCredentialsIfChanged();
+
+      expect(result).toEqual({
+        success: false,
+        message: 'Codex is not logged in with a ChatGPT account',
+      });
+      expect(spawnedProcs).toHaveLength(0);
+      expect(fetchCaptures).toHaveLength(0);
     });
   });
 
   describe('error state', () => {
     it('rejects non-JSON credentials without uploading', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
-      wireCodexAuthFile('not-json-at-all');
       installUpload();
 
-      const result = await GptCredentialSync.syncCredentials();
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin('not-json-at-all');
+      const result = await syncPromise;
 
       expect(result).toEqual({
         success: false,
@@ -253,7 +569,10 @@ describe('gpt-credential-sync blackbox', () => {
 
     it('rejects auth files that are not ChatGPT login mode', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
-      wireCodexAuthFile(
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin(
         JSON.stringify({
           auth_mode: 'api-key',
           tokens: {
@@ -262,9 +581,7 @@ describe('gpt-credential-sync blackbox', () => {
           },
         })
       );
-      installUpload();
-
-      const result = await GptCredentialSync.syncCredentials();
+      const result = await syncPromise;
 
       expect(result).toEqual({
         success: false,
@@ -275,10 +592,13 @@ describe('gpt-credential-sync blackbox', () => {
 
     it('rejects ChatGPT auth files missing access or refresh token', async () => {
       vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
-      wireCodexAuthFile(JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'one' } }));
       installUpload();
 
-      const result = await GptCredentialSync.syncCredentials();
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin(
+        JSON.stringify({ auth_mode: 'chatgpt', tokens: { access_token: 'one' } })
+      );
+      const result = await syncPromise;
 
       expect(result).toEqual({
         success: false,
@@ -349,14 +669,13 @@ describe('gpt-credential-sync blackbox', () => {
 
   describe('hasCredentials', () => {
     it('returns true when the Codex auth file exists', () => {
-      fsExistsSync.mockReturnValue(true);
+      wireCodexAuthFile();
 
       expect(GptCredentialSync.hasCredentials()).toBe(true);
       expect(fsExistsSync).toHaveBeenCalledWith(CODEX_AUTH_PATH);
     });
 
     it('returns false when the Codex auth file is absent or existsSync throws', () => {
-      fsExistsSync.mockReturnValueOnce(false);
       expect(GptCredentialSync.hasCredentials()).toBe(false);
 
       fsExistsSync.mockImplementationOnce(() => {

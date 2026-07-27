@@ -58,7 +58,9 @@ fi
 
 status=""
 for attempt in $(seq 1 60); do
-    status="$(curl -fsS -o /dev/null -w '%{http_code}' "$PUBLIC_BASE_URL/test_payment" 2>/dev/null || true)"
+    # --noproxy '*' so an inherited proxy can neither fake a healthy tunnel with
+    # a 407/5xx nor mask a healthy one by refusing the trycloudflare host.
+    status="$(curl -fsS -o /dev/null -w '%{http_code}' --noproxy '*' "$PUBLIC_BASE_URL/test_payment" 2>/dev/null || true)"
     if [ "$status" = "200" ]; then
         break
     fi

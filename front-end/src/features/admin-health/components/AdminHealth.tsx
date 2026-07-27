@@ -50,7 +50,7 @@ import { MetricSectionHeader } from './MetricHierarchy';
 import ConnectorAdoptionSection from './ConnectorAdoptionSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import VelocitySection from './VelocitySection';
-import WaitlistPeopleSection from './WaitlistPeopleSection';
+import UsersSection from './UsersSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
 import { funnelEndToEnd, relativeChange, seriesMetricChange } from './metricComparison';
 import type {
@@ -78,8 +78,10 @@ function formatPercent(value: number): string {
   }).format(value);
 }
 
+// People IN THE APP — past the invite gate via a redeemed code OR a paid
+// subscription. Not every verified signup; most of those are still waitlisted.
 function userNoun(count: number): string {
-  return count === 1 ? 'user' : 'users';
+  return count === 1 ? 'person in app' : 'people in app';
 }
 
 const PERIOD_COPY: Record<AdminHealthTimeSlice, { title: string; range: string }> = {
@@ -368,7 +370,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
       <MetricPanel
-        title="# of Users"
+        title="# of People in App"
         value={formatNumber(data.summary.userCount)}
         detail={`${formatNumber(newUsers)} new ${userNoun(newUsers)} this period.`}
         icon={<Users className="h-5 w-5" />}
@@ -612,7 +614,7 @@ export default function AdminHealth() {
                 description="Internal execution signals that support product and operational health."
               />
               <WaitlistSignupsChart data={data} />
-              <WaitlistPeopleSection />
+              <UsersSection />
               <VelocitySection data={data} />
             </section>
           </div>

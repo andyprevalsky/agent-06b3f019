@@ -24,15 +24,6 @@ export interface SupabaseAdminUsersListResponse {
   users: SupabaseAdminUserResponse[];
 }
 
-export interface SessionTokens {
-  access_token: string;
-  refresh_token: string;
-  expires_in: number;
-  expires_at: number;
-  token_type: string;
-}
-
-export interface AnonymousSessionResult {
-  user: { id: string; is_anonymous: boolean };
-  session: SessionTokens;
-}
+// Session token shapes are owned by the canonical minter so the auth domain and
+// admin-health (admin account switching) can never drift apart.
+export type { AnonymousSessionResult, SessionTokens } from '../../providers/sessionTokens';

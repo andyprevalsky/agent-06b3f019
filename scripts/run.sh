@@ -1009,38 +1009,167 @@ ensure_ngrok_domain_reserved() {
     }
 }
 
+# Cloudflare account-less quick tunnels have no uptime guarantee: a hostname is
+# published within ~2s but a meaningful fraction never route at all (DNS answers
+# with Cloudflare IPs, yet every request fails to connect indefinitely), and the
+# service also rate-limits bursts of tunnel creation. Publication alone was
+# treated as readiness here, so a dead tunnel was only discovered ~60s later by
+# the public-tunnel smoke — which fatally tore down the whole stack with no
+# retry. Verify the edge actually routes, and recycle the tunnel when it does not.
+#
+# Any HTTP status proves the edge routes to us; the origin frontend is not up yet
+# at this point, so 502/404 are perfectly acceptable here. Only "no HTTP response
+# at all" (curl writes 000) means the hostname is dead.
+CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS:-45}"
+CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
+# Linear backoff base; attempt N waits N × this before re-requesting.
+CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
+
+cloudflare_tunnel_edge_is_routing() {
+    local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        # --noproxy '*': this probe must measure the Cloudflare edge itself, not
+        # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
+        # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
+        # (as on a macOS host with a content blocker configured system-wide)
+        # refuse trycloudflare.com outright and report a healthy tunnel as dead.
+        status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        if [ -n "$status" ] && [ "$status" != "000" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 start_cloudflare_quick_tunnel() {
     if ! command -v cloudflared >/dev/null 2>&1; then
         echo "❌ cloudflared is required for isolated benchmark public tunnels."
         exit 1
     fi
     mkdir -p "$RUN_CONTEXT_DIR"
-    local tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
     local tunnel_home="$RUN_CONTEXT_DIR/cloudflared-home"
     mkdir -p "$tunnel_home"
-    echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT"
-    HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
-        > "$tunnel_log" 2>&1 &
-    NGROK_PID=$!
     PUBLIC_TUNNEL_SERVICE_NAME="cloudflared"
-    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
 
-    for attempt in $(seq 1 60); do
-        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-            echo "❌ cloudflared exited before the public tunnel became ready."
-            tail -80 "$tunnel_log" || true
-            exit 1
+    local tunnel_attempt tunnel_log published
+    for tunnel_attempt in $(seq 1 "$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"); do
+        tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
+        [ "$tunnel_attempt" -gt 1 ] && tunnel_log="$RUN_CONTEXT_DIR/cloudflared.attempt${tunnel_attempt}.log"
+
+        echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT (attempt $tunnel_attempt/$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS)"
+        HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
+            > "$tunnel_log" 2>&1 &
+        NGROK_PID=$!
+        PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+        published=false
+        for attempt in $(seq 1 60); do
+            if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+                echo "⚠️  cloudflared exited before publishing a tunnel (attempt $tunnel_attempt)."
+                tail -40 "$tunnel_log" || true
+                break
+            fi
+            if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
+                published=true
+                break
+            fi
+            sleep 1
+        done
+
+        if [ "$published" = true ]; then
+            echo "🔎 Verifying the tunnel edge routes: $PUBLIC_BASE_URL"
+            if cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL"; then
+                echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+                return 0
+            fi
+            echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
         fi
-        if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
-            echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
-            return 0
+
+        # Retire this hostname before asking Cloudflare for a new one, so the dead
+        # tunnel cannot linger in PIDS and be reported as a live service.
+        kill "$NGROK_PID" 2>/dev/null || true
+        wait "$NGROK_PID" 2>/dev/null || true
+        unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
+        NGROK_PID=""
+
+        # Back off before re-requesting. Consecutive dead tunnels usually mean the
+        # account-less service is rate-limiting this IP rather than that one
+        # hostname was unlucky, and hammering it immediately keeps us limited.
+        if [ "$tunnel_attempt" -lt "$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS" ]; then
+            local backoff=$((CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS * tunnel_attempt))
+            echo "⏳ Backing off ${backoff}s before requesting another quick tunnel..."
+            sleep "$backoff"
         fi
-        sleep 1
     done
 
-    echo "❌ cloudflared did not publish a valid run-scoped HTTPS origin for :$FRONTEND_PORT"
-    tail -80 "$tunnel_log" || true
-    exit 1
+    echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
+    echo "   trycloudflare.com is account-less and best-effort."
+    return 1
+}
+
+# Fallback provider when trycloudflare is unavailable.
+#
+# trycloudflare.com has no uptime guarantee and can refuse to route EVERY quick
+# tunnel from a host for hours at a stretch (observed 2026-07-27: tunnels
+# register, then Cloudflare terminates them or never routes the hostname, across
+# both QUIC and HTTP/2). That used to fail the entire Pre-Deploy smoke gate with
+# no recourse. ngrok is already a supported provider here and uses independent
+# infrastructure, so an ephemeral ngrok endpoint is a clean second source.
+#
+# Ephemeral on purpose: no --domain, so this needs no reserved domain and no
+# paid ngrok plan — it is a disposable per-run URL, exactly like the quick tunnel
+# it replaces.
+start_ngrok_ephemeral_tunnel() {
+    command -v ngrok >/dev/null 2>&1 || {
+        echo "   ngrok fallback unavailable: ngrok is not installed."
+        return 1
+    }
+    if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
+        echo "   ngrok fallback unavailable: no authtoken configured."
+        return 1
+    fi
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local ngrok_log="$RUN_CONTEXT_DIR/ngrok-fallback.log"
+    echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
+
+    ngrok http "$FRONTEND_PORT" \
+        --log stdout --log-format json --log-level info > "$ngrok_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    local ngrok_url=""
+    for attempt in $(seq 1 45); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok exited before publishing a tunnel."
+            tail -20 "$ngrok_log" || true
+            return 1
+        fi
+        ngrok_url="$(grep -oE '"url":"https://[^"]+"' "$ngrok_log" 2>/dev/null |
+            head -1 | sed 's/"url":"//; s/"$//')"
+        [ -n "$ngrok_url" ] && break
+        sleep 1
+    done
+    [ -n "$ngrok_url" ] || {
+        echo "❌ ngrok did not publish an HTTPS endpoint."
+        tail -20 "$ngrok_log" || true
+        return 1
+    }
+
+    public_tunnel_publish_environment "$ngrok_url" "$ALLOWED_ORIGINS" || {
+        echo "❌ ngrok published an unusable origin: $ngrok_url"
+        return 1
+    }
+
+    echo "🔎 Verifying the ngrok edge routes: $PUBLIC_BASE_URL"
+    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+        echo "❌ $PUBLIC_BASE_URL never routed."
+        return 1
+    }
+    echo "🌐 Public tunnel ready (ngrok): $PUBLIC_BASE_URL"
+    return 0
 }
 
 start_ngrok_public_tunnel() {
@@ -1129,7 +1258,16 @@ EOF
 
 start_public_tunnel() {
     case "$(public_tunnel_provider_for_mode "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}")" in
-        cloudflare) start_cloudflare_quick_tunnel ;;
+        cloudflare)
+            # A single best-effort provider is a single point of failure for the
+            # whole benchmark stack. Fall back to ngrok rather than failing the
+            # run when trycloudflare will not route.
+            start_cloudflare_quick_tunnel && return 0
+            start_ngrok_ephemeral_tunnel && return 0
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then ngrok)." >&2
+            echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+            exit 1
+            ;;
         ngrok) start_ngrok_public_tunnel ;;
         *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
     esac
@@ -1239,7 +1377,15 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
-    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ]; then
+    # Only publish a PUBLIC url when one actually exists. With
+    # BENCHMARK_SKIP_PUBLIC_TUNNEL=1 the "public" URL is deliberately
+    # http://localhost:<port>, which publish_url_manifest correctly rejects (it
+    # requires a portless HTTPS origin). Without this guard the two flags
+    # conflict and abort the whole stack with a misleading
+    # "Failed to publish ephemeral public URL", even though the caller asked for
+    # no tunnel at all.
+    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ] &&
+        [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" != "1" ]; then
         local services_manifest
         case "$RUN_CONTEXT_DIR" in
             /*) services_manifest="$RUN_CONTEXT_DIR/services.json" ;;

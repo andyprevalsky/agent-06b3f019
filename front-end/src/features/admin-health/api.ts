@@ -1,12 +1,7 @@
 import { backendApiUrl } from '@/lib/backendUrl';
 import { getStoredSession } from '@/lib/supabase';
 
-import type {
-  AdminHealthData,
-  AdminHealthTimeSlice,
-  AdminWaitlistInviteResponse,
-  AdminWaitlistPeopleResponse,
-} from './types';
+import type { AdminHealthData, AdminHealthTimeSlice, AdminWaitlistInviteResponse } from './types';
 
 const REQUEST_TIMEOUT_MS = 15 * 1000;
 
@@ -46,36 +41,6 @@ async function parseError(response: Response): Promise<string> {
     // fall through to status-based message
   }
   return `Request failed (${response.status})`;
-}
-
-export async function fetchWaitlistPeople(
-  page: number,
-  pageSize: number,
-): Promise<AdminWaitlistPeopleResponse> {
-  const session = getStoredSession();
-  if (!session) throw new Error('Not authenticated');
-
-  const params = new URLSearchParams({
-    page: String(page),
-    pageSize: String(pageSize),
-  });
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${backendApiUrl()}/admin-health/waitlist?${params.toString()}`, {
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-        'Content-Type': 'application/json',
-      },
-      signal: controller.signal,
-    });
-
-    if (!response.ok) throw new Error(await parseError(response));
-
-    return (await response.json()) as AdminWaitlistPeopleResponse;
-  } finally {
-    window.clearTimeout(timeoutId);
-  }
 }
 
 export async function inviteWaitlistPerson(

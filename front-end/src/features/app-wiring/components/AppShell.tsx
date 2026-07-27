@@ -18,6 +18,10 @@
  *
  * WaitlistGate overlays every route: authenticated users without a redeemed
  * invite code see "You're On The Waitlist!" instead of being fully signed in.
+ *
+ * AdminSwitcherMount overlays every route too: it renders the fixed top-right
+ * admin account pill (and the purple "Viewing as …" badge while impersonating),
+ * so an admin can always tell whose account they are in and get back to theirs.
  */
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -28,6 +32,8 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { AppDataProvider } from '@/hooks/useAppData';
 import ErrorBoundary from '@/components/ErrorBoundary';
 import { WaitlistGate } from '@/features/auth';
+
+import { AdminSwitcherMount } from './AdminSwitcherMount';
 
 import { ROUTE_TABLE } from '../config';
 
@@ -42,6 +48,7 @@ const AppShell = () => (
           <Analytics />
           <BrowserRouter>
             <WaitlistGate />
+            <AdminSwitcherMount />
             <Routes>
               {ROUTE_TABLE.map(({ path, component: Page }) => (
                 <Route key={path} path={path} element={<Page />} />
