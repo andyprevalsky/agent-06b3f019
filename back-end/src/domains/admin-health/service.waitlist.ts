@@ -26,7 +26,7 @@ import {
   WaitlistInviteInProgressError,
 } from './service.waitlist-finalization';
 import { resolveInviteGate } from './service.waitlist-gate';
-import { DEFAULT_WAITLIST_PAGE_SIZE, type WaitlistPagination } from './service.waitlist-pagination';
+import { DEFAULT_PEOPLE_PAGE_SIZE, type PeoplePagination } from './service.pagination';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPeopleResponse } from './types';
 
 export {
@@ -205,7 +205,7 @@ function normalizePhoneDigits(phone: string | null | undefined): string {
 
 /** Return one bounded page of actionable phone-bearing signups with gate state. */
 export async function getWaitlistPeople(
-  pagination: WaitlistPagination = { page: 1, pageSize: DEFAULT_WAITLIST_PAGE_SIZE }
+  pagination: PeoplePagination = { page: 1, pageSize: DEFAULT_PEOPLE_PAGE_SIZE }
 ): Promise<AdminWaitlistPeopleResponse> {
   const { rows, total } = await repo.findWaitlistPeople({
     skip: (pagination.page - 1) * pagination.pageSize,

@@ -329,6 +329,19 @@ async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   });
   const userIdByPhone = new Map(additionalUsers.map((u) => [u.phone, u.userId]));
   for (const userId of userIdByPhone.values()) userIds.add(userId);
+
+  // Mirror findInviteCodeRedeemers: the metric counts people IN THE APP, and a
+  // redeemed invite code clears the waitlist gate just like a subscription does.
+  // Someone who got in on a code but never paid is still a person in the app.
+  const redeemers = await prisma.user.findMany({
+    where: { usedInviteCode: { not: null }, phone: { not: null } },
+    select: { userId: true, phone: true },
+  });
+  for (const redeemer of redeemers) {
+    if ((redeemer.phone ?? '').trim() === '') continue;
+    if (ADMIN_HEALTH_EXCLUDED_USER_IDS.has(redeemer.userId)) continue;
+    userIds.add(redeemer.userId);
+  }
   return userIds;
 }
 
