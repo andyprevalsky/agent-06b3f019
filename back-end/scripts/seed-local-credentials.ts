@@ -18,24 +18,62 @@ function rowSignature(parts: readonly unknown[]): string {
   return JSON.stringify(parts);
 }
 
-type SnapshotLookupModel<T extends { userId: string }> = {
-  findMany?(args: { where: { userId: { in: string[] } } }): Promise<T[]>;
+type SnapshotLookupWhere = {
+  userId: { in: string[] };
+  /** Narrows the snapshot read to just the rows in the current page. */
+  origin?: { in: string[] };
 };
 
+type SnapshotLookupModel<T extends { userId: string }> = {
+  findMany?(args: { where: SnapshotLookupWhere }): Promise<T[]>;
+};
+
+/**
+ * The snapshot read must stay proportional to the rows being synced, not to the
+ * whole table. Paging the remote side alone is not enough: an unscoped local
+ * `findMany` re-materializes every already-synced blob row on every page, so
+ * peak residency stays O(table) and the guest still dies.
+ */
 async function rowsNeedingContentSync<T extends { userId: string }>(
   remoteRows: T[],
   localModel: SnapshotLookupModel<T>,
   identity: (row: T) => string,
-  contentMatches: (remote: T, local: T) => boolean
+  contentMatches: (remote: T, local: T) => boolean,
+  narrowSnapshot?: (rows: T[]) => Partial<SnapshotLookupWhere>
 ): Promise<T[]> {
   if (!localModel.findMany || remoteRows.length === 0) return remoteRows;
   const userIds = [...new Set(remoteRows.map((row) => row.userId))];
-  const localRows = await localModel.findMany({ where: { userId: { in: userIds } } });
+  const localRows = await localModel.findMany({
+    where: { userId: { in: userIds }, ...(narrowSnapshot?.(remoteRows) ?? {}) },
+  });
   const localByIdentity = new Map(localRows.map((row) => [identity(row), row]));
   return remoteRows.filter((row) => {
     const local = localByIdentity.get(identity(row));
     return !local || !contentMatches(row, local);
   });
+}
+
+/**
+ * Read-and-write one page at a time so no blob-bearing table is ever fully
+ * resident. Each page is released before the next is fetched, which keeps peak
+ * heap proportional to `pageSize` instead of to the table.
+ */
+export async function syncPagedCredentials<T>(
+  readPage: (page: { skip: number; take: number }) => Promise<T[]>,
+  syncPage: (rows: T[]) => Promise<number>,
+  pageSize: number
+): Promise<number> {
+  if (!Number.isInteger(pageSize) || pageSize < 1) {
+    throw new Error(`credential sync page size must be a positive integer, got ${pageSize}`);
+  }
+  let total = 0;
+  for (let skip = 0; ; skip += pageSize) {
+    const rows = await readPage({ skip, take: pageSize });
+    if (rows.length === 0) break;
+    total += await syncPage(rows);
+    if (rows.length < pageSize) break;
+  }
+  return total;
 }
 
 function cookieContent(cookie: Cookie): string {
@@ -270,7 +308,8 @@ export async function syncOriginCredentials<T extends BrowserOriginRecord>(
     origins,
     localOrigin,
     (origin) => rowSignature([origin.userId, origin.origin]),
-    (remote, local) => remote.hash === local.hash
+    (remote, local) => remote.hash === local.hash,
+    (rows) => ({ origin: { in: [...new Set(rows.map((row) => row.origin))] } })
   );
   for (const origin of originsToSync) {
     const { id: remoteId, ...updateData } = origin;

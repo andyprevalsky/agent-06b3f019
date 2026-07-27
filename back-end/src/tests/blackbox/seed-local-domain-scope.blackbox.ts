@@ -168,8 +168,12 @@ test('seed-local consumes each scoped reader exactly once in the live credential
     'browserPassword',
     'passkeyCredential',
   ]) {
+    // Match the call site, not its argument list. Blob-bearing readers now take
+    // a page because the unpaged whole-table read OOM-killed every bench guest.
+    // The invariant is unchanged and still strict: exactly ONE call site per
+    // table — no bypass of the scoped reader, no duplicate read.
     assert.equal(
-      occurrences(`scopedRemoteBrowserAuth.${table}()`),
+      occurrences(`scopedRemoteBrowserAuth.${table}(`),
       1,
       `${table} must execute through its scoped reader`
     );

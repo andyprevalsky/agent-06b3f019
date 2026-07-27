@@ -1525,8 +1525,15 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
 
 
 def test_agent_payment_accepts_grounded_structured_browser_confirmation():
-    """A verified browser result must not depend on one exact prose inflection."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+    """A verified browser result must not depend on one exact prose inflection.
+
+    Ported from the deleted `_evaluate_agent_payment_result` exact-key matcher to the
+    current pipeline (c747ca4fd), which left these two cases importing a symbol that no
+    longer exists — the agents `benchmark` domain has been red on main since. The pass/fail
+    verdict now lives in the async semantic gate rather than a pure function, so the
+    contract this case can still pin is that the grounded id REACHES that judge.
+    """
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
     data = {
         "agent": {
@@ -1548,12 +1555,16 @@ def test_agent_payment_accepts_grounded_structured_browser_confirmation():
         ],
     }
 
-    assert _evaluate_agent_payment_result(data) == (True, None)
+    assert "tp_6faab326" in _extract_agent_payment_output_blob(data)
 
 
 def test_agent_payment_accepts_current_payment_confirmation_schema_key():
-    """The browser payment task currently asks for payment_confirmation_id."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+    """The browser payment task currently asks for payment_confirmation_id.
+
+    Same port as above: pins that this schema key's grounded id, alongside the
+    purchased product names, survives extraction into the semantic judge's blob.
+    """
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
     data = {
         "messages": [
@@ -1578,7 +1589,9 @@ def test_agent_payment_accepts_current_payment_confirmation_schema_key():
         ],
     }
 
-    assert _evaluate_agent_payment_result(data) == (True, None)
+    blob = _extract_agent_payment_output_blob(data)
+    assert "tp_058813d0" in blob
+    assert "Aurora Notebook" in blob
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():

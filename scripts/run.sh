@@ -828,11 +828,25 @@ if [ "$USER_EXISTS" = "0" ]; then
     # exited before becoming healthy" → the box dropped from the batch (an infra
     # loss, not a benchmark verdict). Retry a few times before giving up so a
     # one-off native crash doesn't cost a whole box.
+    # Capture the seed's OWN status. `$?` read after `fi` is the *if statement's*
+    # status — which is 0 whenever the condition was false and there is no else —
+    # so the real signal (137 = SIGKILL/OOM, 139 = SIGSEGV) was reported as
+    # "rc=0" and every diagnosis started from a lie.
     _seed_ok=0
     for _seed_try in 1 2 3; do
-        if (cd back-end && npx tsx scripts/seed-local.ts); then _seed_ok=1; break; fi
-        _seed_rc=$?
-        echo "   ⚠️ first-run seed attempt ${_seed_try}/3 failed (rc=${_seed_rc}$([ "$_seed_rc" = 139 ] && echo ' = SIGSEGV')) — retrying..."
+        _seed_rc=0
+        (cd back-end && npx tsx scripts/seed-local.ts) || _seed_rc=$?
+        if [ "$_seed_rc" = 0 ]; then _seed_ok=1; break; fi
+        _seed_signal=""
+        case "$_seed_rc" in
+            137) _seed_signal=" = SIGKILL (out of memory — check dmesg for oom-kill)" ;;
+            139) _seed_signal=" = SIGSEGV" ;;
+        esac
+        if [ "$_seed_try" -lt 3 ]; then
+            echo "   ⚠️ first-run seed attempt ${_seed_try}/3 failed (rc=${_seed_rc}${_seed_signal}) — retrying..."
+        else
+            echo "   ⚠️ first-run seed attempt ${_seed_try}/3 failed (rc=${_seed_rc}${_seed_signal}) — attempts exhausted"
+        fi
         sleep $(( _seed_try * 3 ))
     done
     [ "$_seed_ok" = 1 ] || { echo "❌ first-run seed failed after 3 attempts — aborting stack"; exit 1; }

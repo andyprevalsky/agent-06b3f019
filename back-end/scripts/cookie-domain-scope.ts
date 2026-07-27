@@ -88,8 +88,20 @@ export type BrowserAuthRowTypes = {
   passkeyCredential: unknown;
 };
 
+/**
+ * A page of a scoped read. Browser-auth tables carry multi-MB encrypted JSON
+ * blobs (LocalStorageOrigin.entries, IndexedDBOrigin.databases), so the read
+ * boundary is paged: materializing a whole table costs gigabytes of V8 heap
+ * once the JSON is parsed into objects, which OOM-kills every memory-bounded
+ * bench guest. `undefined` means "read everything" for the small tables.
+ */
+export type BrowserAuthPage = { skip: number; take: number };
+
 export type BrowserAuthReaders<Rows extends BrowserAuthRowTypes> = {
-  [Table in keyof Rows]: (where: Record<string, unknown>) => Promise<Rows[Table][]>;
+  [Table in keyof Rows]: (
+    where: Record<string, unknown>,
+    page?: BrowserAuthPage
+  ) => Promise<Rows[Table][]>;
 };
 
 // Bind the selector contract to the actual read boundary. seed-local consumes
@@ -99,16 +111,23 @@ export function createScopedBrowserAuthReaders<Rows extends BrowserAuthRowTypes>
   readers: BrowserAuthReaders<Rows>,
   userId: string,
   domains: string[]
-): { [Table in keyof Rows]: () => Promise<Rows[Table][]> } {
+): {
+  [Table in keyof Rows]: (page?: BrowserAuthPage) => Promise<Rows[Table][]>;
+} {
   return {
-    cookie: () => readers.cookie(cookieSyncWhere(userId, domains)),
-    cookieBundle: () => readers.cookieBundle(authRealmSyncWhere(userId, domains)),
-    steelSessionAuth: () => readers.steelSessionAuth(authRealmSyncWhere(userId, domains)),
-    localStorageOrigin: () => readers.localStorageOrigin(originSyncWhere(userId, domains)),
-    indexedDBOrigin: () => readers.indexedDBOrigin(originSyncWhere(userId, domains)),
-    browserPermission: () => readers.browserPermission(originSyncWhere(userId, domains)),
-    cacheStorageOrigin: () => readers.cacheStorageOrigin(originSyncWhere(userId, domains)),
-    browserPassword: () => readers.browserPassword(originSyncWhere(userId, domains)),
-    passkeyCredential: () => readers.passkeyCredential(passkeySyncWhere(userId, domains)),
+    cookie: (page) => readers.cookie(cookieSyncWhere(userId, domains), page),
+    cookieBundle: (page) => readers.cookieBundle(authRealmSyncWhere(userId, domains), page),
+    steelSessionAuth: (page) =>
+      readers.steelSessionAuth(authRealmSyncWhere(userId, domains), page),
+    localStorageOrigin: (page) =>
+      readers.localStorageOrigin(originSyncWhere(userId, domains), page),
+    indexedDBOrigin: (page) => readers.indexedDBOrigin(originSyncWhere(userId, domains), page),
+    browserPermission: (page) =>
+      readers.browserPermission(originSyncWhere(userId, domains), page),
+    cacheStorageOrigin: (page) =>
+      readers.cacheStorageOrigin(originSyncWhere(userId, domains), page),
+    browserPassword: (page) => readers.browserPassword(originSyncWhere(userId, domains), page),
+    passkeyCredential: (page) =>
+      readers.passkeyCredential(passkeySyncWhere(userId, domains), page),
   };
 }
