@@ -621,10 +621,11 @@ export function registerHandlers() {
     return hasCredentials;
   });
 
-  ipcMain.handle('gpt:syncCredentials', async () => {
+  ipcMain.handle('gpt:syncCredentials', async (event) => {
     logIpc('IN', 'gpt:syncCredentials');
+    const window = BrowserWindow.fromWebContents(event.sender);
     try {
-      const result = await GptCredentialSync.syncCredentials();
+      const result = await GptCredentialSync.syncCredentials(window);
       logIpc('OUT', 'gpt:syncCredentials', result);
       return result;
     } catch (error) {

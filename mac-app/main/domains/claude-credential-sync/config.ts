@@ -17,7 +17,4 @@ export const NPM_INSTALL_TIMEOUT_MS = 120_000;
 /** Timeout for `claude setup-token` (OAuth browser flow). */
 export const CLAUDE_SETUP_TOKEN_TIMEOUT_MS = 300_000;
 
-/** Timeout for the shell-path probe when discovering PATH in packaged builds. */
-export const SHELL_PATH_PROBE_TIMEOUT_MS = 3_000;
-
 export { RSA_PUBLIC_KEY_PEM } from '../../base/credentialEncryption';

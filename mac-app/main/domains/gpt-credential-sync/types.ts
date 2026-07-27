@@ -2,6 +2,9 @@
  * Types for the gpt-credential-sync domain.
  */
 
+/** Status callback used by the install/login flow to surface progress. */
+export type SyncStatusCallback = (status: string) => void;
+
 export interface SyncResult {
   success: boolean;
   message?: string;
