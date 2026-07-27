@@ -1028,7 +1028,12 @@ CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECON
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     while [ "$SECONDS" -lt "$deadline" ]; do
-        status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
+        # --noproxy '*': this probe must measure the Cloudflare edge itself, not
+        # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
+        # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
+        # (as on a macOS host with a content blocker configured system-wide)
+        # refuse trycloudflare.com outright and report a healthy tunnel as dead.
+        status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0
         fi
@@ -1299,7 +1304,15 @@ with open(tmp_path, "w") as f:
     f.write("\n")
 os.replace(tmp_path, path)
 PY
-    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ]; then
+    # Only publish a PUBLIC url when one actually exists. With
+    # BENCHMARK_SKIP_PUBLIC_TUNNEL=1 the "public" URL is deliberately
+    # http://localhost:<port>, which publish_url_manifest correctly rejects (it
+    # requires a portless HTTPS origin). Without this guard the two flags
+    # conflict and abort the whole stack with a misleading
+    # "Failed to publish ephemeral public URL", even though the caller asked for
+    # no tunnel at all.
+    if [ "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}" = "1" ] &&
+        [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" != "1" ]; then
         local services_manifest
         case "$RUN_CONTEXT_DIR" in
             /*) services_manifest="$RUN_CONTEXT_DIR/services.json" ;;
