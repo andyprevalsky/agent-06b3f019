@@ -1009,37 +1009,97 @@ ensure_ngrok_domain_reserved() {
     }
 }
 
+# Cloudflare account-less quick tunnels have no uptime guarantee: a hostname is
+# published within ~2s but a meaningful fraction never route at all (DNS answers
+# with Cloudflare IPs, yet every request fails to connect indefinitely), and the
+# service also rate-limits bursts of tunnel creation. Publication alone was
+# treated as readiness here, so a dead tunnel was only discovered ~60s later by
+# the public-tunnel smoke — which fatally tore down the whole stack with no
+# retry. Verify the edge actually routes, and recycle the tunnel when it does not.
+#
+# Any HTTP status proves the edge routes to us; the origin frontend is not up yet
+# at this point, so 502/404 are perfectly acceptable here. Only "no HTTP response
+# at all" (curl writes 000) means the hostname is dead.
+CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS:-45}"
+CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
+# Linear backoff base; attempt N waits N × this before re-requesting.
+CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
+
+cloudflare_tunnel_edge_is_routing() {
+    local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" 2>/dev/null || true)"
+        if [ -n "$status" ] && [ "$status" != "000" ]; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 start_cloudflare_quick_tunnel() {
     if ! command -v cloudflared >/dev/null 2>&1; then
         echo "❌ cloudflared is required for isolated benchmark public tunnels."
         exit 1
     fi
     mkdir -p "$RUN_CONTEXT_DIR"
-    local tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
     local tunnel_home="$RUN_CONTEXT_DIR/cloudflared-home"
     mkdir -p "$tunnel_home"
-    echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT"
-    HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
-        > "$tunnel_log" 2>&1 &
-    NGROK_PID=$!
     PUBLIC_TUNNEL_SERVICE_NAME="cloudflared"
-    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
 
-    for attempt in $(seq 1 60); do
-        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
-            echo "❌ cloudflared exited before the public tunnel became ready."
-            tail -80 "$tunnel_log" || true
-            exit 1
+    local tunnel_attempt tunnel_log published
+    for tunnel_attempt in $(seq 1 "$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"); do
+        tunnel_log="$RUN_CONTEXT_DIR/cloudflared.log"
+        [ "$tunnel_attempt" -gt 1 ] && tunnel_log="$RUN_CONTEXT_DIR/cloudflared.attempt${tunnel_attempt}.log"
+
+        echo "🌐 Starting run-scoped public frontend tunnel → localhost:$FRONTEND_PORT (attempt $tunnel_attempt/$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS)"
+        HOME="$tunnel_home" cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$FRONTEND_PORT" \
+            > "$tunnel_log" 2>&1 &
+        NGROK_PID=$!
+        PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+        published=false
+        for attempt in $(seq 1 60); do
+            if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+                echo "⚠️  cloudflared exited before publishing a tunnel (attempt $tunnel_attempt)."
+                tail -40 "$tunnel_log" || true
+                break
+            fi
+            if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
+                published=true
+                break
+            fi
+            sleep 1
+        done
+
+        if [ "$published" = true ]; then
+            echo "🔎 Verifying the tunnel edge routes: $PUBLIC_BASE_URL"
+            if cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL"; then
+                echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
+                return 0
+            fi
+            echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
         fi
-        if cloudflare_publish_reported_environment "$tunnel_log" "$ALLOWED_ORIGINS"; then
-            echo "🌐 Public tunnel ready: $PUBLIC_BASE_URL"
-            return 0
+
+        # Retire this hostname before asking Cloudflare for a new one, so the dead
+        # tunnel cannot linger in PIDS and be reported as a live service.
+        kill "$NGROK_PID" 2>/dev/null || true
+        wait "$NGROK_PID" 2>/dev/null || true
+        unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
+        NGROK_PID=""
+
+        # Back off before re-requesting. Consecutive dead tunnels usually mean the
+        # account-less service is rate-limiting this IP rather than that one
+        # hostname was unlucky, and hammering it immediately keeps us limited.
+        if [ "$tunnel_attempt" -lt "$CLOUDFLARE_TUNNEL_MAX_ATTEMPTS" ]; then
+            local backoff=$((CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS * tunnel_attempt))
+            echo "⏳ Backing off ${backoff}s before requesting another quick tunnel..."
+            sleep "$backoff"
         fi
-        sleep 1
     done
 
-    echo "❌ cloudflared did not publish a valid run-scoped HTTPS origin for :$FRONTEND_PORT"
-    tail -80 "$tunnel_log" || true
+    echo "❌ cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
+    echo "   trycloudflare.com is account-less and best-effort; re-run, or set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin."
     exit 1
 }
 
