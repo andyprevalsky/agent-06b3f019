@@ -54,14 +54,27 @@ function readJson<T>(key: string): T | null {
   }
 }
 
+/** Whether a stashed session can no longer be restored. */
+function isSessionExpired(session: Session | null): boolean {
+  return (
+    session !== null &&
+    typeof session.expires_at === 'number' &&
+    session.expires_at * 1000 < Date.now()
+  );
+}
+
 /** The account currently being impersonated, or null when on the admin's own account. */
 export function getImpersonatedAccount(): ImpersonatedAccount | null {
   const account = readJson<ImpersonatedAccount>(IMPERSONATION_KEY);
   if (account === null || typeof account.userId !== 'string' || account.userId === '') return null;
-  // A stashed admin session is what makes the switch reversible. Without one we
-  // are not in a recoverable impersonation, so don't claim to be.
-  if (readJson<Session>(ADMIN_SESSION_KEY) === null) {
+  // A stashed admin session is what makes the switch reversible. Without one —
+  // or with an EXPIRED one — we are not in a recoverable impersonation, so don't
+  // claim to be. An expired stash would otherwise keep signing admin-gated calls
+  // with a dead token and surface generic failures instead of a clear expiry.
+  const adminSession = readJson<Session>(ADMIN_SESSION_KEY);
+  if (adminSession === null || isSessionExpired(adminSession)) {
     window.localStorage.removeItem(IMPERSONATION_KEY);
+    window.localStorage.removeItem(ADMIN_SESSION_KEY);
     return null;
   }
   return account;
@@ -125,12 +138,7 @@ export function endImpersonation(): boolean {
   window.localStorage.removeItem(ADMIN_SESSION_KEY);
   window.localStorage.removeItem(IMPERSONATION_KEY);
 
-  const expired =
-    adminSession !== null &&
-    typeof adminSession.expires_at === 'number' &&
-    adminSession.expires_at * 1000 < Date.now();
-
-  if (adminSession === null || expired) {
+  if (adminSession === null || isSessionExpired(adminSession)) {
     notifyImpersonationChanged();
     return false;
   }

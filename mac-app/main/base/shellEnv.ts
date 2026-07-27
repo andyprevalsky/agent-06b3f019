@@ -39,11 +39,15 @@ export function resetAugmentedEnvCache(): void {
 function loginShellPath(): string[] {
   try {
     const shell = process.env.SHELL ?? '/bin/zsh';
-    const shellPath = execFileSync(shell, ['-ilc', 'echo $PATH'], {
+    const output = execFileSync(shell, ['-ilc', 'echo $PATH'], {
       stdio: 'pipe',
       encoding: 'utf8',
       timeout: SHELL_PATH_PROBE_TIMEOUT_MS,
     }).trim();
+    // `-i` sources rc files, which routinely echo banners/version notices to
+    // stdout before our own `echo`. PATH is the LAST line; splitting the whole
+    // buffer on ':' would inject those banner fragments as PATH entries.
+    const shellPath = output.split('\n').pop()?.trim() ?? '';
     return shellPath === '' ? [] : shellPath.split(':').filter(Boolean);
   } catch {
     return [];

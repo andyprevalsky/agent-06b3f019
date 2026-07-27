@@ -48,9 +48,18 @@ export function useUserDirectory() {
 
   useEffect(() => {
     let active = true;
+    // `active` only discards the RESULT; without a signal the superseded request
+    // still runs to completion. Every keystroke would otherwise leave its fetch
+    // in flight against the admin directory.
+    const controller = new AbortController();
     setPeople(null);
     setError(null);
-    fetchAdminDirectory({ search: appliedSearch, page, pageSize: DIRECTORY_PAGE_SIZE })
+    fetchAdminDirectory({
+      search: appliedSearch,
+      page,
+      pageSize: DIRECTORY_PAGE_SIZE,
+      signal: controller.signal,
+    })
       .then((result) => {
         if (!active) return;
         setTotal(result.total);
@@ -63,10 +72,14 @@ export function useUserDirectory() {
         setPeople(result.people);
       })
       .catch((err: unknown) => {
-        if (active) setError(err instanceof Error ? err.message : String(err));
+        // An abort is this effect superseding itself, not a failure to surface.
+        if (active && !(err instanceof DOMException && err.name === 'AbortError')) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
       });
     return () => {
       active = false;
+      controller.abort();
     };
   }, [page, appliedSearch]);
 

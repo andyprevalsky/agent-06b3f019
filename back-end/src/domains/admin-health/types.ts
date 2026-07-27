@@ -1,3 +1,5 @@
+import type { SessionTokens } from '../../providers/sessionTokens';
+
 export type AdminHealthTimeSlice = 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
 export interface AdminHealthPeriod {
@@ -153,13 +155,9 @@ export interface AdminDirectoryResponse {
 }
 
 export interface AdminImpersonationResponse {
-  session: {
-    access_token: string;
-    refresh_token: string;
-    expires_in: number;
-    expires_at: number;
-    token_type: string;
-  };
+  // Reuse the canonical minter's type so this response cannot drift from what
+  // generateSupabaseSession actually returns.
+  session: SessionTokens;
   user: {
     userId: string;
     name: string | null;

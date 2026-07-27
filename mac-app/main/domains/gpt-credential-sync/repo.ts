@@ -11,7 +11,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execFileSync, execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn, type ChildProcess } from 'child_process';
 import { getAugmentedEnv } from '../../base/shellEnv';
 import { toError } from '../../../shared/utils/error';
 import type { SyncStatusCallback } from './types';
@@ -133,6 +133,27 @@ export function codexCliIsUsable(): boolean {
   }
 }
 
+/**
+ * Terminate a spawned process AND its descendants.
+ *
+ * `npm` and `codex` on PATH are shell wrappers that fork a node child. A plain
+ * `proc.kill()` signals only the wrapper, so a timed-out `npm install -g --force`
+ * keeps mutating the global prefix while the user retries — producing exactly the
+ * half-installed state this flow exists to repair. Both children are spawned
+ * `detached: true`, so a negative pid signals the whole process group.
+ */
+function killTree(proc: ChildProcess): void {
+  try {
+    if (proc.pid !== undefined) {
+      process.kill(-proc.pid, 'SIGTERM');
+      return;
+    }
+  } catch {
+    // Group already gone, or the platform refused it — fall through.
+  }
+  proc.kill();
+}
+
 export interface CodexProcessOptions {
   onStatus: SyncStatusCallback;
   onLog: (line: string) => void;
@@ -168,6 +189,8 @@ export function installCodexCLI(opts: CodexProcessOptions): Promise<void> {
     const proc = spawn(npmPath, ['install', '-g', '--force', CODEX_NPM_PACKAGE], {
       env,
       stdio: 'pipe',
+      // Own process group so a timeout can reap the whole tree — see killTree.
+      detached: true,
     });
 
     let stderr = '';
@@ -179,7 +202,7 @@ export function installCodexCLI(opts: CodexProcessOptions): Promise<void> {
     });
 
     const timer = setTimeout(() => {
-      proc.kill();
+      killTree(proc);
       reject(new Error('Codex installation timed out after 2 minutes'));
     }, NPM_INSTALL_TIMEOUT_MS);
 
@@ -215,7 +238,7 @@ export function runCodexLogin(opts: CodexProcessOptions): Promise<void> {
     opts.onStatus('Opening browser to sign in to ChatGPT...');
     opts.onLog(`Running: ${codexPath} login`);
 
-    const proc = spawn(codexPath, ['login'], { env, stdio: 'pipe' });
+    const proc = spawn(codexPath, ['login'], { env, stdio: 'pipe', detached: true });
 
     let stderr = '';
     proc.stdout.on('data', (d: Buffer) => {
@@ -230,7 +253,7 @@ export function runCodexLogin(opts: CodexProcessOptions): Promise<void> {
     });
 
     const timer = setTimeout(() => {
-      proc.kill();
+      killTree(proc);
       reject(new Error('ChatGPT sign-in timed out after 5 minutes. Please try again.'));
     }, CODEX_LOGIN_TIMEOUT_MS);
 
