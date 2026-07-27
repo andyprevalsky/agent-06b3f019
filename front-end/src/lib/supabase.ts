@@ -22,8 +22,34 @@ const LOGOUT_EPOCH_KEY = 'rose-session-logout-epoch';
 const LOGOUT_PENDING_KEY = 'rose-session-logout-pending';
 export const AUTH_SESSION_CHANGED_EVENT = 'rose-auth-session-changed';
 
+// Admin account switching (see lib/impersonation.ts). The keys live here — with
+// every other session key — so clearSession() can drop them without importing
+// impersonation.ts, which imports this module.
+export const ADMIN_SESSION_KEY = 'rose-admin-session';
+export const IMPERSONATION_KEY = 'rose-impersonation';
+export const IMPERSONATION_CHANGED_EVENT = 'rose-impersonation-changed';
+
 function notifyAuthSessionChanged(): void {
   window.dispatchEvent(new CustomEvent(AUTH_SESSION_CHANGED_EVENT));
+}
+
+export function notifyImpersonationChanged(): void {
+  window.dispatchEvent(new CustomEvent(IMPERSONATION_CHANGED_EVENT));
+}
+
+/**
+ * Drop impersonation bookkeeping without restoring anything. Signing out must
+ * do this: a stashed admin session left behind would resurrect an "impersonating"
+ * badge — and admin authority — on the next load, after the admin logged out.
+ */
+export function clearImpersonationState(): void {
+  if (typeof window === 'undefined') return;
+  const hadState =
+    window.localStorage.getItem(ADMIN_SESSION_KEY) !== null ||
+    window.localStorage.getItem(IMPERSONATION_KEY) !== null;
+  window.localStorage.removeItem(ADMIN_SESSION_KEY);
+  window.localStorage.removeItem(IMPERSONATION_KEY);
+  if (hadState) notifyImpersonationChanged();
 }
 
 // API Configuration
@@ -162,6 +188,7 @@ export async function clearSession(): Promise<void> {
 
   window.localStorage.removeItem(SESSION_KEY);
   window.localStorage.removeItem(USER_CACHE_KEY);
+  clearImpersonationState();
   const nextLogoutEpoch = Number(window.localStorage.getItem(LOGOUT_EPOCH_KEY) ?? '0') + 1;
   window.localStorage.setItem(LOGOUT_EPOCH_KEY, String(nextLogoutEpoch));
   window.localStorage.setItem(LOGOUT_PENDING_KEY, '1');

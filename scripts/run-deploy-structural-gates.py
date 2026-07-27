@@ -67,6 +67,10 @@ GATES = (
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
     Gate("run-seed-exit-code", ("bash", "scripts/tests/run-seed-exit-code.test.sh")),
     Gate(
+        "run-public-tunnel-routing",
+        ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"),
+    ),
+    Gate(
         "setup-db-concurrency",
         ("bash", "scripts/tests/setup-db-concurrency.test.sh"),
     ),

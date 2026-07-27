@@ -33,7 +33,7 @@ export default function ConnectorAdoptionSection({
           Connector Adoption
         </h3>
         <p className="mt-1 text-xs leading-5 text-muted-foreground">
-          Verified users with at least one active connection in each onboarding subtype.
+          People in the app with at least one active connection in each onboarding subtype.
         </p>
       </div>
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
@@ -50,7 +50,7 @@ export default function ConnectorAdoptionSection({
               />
             </div>
             <p className="mt-3 text-xs leading-5 text-muted-foreground">
-              {subtype.connectedUsers} of {adoption.eligibleUserCount} verified users connected
+              {subtype.connectedUsers} of {adoption.eligibleUserCount} people in app connected
             </p>
           </article>
         ))}

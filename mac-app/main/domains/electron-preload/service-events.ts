@@ -63,7 +63,11 @@ export function buildUnsubscribableEventBridge(
   ipcRenderer: IpcRenderer
 ): Pick<
   IPC,
-  'onOpenAgent' | 'onClaudeSetupStatus' | 'onWhatsAppQRCode' | 'onPasskeysImportComplete'
+  | 'onOpenAgent'
+  | 'onClaudeSetupStatus'
+  | 'onGptSetupStatus'
+  | 'onWhatsAppQRCode'
+  | 'onPasskeysImportComplete'
 > {
   let pendingOpenAgentId: string | null = null;
   const openAgentCallbacks = new Set<(agentId: string) => void>();
@@ -93,6 +97,13 @@ export function buildUnsubscribableEventBridge(
       ipcRenderer.on('claude:setupStatus', handler);
       return () => {
         ipcRenderer.removeListener('claude:setupStatus', handler);
+      };
+    },
+    onGptSetupStatus: (callback: (status: string) => void) => {
+      const handler = (_event: IpcRendererEvent, status: unknown) => callback(status as string);
+      ipcRenderer.on('gpt:setupStatus', handler);
+      return () => {
+        ipcRenderer.removeListener('gpt:setupStatus', handler);
       };
     },
     onWhatsAppQRCode: (callback: (qr: string) => void) => {

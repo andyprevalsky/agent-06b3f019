@@ -41,10 +41,16 @@ export async function fetchStripeSubscribersByPeriod(
       subscriptionIdsByCustomerId.set(customerId, subscriptionIds);
     }
 
-    const [subscriptionUsers, additionalUsers] = await Promise.all([
+    const [subscriptionUsers, corePhoneUsers, inviteCodeRedeemers] = await Promise.all([
       repo.findSubscriptionUsersByCustomerIds(lifecycles.map((lifecycle) => lifecycle.customerId)),
       repo.findUsersByPhones(Array.from(ADMIN_HEALTH_ADDITIONAL_PHONES)),
+      // People who got in on an invite code are in the app even though they
+      // never paid — the metric is "people in app", not "paying subscribers".
+      repo.findInviteCodeRedeemers(),
     ]);
+    const additionalUsers = [...corePhoneUsers, ...inviteCodeRedeemers].filter(
+      (user) => !ADMIN_HEALTH_EXCLUDED_USER_IDS.has(user.userId)
+    );
     const userIdByCustomerId = new Map(
       subscriptionUsers.map((subscription) => [subscription.stripeCustomerId, subscription.userId])
     );

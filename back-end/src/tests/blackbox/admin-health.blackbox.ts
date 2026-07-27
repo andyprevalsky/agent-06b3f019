@@ -23,6 +23,9 @@ import { isCacheableAdminHealthResponse } from '../../domains/admin-health/servi
 import {
   assertConnectorAdoption,
   assertDatabaseActivationCounts,
+  AdminHealthResponseSchema,
+  ErrorResponseSchema,
+  type AdminHealthResponse,
 } from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
 config();
@@ -33,101 +36,6 @@ const CASE_CONCURRENCY = Number(
 );
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const NON_ADMIN_USER_ID = 'admin-health-non-admin-user';
-
-const MetricStatusSchema = z.union([
-  z.literal('ready'),
-  z.literal('unavailable'),
-  z.literal('error'),
-]);
-const VelocityMetricSchema = z.object({
-  label: z.string(),
-  value: z.number().nullable(),
-  status: MetricStatusSchema,
-  detail: z.string().optional(),
-});
-const AdminHealthResponseSchema = z.object({
-  timeSlice: z.union([
-    z.literal('weekly'),
-    z.literal('monthly'),
-    z.literal('quarterly'),
-    z.literal('yearly'),
-  ]),
-  generatedAt: z.string(),
-  range: z.object({ start: z.string(), end: z.string() }),
-  historyRange: z.object({ start: z.string(), end: z.string() }),
-  summary: z.object({
-    revenueCents: z.number().nullable(),
-    userCount: z.number(),
-    taskCount: z.number(),
-    tasksIssuedPerUser: z.number(),
-    outputTokensPerTask: z.number(),
-    taskCompletionRate: z.number(),
-  }),
-  series: z.array(
-    z.object({
-      key: z.string(),
-      label: z.string(),
-      start: z.string(),
-      end: z.string(),
-      revenueCents: z.number().nullable(),
-      userCount: z.number(),
-      newUsers: z.number(),
-      taskCount: z.number(),
-      tasksIssuedPerUser: z.number(),
-      outputTokensPerTask: z.number(),
-      taskCompletionRate: z.number(),
-      andyLinearPoints: z.number().nullable(),
-      githubCommits: z.number().nullable(),
-      tamaraLinearPoints: z.number().nullable(),
-    })
-  ),
-  retentionCohorts: z.array(
-    z.object({
-      cohortWeek: z.string(),
-      label: z.string(),
-      size: z.number(),
-      points: z.array(
-        z.object({
-          week: z.number(),
-          retainedUsers: z.number(),
-          retentionRate: z.number(),
-        })
-      ),
-    })
-  ),
-  funnel: z.object({
-    steps: z.array(
-      z.object({
-        id: z.string(),
-        label: z.string(),
-        count: z.number().nullable(),
-        previousCount: z.number().nullable(),
-        conversionRate: z.number().nullable(),
-        previousConversionRate: z.number().nullable(),
-        conversionRateChange: z.number().nullable(),
-        source: z.union([z.literal('database'), z.literal('client_analytics')]),
-        status: z.union([z.literal('ready'), z.literal('unavailable')]),
-        detail: z.string().optional(),
-      })
-    ),
-    endToEnd: z.object({
-      conversionRate: z.number().nullable(),
-      previousConversionRate: z.number().nullable(),
-      conversionRateChange: z.number().nullable(),
-    }),
-  }),
-  velocity: z.object({
-    dev: z.object({
-      linearPointsCompleted: VelocityMetricSchema,
-      githubCommitsLanded: VelocityMetricSchema,
-    }),
-    ops: z.object({
-      linearPointsCompleted: VelocityMetricSchema,
-    }),
-  }),
-});
-const ErrorResponseSchema = z.object({ error: z.string() });
-type AdminHealthResponse = z.infer<typeof AdminHealthResponseSchema>;
 
 interface TestResult {
   name: string;
@@ -329,6 +237,19 @@ async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   });
   const userIdByPhone = new Map(additionalUsers.map((u) => [u.phone, u.userId]));
   for (const userId of userIdByPhone.values()) userIds.add(userId);
+
+  // Mirror findInviteCodeRedeemers: the metric counts people IN THE APP, and a
+  // redeemed invite code clears the waitlist gate just like a subscription does.
+  // Someone who got in on a code but never paid is still a person in the app.
+  const redeemers = await prisma.user.findMany({
+    where: { usedInviteCode: { not: null }, phone: { not: null } },
+    select: { userId: true, phone: true },
+  });
+  for (const redeemer of redeemers) {
+    if ((redeemer.phone ?? '').trim() === '') continue;
+    if (ADMIN_HEALTH_EXCLUDED_USER_IDS.has(redeemer.userId)) continue;
+    userIds.add(redeemer.userId);
+  }
   return userIds;
 }
 

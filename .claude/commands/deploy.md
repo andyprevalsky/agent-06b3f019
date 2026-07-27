@@ -411,21 +411,12 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these fourteen independent suites without
-changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
-`bash scripts/tests/setup-db-concurrency.test.sh`,
-`bash scripts/tests/deploy-worktree-preflight.test.sh`,
-`bash scripts/tests/seed-cache-decision.test.sh`,
-`bash scripts/tests/semantic-deploy-gate.test.sh`,
-`bash scripts/tests/check-agent-behavior-approval.test.sh`,
-`bash scripts/tests/approval-format.test.sh`,
-`bash scripts/tests/workflow-deployment-migration.test.sh`,
-`python3 scripts/tests/factory-review.test.py`,
-`python3 scripts/tests/wait-for-code-review.test.py`,
-`python3 scripts/tests/deploy-review-cycle.test.py`, and
-`bash scripts/tests/run-deploy-stage.test.sh`, and
-`python3 scripts/tests/run-deploy-structural-gates.test.py`, and
-`python3 scripts/tests/deploy-live-probes.test.py`.
+The concurrent runner executes every suite in the `GATES` registry
+(`scripts/run-deploy-structural-gates.py`) without changing their assertions or
+test counts. That registry is the single source of truth — print the current set
+with `python3 scripts/run-deploy-structural-gates.py --list` rather than
+maintaining a duplicate list here, which silently drifts every time a gate is
+added.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \

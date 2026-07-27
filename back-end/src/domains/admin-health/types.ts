@@ -1,3 +1,5 @@
+import type { SessionTokens } from '../../providers/sessionTokens';
+
 export type AdminHealthTimeSlice = 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
 export interface AdminHealthPeriod {
@@ -118,6 +120,51 @@ export interface AdminWaitlistInviteResponse {
   alreadyOffWaitlist: boolean;
   /** A signed-up account exists for this phone. */
   hasAccount: boolean;
+}
+
+/**
+ * One row of the admin user directory: a real account, a waitlist signup, or —
+ * when the phone numbers match — both merged into a single person.
+ */
+export interface AdminDirectoryPerson {
+  /** Stable row key: `user:<userId>` when an account exists, else `waitlist:<id>`. */
+  key: string;
+  /** Present when a real account exists — this is what an admin can switch into. */
+  userId: string | null;
+  /** Present when the person is on the waitlist — this is what an invite targets. */
+  waitlistId: string | null;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  joinedAt: string;
+  invitedAt: string | null;
+  hasAccount: boolean;
+  hasSubscription: boolean;
+  /** Account exists, is on the waitlist, and is still behind the invite gate. */
+  isGated: boolean;
+  isAdmin: boolean;
+}
+
+export interface AdminDirectoryResponse {
+  people: AdminDirectoryPerson[];
+  total: number;
+  page: number;
+  pageSize: number;
+  totalPages: number;
+  search: string;
+}
+
+export interface AdminImpersonationResponse {
+  // Reuse the canonical minter's type so this response cannot drift from what
+  // generateSupabaseSession actually returns.
+  session: SessionTokens;
+  user: {
+    userId: string;
+    name: string | null;
+    email: string | null;
+    phone: string | null;
+    isAdmin: boolean;
+  };
 }
 
 export interface AdminHealthResponse {

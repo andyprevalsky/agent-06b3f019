@@ -16,18 +16,19 @@ import { http, HttpResponse } from 'msw';
 
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
-
-import PlaidSection from '@/features/integrations/components/PlaidSection';
-import type { PlaidItem, PlaidSyncSummary } from '@/features/integrations/types';
-import { usePlaidIntegration } from '@/features/integrations/hooks/usePlaidIntegration';
+import {
+  API_BASE,
+  makeItem,
+  makeSync,
+  mockSession,
+  PlaidIntegrationHarness,
+} from './plaid.fixtures';
 
 function clickPlaidActionButton(): Promise<void> {
   return userEvent.click(
     screen.getByRole('button', { name: /connect (a bank|another financial account)/i }),
   );
 }
-
-const API_BASE = 'http://localhost:3001/api';
 
 // ---------------------------------------------------------------------------
 // Mock react-plaid-link
@@ -115,84 +116,6 @@ vi.mock('react-plaid-link', () => ({
     };
   },
 }));
-
-// ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-function mockSession() {
-  const session = {
-    access_token: 'test-token',
-    refresh_token: 'test-refresh',
-    expires_in: 3600,
-    expires_at: Math.floor(Date.now() / 1000) + 3600,
-    token_type: 'bearer',
-    user: { id: 'test-user', is_anonymous: false },
-  };
-  localStorage.setItem('rose-session', JSON.stringify(session));
-  localStorage.setItem('app-user', JSON.stringify({ id: 'test-user', is_anonymous: false }));
-}
-
-function makeSync(overrides: Partial<PlaidSyncSummary> = {}): PlaidSyncSummary {
-  return {
-    transactionCount: 42,
-    postedTransactionCount: 40,
-    pendingTransactionCount: 2,
-    removedTransactionCount: 0,
-    dateRange: {
-      from: '2025-01-01T00:00:00.000Z',
-      to: '2025-03-31T00:00:00.000Z',
-    },
-    ...overrides,
-  };
-}
-
-function makeItem(overrides: Partial<PlaidItem> = {}): PlaidItem {
-  return {
-    id: 'item-uuid-1',
-    plaidItemId: 'plaid_item_1',
-    institutionId: 'ins_109508',
-    institutionName: 'First Platypus Bank',
-    status: 'ACTIVE',
-    products: ['transactions', 'auth'],
-    createdAt: '2026-05-12T17:00:00Z',
-    lastSyncAt: '2026-05-12T17:00:00Z',
-    disconnectedAt: null,
-    sync: {
-      ...makeSync(),
-      state: 'synced',
-    },
-    accounts: [
-      {
-        id: 'acct-uuid-1',
-        plaidAccountId: 'acct_plaid_1',
-        name: 'Plaid Checking',
-        officialName: 'Plaid Gold Checking',
-        mask: '0000',
-        type: 'depository',
-        subtype: 'checking',
-        sync: makeSync(),
-      },
-    ],
-    ...overrides,
-  };
-}
-
-export function PlaidIntegrationHarness() {
-  const plaid = usePlaidIntegration();
-  return (
-    <PlaidSection
-      items={plaid.items}
-      itemsLoading={plaid.itemsLoading}
-      connectLoading={plaid.connectLoading}
-      disconnectingItemId={plaid.disconnectingItemId}
-      error={plaid.error}
-      onConnect={plaid.onConnect}
-      onUpdate={plaid.onUpdate}
-      onDisconnect={plaid.onDisconnect}
-    />
-  );
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -320,6 +243,53 @@ describe('PlaidSection (rendering)', () => {
     expect(screen.queryByText(/sync error/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/\b\d+ accounts\b/i)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /repair chase/i })).not.toBeInTheDocument();
+  });
+
+  it('renders repair actions as labeled controls beside their institution chips', async () => {
+    server.use(
+      http.get(`${API_BASE}/integrations/plaid/items`, () =>
+        HttpResponse.json({
+          items: [
+            makeItem({
+              id: 'item-error-chase',
+              institutionId: 'ins_56',
+              institutionName: 'Chase',
+              status: 'ERROR',
+              sync: { ...makeSync(), state: 'error' },
+            }),
+            makeItem({
+              id: 'item-reauth-wells',
+              institutionId: 'ins_57',
+              institutionName: 'Wells Fargo',
+              status: 'REQUIRES_REAUTH',
+              sync: { ...makeSync(), state: 'needs_repair' },
+            }),
+          ],
+        }),
+      ),
+    );
+
+    renderWithProviders(<PlaidIntegrationHarness />);
+
+    const chaseRepair = await screen.findByRole('button', { name: /repair chase/i });
+    const wellsRepair = screen.getByRole('button', { name: /repair wells fargo/i });
+
+    // Each affordance must read as a labeled action, not a bare icon. A wrench
+    // glyph with no text is unidentifiable — the reported "weird gear".
+    for (const button of [chaseRepair, wellsRepair]) {
+      expect(button.textContent?.trim()).not.toBe('');
+      expect(within(button).getByText(/reconnect/i)).toBeInTheDocument();
+    }
+
+    // They must sit with the chips they refer to, not float in a detached row.
+    const titleColumn = screen.getByText('Banks & Financial Accounts').closest('.flex-col');
+    expect(titleColumn).not.toBeNull();
+    expect(titleColumn).toContainElement(chaseRepair);
+    expect(titleColumn).toContainElement(wellsRepair);
+
+    // And each must say what is actually wrong, not just offer a wrench.
+    expect(chaseRepair.getAttribute('title')).toMatch(/chase stopped syncing/i);
+    expect(wellsRepair.getAttribute('title')).toMatch(/wells fargo needs you to sign in again/i);
   });
 
   it('uses the action button to connect another account when already connected', async () => {
