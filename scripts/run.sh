@@ -1103,9 +1103,73 @@ start_cloudflare_quick_tunnel() {
         fi
     done
 
-    echo "❌ cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
-    echo "   trycloudflare.com is account-less and best-effort; re-run, or set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin."
-    exit 1
+    echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
+    echo "   trycloudflare.com is account-less and best-effort."
+    return 1
+}
+
+# Fallback provider when trycloudflare is unavailable.
+#
+# trycloudflare.com has no uptime guarantee and can refuse to route EVERY quick
+# tunnel from a host for hours at a stretch (observed 2026-07-27: tunnels
+# register, then Cloudflare terminates them or never routes the hostname, across
+# both QUIC and HTTP/2). That used to fail the entire Pre-Deploy smoke gate with
+# no recourse. ngrok is already a supported provider here and uses independent
+# infrastructure, so an ephemeral ngrok endpoint is a clean second source.
+#
+# Ephemeral on purpose: no --domain, so this needs no reserved domain and no
+# paid ngrok plan — it is a disposable per-run URL, exactly like the quick tunnel
+# it replaces.
+start_ngrok_ephemeral_tunnel() {
+    command -v ngrok >/dev/null 2>&1 || {
+        echo "   ngrok fallback unavailable: ngrok is not installed."
+        return 1
+    }
+    if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
+        echo "   ngrok fallback unavailable: no authtoken configured."
+        return 1
+    fi
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local ngrok_log="$RUN_CONTEXT_DIR/ngrok-fallback.log"
+    echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
+
+    ngrok http "$FRONTEND_PORT" \
+        --log stdout --log-format json --log-level info > "$ngrok_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="ngrok"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    local ngrok_url=""
+    for attempt in $(seq 1 45); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ ngrok exited before publishing a tunnel."
+            tail -20 "$ngrok_log" || true
+            return 1
+        fi
+        ngrok_url="$(grep -oE '"url":"https://[^"]+"' "$ngrok_log" 2>/dev/null |
+            head -1 | sed 's/"url":"//; s/"$//')"
+        [ -n "$ngrok_url" ] && break
+        sleep 1
+    done
+    [ -n "$ngrok_url" ] || {
+        echo "❌ ngrok did not publish an HTTPS endpoint."
+        tail -20 "$ngrok_log" || true
+        return 1
+    }
+
+    public_tunnel_publish_environment "$ngrok_url" "$ALLOWED_ORIGINS" || {
+        echo "❌ ngrok published an unusable origin: $ngrok_url"
+        return 1
+    }
+
+    echo "🔎 Verifying the ngrok edge routes: $PUBLIC_BASE_URL"
+    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+        echo "❌ $PUBLIC_BASE_URL never routed."
+        return 1
+    }
+    echo "🌐 Public tunnel ready (ngrok): $PUBLIC_BASE_URL"
+    return 0
 }
 
 start_ngrok_public_tunnel() {
@@ -1194,7 +1258,16 @@ EOF
 
 start_public_tunnel() {
     case "$(public_tunnel_provider_for_mode "${BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL:-0}")" in
-        cloudflare) start_cloudflare_quick_tunnel ;;
+        cloudflare)
+            # A single best-effort provider is a single point of failure for the
+            # whole benchmark stack. Fall back to ngrok rather than failing the
+            # run when trycloudflare will not route.
+            start_cloudflare_quick_tunnel && return 0
+            start_ngrok_ephemeral_tunnel && return 0
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then ngrok)." >&2
+            echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+            exit 1
+            ;;
         ngrok) start_ngrok_public_tunnel ;;
         *) echo "❌ Invalid public tunnel mode." >&2; exit 2 ;;
     esac
