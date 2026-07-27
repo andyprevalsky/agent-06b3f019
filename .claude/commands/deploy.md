@@ -411,8 +411,9 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these thirteen independent suites without
+The concurrent runner executes exactly these fourteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/setup-db-concurrency.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
@@ -433,7 +434,7 @@ bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
   bash scripts/tests/seed-cache-decision.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
 runner.

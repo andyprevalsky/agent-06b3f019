@@ -13,12 +13,21 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 . "$SCRIPT_DIR/lib/workspace-env.sh"
+. "$SCRIPT_DIR/lib/workspace-db-lock.sh"
 normalize_conductor_workspace_env
 
 export LOCAL_DB_PORT=$(($CONDUCTOR_PORT + 5))
 DB_CONTAINER="victoria-db-${CONDUCTOR_WORKSPACE_NAME}"
 DB_VOLUME="victoria-pgdata-${CONDUCTOR_WORKSPACE_NAME}"
 LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+
+# Everything below rebuilds ONE database from scratch: it drops the public
+# schema, re-pushes it, and streams prod data in. Two invocations for the same
+# workspace are not rare — a fresh Conductor workspace runs this script as the
+# tail of its `setup` hook while the first `/sync` runs it too — and unserialized
+# they destroy each other's work mid-seed. Wait for the peer instead.
+acquire_workspace_db_lock "$DB_CONTAINER"
+trap release_workspace_db_lock EXIT
 
 # Ensure Docker is running
 if ! docker ps &>/dev/null 2>&1; then
