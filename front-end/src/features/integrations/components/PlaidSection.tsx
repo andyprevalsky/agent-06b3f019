@@ -167,6 +167,7 @@ export default function PlaidSection({
             label={itemChipLabel(item)}
             tone={chipToneForState(item.sync.state)}
             removing={disconnectingItemId === item.id}
+            disabled={connectLoading}
             onRemove={() => onDisconnect(item.id)}
             removeLabel={`Disconnect ${item.institutionName ?? 'Plaid connection'} and its connected accounts`}
             title={itemChipTitle(item)}
@@ -174,7 +175,9 @@ export default function PlaidSection({
           {itemNeedsUpdate(item) && (
             <PlaidRepairButton
               item={item}
-              isLoading={connectLoading}
+              // Reconnect and disconnect mutate the same Plaid item, so each must
+              // be inert while the other is in flight.
+              isLoading={connectLoading || disconnectingItemId === item.id}
               onClick={() => onUpdate(item.id)}
             />
           )}

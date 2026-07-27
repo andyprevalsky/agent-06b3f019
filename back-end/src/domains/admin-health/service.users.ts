@@ -131,7 +131,11 @@ export async function impersonateUser(params: {
   const target = await repo.findImpersonationTarget(targetUserId);
   if (target === null) throw new ImpersonationTargetNotFoundError();
 
-  const session = generateSupabaseSession(target.userId, target.phone ?? '');
+  // Carry the acting admin into the token so impersonated activity is
+  // attributable downstream and expires on an operator-action timescale.
+  const session = generateSupabaseSession(target.userId, target.phone ?? '', {
+    actorUserId: params.actorUserId,
+  });
 
   log.warn('Admin switched into another account', {
     actorUserId: params.actorUserId,

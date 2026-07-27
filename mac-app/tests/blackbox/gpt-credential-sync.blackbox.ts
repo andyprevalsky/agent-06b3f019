@@ -99,7 +99,15 @@ vi.mock('child_process', async () => {
     cp.spawnedProcs.push({ args, emitter, stdout, stderr });
     return emitter;
   };
-  const mod = { execSync, spawn, execFileSync: () => '' };
+  // Route execFileSync through the same handler as execSync so probes keep the
+  // same observable contract regardless of which primitive the repo layer uses
+  // (the `codex --version` health probe uses execFileSync to avoid shell parsing).
+  const execFileSync = (file: string, args: readonly string[] = []) => {
+    const command = [file, ...args].join(' ');
+    cp.execCalls.push({ fn: 'execSync', command });
+    return cp.state.execSyncHandler(command);
+  };
+  const mod = { execSync, spawn, execFileSync };
   return { ...mod, default: mod };
 });
 
@@ -456,7 +464,10 @@ describe('gpt-credential-sync blackbox', () => {
       installUpload();
 
       const send = vi.fn();
-      const window = { webContents: { send } } as unknown as BrowserWindow;
+      const window = {
+        webContents: { send },
+        isDestroyed: () => false,
+      } as unknown as BrowserWindow;
       const syncPromise = GptCredentialSync.syncCredentials(window);
       await completeCodexLogin();
       await syncPromise;
@@ -467,6 +478,43 @@ describe('gpt-credential-sync blackbox', () => {
       expect(events).toContain('Opening browser to sign in to ChatGPT...');
       expect(events).toContain('Uploading credentials...');
       expect(events[events.length - 1]).toBe('');
+    });
+
+    it('keeps syncing when the BrowserWindow is destroyed mid-flow', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      installUpload();
+
+      // A destroyed window is non-null and throws on send. Progress reporting is
+      // advisory and must never abort a login that is otherwise succeeding.
+      const send = vi.fn(() => {
+        throw new Error('Object has been destroyed');
+      });
+      const window = {
+        webContents: { send },
+        isDestroyed: () => true,
+      } as unknown as BrowserWindow;
+
+      const syncPromise = GptCredentialSync.syncCredentials(window);
+      await completeCodexLogin();
+      const result = await syncPromise;
+
+      expect(result).toEqual({ success: true });
+      expect(send).not.toHaveBeenCalled();
+      expect(fetchCaptures).toHaveLength(1);
+    });
+
+    it('sanitizes auth_mode so a backup cannot escape the codex directory', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(JSON.stringify({ auth_mode: '../../evil/path', OPENAI_API_KEY: 'sk-x' }));
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      await syncPromise;
+
+      const [backupPath] = fsWriteFileSync.mock.calls[0];
+      expect(backupPath).not.toContain('..');
+      expect(backupPath).toBe(`${CODEX_AUTH_PATH}.evilpath.bak`);
     });
 
     it('never launches a login from the non-interactive periodic refresh', async () => {

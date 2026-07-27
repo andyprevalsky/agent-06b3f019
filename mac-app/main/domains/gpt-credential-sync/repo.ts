@@ -11,7 +11,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync, spawn } from 'child_process';
+import { execFileSync, execSync, spawn } from 'child_process';
 import { getAugmentedEnv } from '../../base/shellEnv';
 import { toError } from '../../../shared/utils/error';
 import type { SyncStatusCallback } from './types';
@@ -21,6 +21,7 @@ import {
   CODEX_NPM_PACKAGE,
   CODEX_VERSION_PROBE_TIMEOUT_MS,
   NPM_INSTALL_TIMEOUT_MS,
+  SHELL_PROBE_TIMEOUT_MS,
 } from './config';
 
 // ---------------------------------------------------------------------------
@@ -57,8 +58,12 @@ export function backupCodexAuthFile(): string | null {
     let mode = 'previous';
     try {
       const parsed = JSON.parse(raw) as { auth_mode?: string };
-      if (typeof parsed.auth_mode === 'string' && parsed.auth_mode !== '') {
-        mode = parsed.auth_mode;
+      // `auth_mode` is untrusted file content spliced into a path, so restrict it
+      // to a safe slug. A value containing `/` or `..` would otherwise let the
+      // backup escape ~/.codex/.
+      const sanitized = (parsed.auth_mode ?? '').replace(/[^A-Za-z0-9_-]/g, '');
+      if (sanitized !== '') {
+        mode = sanitized.slice(0, 32);
       }
     } catch {
       // An unparseable file still deserves a backup, just under a generic name.
@@ -83,6 +88,7 @@ export function findNpmCodexPath(): string | null {
       stdio: 'pipe',
       encoding: 'utf8',
       env,
+      timeout: SHELL_PROBE_TIMEOUT_MS,
     }).trim();
     const codexPath = path.join(npmPrefix, 'bin', 'codex');
     if (fs.existsSync(codexPath)) {
@@ -109,7 +115,9 @@ export function getCodexPath(): string {
  */
 export function codexCliIsUsable(): boolean {
   try {
-    execSync(`"${getCodexPath()}" --version`, {
+    // execFileSync (not execSync) so the binary path is passed as an argv entry
+    // rather than parsed by a shell — paths can contain spaces or metacharacters.
+    execFileSync(getCodexPath(), ['--version'], {
       stdio: 'pipe',
       encoding: 'utf8',
       env: getAugmentedEnv(),
@@ -138,7 +146,12 @@ export function installCodexCLI(opts: CodexProcessOptions): Promise<void> {
     const env = getAugmentedEnv();
     let npmPath: string;
     try {
-      npmPath = execSync('which npm', { stdio: 'pipe', encoding: 'utf8', env }).trim();
+      npmPath = execSync('which npm', {
+        stdio: 'pipe',
+        encoding: 'utf8',
+        env,
+        timeout: SHELL_PROBE_TIMEOUT_MS,
+      }).trim();
     } catch {
       reject(
         new Error('npm not found. Please install Node.js from https://nodejs.org and try again.')

@@ -15,7 +15,15 @@ const LOG_COMPONENT = 'GptCredentialSync';
 function buildSendStatus(window?: BrowserWindow | null): SyncStatusCallback {
   return (status: string) => {
     logConsole(LOG_COMPONENT, `Status: ${status}`);
-    window?.webContents.send('gpt:setupStatus', status);
+    // A destroyed BrowserWindow is not null, and sending to it throws
+    // "Object has been destroyed" — which would abort a login that is otherwise
+    // succeeding. Progress reporting must never fail the flow it reports on.
+    if (window === undefined || window === null || window.isDestroyed()) return;
+    try {
+      window.webContents.send('gpt:setupStatus', status);
+    } catch {
+      // The window went away between the check and the send; status is advisory.
+    }
   };
 }
 

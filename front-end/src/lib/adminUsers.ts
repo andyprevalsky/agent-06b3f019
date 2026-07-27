@@ -81,6 +81,17 @@ async function adminFetch(path: string, init: RequestInit = {}): Promise<unknown
 
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  // `signal` below overrides whatever `...init` carried, so a caller-supplied
+  // signal must be forwarded explicitly — otherwise superseded keystrokes keep
+  // their requests in flight instead of being cancelled.
+  const callerSignal = init.signal ?? null;
+  const forwardAbort = (): void => controller.abort();
+  if (callerSignal !== null) {
+    if (callerSignal.aborted) forwardAbort();
+    else callerSignal.addEventListener('abort', forwardAbort, { once: true });
+  }
+
   try {
     const response = await fetch(`${backendApiUrl()}${path}`, {
       ...init,
@@ -95,6 +106,7 @@ async function adminFetch(path: string, init: RequestInit = {}): Promise<unknown
     return await response.json();
   } finally {
     window.clearTimeout(timeoutId);
+    callerSignal?.removeEventListener('abort', forwardAbort);
   }
 }
 
