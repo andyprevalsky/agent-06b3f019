@@ -9,7 +9,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 
 /** Timeout for the login-shell probe used to recover the user's real PATH. */
 export const SHELL_PATH_PROBE_TIMEOUT_MS = 3_000;
@@ -28,11 +28,47 @@ export function resetAugmentedEnvCache(): void {
   cachedExtraPaths = null;
 }
 
+/**
+ * The user's PATH according to their own login shell.
+ *
+ * Probes `$SHELL` rather than hard-coding bash: macOS defaults to zsh, and a
+ * bash login shell does not source `~/.zshrc`, so PATH entries added there
+ * (where most user-installed CLIs land) would be invisible. Executed argv-style
+ * so no part of the shell path is re-parsed by another shell.
+ */
+function loginShellPath(): string[] {
+  try {
+    const shell = process.env.SHELL ?? '/bin/zsh';
+    const shellPath = execFileSync(shell, ['-ilc', 'echo $PATH'], {
+      stdio: 'pipe',
+      encoding: 'utf8',
+      timeout: SHELL_PATH_PROBE_TIMEOUT_MS,
+    }).trim();
+    return shellPath === '' ? [] : shellPath.split(':').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function discoverExtraPaths(): string[] {
   const home = process.env.HOME ?? '';
-  const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', `${home}/.npm-global/bin`];
 
-  // Include ALL NVM node version bin dirs (packaged Electron won't have NVM_DIR set).
+  // Order matters: the first bin dir containing `npm` wins, and that decides
+  // which Node install `npm config get prefix` reports. The ACTIVE toolchain has
+  // to come first — `$NVM_BIN`, then the user's own login-shell PATH. Leading
+  // with the version scan below would let an arbitrary readdirSync order resolve
+  // `npm` against an inactive Node, installing CLIs under the wrong prefix.
+  const activePaths: string[] = [];
+  if (process.env.NVM_BIN !== undefined && process.env.NVM_BIN !== '') {
+    activePaths.push(process.env.NVM_BIN);
+  }
+  activePaths.push(...loginShellPath());
+
+  const standardPaths = ['/usr/local/bin', '/opt/homebrew/bin', `${home}/.npm-global/bin`];
+
+  // Fallback only: every NVM node version bin dir, for a packaged Electron app
+  // that inherited neither NVM_BIN nor a usable login-shell PATH.
+  const nvmFallbackPaths: string[] = [];
   try {
     const nvmDir = process.env.NVM_DIR ?? `${home}/.nvm`;
     const versionsDir = path.join(nvmDir, 'versions', 'node');
@@ -40,7 +76,7 @@ function discoverExtraPaths(): string[] {
       for (const version of fs.readdirSync(versionsDir)) {
         const binDir = path.join(versionsDir, version, 'bin');
         if (fs.existsSync(binDir)) {
-          extraPaths.push(binDir);
+          nvmFallbackPaths.push(binDir);
         }
       }
     }
@@ -48,27 +84,19 @@ function discoverExtraPaths(): string[] {
     // NVM not installed, skip.
   }
 
-  // Also try the user's default shell PATH as a last resort.
-  try {
-    const shellPath = execSync('/bin/bash -ilc "echo $PATH"', {
-      stdio: 'pipe',
-      encoding: 'utf8',
-      timeout: SHELL_PATH_PROBE_TIMEOUT_MS,
-    }).trim();
-    if (shellPath !== '') {
-      extraPaths.push(...shellPath.split(':'));
-    }
-  } catch {
-    // Ignore.
-  }
-
-  return extraPaths;
+  const seen = new Set<string>();
+  return [...activePaths, ...standardPaths, ...nvmFallbackPaths].filter((entry) => {
+    if (entry === '' || seen.has(entry)) return false;
+    seen.add(entry);
+    return true;
+  });
 }
 
 /**
  * Build a ProcessEnv whose PATH covers the common install locations for `npm`
- * and npm-global CLIs: standard bin dirs, every NVM node version's bin dir, and
- * the user's own login-shell PATH as a last resort.
+ * and npm-global CLIs, ordered so the user's ACTIVE toolchain resolves first:
+ * `$NVM_BIN` and the login-shell PATH, then standard bin dirs, then a scan of
+ * every NVM node version as a last-resort fallback.
  *
  * Discovery is cached for the process lifetime; only the first call pays the
  * login-shell probe.

@@ -39,6 +39,7 @@ const fsReaddirSync = vi.hoisted(() => vi.fn<(path: string) => string[]>(() => [
 const fsWriteFileSync = vi.hoisted(() =>
   vi.fn<(path: string, data: string, opts?: unknown) => void>()
 );
+const fsChmodSync = vi.hoisted(() => vi.fn<(path: string, mode: number) => void>());
 
 vi.mock('fs', () => {
   const mod = {
@@ -46,6 +47,7 @@ vi.mock('fs', () => {
     readFileSync: fsReadFileSync,
     readdirSync: fsReaddirSync,
     writeFileSync: fsWriteFileSync,
+    chmodSync: fsChmodSync,
   };
   return { ...mod, default: mod };
 });
@@ -162,6 +164,7 @@ describe('gpt-credential-sync blackbox', () => {
     });
     fsReaddirSync.mockReset().mockReturnValue([]);
     fsWriteFileSync.mockReset();
+    fsChmodSync.mockReset();
 
     setExecSyncHandler((command) => {
       if (command.includes('--version')) {
@@ -515,6 +518,20 @@ describe('gpt-credential-sync blackbox', () => {
       const [backupPath] = fsWriteFileSync.mock.calls[0];
       expect(backupPath).not.toContain('..');
       expect(backupPath).toBe(`${CODEX_AUTH_PATH}.evilpath.bak`);
+    });
+
+    it('forces 0600 on the credential backup even when it already exists', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(SESSION);
+      wireCodexAuthFile(JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-x' }));
+      installUpload();
+
+      const syncPromise = GptCredentialSync.syncCredentials();
+      await completeCodexLogin();
+      await syncPromise;
+
+      // writeFileSync's `mode` only applies on creation, so an already-present
+      // backup would keep its old (possibly world-readable) permissions.
+      expect(fsChmodSync).toHaveBeenCalledWith(`${CODEX_AUTH_PATH}.apikey.bak`, 0o600);
     });
 
     it('never launches a login from the non-interactive periodic refresh', async () => {

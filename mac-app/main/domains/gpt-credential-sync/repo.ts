@@ -70,6 +70,10 @@ export function backupCodexAuthFile(): string | null {
     }
     const backupPath = `${CODEX_AUTH_PATH}.${mode}.bak`;
     fs.writeFileSync(backupPath, raw, { mode: 0o600 });
+    // `mode` on writeFileSync only applies when the file is CREATED. Overwriting
+    // a pre-existing backup would keep whatever permissions it already had, so
+    // chmod unconditionally — this file holds credentials.
+    fs.chmodSync(backupPath, 0o600);
     return backupPath;
   } catch {
     return null;
