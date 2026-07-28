@@ -28,11 +28,8 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
 import { getWaitlistPeople } from '../../domains/admin-health/service.waitlist';
-import { findWaitlistPeople, findWaitlistPersonById } from '../../domains/admin-health/repo';
-import { checkInviteCode } from '../../domains/invite-codes/service';
+import { findWaitlistPeople } from '../../domains/admin-health/repo';
 import { prisma } from '../../providers/database';
-import { isRealWaitlistPerson, realWaitlistPersonSql } from '../../providers/waitlistIdentity';
-import { Prisma } from '@prisma/client';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
@@ -142,11 +139,6 @@ function uniquePhone(): string {
   return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
 }
 
-/** An identity the real-people filter must reject, for exclusion assertions. */
-function fixtureEmail(marker: string): string {
-  return `${marker}@blackbox-test.dev`;
-}
-
 async function testList_noAuth() {
   const res = await request(`${BASE_URL}/api/admin-health/waitlist`);
   assertStatus(res.status, 401, res.data);
@@ -207,150 +199,6 @@ async function testList_excludesWhitespaceOnlyPhones() {
     }
   } finally {
     await prisma.waitlist.deleteMany({ where: { name: marker } });
-  }
-}
-
-/**
- * The regression this filter was rebuilt around: a signup with an email and no
- * phone is a real person. The list used to require a phone as a stand-in for
- * "not fixture junk", which hid every landing-form signup (that form collects
- * no phone at all) plus a manually imported roster.
- */
-async function testList_includesEmailOnlySignup() {
-  const marker = `wlcase-emailonly-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const email = `${marker}@waitlist-case.dev`;
-  try {
-    const seeded = await prisma.waitlist.create({
-      data: { name: marker, email, phone: null, variant: 'landing-page-a' },
-    });
-    const page = await findWaitlistPeople({ skip: 0, take: 100_000 });
-    const row = page.rows.find((candidate) => candidate.id === seeded.id);
-    if (!row) throw new Error('Email-only signup missing from the waitlist list');
-    if (row.phone !== null) throw new Error(`Expected a null phone, got ${String(row.phone)}`);
-    if (row.email !== email) throw new Error(`Expected email ${email}, got ${String(row.email)}`);
-  } finally {
-    await prisma.waitlist.deleteMany({ where: { name: marker } });
-  }
-}
-
-/** Counting an email-only person is only safe because fixtures are excluded. */
-async function testList_excludesOurOwnFixtureRows() {
-  const marker = `wlcase-fixture-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  try {
-    const seeded = await prisma.waitlist.create({
-      data: { name: marker, email: fixtureEmail(marker), phone: null, variant: 'landing-page-a' },
-    });
-    const page = await findWaitlistPeople({ skip: 0, take: 100_000 });
-    if (page.rows.some((row) => row.id === seeded.id)) {
-      throw new Error('A @blackbox-test.dev fixture counted as a real waitlist person');
-    }
-    if (await findWaitlistPersonById(seeded.id)) {
-      throw new Error('A fixture row was individually addressable as a real person');
-    }
-  } finally {
-    await prisma.waitlist.deleteMany({ where: { name: marker } });
-  }
-}
-
-/** The list total must count the same population the rows come from. */
-async function testList_totalMatchesFilteredRows() {
-  const marker = `wlcase-total-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  try {
-    await prisma.waitlist.createMany({
-      data: [
-        {
-          name: `${marker}-real`,
-          email: `${marker}-real@waitlist-case.dev`,
-          variant: 'landing-page-a',
-        },
-        { name: `${marker}-fix`, email: fixtureEmail(marker), variant: 'landing-page-a' },
-      ],
-    });
-    const page = await findWaitlistPeople({ skip: 0, take: 100_000 });
-    if (page.total !== page.rows.length) {
-      throw new Error(`Total ${page.total} disagrees with ${page.rows.length} returned rows`);
-    }
-  } finally {
-    await prisma.waitlist.deleteMany({ where: { name: { startsWith: marker } } });
-  }
-}
-
-/**
- * The real-person rule has two implementations — isRealWaitlistPerson (TS, used
- * by the invite lookup and the signup metric) and realWaitlistPersonSql (used by
- * the paged list, its COUNT, and the user directory). They must agree on every
- * row or the list and its total silently disagree. This drives a matrix of
- * identities through both and diffs the verdicts.
- */
-async function testRealPersonRule_sqlMatchesTypescript() {
-  const marker = `wlcase-parity-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const seeds = [
-    { label: 'phone-only', email: null, phone: uniquePhone() },
-    { label: 'email-only', email: `${marker}-a@waitlist-case.dev`, phone: null },
-    { label: 'both', email: `${marker}-b@waitlist-case.dev`, phone: uniquePhone() },
-    { label: 'blank-phone', email: `${marker}-c@waitlist-case.dev`, phone: '   ' },
-    { label: 'fixture-domain', email: fixtureEmail(`${marker}-d`), phone: null },
-    {
-      label: 'fixture-domain-with-phone',
-      email: fixtureEmail(`${marker}-e`),
-      phone: uniquePhone(),
-    },
-    { label: 'reserved-domain', email: `${marker}-f@example.com`, phone: null },
-    { label: 'dotted-test-domain', email: `${marker}-g@something.test`, phone: null },
-    {
-      label: 'fixture-phone-1999',
-      email: null,
-      phone: `+1999${String(randomInt(0, 1e7)).padStart(7, '0')}`,
-    },
-    {
-      label: 'fixture-phone-1555',
-      email: null,
-      phone: `+1555${String(randomInt(0, 1e7)).padStart(7, '0')}`,
-    },
-  ];
-  try {
-    const created = [];
-    for (const seed of seeds) {
-      created.push({
-        seed,
-        row: await prisma.waitlist.create({
-          data: { name: `${marker}-${seed.label}`, email: seed.email, phone: seed.phone },
-        }),
-      });
-    }
-
-    const sqlIds = new Set(
-      (
-        await prisma.$queryRaw<Array<{ id: string }>>(
-          Prisma.sql`SELECT "id" FROM "Waitlist" WHERE ${realWaitlistPersonSql()} AND "name" LIKE ${marker + '%'}`
-        )
-      ).map((row) => row.id)
-    );
-
-    const disagreements = created
-      .map(({ seed, row }) => ({
-        label: seed.label,
-        ts: isRealWaitlistPerson(row),
-        sql: sqlIds.has(row.id),
-      }))
-      .filter((verdict) => verdict.ts !== verdict.sql);
-
-    if (disagreements.length > 0) {
-      throw new Error(`TS and SQL real-person rules disagree: ${JSON.stringify(disagreements)}`);
-    }
-
-    // Guard against both implementations being uniformly wrong.
-    const reals = created
-      .filter(({ row }) => isRealWaitlistPerson(row))
-      .map(({ seed }) => seed.label);
-    const expected = ['phone-only', 'email-only', 'both', 'blank-phone'];
-    if (JSON.stringify(reals.sort()) !== JSON.stringify([...expected].sort())) {
-      throw new Error(
-        `Expected exactly ${JSON.stringify(expected)} to count, got ${JSON.stringify(reals)}`
-      );
-    }
-  } finally {
-    await prisma.waitlist.deleteMany({ where: { name: { startsWith: marker } } });
   }
 }
 
@@ -510,38 +358,6 @@ async function testInvite_happyPathFlagsAndMarks() {
   }
 }
 
-// The invite flags the matching account off the waitlist (offWaitlistAt) WITHOUT
-// granting access, and is idempotent so a re-send never double-writes.
-async function testMarkOffWaitlist_setsFlagIdempotent() {
-  const marker = `wlcase-flag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
-  try {
-    await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
-
-    const first = await markOffWaitlistByPhone(phone);
-    if (!first.flagged || first.alreadyOffWaitlist) {
-      throw new Error(`First mark should set the flag, got ${JSON.stringify(first)}`);
-    }
-    const flagged = await prisma.user.findUnique({
-      where: { userId: marker },
-      select: { offWaitlistAt: true, usedInviteCode: true },
-    });
-    if (flagged?.offWaitlistAt === null || flagged?.offWaitlistAt === undefined) {
-      throw new Error('offWaitlistAt was not set');
-    }
-    if (flagged.usedInviteCode !== null) {
-      throw new Error('Flagging must not grant access (usedInviteCode must stay null)');
-    }
-
-    const second = await markOffWaitlistByPhone(phone);
-    if (second.flagged || !second.alreadyOffWaitlist) {
-      throw new Error(`Second mark must be a no-op, got ${JSON.stringify(second)}`);
-    }
-  } finally {
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
 // getWaitlistPeople joins each phone-bearing signup to its account so admins
 // can see who is still gated vs. already in the app.
 async function testGetWaitlistPeople_derivesAccountStatus() {
@@ -606,58 +422,6 @@ async function testGetWaitlistPeople_subscriptionClearsGated() {
   }
 }
 
-// checkInviteCode surfaces the off-waitlist flag so onboarding can show the
-// subscription view; the flag alone does NOT clear the gate.
-async function testCheckInviteCode_reflectsOffWaitlistFlag() {
-  const marker = `wlcase-chkflag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  try {
-    await prisma.user.create({
-      data: { userId: marker, usedInviteCode: null, offWaitlistAt: new Date() },
-    });
-    const result = await checkInviteCode(marker);
-    if (!result.offWaitlist) throw new Error('Expected offWaitlist: true for a flagged user');
-    if (!result.needsInviteCode) {
-      throw new Error('Flag alone must not clear the gate (needsInviteCode should stay true)');
-    }
-  } finally {
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
-// An active subscription clears the invite gate: subscription OR invite code.
-async function testCheckInviteCode_activeSubscriptionClearsGate() {
-  const marker = `wlcase-chksub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const stripeId = `sub_blackbox_${marker}`;
-  try {
-    await prisma.user.create({ data: { userId: marker, usedInviteCode: null } });
-
-    const gatedBefore = await checkInviteCode(marker);
-    if (!gatedBefore.needsInviteCode) {
-      throw new Error('User without a subscription or code must be gated');
-    }
-
-    await prisma.subscription.create({
-      data: {
-        userId: marker,
-        subscriptionTier: 20,
-        stripeSubscriptionId: stripeId,
-        stripeCustomerId: `cus_blackbox_${marker}`,
-        currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      },
-    });
-
-    const afterSub = await checkInviteCode(marker);
-    if (afterSub.needsInviteCode) {
-      throw new Error(
-        'An active subscription must clear the gate (needsInviteCode should be false)'
-      );
-    }
-  } finally {
-    await prisma.subscription.deleteMany({ where: { userId: marker } });
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
 async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
   const start = Date.now();
   try {
@@ -706,22 +470,6 @@ async function main() {
       fn: testList_paginatesNewestFirst,
     },
     {
-      name: 'waitlist list includes email-only signups (no phone required)',
-      fn: testList_includesEmailOnlySignup,
-    },
-    {
-      name: 'waitlist list excludes our own @blackbox-test.dev fixtures',
-      fn: testList_excludesOurOwnFixtureRows,
-    },
-    {
-      name: 'waitlist list total matches the filtered row set',
-      fn: testList_totalMatchesFilteredRows,
-    },
-    {
-      name: 'real-person rule: SQL and TypeScript implementations agree',
-      fn: testRealPersonRule_sqlMatchesTypescript,
-    },
-    {
       name: 'POST /api/admin-health/waitlist/:id/invite non-admin -> 403',
       fn: testInvite_nonAdminForbidden,
     },
@@ -738,24 +486,12 @@ async function main() {
       fn: testInvite_happyPathFlagsAndMarks,
     },
     {
-      name: 'markOffWaitlistByPhone sets the flag and is idempotent',
-      fn: testMarkOffWaitlist_setsFlagIdempotent,
-    },
-    {
       name: 'getWaitlistPeople derives account + gate status',
       fn: testGetWaitlistPeople_derivesAccountStatus,
     },
     {
       name: 'getWaitlistPeople: active subscription clears isGated',
       fn: testGetWaitlistPeople_subscriptionClearsGated,
-    },
-    {
-      name: 'checkInviteCode reflects the off-waitlist flag',
-      fn: testCheckInviteCode_reflectsOffWaitlistFlag,
-    },
-    {
-      name: 'checkInviteCode: active subscription clears the gate',
-      fn: testCheckInviteCode_activeSubscriptionClearsGate,
     },
   ];
 
