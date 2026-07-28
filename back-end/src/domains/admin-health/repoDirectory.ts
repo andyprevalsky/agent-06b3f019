@@ -1,7 +1,7 @@
 /**
- * Admin user-directory queries — the searchable union of real accounts and
- * phone-bearing waitlist signups that backs the admin Users page and the
- * always-on account switcher.
+ * Admin user-directory queries — the searchable union of real accounts and real
+ * waitlist signups that backs the admin Users page and the always-on account
+ * switcher.
  *
  * Split out of repo.ts to keep each repo file inside the strict per-file line
  * budget. Peer repo imports are permitted by the layered-architecture rules.
@@ -10,6 +10,7 @@
 import { Prisma } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
+import { realWaitlistPersonSql } from '../../providers/waitlistIdentity';
 
 export interface DirectoryPersonRow {
   userId: string | null;
@@ -38,10 +39,17 @@ function likePattern(term: string): string {
 
 /**
  * The two halves of the directory: real accounts and waitlist signups, keyed on
- * the last 10 phone digits so differently-formatted numbers still line up.
+ * the last 10 phone digits so differently-formatted numbers still line up, and
+ * falling back to the lowercased email when a side carries no phone at all.
  *
- * Waitlist rows are de-duplicated per phone (oldest wins) so a person who
- * signed up twice can't split the account they belong to across two rows.
+ * The email fallback is what lets email-only signups (the public landing form
+ * collects no phone) appear here; they previously vanished entirely. An
+ * email-only waitlist row still cannot merge into a phone-bearing account —
+ * that account keys on its digits — so it stays a distinct directory entry
+ * until it signs up with a phone.
+ *
+ * Waitlist rows are de-duplicated per key (oldest wins) so a person who signed
+ * up twice can't split the account they belong to across two rows.
  */
 const DIRECTORY_CTE = Prisma.sql`
   WITH acct AS (
@@ -53,7 +61,11 @@ const DIRECTORY_CTE = Prisma.sql`
       u."createdAt" AS joined_at,
       u."usedInviteCode" AS used_invite_code,
       u."offWaitlistAt" AS off_waitlist_at,
-      NULLIF(RIGHT(regexp_replace(COALESCE(u."phone", ''), '[^0-9]', '', 'g'), 10), '') AS digits
+      NULLIF(RIGHT(regexp_replace(COALESCE(u."phone", ''), '[^0-9]', '', 'g'), 10), '') AS digits,
+      COALESCE(
+        NULLIF(RIGHT(regexp_replace(COALESCE(u."phone", ''), '[^0-9]', '', 'g'), 10), ''),
+        'email:' || lower(NULLIF(btrim(COALESCE(u."email", '')), ''))
+      ) AS match_key
     FROM "User" u
     -- Phone-bearing rows count even when isAnonymous is true: the core dev/test
     -- account (1f85ff25…, +19729777432) is flagged anonymous but is a real
@@ -63,19 +75,30 @@ const DIRECTORY_CTE = Prisma.sql`
        OR NULLIF(btrim(COALESCE(u."phone", '')), '') IS NOT NULL
   ),
   wl AS (
-    SELECT DISTINCT ON (RIGHT(regexp_replace(w."phone", '[^0-9]', '', 'g'), 10))
+    SELECT DISTINCT ON (
+      COALESCE(
+        NULLIF(RIGHT(regexp_replace(COALESCE(w."phone", ''), '[^0-9]', '', 'g'), 10), ''),
+        'email:' || lower(NULLIF(btrim(COALESCE(w."email", '')), ''))
+      )
+    )
       w."id" AS waitlist_id,
       NULLIF(btrim(COALESCE(w."name", '')), '') AS name,
       NULLIF(btrim(COALESCE(w."email", '')), '') AS email,
-      w."phone" AS phone,
+      NULLIF(btrim(COALESCE(w."phone", '')), '') AS phone,
       w."created_at" AS joined_at,
       w."invited_at" AS invited_at,
-      RIGHT(regexp_replace(w."phone", '[^0-9]', '', 'g'), 10) AS digits
+      NULLIF(RIGHT(regexp_replace(COALESCE(w."phone", ''), '[^0-9]', '', 'g'), 10), '') AS digits,
+      COALESCE(
+        NULLIF(RIGHT(regexp_replace(COALESCE(w."phone", ''), '[^0-9]', '', 'g'), 10), ''),
+        'email:' || lower(NULLIF(btrim(COALESCE(w."email", '')), ''))
+      ) AS match_key
     FROM "Waitlist" w
-    WHERE w."phone" IS NOT NULL
-      AND RIGHT(regexp_replace(w."phone", '[^0-9]', '', 'g'), 10) <> ''
+    WHERE ${realWaitlistPersonSql('w')}
     ORDER BY
-      RIGHT(regexp_replace(w."phone", '[^0-9]', '', 'g'), 10),
+      COALESCE(
+        NULLIF(RIGHT(regexp_replace(COALESCE(w."phone", ''), '[^0-9]', '', 'g'), 10), ''),
+        'email:' || lower(NULLIF(btrim(COALESCE(w."email", '')), ''))
+      ),
       w."created_at" ASC,
       w."id" ASC
   ),
@@ -92,7 +115,7 @@ const DIRECTORY_CTE = Prisma.sql`
       acct.off_waitlist_at,
       COALESCE(acct.digits, wl.digits) AS digits
     FROM acct
-    FULL OUTER JOIN wl ON acct.digits = wl.digits
+    FULL OUTER JOIN wl ON acct.match_key = wl.match_key
   )
 `;
 
