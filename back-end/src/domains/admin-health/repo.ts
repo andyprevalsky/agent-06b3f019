@@ -1,6 +1,7 @@
 import { IntegrationStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
+import { isRealWaitlistPerson } from '../../providers/waitlistIdentity';
 
 export interface AdminUserRecord {
   userId: string;
@@ -143,16 +144,16 @@ export async function findWaitlistSignupsBetween(
   start: Date,
   end: Date
 ): Promise<WaitlistSignupRecord[]> {
-  // Only phone-bearing signups count. The legacy email waitlist (~3k rows with
-  // no phone) is not a real product signup, so entries without a phone number
-  // are cleared out of this metric.
+  // A signup counts on email OR phone. This used to require a phone as a proxy
+  // for "not fixture junk" — the ~2.7k phone-less rows are almost entirely our
+  // own @blackbox-test.dev / @contract-test.dev fixtures — but that also
+  // discarded every real email-only signup, including the whole public landing
+  // form population. Fixtures are excluded by classification instead.
   const rows = await prisma.waitlist.findMany({
-    where: { createdAt: { gte: start, lt: end }, phone: { not: null } },
-    select: { createdAt: true, phone: true },
+    where: { createdAt: { gte: start, lt: end } },
+    select: { createdAt: true, name: true, email: true, phone: true },
   });
-  return rows
-    .filter((row) => (row.phone ?? '').trim() !== '')
-    .map(({ createdAt }) => ({ createdAt }));
+  return rows.filter(isRealWaitlistPerson).map(({ createdAt }) => ({ createdAt }));
 }
 
 // Waitlist-people queries live in their own file (per-file line budget) but

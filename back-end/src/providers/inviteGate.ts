@@ -8,6 +8,7 @@
 
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { normalizeWaitlistEmail } from './waitlistIdentity';
 
 const log = createLogger('InviteGate');
 
@@ -115,24 +116,73 @@ export async function registerGatedUser(input: GatedUserInput): Promise<void> {
   // Supabase JWTs carry the phone claim without a leading '+'; store canonical E.164.
   const digits = input.phone.replace(/\D/g, '');
   if (digits === '') return;
+  const phone = '+' + digits;
   try {
     const user = await prisma.user.findUnique({
       where: { userId: input.userId },
-      select: { name: true },
+      select: { name: true, email: true },
     });
+    const email = normalizeWaitlistEmail(user?.email);
+    const name = user?.name ?? '';
+
+    // The upsert stays create-only so two concurrent gate checks cannot collide
+    // on the unique phone, and it deliberately carries no email: Waitlist.email
+    // is UNIQUE, so an address another row already owns would fail the create
+    // and lose the signup entirely. Contact details are attached separately,
+    // where a collision is survivable and hand-curated values are preserved.
     await prisma.waitlist.upsert({
-      where: { phone: '+' + digits },
-      create: {
-        phone: '+' + digits,
-        name: user?.name ?? '',
-        variant: 'gated-login',
-      },
+      where: { phone },
+      create: { phone, name, variant: 'gated-login' },
       update: {},
     });
+
+    await backfillGatedContactDetails({ phone, name, email });
   } catch (error) {
     log.error('Failed to record gated user on waitlist', {
       userId: input.userId,
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+function isUniqueConstraintError(error: unknown): boolean {
+  return (
+    typeof error === 'object' && error !== null && (error as { code?: unknown }).code === 'P2002'
+  );
+}
+
+/**
+ * Fill in contact details the waitlist row is still missing.
+ *
+ * Sign-up collects an email and a name and stores them on User, but this row
+ * historically carried only the phone — so the admin waitlist read "no email on
+ * file" for people whose address we already held one table over, and invites
+ * had to re-derive it from the account.
+ *
+ * Only ever fills blanks: a value already on the row wins, because it may have
+ * been curated by an admin or imported from a roster.
+ */
+async function backfillGatedContactDetails(params: {
+  phone: string;
+  name: string;
+  email: string | null;
+}): Promise<void> {
+  const { phone, name, email } = params;
+  if (email !== null) {
+    try {
+      await prisma.waitlist.updateMany({
+        where: { phone, OR: [{ email: null }, { email: '' }] },
+        data: { email },
+      });
+    } catch (error) {
+      // Waitlist.email is UNIQUE. Another row (an earlier signup, or a manual
+      // roster import) may already own this address; that row is canonical, so
+      // leave this one email-less rather than failing the gate check.
+      if (!isUniqueConstraintError(error)) throw error;
+      log.info('Skipped waitlist email backfill: address already on another row', { phone });
+    }
+  }
+  if (name !== '') {
+    await prisma.waitlist.updateMany({ where: { phone, name: '' }, data: { name } });
   }
 }

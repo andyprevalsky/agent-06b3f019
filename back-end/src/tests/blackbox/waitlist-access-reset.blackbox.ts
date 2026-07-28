@@ -6,6 +6,10 @@ import { resolve } from 'node:path';
 
 import { planWaitlistAccessReset } from '../../domains/waitlist/accessReset';
 
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
+
 const protectedIds = new Set(['andy', 'tamy', 'aman']);
 const timestamp = new Date('2026-07-23T00:00:00.000Z');
 const plan = planWaitlistAccessReset(
