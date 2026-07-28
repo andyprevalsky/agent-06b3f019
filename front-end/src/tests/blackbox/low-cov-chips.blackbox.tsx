@@ -383,6 +383,51 @@ describe('ApprovalChip', () => {
     }
   });
 
+  // CodeRabbit finding on PR #912: AgentChatArea keeps ApprovalChip mounted for
+  // as long as SOME approval is pending, so a second request inherited the
+  // first one's scrollTop and opened already scrolled past its own title —
+  // a residual path to the very cutoff this card was changed to prevent.
+  it('rewinds its scroll position when the approval request changes', () => {
+    const approval = (id: string, merchant: string) => ({
+      attentionRequestId: id,
+      question: `Approve a $22.81 purchase from ${merchant}?`,
+      requestPaymentCard: {
+        merchant,
+        currency: 'USD',
+        lineItems: Array.from({ length: 8 }, (_, index) => ({
+          name: `Item ${index}`,
+          productUrl: `https://order.toasttab.com/online/x/item-${index}`,
+          rating: '0 stars',
+          reviewCount: '0 reviews',
+          unitPriceCents: 2100,
+          quantity: 1,
+          lineTotalCents: 2100,
+        })),
+        subtotalCents: 16800,
+        totalCents: 18100,
+      },
+    });
+
+    const { container, rerender } = renderWithProviders(
+      <ApprovalChip pendingApproval={approval('req-first', 'First Merchant')} />,
+    );
+
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    expect(scroller).not.toBeNull();
+
+    // Simulate the user having scrolled the first approval's body down.
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    // A different request arrives while the component stays mounted.
+    rerender(<ApprovalChip pendingApproval={approval('req-second', 'Second Merchant')} />);
+
+    expect(scroller.scrollTop).toBe(0);
+    expect(
+      screen.getByText('Approve a $22.81 purchase from Second Merchant?'),
+    ).toBeInTheDocument();
+  });
+
   it('renders historical payment metadata without undefined values or broken links', () => {
     renderWithProviders(
       <ApprovalChip

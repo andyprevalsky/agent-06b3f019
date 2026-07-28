@@ -592,8 +592,20 @@ class BrowserHumanizer:
             await mouse.move(down_x, down_y)
             await mouse.down()
             await asyncio.sleep(synthesize_click_delay_ms() / 1000)
-            await mouse.move(up_x, up_y)
             await mouse.up()
+            # Release drift lands AFTER mouseup, not between down and up.
+            #
+            # Every mouse call is a round trip to a REMOTE browser, so a move
+            # inside the press adds that latency to the hold duration the PAGE
+            # observes: we sampled an ~85ms human dwell but emitted 621.5ms
+            # (measured). Anti-bot scorers read the emitted press, and a submit
+            # whose mousedown is older than 500ms is classified as a
+            # programmatic click rather than a real gesture -- which is exactly
+            # what FCaptcha's `programmatic_click` bot rule fired on. Drifting
+            # after release keeps the motor noise (last-move != down, so the
+            # click is not pixel-perfect) while the press itself stays inside
+            # the sampled human distribution.
+            await mouse.move(up_x, up_y)
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)

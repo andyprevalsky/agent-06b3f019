@@ -2449,6 +2449,69 @@ async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates
     assert set(fake_mouse.moves[1:-1]) != {(360, 240)}
 
 
+async def test_click_press_holds_no_remote_round_trip_between_down_and_up():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.183 > ratchet 0.163).
+
+    Every mouse call is a round trip to a REMOTE browser. The release-drift move
+    used to sit BETWEEN mousedown and mouseup, so that latency landed inside the
+    press: we sampled an ~85ms human dwell but the page observed 621.5ms. A
+    submit whose mousedown is older than FCaptcha's 500ms RECENT_GESTURE_MS is
+    scored as `programmatic_click` (bot 0.8x0.85 -> +0.0884), which was the
+    entire gap over the ratchet.
+
+    Assert the ORDER: no move may be dispatched while the button is held. This
+    is latency-independent, so it holds no matter how slow the transport is.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    events = []
+
+    class OrderTrackingMouse:
+        def __init__(self):
+            self._pos = (0, 0)
+
+        async def move(self, x, y):
+            self._pos = (x, y)
+            events.append("move")
+
+        async def down(self, **kwargs):
+            events.append("down")
+
+        async def up(self, **kwargs):
+            events.append("up")
+
+    class FakeKeyboard:
+        async def press(self, *args, **kwargs):
+            return None
+
+    page = SimpleNamespace(
+        mouse=OrderTrackingMouse(),
+        keyboard=FakeKeyboard(),
+        viewport_size={"width": 1280, "height": 800},
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+                "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS": "1",
+            },
+            clear=False,
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        await humanizer.initialize_cursor((100, 100))
+        await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
+
+    assert "down" in events and "up" in events, events
+    held = events[events.index("down") + 1 : events.index("up")]
+    assert held == [], f"no remote call may sit inside the press; found {held}"
+    # The motor noise itself must survive, just relocated after the release.
+    assert "move" in events[events.index("up") + 1 :], "release drift must follow mouseup"
+
+
 async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -13779,6 +13842,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_click_synthesis",
         test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates,
+    )
+    await r.record_async(
+        "click_press_has_no_round_trip_inside_hold",
+        test_click_press_holds_no_remote_round_trip_between_down_and_up,
     )
     await r.record_async(
         "browser_humanizer_cursor_observer_after_overlay",

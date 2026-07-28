@@ -251,7 +251,7 @@ function PaymentReceipt({
  * whatever line it lands on and reads as a rendering bug rather than a scroll
  * region — which is exactly how the original cutoff was reported.
  */
-function useHasMoreBelow() {
+function useHasMoreBelow(resetKey?: string) {
   const [hasMoreBelow, setHasMoreBelow] = useState(false);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const contentRef = useRef<HTMLDivElement | null>(null);
@@ -278,13 +278,25 @@ function useHasMoreBelow() {
     return () => observer.disconnect();
   }, [measure]);
 
+  // AgentChatArea keeps this component mounted for as long as SOME approval is
+  // pending, so a second request reuses the first one's scroll position and
+  // opens already scrolled past its own title — the exact cutoff this card
+  // exists to prevent. Rewind and remeasure whenever the request identity
+  // changes.
+  useEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
+    measure();
+  }, [resetKey, measure]);
+
   return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
 }
 
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
-  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = useHasMoreBelow();
+  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = useHasMoreBelow(
+    pendingApproval?.attentionRequestId,
+  );
   const { handleAccept, handleReject } = useApprovalHandlers({
     pendingApproval,
     contextInput,

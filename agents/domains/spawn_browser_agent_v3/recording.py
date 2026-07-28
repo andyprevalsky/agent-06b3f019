@@ -2073,7 +2073,7 @@ class BrowserNetworkRecorder:
                 return
             if not self._should_capture(url, resource_type):
                 return
-            self.entries[request_key] = {
+            entry = {
                 "request_id": request_id,
                 "browser_generation": generation,
                 "session_id": session_id,
@@ -2082,6 +2082,22 @@ class BrowserNetworkRecorder:
                 "resource_type": resource_type,
                 "request_ts_ms": int((time.monotonic() - self._started_at) * 1000),
             }
+            # Capture the request body, not just the response. Anti-bot scoring
+            # endpoints (e.g. FCaptcha /api/score) send every behavioral signal
+            # in the REQUEST and return only a bare score, so a response-only
+            # recorder cannot answer "which signal got flagged?" — diagnosing a
+            # score regression then means re-running the whole benchmark blind.
+            # postData already rides along on requestWillBeSent, so this costs
+            # no extra CDP round-trip.
+            post_data = request.get("postData")
+            if isinstance(post_data, str) and post_data:
+                entry["request_body"] = post_data[: self._max_body_bytes]
+                entry["request_body_truncated"] = len(post_data) > self._max_body_bytes
+            elif request.get("hasPostData"):
+                # Body too large to inline. Record that it existed so the gap is
+                # visible instead of looking like a body-less request.
+                entry["request_body_truncated"] = True
+            self.entries[request_key] = entry
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
 

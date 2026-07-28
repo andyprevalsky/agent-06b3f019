@@ -75,9 +75,20 @@ def validate_product_detail_url(value: Any) -> str:
     return text
 
 
-def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
-    """Host-only check against a single known page (no trajectory available)."""
-    return validate_product_url_for_pages(value, [current_page_url])
+def validate_product_url_for_page(value: Any, observed_page_url: Any) -> str:
+    """Host-only check against the single page this caller has observed.
+
+    The argument is deliberately forwarded as a TRUSTED page URL and NOT as
+    ``current_page_url=``. Passing it as the current page would enable the
+    "don't echo the page you're standing on" rule on a caller that has no
+    trajectory — and the write-lock purchase path legitimately raises its
+    approval while sitting ON the product page, so that rule would reject a
+    correct link. The parameter is named ``observed_page_url`` to stop a future
+    refactor from "fixing" this into a false-reject; see
+    validate_product_url_for_pages and browser_tools/schemas.py's write-lock
+    branch.
+    """
+    return validate_product_url_for_pages(value, [observed_page_url])
 
 
 def validate_product_url_for_pages(
