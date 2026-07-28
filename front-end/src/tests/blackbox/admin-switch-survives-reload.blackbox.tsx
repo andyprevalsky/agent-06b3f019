@@ -289,3 +289,62 @@ describe('admin surfaces survive an account switch', () => {
     expect(seenAuth).toBe('Bearer admin-token');
   });
 });
+
+/**
+ * Stale-async guard. checkNeedsInviteCode() is async, so an invite check started
+ * BEFORE a switch can resolve after it and write `false` over the impersonation
+ * answer — silently re-trapping the admin the fix above just freed.
+ */
+describe('a stale invite check cannot re-trap an impersonating admin', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    stubReload();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('ignores an in-flight invite check that resolves after impersonation begins', async () => {
+    localStorage.setItem('rose-session', JSON.stringify(session('admin-token', ANDY_ID)));
+
+    // A slow check that reports "needs an invite" and lands AFTER the switch.
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    server.use(
+      http.get(`${API_BASE}/invite-codes/check`, async () => {
+        await gate;
+        return HttpResponse.json({ needsInviteCode: true });
+      }),
+      http.post(`${API_BASE}/admin-health/impersonate`, () =>
+        HttpResponse.json({
+          session: session('target-token', TARGET_ID, '+12125550100'),
+          user: {
+            userId: TARGET_ID,
+            name: 'Gated Target',
+            email: null,
+            phone: '+12125550100',
+            isAdmin: false,
+          },
+        }),
+      ),
+    );
+
+    const { renderHook } = await import('@testing-library/react');
+    const { useAuth } = await import('@/features/auth');
+    const { result } = renderHook(() => useAuth({ passive: true }));
+
+    await switchToAccount(TARGET_ID);
+    await result.current.refreshAuthState('post-switch');
+
+    // Now let the pre-switch check land; it must not clobber the impersonation answer.
+    release?.();
+
+    await waitFor(() => {
+      expect(result.current.isFullySignedIn).toBe(true);
+    });
+  });
+});

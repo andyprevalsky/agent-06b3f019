@@ -168,9 +168,16 @@ interface AuthStateSetters {
 /** Memoized auth actions: updateInviteStatus, applySession, refreshAuthState, signOut. */
 function useAuthActions(setters: AuthStateSetters) {
   const { setUser, setSession, setIsFullySignedIn, setRealtimeReady } = setters;
+  // Generation counter for invite checks. checkNeedsInviteCode() is async, so an
+  // EARLIER call can resolve after a later one and write a stale answer. That is
+  // not hypothetical here: an invite check started before a switch would resolve
+  // afterwards and set isFullySignedIn(false), re-trapping the impersonating
+  // admin the fix below is meant to free.
+  const inviteStatusRequest = useRef(0);
 
   const updateInviteStatus = useCallback(
     async (currentSession: Session | null, currentUser: User | null) => {
+      const request = ++inviteStatusRequest.current;
       if (!currentSession || isAnonymousUser(currentUser)) {
         setIsFullySignedIn(false);
         return;
@@ -191,9 +198,11 @@ function useAuthActions(setters: AuthStateSetters) {
       }
       try {
         const needsInvite = await checkNeedsInviteCode();
+        if (request !== inviteStatusRequest.current) return;
         setIsFullySignedIn(!needsInvite);
         logAuth('Invite check result', { needsInvite, isFullySignedIn: !needsInvite });
       } catch (error) {
+        if (request !== inviteStatusRequest.current) return;
         console.error('[Auth] Failed to check invite requirement', error);
         setIsFullySignedIn(false);
       }
