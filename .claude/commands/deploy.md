@@ -411,12 +411,33 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes every suite in the `GATES` registry
-(`scripts/run-deploy-structural-gates.py`) without changing their assertions or
-test counts. That registry is the single source of truth — print the current set
-with `python3 scripts/run-deploy-structural-gates.py --list` rather than
-maintaining a duplicate list here, which silently drifts every time a gate is
-added.
+The concurrent runner executes exactly these independent suites, without changing
+their assertions or test counts:
+
+`bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/deploy-worktree-preflight.test.sh`,
+`bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/semantic-deploy-gate.test.sh`,
+`bash scripts/tests/check-agent-behavior-approval.test.sh`,
+`bash scripts/tests/approval-format.test.sh`,
+`bash scripts/tests/workflow-deployment-migration.test.sh`,
+`bash scripts/tests/agent-surface-hash.test.sh`,
+`python3 scripts/tests/factory-review.test.py`,
+`python3 scripts/tests/wait-for-code-review.test.py`,
+`python3 scripts/tests/deploy-review-cycle.test.py`,
+`bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/run-deploy-structural-gates.test.py`,
+`python3 scripts/tests/deploy-live-probes.test.py`,
+`bash scripts/tests/run-process-cleanup.test.sh`,
+`bash scripts/tests/run-seed-exit-code.test.sh`,
+`bash scripts/tests/run-public-tunnel-routing.test.sh`, and
+`bash scripts/tests/setup-db-concurrency.test.sh`.
+
+This list is deliberately explicit, not a registry pointer: several of these
+suites assert that their own command still appears here, which is how a gate
+cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
+asserts this list and the `GATES` registry match exactly in both directions, so
+adding a gate without documenting it here fails the build.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
