@@ -1885,6 +1885,29 @@ class BrowserNetworkRecorder:
         ".wav",
     )
     CAPTURE_RESOURCE_TYPES = {"XHR", "Fetch", "Document"}
+    # Default-DENY allowlist for retaining raw request bodies.
+    #
+    # The browser agent signs into real user accounts and completes real
+    # purchases, so an unrestricted POST-body recorder would persist passwords,
+    # session tokens, and card numbers into diagnostic artifacts that outlive
+    # the run. The diagnostic need that motivated body capture is narrow:
+    # anti-bot vendors put every behavioral signal in the REQUEST and return
+    # only a bare score, so a response-only recorder cannot answer "which
+    # signal got flagged?" without re-running the whole benchmark blind.
+    # Allowlisting those scoring endpoints preserves that answer and stores
+    # nothing else. Add a marker only for a telemetry endpoint that is known
+    # not to carry user credentials.
+    BODY_CAPTURE_URL_MARKERS = (
+        "/api/score",
+        "/api/verify",
+        "fcaptcha.",
+        "recaptcha/api",
+        "hcaptcha.com",
+        "challenges.cloudflare.com",
+        "arkoselabs.com",
+        "datadome.co",
+        "perimeterx.net",
+    )
 
     def __init__(
         self,
@@ -2027,6 +2050,11 @@ class BrowserNetworkRecorder:
         self.session_id = session_id
         await self.start()
 
+    def _should_capture_request_body(self, url: str) -> bool:
+        """Whether this URL's raw request body may be retained (default deny)."""
+        host_and_path = url.lower().split("?", 1)[0]
+        return any(marker in host_and_path for marker in self.BODY_CAPTURE_URL_MARKERS)
+
     def _should_capture(self, url: str, resource_type: str, mime_type: str = "") -> bool:
         if not url.startswith(("http://", "https://")):
             return False
@@ -2090,7 +2118,7 @@ class BrowserNetworkRecorder:
             # postData already rides along on requestWillBeSent, so this costs
             # no extra CDP round-trip.
             post_data = request.get("postData")
-            if isinstance(post_data, str) and post_data:
+            if isinstance(post_data, str) and post_data and self._should_capture_request_body(url):
                 entry["request_body"] = post_data[: self._max_body_bytes]
                 entry["request_body_truncated"] = len(post_data) > self._max_body_bytes
             elif request.get("hasPostData"):

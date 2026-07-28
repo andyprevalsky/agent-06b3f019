@@ -47,7 +47,7 @@
  * - onApprovalHandled: () => void
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -283,7 +283,11 @@ function useHasMoreBelow(resetKey?: string) {
   // opens already scrolled past its own title — the exact cutoff this card
   // exists to prevent. Rewind and remeasure whenever the request identity
   // changes.
-  useEffect(() => {
+  // useLayoutEffect, not useEffect: a passive effect runs AFTER paint, so the
+  // browser can present one frame of new content at the old scrollTop —
+  // briefly recreating the very cutoff this hook prevents. Rewinding before
+  // paint makes that frame unreachable.
+  useLayoutEffect(() => {
     if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
     measure();
   }, [resetKey, measure]);

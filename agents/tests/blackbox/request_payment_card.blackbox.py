@@ -92,18 +92,25 @@ def test_product_url_trust_is_trajectory_evidence_not_url_vocabulary():
         == "https://order.toasttab.com/lok-lak"
     )
 
-    # www./subdomain relationships count as the same merchant.
-    assert validate_product_url_for_pages("https://www.toasttab.com/local/lunette", visited)
+    # A page BENEATH an observed host is covered (the browser was on that site).
+    assert validate_product_url_for_pages("https://menu.order.toasttab.com/lok-lak", visited)
 
-    # A host the browser never loaded is the one thing still refused — this is
-    # what stops a fabricated link reaching a human approving a real charge.
-    try:
-        validate_product_url_for_pages("https://totally-different.com/products/x", visited)
-    except ValueError as error:
-        assert "not observed in the browser trajectory" in str(error), error
-        assert "totally-different.com" in str(error), error
-    else:
-        raise AssertionError("accepted a product_url on an unobserved host")
+    # Coverage is DIRECTIONAL. Observing order.toasttab.com must NOT authorize
+    # the parent toasttab.com. Agent 90ac106a did exactly this: blocked on the
+    # real host, it host-swapped to a www.toasttab.com URL it had never loaded
+    # and put that fabricated link in front of a human approving a real charge.
+    # A symmetric host match made that indistinguishable from a real product page.
+    for unobserved in (
+        "https://www.toasttab.com/local/lunette-cambodia/item-lok-lak",
+        "https://toasttab.com/local/lunette",
+        "https://evil.com/products/x",
+    ):
+        try:
+            validate_product_url_for_pages(unobserved, visited)
+        except ValueError as error:
+            assert "not observed in the browser trajectory" in str(error), error
+        else:
+            raise AssertionError(f"accepted a product_url on an unobserved host: {unobserved}")
 
 
 def test_payment_line_item_requires_reviews_and_a_product_detail_url():

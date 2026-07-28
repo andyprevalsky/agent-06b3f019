@@ -49,11 +49,19 @@ def _normalized_page_route(value: str) -> tuple[str, str]:
     return hostname, path
 
 
-def _same_merchant_host(left: str, right: str) -> bool:
-    """Match an observed merchant host, including its own subdomains."""
-    if not left or not right:
+def _product_host_is_covered(product_host: str, observed_host: str) -> bool:
+    """Whether an observed host authorizes this product host.
+
+    Directional on purpose. Observing ``shop.example.com`` must NOT authorize
+    ``example.com``: the browser never loaded the parent, and a symmetric match
+    let an agent mint a product link on a host it had not visited — the exact
+    fabrication that put an unverified www.toasttab.com URL in front of a human
+    approving a real charge. A product page may only live on the observed host
+    or beneath it.
+    """
+    if not product_host or not observed_host:
         return False
-    return left == right or left.endswith(f".{right}") or right.endswith(f".{left}")
+    return product_host == observed_host or product_host.endswith(f".{observed_host}")
 
 
 def validate_product_detail_url(value: Any) -> str:
@@ -116,7 +124,7 @@ def validate_product_url_for_pages(
         for page_url in trusted_page_urls
         if str(page_url or "").strip().startswith(("http://", "https://"))
     ]
-    if not any(_same_merchant_host(product_route[0], observed_host) for observed_host in observed_hosts):
+    if not any(_product_host_is_covered(product_route[0], observed_host) for observed_host in observed_hosts):
         raise ValueError(
             f"product_url host '{product_route[0]}' was not observed in the browser trajectory. "
             "Link to a page on a site this browser session actually loaded."
