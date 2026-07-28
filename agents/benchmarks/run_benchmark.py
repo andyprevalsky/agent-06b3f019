@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -649,34 +650,211 @@ def _payment_receipt_from_attention_request(req: dict) -> dict:
     return {}
 
 
-def _normalize_receipt_items(receipt: dict) -> dict:
-    out = {}
+# ---------------------------------------------------------------------------
+# Shared prose matching for benchmark evaluators
+#
+# WHY THIS EXISTS: several evaluator assertions compare a human-readable string
+# the agent copied off a live page ("Sales Tax", "The Rocky Sandwich (Half)",
+# "Nopa Fish - Toast online ordering", "4821 Maplewood Dr, Austin, TX 78731")
+# against a label pinned in tasks.json. NOTHING teaches the agent the pinned
+# wording -- browser_tools/schemas.py documents these fields only as "Item name
+# shown on the checkout page" / "Fee label shown on the checkout page" /
+# "Merchant or site name" -- so a byte-for-byte comparison scores the merchant's
+# copy-writing, not whether the agent completed the task. Each site used to
+# hand-roll its own matching (exact dict-key equality, `casefold() ==` plus a
+# bespoke `startswith("tax (")` escape hatch, a fixed via/on/through/by
+# connector regex, a punctuation-squashed substring). This module-level helper
+# replaces all of them with one normalizer + one token matcher.
+#
+# WHAT STAYS EXACT (deliberately NOT routed through here, because these are the
+# real grounding for "did the agent buy the right thing, at the right price, on
+# the right site"): unitPriceCents, lineTotalCents, quantity, fee amountCents,
+# subtotalCents/totalCents, currency, the fingerprint hash, and the
+# approval-URL host check in _validate_payment_merchant_identity.
+# ---------------------------------------------------------------------------
+
+# Street-suffix / unit abbreviations. Applied to every token: both sides of a
+# comparison normalize identically, so an entry can never introduce a false
+# negative -- only collapse two spellings of the same word.
+_PROSE_ABBREVIATIONS = {
+    "st": "street",
+    "str": "street",
+    "rd": "road",
+    "dr": "drive",
+    "drv": "drive",
+    "ave": "avenue",
+    "av": "avenue",
+    "blvd": "boulevard",
+    "ln": "lane",
+    "ct": "court",
+    "cir": "circle",
+    "pl": "place",
+    "plz": "plaza",
+    "pkwy": "parkway",
+    "pky": "parkway",
+    "hwy": "highway",
+    "sq": "square",
+    "ter": "terrace",
+    "trl": "trail",
+    "apt": "apartment",
+    "ste": "suite",
+    "bldg": "building",
+    "fl": "floor",
+    "n": "north",
+    "s": "south",
+    "e": "east",
+    "w": "west",
+    "ne": "northeast",
+    "nw": "northwest",
+    "se": "southeast",
+    "sw": "southwest",
+}
+
+# US state/territory abbreviations. Applied ONLY to tokens that were written as
+# uppercase two-letter codes in the source ("Austin, TX"), which is how postal
+# abbreviations are conventionally rendered. That guard keeps ordinary lowercase
+# words like "in", "or", "me", "hi", "ok" from being rewritten as states.
+_US_STATE_ABBREVIATIONS = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california",
+    "co": "colorado", "ct": "connecticut", "de": "delaware", "fl": "florida", "ga": "georgia",
+    "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
+    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
+    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
+    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
+    "nj": "new jersey", "nm": "new mexico", "ny": "new york", "nc": "north carolina",
+    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
+    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota", "tn": "tennessee",
+    "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
+    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+    "pr": "puerto rico",
+}
+
+# Filler words that carry no identity. Dropping them lets "The Rocky Sandwich"
+# and "Rocky Sandwich" agree without weakening any content word.
+_PROSE_STOPWORDS = frozenset({"the", "a", "an", "and", "of", "for", "with"})
+
+
+def normalize_prose_tokens(value: object) -> tuple[str, ...]:
+    """Casefold, strip punctuation/accents/whitespace, expand abbreviations, drop filler.
+
+    'The Rocky  Sandwich (Half)' -> ('rocky', 'sandwich', 'half')
+    '4821 Maplewood Dr, Austin, TX 78731' -> ('4821','maplewood','drive','austin','texas','78731')
+    """
+    if not isinstance(value, str):
+        return ()
+    decomposed = unicodedata.normalize("NFKD", value)
+    tokens: list[str] = []
+    for raw in re.findall(r"[A-Za-z0-9]+", decomposed):
+        if len(raw) == 2 and raw.isupper() and raw.casefold() in _US_STATE_ABBREVIATIONS:
+            expanded = _US_STATE_ABBREVIATIONS[raw.casefold()]
+        else:
+            lowered = raw.casefold()
+            expanded = _PROSE_ABBREVIATIONS.get(lowered, lowered)
+        for token in expanded.split():
+            if token not in _PROSE_STOPWORDS:
+                tokens.append(token)
+    return tuple(tokens)
+
+
+def normalize_prose(value: object) -> str:
+    """Canonical space-joined form of `value` (see normalize_prose_tokens)."""
+    return " ".join(normalize_prose_tokens(value))
+
+
+def prose_tokens_contain(container: object, contained: object) -> bool:
+    """True when every normalized token of `contained` appears in `container`.
+
+    Order-insensitive, so 'Sales Tax' contains 'Tax' and 'Nopa Fish ordered
+    through Toast' contains 'Nopa Fish'. Empty on either side never matches.
+    """
+    container_tokens = set(normalize_prose_tokens(container))
+    contained_tokens = set(normalize_prose_tokens(contained))
+    if not container_tokens or not contained_tokens:
+        return False
+    return contained_tokens <= container_tokens
+
+
+def prose_match_rank(expected: object, actual: object) -> Optional[tuple[int, int]]:
+    """Sortable match quality between two prose strings, or None when they disagree.
+
+    (0, 0)  identical token sets
+    (1, n)  `actual` is a superset -- the page carried n extra words ('Sales Tax')
+    (2, n)  `actual` is a subset -- the page carried n fewer words ('Rocky Sandwich')
+    Lower sorts better, so callers pick the least-surprising candidate deterministically
+    rather than the one that happens to make an amount assertion pass.
+    """
+    expected_tokens = set(normalize_prose_tokens(expected))
+    actual_tokens = set(normalize_prose_tokens(actual))
+    if not expected_tokens or not actual_tokens:
+        return None
+    if expected_tokens == actual_tokens:
+        return (0, 0)
+    if expected_tokens <= actual_tokens:
+        return (1, len(actual_tokens - expected_tokens))
+    if actual_tokens <= expected_tokens:
+        return (2, len(expected_tokens - actual_tokens))
+    return None
+
+
+def best_prose_match(expected: object, candidates: List[tuple[str, object]]) -> Optional[object]:
+    """Pick the best-ranked `(label, payload)` candidate for `expected`, else None."""
+    ranked = [
+        (rank, index, payload)
+        for index, (label, payload) in enumerate(candidates)
+        if (rank := prose_match_rank(expected, label)) is not None
+    ]
+    if not ranked:
+        return None
+    return min(ranked, key=lambda entry: (entry[0], entry[1]))[2]
+
+
+def prose_contains_phrase(haystack: object, needle: object) -> bool:
+    """True when `needle`'s normalized tokens appear contiguously inside `haystack`.
+
+    Adjacency-preserving variant used where the pinned fact is a multi-part
+    phrase (a full mailing address) and scattered tokens must not count.
+    """
+    normalized_needle = normalize_prose(needle)
+    if not normalized_needle:
+        return False
+    return f" {normalized_needle} " in f" {normalize_prose(haystack)} "
+
+
+def _normalize_receipt_items(receipt: dict) -> List[tuple[str, dict]]:
+    """(name, amounts) pairs preserving receipt order; names matched as prose, amounts exact."""
+    out: List[tuple[str, dict]] = []
     for item in receipt.get("lineItems") or receipt.get("line_items") or []:
         if not isinstance(item, dict):
             continue
         name = item.get("name")
         if not isinstance(name, str) or not name:
             continue
-        out[name] = {
-            "image_url": item.get("imageUrl")
-            or item.get("image_url")
-            or item.get("productImageUrl")
-            or item.get("product_image_url"),
-            "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
-            "quantity": item.get("quantity"),
-            "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
-        }
+        out.append(
+            (
+                name,
+                {
+                    "image_url": item.get("imageUrl")
+                    or item.get("image_url")
+                    or item.get("productImageUrl")
+                    or item.get("product_image_url"),
+                    "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
+                    "quantity": item.get("quantity"),
+                    "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
+                },
+            )
+        )
     return out
 
 
-def _normalize_receipt_fees(receipt: dict) -> dict:
-    out = {}
+def _normalize_receipt_fees(receipt: dict) -> List[tuple[str, object]]:
+    """(label, amountCents) pairs preserving receipt order; labels matched as prose."""
+    out: List[tuple[str, object]] = []
     for fee in receipt.get("fees") or []:
         if not isinstance(fee, dict):
             continue
         label = fee.get("label") or fee.get("name")
         if isinstance(label, str) and label:
-            out[label.lower()] = fee.get("amountCents") or fee.get("amount_cents")
+            out.append((label, fee.get("amountCents") or fee.get("amount_cents")))
     return out
 
 
@@ -691,15 +869,10 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
     r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
     re.IGNORECASE,
 )
-_CONNECTED_MERCHANT_IDENTITY = re.compile(
-    r"^\s*(?P<business>.+?)\s+(?:via|on|through|by|/)\s+(?P<platform>.+?)\s*$",
-    re.IGNORECASE,
-)
+# NOTE: there is deliberately no "connected merchant" regex here any more. It only accepted the
+# fixed connector vocabulary "via|on|through|by|/", which no prompt or tool schema teaches;
+# free-form merchant strings are now matched with prose_tokens_contain (see above).
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
-
-
-def _merchant_identity_tokens(value: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
@@ -842,33 +1015,34 @@ def _validate_payment_merchant_identity(
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
 
-    expected_businesses = {_merchant_identity_tokens(expected_match.group("business"))}
+    expected_businesses = [expected_match.group("business")]
     if isinstance(business_aliases, list):
-        expected_businesses.update(
-            _merchant_identity_tokens(alias) for alias in business_aliases if isinstance(alias, str) and alias.strip()
-        )
-    expected_platform = _merchant_identity_tokens(expected_match.group("platform"))
+        expected_businesses.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
+    expected_platform = expected_match.group("platform")
     expected_host = expected_match.group("host").casefold().rstrip(".")
-    actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    if actual_match is None:
-        actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    # The request_payment_card schema only asks for a "Merchant or site name", so a bare
-    # business name is a legitimate emission on ANY platform — the "Business (Platform - host)"
-    # wording is a benchmark bookkeeping convention that is never taught to the agent. Accept a
-    # bare business (or declared alias) on business-token equality alone; the platform is still
-    # proven independently, and never bypassed, by the host-grounding check below.
-    bare_business_merchant = _merchant_identity_tokens(actual_merchant) in expected_businesses
-    if not bare_business_merchant:
+    structured_actual = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    if structured_actual is not None:
+        # An actual that DOES adopt the "Business (Platform - host)" convention is making an
+        # explicit platform + host claim, so it is still held to that claim exactly.
         if (
-            actual_match is None
-            or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
-            or _merchant_identity_tokens(actual_match.group("platform")) != expected_platform
+            not any(
+                prose_match_rank(business, structured_actual.group("business")) is not None
+                for business in expected_businesses
+            )
+            or prose_match_rank(expected_platform, structured_actual.group("platform")) is None
         ):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
-    if actual_match is not None and "host" in actual_match.groupdict():
-        actual_host = actual_match.group("host").casefold().rstrip(".")
+        actual_host = structured_actual.group("host").casefold().rstrip(".")
         if not _merchant_host_matches(expected_host, actual_host):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+    elif not any(prose_tokens_contain(actual_merchant, business) for business in expected_businesses):
+        # The request_payment_card schema only asks for a "Merchant or site name", so ANY free-form
+        # phrasing that carries the expected business ("Nopa Fish", "Nopa Fish via Toast", "Nopa
+        # Fish — Toast online ordering") is a legitimate emission; the "Business (Platform - host)"
+        # wording is benchmark bookkeeping that is never taught to the agent, and the old fixed
+        # via/on/through/by connector vocabulary is not taught either. Which site was ACTUALLY paid
+        # is still proven independently, and never bypassed, by the host-grounding check below.
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
     # The approval URL is the terminal payment boundary the benchmark observes.
     # Prefer it over inferred browser history: click-driven redirects may not emit a
@@ -962,7 +1136,10 @@ def _validate_payment_receipt(
     actual_items = _normalize_receipt_items(receipt)
     for expected_item in expected.get("lineItems", []):
         name = expected_item.get("name")
-        actual = actual_items.get(name)
+        # The tool schema documents `name` only as "Item name shown on the checkout page",
+        # so the pinned wording is benchmark bookkeeping, not a taught format: match the
+        # name as prose. Every amount below still compares EXACTLY.
+        actual = best_prose_match(name, actual_items)
         if not actual:
             return f"missing receipt line item: {name}"
         for actual_key, expected_key in (
@@ -981,13 +1158,12 @@ def _validate_payment_receipt(
 
     actual_fees = _normalize_receipt_fees(receipt)
     for expected_fee in expected.get("fees", []):
-        label = expected_fee.get("label", "").lower()
-        actual_fee = actual_fees.get(label)
-        if actual_fee is None and label == "tax":
-            actual_fee = next(
-                (amount for actual_label, amount in actual_fees.items() if actual_label.startswith("tax (")),
-                None,
-            )
+        # The tool schema documents `label` only as "Fee label shown on the checkout page"
+        # and gives no vocabulary, so "Sales Tax"/"Tax (8.25%)"/"Estimated Tax" are all
+        # legitimate renderings of a pinned "Tax". The general prose rule subsumes the old
+        # bespoke `startswith("tax (")` escape hatch, which is now deleted. amountCents
+        # still compares EXACTLY.
+        actual_fee = best_prose_match(expected_fee.get("label", ""), actual_fees)
         if actual_fee != expected_fee.get("amountCents"):
             return (
                 f"{expected_fee.get('label')} fee mismatch: "
@@ -1213,6 +1389,26 @@ async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id
     )
 
 
+def _missing_final_findings(findings: List[str], haystack: str) -> List[str]:
+    """expected_final_findings the agent's final answer failed to report.
+
+    `expected_final_findings` pins prose facts (a full mailing address) that the agent only ever
+    heard spoken aloud on a phone call; nothing tells it to echo the benchmark's exact spelling, so
+    "4821 Maplewood Dr, Austin, TX 78731" is the same fact as "4821 Maplewood Drive, Austin, Texas
+    78731". `missing_call_findings` (punctuation-squashed substring, spoken-digit aware) is tried
+    first and its acceptances are preserved verbatim; anything it rejects gets a second, purely
+    deterministic chance via the shared prose normalizer, which expands street-suffix and state
+    abbreviations. Adjacency is preserved (prose_contains_phrase, not token-set containment), so a
+    wrong street number/name/zip -- or the right words scattered across unrelated sentences --
+    still fails.
+    """
+    return [
+        finding
+        for finding in missing_call_findings(findings, haystack)
+        if not prose_contains_phrase(haystack, finding)
+    ]
+
+
 async def _evaluate_phone_call_task(
     task: BenchmarkTask,
     data: dict,
@@ -1224,7 +1420,7 @@ async def _evaluate_phone_call_task(
     missing = missing_call_findings(expected_findings, phone_search_text(data))
     if missing:
         return False, f"agent output missing pinned/expected call findings: {missing}"
-    final_missing = missing_call_findings(task.expected_final_findings or [], phone_final_result_text(data))
+    final_missing = _missing_final_findings(task.expected_final_findings or [], phone_final_result_text(data))
     if final_missing:
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:

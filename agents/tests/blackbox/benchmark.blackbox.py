@@ -846,7 +846,14 @@ def test_toast_payment_merchant_identity_accepts_grounded_connector_variant():
 
 
 def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
-    """Semantic merchant matching must reject a wrong merchant, host, or browser flow."""
+    """Semantic merchant matching must reject a wrong merchant, host, or browser flow.
+
+    A FREE-FORM platform word ("Nopa Fish via DoorDash") is no longer rejected on the string
+    alone: nothing teaches the agent a platform vocabulary, and which site was actually paid is
+    proven by the approval/navigation host, which is asserted below and on every path. A
+    *structured* "Business (Platform - host)" answer still makes an explicit platform claim and is
+    still held to it.
+    """
     from copy import deepcopy
 
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -854,9 +861,18 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
 
     task = get_task_by_name("browser-toast-nopa-write-lock")
 
-    for merchant in ("Nopa Chips via Toast", "Nopa Fish via DoorDash"):
+    for merchant in ("Nopa Chips via Toast", "Nopa Fish (DoorDash - doordash.com)"):
         request, messages = _captured_toast_payment_approval(merchant=merchant)
         assert _validate_payment_receipt(task, request, messages=messages) is not None
+
+    # A free-form platform word rides entirely on host grounding: grounded on Toast it passes,
+    # grounded on DoorDash it fails.
+    loose_platform_request, loose_platform_messages = _captured_toast_payment_approval(
+        merchant="Nopa Fish via DoorDash"
+    )
+    assert _validate_payment_receipt(task, loose_platform_request, messages=loose_platform_messages) is None
+    loose_platform_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
+    assert _validate_payment_receipt(task, loose_platform_request, messages=loose_platform_messages) is not None
 
     wrong_host_request, wrong_host_messages = _captured_toast_payment_approval()
     wrong_host_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
@@ -1195,6 +1211,208 @@ def test_payment_receipt_tax_rate_qualifier_preserves_exact_amount():
     assert _validate_payment_receipt(task, request) is None
     request["metadata"]["requestPaymentCard"]["fees"][0]["amountCents"] = 298
     assert "expected 297, got 298" in _validate_payment_receipt(task, request)
+
+
+def _prose_receipt_task(**expected_payment_receipt):
+    """Minimal task carrying only an expected_payment_receipt, for evaluator-level assertions."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    return BenchmarkTask(
+        name="prose-receipt",
+        title="Prose Receipt",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="auto_approve",
+        start_phase="execute",
+        expected_payment_receipt=expected_payment_receipt,
+    )
+
+
+def test_prose_normalizer_expands_abbreviations_without_collapsing_distinct_words():
+    """The shared normalizer is the single matching primitive; assert its exact semantics."""
+    from benchmarks.run_benchmark import (
+        normalize_prose,
+        prose_contains_phrase,
+        prose_tokens_contain,
+    )
+
+    assert normalize_prose("The Rocky  Sandwich (Half)") == "rocky sandwich half"
+    assert normalize_prose("4821 Maplewood Dr, Austin, TX 78731") == "4821 maplewood drive austin texas 78731"
+    assert normalize_prose("4821 Maplewood Drive, Austin, Texas 78731") == "4821 maplewood drive austin texas 78731"
+    # Lowercase two-letter English words are NOT rewritten as US states.
+    assert normalize_prose("Delivered in Austin") == "delivered in austin"
+
+    assert prose_tokens_contain("Sales Tax", "Tax")
+    assert not prose_tokens_contain("Shipping", "Tax")
+    assert not prose_tokens_contain("Tax", "")
+    # Adjacency is preserved by the phrase form: scattered tokens must not count.
+    assert prose_contains_phrase("Ship to 4821 Maplewood Dr, Austin TX 78731 today", "4821 Maplewood Drive")
+    assert not prose_contains_phrase("Maplewood Drive is in Austin; unit 4821 is vacant", "4821 Maplewood Drive")
+
+
+def test_receipt_line_item_names_match_as_prose_while_amounts_stay_exact():
+    """`name` is documented only as "Item name shown on the checkout page" — never a pinned format.
+
+    Pre-fix this compared by case-sensitive exact dict-key equality, so a live page rendering of
+    "the rocky sandwich" / "The Rocky Sandwich®" / "Rocky Sandwich" failed a correct purchase with
+    "missing receipt line item: The Rocky Sandwich". unitPriceCents / lineTotalCents / quantity are
+    the real grounding and still compare EXACTLY.
+    """
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = _prose_receipt_task(
+        lineItems=[
+            {"name": "The Rocky Sandwich", "unitPriceCents": 2100, "quantity": 1, "lineTotalCents": 2100}
+        ]
+    )
+
+    def request(name, **overrides):
+        item = {"name": name, "unitPriceCents": 2100, "quantity": 1, "lineTotalCents": 2100, **overrides}
+        return {"metadata": {"requestPaymentCard": {"lineItems": [item]}}}
+
+    for rendering in (
+        "The Rocky Sandwich",
+        "the rocky sandwich",
+        "THE ROCKY SANDWICH",
+        "The Rocky Sandwich®",
+        "The Rocky  Sandwich (Half)",
+        "Rocky Sandwich",
+    ):
+        assert _validate_payment_receipt(task, request(rendering)) is None, rendering
+
+    # A genuinely different item is still missing.
+    wrong_item = _validate_payment_receipt(task, request("Grilled Cheese Melt"))
+    assert wrong_item == "missing receipt line item: The Rocky Sandwich"
+
+    # Amounts are untouched by prose matching.
+    assert "unitPriceCents mismatch: expected 2100, got 2101" in _validate_payment_receipt(
+        task, request("sales rocky sandwich", unitPriceCents=2101)
+    )
+    assert "lineTotalCents mismatch: expected 2100, got 4200" in _validate_payment_receipt(
+        task, request("the rocky sandwich", lineTotalCents=4200)
+    )
+    assert "quantity mismatch: expected 1, got 2" in _validate_payment_receipt(
+        task, request("the rocky sandwich", quantity=2)
+    )
+
+
+def test_receipt_fee_labels_match_as_prose_and_subsume_the_tax_escape_hatch():
+    """`label` is documented only as "Fee label shown on the checkout page" — no vocabulary given.
+
+    Pre-fix this was `casefold() ==` plus a bespoke `startswith("tax (")` escape hatch, so a page
+    saying "Sales Tax" failed with "Tax fee mismatch: expected 297, got None". amountCents is the
+    real grounding and still compares EXACTLY.
+    """
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = _prose_receipt_task(fees=[{"label": "Tax", "amountCents": 297}])
+
+    def request(label, amount=297):
+        return {"metadata": {"requestPaymentCard": {"fees": [{"label": label, "amountCents": amount}]}}}
+
+    for rendering in ("Tax", "TAX", "Sales Tax", "Estimated Sales Tax", "Tax (8.25%)", "Tax & Fees"):
+        assert _validate_payment_receipt(task, request(rendering)) is None, rendering
+
+    # A genuinely different fee still cannot satisfy a pinned Tax line.
+    assert "expected 297, got None" in _validate_payment_receipt(task, request("Shipping"))
+    assert "expected 297, got None" in _validate_payment_receipt(task, request("Service Charge"))
+    # ...and the amount is exact regardless of wording.
+    assert "expected 297, got 298" in _validate_payment_receipt(task, request("Sales Tax", amount=298))
+
+    # Multi-fee receipts still bind each pinned label to its own amount.
+    multi_task = _prose_receipt_task(
+        fees=[{"label": "Tax", "amountCents": 297}, {"label": "Shipping", "amountCents": 499}]
+    )
+    multi = {
+        "metadata": {
+            "requestPaymentCard": {
+                "fees": [
+                    {"label": "Sales Tax", "amountCents": 297},
+                    {"label": "Shipping & Handling", "amountCents": 499},
+                ]
+            }
+        }
+    }
+    assert _validate_payment_receipt(multi_task, multi) is None
+    multi["metadata"]["requestPaymentCard"]["fees"][1]["amountCents"] = 500
+    assert "expected 499, got 500" in _validate_payment_receipt(multi_task, multi)
+
+
+def test_merchant_identity_accepts_untaught_phrasing_only_when_host_is_grounded():
+    """The schema asks for a "Merchant or site name" — not a connector vocabulary.
+
+    Pre-fix a free-form merchant had to match `via|on|through|by|/`, so "Nopa Fish — Toast online
+    ordering" failed with "merchant mismatch". The approval/navigation host remains the only
+    independent proof of which site was paid and is asserted on every path here.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-toast-nopa-write-lock")
+
+    for merchant in (
+        "Nopa Fish",
+        "Nopa Fish via Toast",
+        "Nopa Fish — Toast online ordering",
+        "Nopa Fish, ordered through Toast",
+        "Nopa Fish Toast Order",
+        "NOPA FISH (Toast - order.toasttab.com)",
+    ):
+        request, messages = _captured_toast_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
+
+    # A different business is still a mismatch no matter how it is phrased.
+    for merchant in ("Golden Gate Diner via Toast", "Nopa Chips", "Toast"):
+        request, messages = _captured_toast_payment_approval(merchant=merchant)
+        reason = _validate_payment_receipt(task, request, messages=messages)
+        assert reason is not None and reason.startswith("merchant mismatch"), merchant
+
+    # Host grounding is untouched: an accepted phrasing on an ungrounded host still fails.
+    request, messages = _captured_toast_payment_approval(merchant="Nopa Fish — Toast online ordering")
+    request["metadata"]["requestUserApproval"] = {"url": "https://checkout.attacker.example/order"}
+    reason = _validate_payment_receipt(task, request, messages=messages)
+    assert reason is not None and reason.startswith("merchant host not grounded"), reason
+
+
+def test_expected_final_findings_accept_standard_address_abbreviations():
+    """A pinned mailing address is one fact with many spellings; "Dr"/"TX" is not a wrong answer.
+
+    Pre-fix the punctuation-squashed substring match rejected
+    "4821 Maplewood Dr, Austin, TX 78731" against the pinned
+    "4821 Maplewood Drive, Austin, Texas 78731". Fixed deterministically (no LLM judge): the
+    address has exactly one machine-checkable answer.
+    """
+    from benchmarks.run_benchmark import _missing_final_findings
+
+    pinned = "4821 Maplewood Drive, Austin, Texas 78731"
+
+    for reported in (
+        f"The client's mailing address is {pinned}.",
+        "The client's mailing address is 4821 Maplewood Dr, Austin, TX 78731.",
+        "Mailing address: 4821 Maplewood Dr., Austin TX, 78731",
+        "4821 MAPLEWOOD DRIVE, AUSTIN, TEXAS 78731",
+    ):
+        assert _missing_final_findings([pinned], reported) == [], reported
+
+    for wrong in (
+        "4820 Maplewood Dr, Austin, TX 78731",  # wrong street number
+        "4821 Oakwood Dr, Austin, TX 78731",  # wrong street name
+        "4821 Maplewood Dr, Austin, TX 78732",  # wrong zip
+        "4821 Maplewood Dr, Dallas, TX 78731",  # wrong city
+        "Maplewood Drive, Austin, Texas 78731",  # missing street number
+    ):
+        assert _missing_final_findings([pinned], wrong) == [pinned], wrong
+
+    # Codes keep their existing spoken-digit/punctuation tolerance and stay strict on content.
+    assert _missing_final_findings(["ROSE-4471", "34.20"], "Confirmation R O S E dash 4471, $34.20 charged") == []
+    assert _missing_final_findings(["ROSE-4471"], "Confirmation ROSA-4471") == ["ROSE-4471"]
 
 
 def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
@@ -11085,6 +11303,26 @@ async def run_all_tests():
     r.record(
         "payment_receipt_tax_rate_qualifier",
         test_payment_receipt_tax_rate_qualifier_preserves_exact_amount,
+    )
+    r.record(
+        "prose_normalizer_semantics",
+        test_prose_normalizer_expands_abbreviations_without_collapsing_distinct_words,
+    )
+    r.record(
+        "receipt_line_item_names_prose_amounts_exact",
+        test_receipt_line_item_names_match_as_prose_while_amounts_stay_exact,
+    )
+    r.record(
+        "receipt_fee_labels_prose_subsume_tax_hatch",
+        test_receipt_fee_labels_match_as_prose_and_subsume_the_tax_escape_hatch,
+    )
+    r.record(
+        "merchant_identity_untaught_phrasing_needs_grounded_host",
+        test_merchant_identity_accepts_untaught_phrasing_only_when_host_is_grounded,
+    )
+    r.record(
+        "final_findings_accept_address_abbreviations",
+        test_expected_final_findings_accept_standard_address_abbreviations,
     )
     r.record(
         "payment_lifecycle_cross_provider_state",
