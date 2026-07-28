@@ -89,6 +89,22 @@ Implications sections.
    the RCA from Causal proof; outcome pending to Complete. When the slice is
    executed one task at a time, finish this full RCA → approval when required →
    exact rerun cycle before starting another original-slice task.
+12. **Approval format is the ONLY response format — no exceptions.** Every
+   response emitted while `/descend` is active MUST consist of exactly: the
+   header block, the lifecycle table, and — only at a stop — the approval
+   sections defined in the response contract. Nothing else may appear. No
+   free-form prose report, no narrative of what you did, no "what I found"
+   essay, no recap of completed work, no bulleted list of open items outside
+   the table, no explanation of a fix outside its own approval section, no
+   commentary on sub-agent results. If a fact does not fit in the header, a
+   table cell, or a required approval section, it is not said in chat —
+   evidence belongs in the RCA and the commit message.
+   **Single exception:** inside a deploy approval gate you may additionally show
+   the exact file diff or file content under review, because a human cannot
+   approve a snapshot they cannot see.
+   Be as concise as possible without losing critical information: preserve the
+   measurement, the wrong value, the expected value, and the file link; cut
+   everything else. Never pad.
 
 ## Issue clusters
 
@@ -496,6 +512,15 @@ lifecycle table, or approval content in a code block. Do not include an ASCII
 banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
 overall-slice header count. Emit exactly one table row per issue/fix, including
 the full infra ledger and current HARNESS fixes.
+
+**This contract is exhaustive, not a minimum (Hard rule 12).** A response
+contains the header, the lifecycle table, and — at a stop only — the approval
+sections below. It contains nothing else. Do not append a summary, a status
+narrative, a list of what is still open, or any prose outside an approval
+section; the table already carries that state. The only permitted addition is
+the file diff or file content shown inside a deploy approval gate. Keep every
+required field as short as it can be while preserving the measurement, the
+wrong value, the expected value, and the file link.
 
 ### Header
 
