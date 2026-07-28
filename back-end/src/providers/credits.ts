@@ -109,6 +109,14 @@ export async function ensureInviteMonthlyCredit(userId: string): Promise<void> {
       userId,
       error: error instanceof Error ? error.message : String(error),
     });
+    // Any OTHER failure must not be swallowed. Returning here would let
+    // getUsageSummary report a balance MISSING this user's allowance, which can
+    // send an eligible invited user through the credit gate — the exact outcome
+    // the allowance exists to prevent. Failing loudly is the safer mode: the
+    // worker's usage check treats a non-200 as "don't override cache" (returns
+    // None) rather than as zero credits, so a transient DB fault degrades to the
+    // previous known state instead of a wrong out-of-credits verdict.
+    throw error;
   }
 }
 
