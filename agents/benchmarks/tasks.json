@@ -4495,7 +4495,9 @@
         "walletFundingCount": 1,
         "cardCount": 1,
         "agentCardProviderCardCount": 1,
-        "agentCardProviderTransferCount": 1
+        "agentCardProviderTransferCount": 1,
+        "stripePaymentIntentCount": 1,
+        "stripeProviderPaymentIntentCount": 1
       },
       "purchase": {
         "status": "CLEARED",
@@ -4504,6 +4506,12 @@
       "walletFunding": {
         "status": "CONSUMED",
         "amountCents": 100
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 100,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 100
       },
       "orgTransfer": {
         "status": "consumed",

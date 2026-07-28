@@ -1085,6 +1085,55 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
 
 
+def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
+    """The PRODUCTION payment tasks have the same hard requirement as their sandbox siblings.
+
+    `agent-payment-production-abandonment` is /deploy Step 13c and asserts `stripeHold.status ==
+    succeeded`. Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal
+    Stripe hold; the admin branch calls `issueAdminCompanyCard`, which never creates a payment
+    intent. The default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving these tasks
+    on it makes the production gate unpassable by construction -- which is exactly how it broke.
+    """
+    import re
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID,
+        AGENT_PAYMENT_LIFECYCLE_USER_ID,
+        AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES,
+        USER_ID,
+        benchmark_run_user_id_for_task,
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts
+    )
+    assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
+        "production payment identity drifted between the harness and the back-end: "
+        f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
+    )
+
+    # Never the default (admin) user, never a hardcoded admin, and never shared with the sandbox
+    # identity: one user holds exactly one Subscription (stripeCustomerId) and one agentcard
+    # Integration (cardholderId), and production needs LIVE values where sandbox needs TEST ones.
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != AGENT_PAYMENT_LIFECYCLE_USER_ID
+    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID not in admin_ts
+
+    for name in sorted(AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES):
+        task = get_task_by_name(name)
+        assert task.production_only, f"{name} must stay production_only"
+        assert benchmark_run_user_id_for_task(name) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
+            f"{name} must run as the non-admin production payment identity, otherwise its "
+            "stripeHold assertion cannot be satisfied"
+        )
+        assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded"
+
+
 def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
     """The admin funding path keeps a benchmark, and it only works if the stack grants admin.
 
@@ -10848,6 +10897,10 @@ async def run_all_tests():
     r.record(
         "agent_payment_lifecycle_user_is_non_admin",
         test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+    )
+    r.record(
+        "production_payment_lifecycle_user_is_non_admin",
+        test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity,
     )
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",

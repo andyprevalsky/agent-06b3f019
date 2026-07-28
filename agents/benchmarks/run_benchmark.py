@@ -204,6 +204,20 @@ AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 }
+# Production counterpart of the four sandbox tasks above, and the same hard requirement.
+# `agent-payment-production-abandonment` is /deploy Step 13c and asserts stripeHold succeeded plus
+# stripePaymentIntentCount 1; running it as the default (admin) benchmark user routes the mint to
+# `issueAdminCompanyCard`, which never creates a payment intent, so the gate cannot pass.
+# The identity is deliberately SEPARATE from AGENT_PAYMENT_LIFECYCLE_USER_ID: a user holds exactly
+# one Subscription row (one stripeCustomerId) and one agentcard Integration row (one cardholderId),
+# and production needs LIVE-mode values where the sandbox fixture needs TEST-mode ones. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID in back-end/src/domains/purchases/config.ts; provisioned
+# once by `back-end/scripts/setup-benchmark-payment.ts --live`.
+AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = "00000000-0000-4000-8000-000000000107"
+AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_PRODUCTION_TASK_NAME,
+    "agent-payment-production-purchase",
+}
 # Repeatable-cache baselines from local smoke run
 # 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
 # agent identity + call site and excludes one-shot calls. Per the one-way
@@ -1296,6 +1310,25 @@ def _free_credit_subscription_gate_user_id() -> str:
     )
 
 
+def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
+    """The dedicated identity a task must run as, or None to use the default benchmark user.
+
+    Single source of truth for the run-user override so the mapping can be asserted directly
+    instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
+    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
+    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    """
+    if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        return _free_credit_subscription_gate_user_id()
+    if task_name in GATE_FIXTURE_TASK_USER_IDS:
+        return GATE_FIXTURE_TASK_USER_IDS[task_name]
+    if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+    if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    return None
+
+
 async def _api_headers() -> dict:
     """Get auth headers — JWT for prod, API key fallback. Caches after first success."""
     global _cached_headers, _cached_headers_user_id, _auth_mode
@@ -1380,6 +1413,56 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
             "iMessage bench requires an updated, authenticated Mac app polling this exact backend; "
             f"last seen: {last_seen_at}"
         )
+
+
+PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
+    "Provision it once with: cd back-end && STRIPE_SECRET_KEY=<production sk_live_ key> "
+    "BENCHMARK_AGENTCARD_CARDHOLDER_ID=<production cardholder id> "
+    "npx tsx scripts/setup-benchmark-payment.ts --live"
+)
+
+
+def _production_payment_identity_gap(usage: dict) -> Optional[str]:
+    """Why the production payment identity cannot complete a purchase, or None when it can.
+
+    `resolveAndIssuePurchaseCard` 402s a non-admin with no `Subscription.stripeCustomerId`, and an
+    agent with no credit headroom stops at OUT_OF_CREDITS before it ever reaches checkout. Both are
+    provisioning gaps, not product failures, so name them before the run spends live money.
+    """
+    tier = usage.get("tier")
+    if tier is None or tier == "":
+        return "it has no Subscription row, so no Stripe billing customer — every mint would 402"
+    remaining = usage.get("remaining")
+    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
+        return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    return None
+
+
+async def _preflight_production_payment_identity(base_url: str) -> None:
+    """Fail fast when the production payment identity was never provisioned.
+
+    Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
+    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    """
+    user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(
+            f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers
+        )
+    if response.status_code != 200:
+        print(
+            f"    ⚠ Could not verify production payment identity {user_id} "
+            f"({response.status_code}): {response.text[:200]}"
+        )
+        return
+    gap = _production_payment_identity_gap(response.json())
+    if gap is None:
+        return
+    raise RuntimeError(
+        f"Production payment identity {user_id} is not provisioned: {gap}. "
+        f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+    )
 
 
 def _benchmark_agent_source_override() -> str:
@@ -7295,14 +7378,13 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
-    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
-        os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
-    elif task.name in GATE_FIXTURE_TASK_USER_IDS:
-        os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]
-    elif task.name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
-        # Non-admin identity: the admin funding path mints a company-funded card with no personal
-        # Stripe hold, which these tasks explicitly assert. See AGENT_PAYMENT_LIFECYCLE_USER_ID.
-        os.environ["BENCHMARK_RUN_USER_ID"] = AGENT_PAYMENT_LIFECYCLE_USER_ID
+    # Includes the non-admin payment identities: the admin funding path mints a company-funded card
+    # with no personal Stripe hold, which the lifecycle tasks explicitly assert.
+    run_user_id_override = benchmark_run_user_id_for_task(task.name)
+    if run_user_id_override:
+        os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
+    if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
+        await _preflight_production_payment_identity(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
