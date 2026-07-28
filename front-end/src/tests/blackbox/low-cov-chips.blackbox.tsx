@@ -327,6 +327,62 @@ describe('ApprovalChip', () => {
     ).toBeInTheDocument();
   });
 
+  // RCA (agent 90ac106a): on a phone the card's title ("Approve a $22.81
+  // purchase from …") rendered half-clipped under the header and the
+  // Approve/Reject buttons sat below the fold. Two causes: the question had its
+  // own max-h-[300px] nested scroller whose scrollTop could park past line one,
+  // and the card had no height budget of its own so the ancestor
+  // `overflow-hidden` column cut off whatever did not fit. Cement both: exactly
+  // one scroll region, and it must not be the question/title element.
+  it('bounds its own height and keeps the title out of a nested scroller', () => {
+    const { container } = renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-tall',
+          question: 'Approve a $22.81 purchase from Lunette Cambodia - Ferry Building?',
+          requestPaymentCard: {
+            merchant: 'Lunette Cambodia - Ferry Building',
+            currency: 'USD',
+            lineItems: Array.from({ length: 8 }, (_, index) => ({
+              name: `Lok Lak ${index}`,
+              productUrl: `https://order.toasttab.com/online/lunette/item-lok-lak-${index}`,
+              rating: '0 stars',
+              reviewCount: '0 reviews',
+              unitPriceCents: 2100,
+              quantity: 1,
+              lineTotalCents: 2100,
+            })),
+            subtotalCents: 16800,
+            totalCents: 18100,
+          },
+        }}
+      />,
+    );
+
+    // Mobile cap stays under half the viewport so the trajectory behind the
+    // card remains readable while the user decides on a real charge.
+    const card = container.querySelector('.max-h-\\[55dvh\\]');
+    expect(card).not.toBeNull();
+    expect(card?.className).toContain('flex-col');
+    expect(card?.className).toContain('md:max-h-[70dvh]');
+
+    // The title must not sit inside an element that scrolls independently of
+    // the card body — that is what hid it behind the header.
+    const title = screen.getByText(
+      'Approve a $22.81 purchase from Lunette Cambodia - Ferry Building?',
+    );
+    const scrollers = Array.from(container.querySelectorAll('.overflow-y-auto'));
+    expect(scrollers).toHaveLength(1);
+    expect(scrollers[0].contains(title)).toBe(true);
+    expect(scrollers[0]).not.toBe(title);
+    expect(scrollers[0].className).toContain('min-h-0');
+
+    // Accept/Reject live outside the scroll region so they are always tappable.
+    for (const label of [/accept/i, /reject/i]) {
+      expect(scrollers[0].contains(screen.getByRole('button', { name: label }))).toBe(false);
+    }
+  });
+
   it('renders historical payment metadata without undefined values or broken links', () => {
     renderWithProviders(
       <ApprovalChip

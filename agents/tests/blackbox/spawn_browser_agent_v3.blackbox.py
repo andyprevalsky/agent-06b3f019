@@ -9130,8 +9130,8 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
     assert session.get_or_create_cdp_session.await_count == 4
-    for call in session.get_or_create_cdp_session.await_args_list:
-        assert call.kwargs == {"focus": True}
+    for cdp_call in session.get_or_create_cdp_session.await_args_list:
+        assert cdp_call.kwargs == {"focus": True}
     assert cdp_client.send.Runtime.evaluate.await_count == 4
     evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
     assert evaluate_kwargs["session_id"] == "cdp-1"
@@ -12723,9 +12723,16 @@ _TOAST_PAYMENT_CARD_ARGS = {
             "quantity": 1,
             "unit_price_cents": 2500,
             "line_total_cents": 2500,
-            # Toast is a single-URL food-ordering SPA: no product-detail page,
-            # no star rating, no reviews. This is the exact class of args prod
-            # agent 847adea5 produced and got rejected 5x on.
+            # Toast is a single-URL food-ordering SPA: no star rating, no
+            # reviews. This is the exact class of args prod agent 847adea5
+            # produced and got rejected 5x on.
+            #
+            # The product_url is NO LONGER rejected at schema level. Word-list
+            # URL filtering was removed after it made purchases impossible on
+            # whole ordering platforms (agents 53feac08, 90ac106a); a checkout
+            # URL is now caught by the current-page gate in service_actions,
+            # which has the trajectory to prove it. See
+            # test_execute_action_request_payment_card_rejects_current_session_product_link.
             "product_url": "https://order.toasttab.com/online/nopafish/checkout/12345678-1234-4fab-8043-436e74cc34a9",
             "rating": "No rating displayed on Toast ordering page",
             "review_count": "No reviews displayed on Toast ordering page",
@@ -12751,8 +12758,7 @@ def test_payment_card_tool_args_raise_typed_validation_error():
     except BrowserToolArgsValidationError as err:
         assert err.tool_name == "request_payment_card"
         assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
-        # The feedback the model receives must name all three unsatisfiable fields.
-        assert "product_url" in err.detail
+        # The feedback the model receives must name every unsatisfiable field.
         assert "rating" in err.detail
         assert "review_count" in err.detail
         # It must be a distinct type, not a bare pydantic ValidationError.
@@ -12798,7 +12804,7 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
     assert tool_msgs, "validation error was not appended to browser_turn_messages"
     tool_blob = json.dumps(tool_msgs[-1])
-    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    assert "rating" in tool_blob and "review_count" in tool_blob
     # 2) Recorded in action history as a failed attempt the model can see.
     entries = action_history.get_entries()
     assert entries and entries[-1]["action"] == "request_payment_card"

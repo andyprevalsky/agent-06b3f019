@@ -671,6 +671,11 @@ class GenerateWriteLockNotificationTool(BaseModel):
         if self.trigger_type == "purchase" and self.purchase is not None:
             trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
+                # No current_page_url here on purpose: a write-lock purchase
+                # approval is often raised while the agent is standing ON the
+                # product page, so "product_url != current page" would be a
+                # false reject. That rule belongs to the request_payment_card
+                # path, where the agent is necessarily at checkout.
                 if trusted_page_urls:
                     validate_product_url_for_pages(item.product_url, trusted_page_urls)
                 else:

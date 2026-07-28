@@ -402,6 +402,7 @@ async def execute_action(  # noqa: C901
                     validate_product_url_for_pages(
                         item.product_url,
                         [*(trusted_page_urls or []), current_url],
+                        current_page_url=current_url,
                     )
             except ValueError as error:
                 hint = ""
