@@ -4363,7 +4363,7 @@
   {
     "name": "agent-payment-production-purchase",
     "title": "Agent Payment Production Completed Purchase",
-    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to https://checkout.stripe.com/c/pay/cs_live_a1OuFv4hobfL8bT8aMMt7r7j5afbCEdOVszyOif4s5KlKgSb8QTtKBCSwV#fidnandhYHdWcXxpYCc%2FJ2FgY2RwaXEnKSdicGRmZGhqaWBTZHdsZGtxJz8nZmprcXdqaScpJ2R1bE5gfCc%2FJ3VuWmlsc2BaMDRWY0c0Vk9xcl1fUXQ8VFZ0akZOVWM9fH9%2FMlNsVlZOcWQ1YmdjQTJNTVY8UTcwRExLaHZtR2lhNV88bmJjcjRkcW1vYEFkMmR3RnczfWlCamBRVTd%2FMVw1NWdINk1Ea1x9JyknY3dqaFZgd3Ngdyc%2FcXdwYCknZ2RmbmJ3anBrYUZqaWp3Jz8nJmNjY2NjYycpJ2lkfGpwcVF8dWAnPyd2bGtiaWBabHFgaCcpJ2BrZGdpYFVpZGZgbWppYWB3dic%2FcXdwYHgl and COMPLETE the Stripe checkout for the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Enter that card in the Stripe payment form and submit the payment. Report the confirmation shown after the payment succeeds.",
+    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4443,10 +4443,11 @@
         "agentcard-live"
       ],
       "live_targets": [
+        "roselabs.ai",
         "checkout.stripe.com",
         "api.roselabs.ai"
       ],
-      "context_notes": "Production COMPLETED-purchase path (distinct from the abandonment probe): mints a live AgentCard and SPENDS it at a real Stripe merchant (Rose Labs own account, acct_1SfB1S). Proves live card authorization on real card rails, which AgentCard test_charge cannot do (sandbox only). The abandonment task covers the void/reclaim/refund path and must stay separate."
+      "context_notes": "Production COMPLETED-purchase path on OUR OWN hosted /test_payment (distinct from the abandonment probe). Place order hands off to a real hosted Stripe Checkout on the Rose Labs account, which is the only way a live Rose-minted card can be authorized \u2014 AgentCard's test_charge is sandbox-only. The abandonment task covers the void/reclaim/refund path and must stay separate."
     },
     "bench": "pipeline-e2e"
   }
