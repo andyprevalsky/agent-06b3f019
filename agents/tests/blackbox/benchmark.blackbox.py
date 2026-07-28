@@ -3458,6 +3458,123 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     assert raised, "live fixture must fail closed when credential refresh fails"
 
 
+def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle():
+    """A green sync that produced nothing injectable is an INFRA failure, not a task result.
+
+    Regression for minted-agent-accounts-uber: prod held 47 uber.com cookies but
+    ZERO CookieBundle rows (stale auth in an orphaned chrome/(none) profile).
+    _sync_browser_credentials returned True because the sync COMMAND exited 0, so
+    the agent ran ~15 minutes signed-out against auth.uber.com and was scored as an
+    agent capability failure. The preflight must reject the domain before an agent
+    is ever created, and must stay quiet for a properly provisioned domain.
+    """
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    # Shapes taken verbatim from the synced local DB on 2026-07-27.
+    unprovisioned = {
+        "domain": "uber.com",
+        "bundles_total": 0,
+        "bundles_enabled": 0,
+        "bundles_injectable": 0,
+        # An enabled Steel marker alone must NOT count: injection discards it when
+        # the live session carries no realm cookies and falls through to the bundle.
+        "steel_sessions_enabled": 1,
+        "cookies_total": 47,
+        "cookies_unexpired": 31,
+        "newest_cookie_synced_at": "2026-05-25T20:30:27Z",
+    }
+    provisioned = {
+        "domain": "opentable.com",
+        "bundles_total": 2,
+        "bundles_enabled": 2,
+        "bundles_injectable": 2,
+        "steel_sessions_enabled": 0,
+        "cookies_total": 36,
+        "cookies_unexpired": 23,
+        "newest_cookie_synced_at": "2026-07-27T23:10:13Z",
+    }
+
+    original_compute = bench._sync_compute_tokens
+    original_browser = bench._sync_browser_credentials
+    original_sql = bench._run_local_victoria_sql
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+
+    sql_calls: list[str] = []
+    summaries: list[dict] = []
+
+    def fake_sql(sql: str) -> str:
+        sql_calls.append(sql)
+        return json.dumps(summaries.pop(0))
+
+    def run(domains, rows):
+        summaries[:] = list(rows)
+        sql_calls.clear()
+        return bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="1f85ff25-6e29-4c1b-8739-f917bd101a30",
+                auth_realm="uber.com",
+                cookie_domains=domains,
+            )
+        )
+
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        # The sync COMMAND succeeds — exactly the state that misreported the outage.
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._run_local_victoria_sql = fake_sql
+
+        # RED: declared domain with no injectable CookieBundle must abort the fixture.
+        raised_message = None
+        try:
+            run(("uber.com",), [unprovisioned])
+        except RuntimeError as exc:
+            raised_message = str(exc)
+        assert raised_message is not None, (
+            "live fixture must fail closed when a declared live_cookie_domain has no "
+            "injectable CookieBundle after the scoped sync"
+        )
+        # Names the domain, the bundle count, the newest syncedAt, and the human action.
+        assert "uber.com" in raised_message
+        assert "0 CookieBundle row(s)" in raised_message
+        assert "2026-05-25T20:30:27Z" in raised_message
+        assert (
+            "log into uber.com in a currently-syncing browser profile so the mac-app sync "
+            "uploads a fresh bundle" in raised_message
+        )
+        # Infra/fixture framing, never a task verdict.
+        assert "INFRA" in raised_message
+        # Counts, domains, and timestamps only — never credential material.
+        assert "value" not in raised_message.lower()
+
+        # The preflight must read the same rows injection consumes.
+        preflight_sql = sql_calls[-1]
+        assert '"CookieBundle"' in preflight_sql and '"Cookie"' in preflight_sql
+        assert '"disabledAt" IS NULL' in preflight_sql
+        assert '"browserSource"' in preflight_sql and '"browserProfile"' in preflight_sql
+        assert "c.value" not in preflight_sql
+
+        # GREEN: a properly provisioned domain must not fire.
+        manifest = run(("opentable.com",), [provisioned])
+        assert manifest["browser_auth"] is True
+
+        # NO-OP: a task with no live_cookie_domains must not query the DB at all.
+        manifest = run((), [])
+        assert manifest["browser_auth"] is True
+        assert sql_calls == []
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_browser_credentials = original_browser
+        bench._run_local_victoria_sql = original_sql
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+
 def test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace():
     """Cloud guests must pass seed-local an explicit production token source."""
     from unittest.mock import patch
@@ -11176,6 +11293,10 @@ async def run_all_tests():
     r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "live_cookie_domain_requires_injectable_bundle",
+        test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle,
     )
     r.record(
         "compute_token_explicit_prod_source",

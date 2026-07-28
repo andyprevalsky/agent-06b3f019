@@ -4792,6 +4792,180 @@ def _anthropic_family_excluded() -> bool:
     }
 
 
+# Chrome/WebKit cookie timestamps count microseconds from 1601-01-01; the offset
+# to the unix epoch matches back-end/src/providers/steel/injection.ts.
+_CHROME_EPOCH_OFFSET_SECONDS = 11644473600
+
+
+def _live_cookie_domain_credential_summary(user_id: str, domain: str) -> dict:
+    """Count the browser credentials the injection path could actually consume.
+
+    This mirrors back-end/src/providers/steel/injection.ts exactly:
+    ``selectTopCookieBundle`` only returns a ``CookieBundle`` that is enabled AND
+    holds at least one ``Cookie`` row in the same (browserSource, browserProfile)
+    whose domain satisfies ``cookieDomainWhere(authRealm)`` — an enabled marker
+    with no matching cookie row "is not an authentication source". Loose cookie
+    rows with no bundle are never injected, because selection is bundle-keyed.
+
+    ``SteelSessionAuth`` is counted for diagnostics but is NOT treated as proof of
+    provisioning: ``resolveBrowserAuthCredentialSource`` only prefers that marker
+    when the LIVE Steel session already carries unexpired realm cookies
+    (``steelSessionHasRealmCookies !== false``), and otherwise logs "Steel auth
+    marker exists but current session has no realm cookies" and falls through to
+    the CookieBundle. That liveness is runtime state no pre-flight can observe —
+    no session exists yet — so the DB-verifiable requirement injection lands on is
+    the bundle.
+
+    Realm scoping matches back-end/scripts/cookie-domain-scope.ts
+    ``authRealmSyncWhere``/``cookieSyncWhere`` (exact host, leading-dot host, or a
+    dot-boundary subdomain) so the preflight asks about precisely the rows the
+    scoped sync was asked to deliver.
+
+    Expiry is reported but deliberately NOT part of the predicate: injection maps
+    an already-expired ``expiresUtc`` to ``undefined`` and still injects the
+    cookie as a session cookie, so treating expiry as disqualifying would be
+    stricter than the code under test.
+    """
+    normalized = domain.strip().lower()
+    user = _sql_literal(user_id)
+    target = _sql_literal(normalized)
+    sql = f"""
+WITH bundles AS (
+    SELECT b.id,
+           b."browserSource",
+           b."browserProfile",
+           b."disabledAt",
+           regexp_replace(lower(btrim(b."authRealm")), '^\\.+', '') AS realm
+    FROM "CookieBundle" b
+    WHERE b."userId" = {user}
+      AND (
+        lower(btrim(b."authRealm")) = {target}
+        OR lower(btrim(b."authRealm")) = '.' || {target}
+        OR right(lower(btrim(b."authRealm")), length({target}) + 1) = '.' || {target}
+      )
+),
+bundle_realms AS (
+    SELECT bundles.*,
+           CASE WHEN left(realm, 4) = 'www.' THEN substr(realm, 5) ELSE realm END AS parent_realm
+    FROM bundles
+),
+injectable AS (
+    SELECT r.id
+    FROM bundle_realms r
+    WHERE r."disabledAt" IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM "Cookie" c
+        WHERE c."userId" = {user}
+          AND c."browserSource" = r."browserSource"
+          AND c."browserProfile" = r."browserProfile"
+          AND (
+            lower(c.domain) IN (r.realm, '.' || r.realm, r.parent_realm, '.' || r.parent_realm)
+            OR right(lower(c.domain), length(r.realm) + 1) = '.' || r.realm
+            OR right(lower(c.domain), length(r.parent_realm) + 1) = '.' || r.parent_realm
+          )
+      )
+),
+domain_cookies AS (
+    SELECT c."expiresUtc", c."syncedAt"
+    FROM "Cookie" c
+    WHERE c."userId" = {user}
+      AND (
+        lower(c.domain) = {target}
+        OR lower(c.domain) = '.' || {target}
+        OR right(lower(c.domain), length({target}) + 1) = '.' || {target}
+      )
+),
+steel AS (
+    SELECT s.id
+    FROM "SteelSessionAuth" s
+    WHERE s."userId" = {user}
+      AND s."disabledAt" IS NULL
+      AND (
+        lower(btrim(s."authRealm")) = {target}
+        OR lower(btrim(s."authRealm")) = '.' || {target}
+        OR right(lower(btrim(s."authRealm")), length({target}) + 1) = '.' || {target}
+      )
+)
+SELECT json_build_object(
+    'domain', {target},
+    'bundles_total', (SELECT count(*) FROM bundle_realms),
+    'bundles_enabled', (SELECT count(*) FROM bundle_realms WHERE "disabledAt" IS NULL),
+    'bundles_injectable', (SELECT count(*) FROM injectable),
+    'steel_sessions_enabled', (SELECT count(*) FROM steel),
+    'cookies_total', (SELECT count(*) FROM domain_cookies),
+    'cookies_unexpired', (
+        SELECT count(*) FROM domain_cookies
+        WHERE "expiresUtc" IS NULL
+           OR "expiresUtc" <= 0
+           OR ("expiresUtc" / 1000000 - {_CHROME_EPOCH_OFFSET_SECONDS}) > extract(epoch FROM now())
+    ),
+    'newest_cookie_synced_at', (
+        SELECT to_char(max("syncedAt") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        FROM domain_cookies
+    )
+)::text;
+""".strip()
+    return json.loads(_run_local_victoria_sql(sql).strip())
+
+
+def _live_cookie_domain_is_usable(summary: dict) -> bool:
+    """A domain is provisioned when selectTopCookieBundle would return a bundle."""
+    return int(summary.get("bundles_injectable") or 0) > 0
+
+
+def _describe_unusable_cookie_domain(summary: dict) -> str:
+    """Counts, domains, and timestamps only — never cookie values or tokens."""
+    return (
+        f"{summary.get('domain')}: "
+        f"{summary.get('bundles_total') or 0} CookieBundle row(s) "
+        f"({summary.get('bundles_enabled') or 0} enabled, "
+        f"{summary.get('bundles_injectable') or 0} with matching cookie rows), "
+        f"{summary.get('steel_sessions_enabled') or 0} enabled SteelSessionAuth marker(s) "
+        "(not injectable on their own), "
+        f"{summary.get('cookies_total') or 0} cookie row(s) "
+        f"({summary.get('cookies_unexpired') or 0} unexpired), "
+        f"newest cookie syncedAt={summary.get('newest_cookie_synced_at') or 'never'}"
+    )
+
+
+def _assert_live_cookie_domains_usable(user_id: str, cookie_domains: tuple[str, ...]) -> None:
+    """Fail the fixture — loudly, as infra — when the scoped sync produced nothing usable.
+
+    ``_sync_browser_credentials`` only reports whether the sync COMMAND succeeded.
+    A domain whose prod auth is stale/orphaned (cookies present, but zero
+    CookieBundle rows) syncs "successfully" and injects nothing, so the agent runs
+    signed-out for the full task budget and gets scored as a capability failure.
+    """
+    if not cookie_domains:
+        return
+    summaries = [_live_cookie_domain_credential_summary(user_id, domain) for domain in cookie_domains]
+    unusable = [s for s in summaries if not _live_cookie_domain_is_usable(s)]
+    if not unusable:
+        for summary in summaries:
+            print(
+                f"    🍪 {summary.get('domain')}: {summary.get('bundles_injectable')} injectable CookieBundle(s), "
+                f"{summary.get('steel_sessions_enabled')} Steel session(s), "
+                f"{summary.get('cookies_total')} cookie row(s)"
+            )
+        return
+    names = ", ".join(str(s.get("domain")) for s in unusable)
+    details = " | ".join(_describe_unusable_cookie_domain(s) for s in unusable)
+    actions = "; ".join(
+        f"log into {s.get('domain')} in a currently-syncing browser profile so the mac-app sync uploads a fresh bundle"
+        for s in unusable
+    )
+    raise RuntimeError(
+        f"Live fixture preflight: no injectable browser credential for {names} after the scoped "
+        f"browser-credential sync. {details}. Cookie injection is bundle-keyed "
+        "(back-end/src/providers/steel/injection.ts selects one enabled CookieBundle that has matching "
+        "cookie rows, or an enabled SteelSessionAuth), so this task would run signed-out and be misscored "
+        f"as an agent capability failure. This is an INFRA/fixture failure, not a task result. Fix: {actions}, "
+        "then re-run. (An enabled SteelSessionAuth marker does not count: injection discards it whenever the "
+        "live session carries no realm cookies and falls through to the CookieBundle.)"
+    )
+
+
 def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     """Apply the one complete, current production-credential overlay.
 
@@ -4830,6 +5004,11 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
+    # A green sync only proves the command exited 0. Assert the post-sync local DB
+    # actually holds a credential the injection path can select for every declared
+    # domain, so a stale/orphaned prod bundle fails here in seconds instead of
+    # burning a full agent run and being misreported as a capability failure.
+    _assert_live_cookie_domains_usable(ctx.user_id, ctx.cookie_domains)
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
