@@ -1,19 +1,21 @@
 /**
- * Waitlist-people queries — the actionable phone-bearing signup list, its
- * account/gate joins, and the invite stamp.
+ * Waitlist-people queries — the real-signup list, its account/gate joins, and
+ * the invite stamp.
  *
  * Split out of repo.ts to keep each repo file inside the strict per-file line
  * budget; repo.ts re-exports these so existing consumers are unaffected.
  */
 
 import { prisma } from '../../providers/database';
+import { isRealWaitlistPerson, realWaitlistPersonSql } from '../../providers/waitlistIdentity';
 import { Prisma } from '@prisma/client';
 
 export interface WaitlistPersonRow {
   id: string;
   name: string;
   email: string | null;
-  phone: string;
+  /** Null for email-only signups — the public landing form collects no phone. */
+  phone: string | null;
   variant: string | null;
   createdAt: Date;
   invitedAt: Date | null;
@@ -25,10 +27,12 @@ export interface WaitlistPeoplePage {
 }
 
 /**
- * One bounded page of actionable waitlist people — the same phone-bearing
- * population the signup metric counts. Newest first, with id as the stable
- * tie-breaker. Email-only legacy rows (no phone) are excluded because they
- * can't be texted.
+ * One bounded page of real waitlist people — the same population the signup
+ * metric counts. Newest first, with id as the stable tie-breaker.
+ *
+ * A person qualifies on email OR phone. The prior filter required a phone,
+ * which was a stand-in for "not fixture junk" and silently hid every email-only
+ * signup; fixtures are now excluded by classification instead.
  */
 export async function findWaitlistPeople(params: {
   skip: number;
@@ -40,14 +44,13 @@ export async function findWaitlistPeople(params: {
         SELECT
           "id",
           "name",
-          "email",
-          "phone",
+          NULLIF(btrim(COALESCE("email", '')), '') AS "email",
+          NULLIF(btrim(COALESCE("phone", '')), '') AS "phone",
           "variant",
           "created_at" AS "createdAt",
           "invited_at" AS "invitedAt"
         FROM "Waitlist"
-        WHERE "phone" IS NOT NULL
-          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+        WHERE ${realWaitlistPersonSql()}
         ORDER BY "created_at" DESC, "id" DESC
         OFFSET ${params.skip}
         LIMIT ${params.take}
@@ -55,8 +58,7 @@ export async function findWaitlistPeople(params: {
       prisma.$queryRaw<Array<{ count: number }>>`
         SELECT COUNT(*)::int AS "count"
         FROM "Waitlist"
-        WHERE "phone" IS NOT NULL
-          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
+        WHERE ${realWaitlistPersonSql()}
       `,
     ],
     { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
@@ -65,6 +67,11 @@ export async function findWaitlistPeople(params: {
     rows,
     total: total[0]?.count ?? 0,
   };
+}
+
+function nullIfBlank(value: string | null): string | null {
+  const trimmed = (value ?? '').trim();
+  return trimmed === '' ? null : trimmed;
 }
 
 export async function findWaitlistPersonById(id: string): Promise<WaitlistPersonRow | null> {
@@ -80,12 +87,12 @@ export async function findWaitlistPersonById(id: string): Promise<WaitlistPerson
       invitedAt: true,
     },
   });
-  if (row === null || (row.phone ?? '').trim() === '') return null;
+  if (row === null || !isRealWaitlistPerson(row)) return null;
   return {
     id: row.id,
     name: row.name,
-    email: row.email,
-    phone: row.phone as string,
+    email: nullIfBlank(row.email),
+    phone: nullIfBlank(row.phone),
     variant: row.variant,
     createdAt: row.createdAt,
     invitedAt: row.invitedAt,

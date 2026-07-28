@@ -28,19 +28,30 @@ import {
   TransactionalEmailError,
 } from '../../providers/transactionalEmail';
 
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
+
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
+/**
+ * A number that reads as a real signup but can never route to a handset: NANP
+ * 555-0100..555-0199 is the officially fictional subscriber range. The +1999
+ * prefix is classified as a waitlist fixture and would be filtered out of the
+ * real-people surfaces this suite drives.
+ */
 function uniquePhone(): string {
-  return `+1999${String(randomInt(0, 100_000_000_000)).padStart(11, '0')}`;
+  const areaCode = randomInt(200, 990);
+  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
 }
 
 async function seedPerson(prefix: string) {
   const marker = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
-  const email = `${marker}@example.com`;
+  const email = `${marker}@waitlist-case.dev`;
   await prisma.user.create({ data: { userId: marker, phone, email, usedInviteCode: null } });
   const waitlist = await prisma.waitlist.create({ data: { name: marker, phone } });
   return { marker, phone, email, waitlist };
@@ -55,7 +66,7 @@ async function cleanupPerson(marker: string, idempotencyKey: string) {
 }
 
 async function testDispatchesCanonicalCopy() {
-  const seeded = await seedPerson('blackbox-dual-invite');
+  const seeded = await seedPerson('wlcase-dual-invite');
   const idempotencyKey = `${seeded.marker}-dispatch`;
   const invitedAt = new Date('2026-07-18T20:00:00.000Z');
   const smsCalls: Array<{ to: string; body: string }> = [];
@@ -108,7 +119,7 @@ async function testDispatchesCanonicalCopy() {
 }
 
 async function testRetrySkipsSuccessfulChannel() {
-  const seeded = await seedPerson('blackbox-retry-invite');
+  const seeded = await seedPerson('wlcase-retry-invite');
   const idempotencyKey = `${seeded.marker}-attempt`;
   let smsCalls = 0;
   let emailCalls = 0;
@@ -152,7 +163,7 @@ async function testRetrySkipsSuccessfulChannel() {
 }
 
 async function testAmbiguousFailuresRemainClaimed() {
-  const emailSeeded = await seedPerson('blackbox-ambiguous-email');
+  const emailSeeded = await seedPerson('wlcase-ambiguous-email');
   const emailKey = `${emailSeeded.marker}-attempt`;
   let emailCalls = 0;
   const emailDependencies: WaitlistInviteDependencies = {
@@ -182,7 +193,7 @@ async function testAmbiguousFailuresRemainClaimed() {
     await cleanupPerson(emailSeeded.marker, emailKey);
   }
 
-  const smsSeeded = await seedPerson('blackbox-ambiguous-sms');
+  const smsSeeded = await seedPerson('wlcase-ambiguous-sms');
   const smsKey = `${smsSeeded.marker}-attempt`;
   let smsCalls = 0;
   const smsDependencies: WaitlistInviteDependencies = {
@@ -213,7 +224,7 @@ async function testAmbiguousFailuresRemainClaimed() {
 }
 
 async function testConcurrentSameKeyHasOneOwner() {
-  const seeded = await seedPerson('blackbox-concurrent-invite');
+  const seeded = await seedPerson('wlcase-concurrent-invite');
   const idempotencyKey = `${seeded.marker}-attempt`;
   let smsCalls = 0;
   let releaseFirstSms!: () => void;
@@ -267,7 +278,7 @@ async function testConcurrentSameKeyHasOneOwner() {
 }
 
 async function testMarkRetryReplaysFinalOutcome() {
-  const seeded = await seedPerson('blackbox-mark-retry');
+  const seeded = await seedPerson('wlcase-mark-retry');
   const idempotencyKey = `${seeded.marker}-attempt`;
   let smsCalls = 0;
   let emailCalls = 0;
@@ -410,7 +421,7 @@ async function testRawEmailAndRefreshDeadline() {
 }
 
 async function testHttpConflictForStartedAttempt() {
-  const marker = `blackbox-http-conflict-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-http-conflict-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const idempotencyKey = `${marker}-attempt`;
   const waitlist = await prisma.waitlist.create({
     data: { name: marker, phone: uniquePhone() },
