@@ -10229,6 +10229,69 @@ async def test_required_attachment_upload_failure_is_fatal():
         server.server_close()
 
 
+
+def test_multi_task_run_record_survives_a_long_task_name_list():
+    """A 9-task local run must still persist its run record.
+
+    RCA cement (descend ecommerce-minus-antibot, epoch 2). `BenchmarkRun.save()`
+    names the file `<ts>_<suite>.json`, where `suite` is every requested task
+    name joined by commas. The 9-task ecommerce slice produced a 268-byte
+    basename, past macOS/Linux NAME_MAX (255), so after 27 minutes and $1.06 of
+    real agent work the save raised
+
+        OSError: [Errno 63] File name too long
+
+    and took the whole run down with it (exit 1, "Benchmark command did not
+    print a result file marker"). Because the write happens BEFORE
+    `_record_history()`, the attempts ledger and duration ledger lost all nine
+    rows too — every per-task failure_reason needed to diagnose the run was
+    destroyed at the moment it became available.
+    """
+    from benchmarks.results import BenchmarkRun
+
+    suite = ",".join(
+        [
+            "browser-opentable-reservation",
+            "browser-instacart-grocery-order",
+            "browser-doordash-usb-c-cable",
+            "browser-alchemy-springs-sauna",
+            "browser-hotel-booking",
+            "browser-event-ticket",
+            "browser-imax-group-tickets",
+            "browser-amazon-return",
+            "minted-agent-accounts-uber",
+        ]
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+        run = BenchmarkRun(suite=suite, base_url="http://localhost:3001")
+        with patch.object(BenchmarkRun, "_record_history", lambda self: None), patch.object(
+            BenchmarkRun, "_upload_to_hub", lambda self: None
+        ):
+            path = run.save(directory=directory)
+
+        basename = os.path.basename(path)
+        assert len(basename.encode()) <= 255, (
+            f"run-record basename is {len(basename.encode())} bytes; the filesystem rejects >255 "
+            "and the entire run record is lost"
+        )
+        assert os.path.exists(path), f"run record was not written to {path}"
+        with open(path) as handle:
+            assert json.load(handle)["suite"] == suite, "the full suite must survive in the record"
+
+    # Two different long suites must not collide onto one truncated filename.
+    with tempfile.TemporaryDirectory() as directory:
+        long_a = ",".join(f"browser-some-quite-long-task-name-{i:02d}" for i in range(12))
+        long_b = ",".join(f"browser-some-quite-long-task-name-{i:02d}" for i in range(11)) + ",browser-zzz"
+        paths = []
+        for suite_name in (long_a, long_b):
+            run = BenchmarkRun(suite=suite_name, base_url="http://localhost:3001")
+            with patch.object(BenchmarkRun, "_record_history", lambda self: None), patch.object(
+                BenchmarkRun, "_upload_to_hub", lambda self: None
+            ):
+                paths.append(run.save(directory=directory))
+        assert paths[0] != paths[1], "distinct suites collapsed onto one run-record filename"
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -11034,5 +11097,9 @@ async def run_all_tests():
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
+    r.record(
+        "multi_task_run_record_survives_long_suite",
+        test_multi_task_run_record_survives_a_long_task_name_list,
+    )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     return r.all_passed

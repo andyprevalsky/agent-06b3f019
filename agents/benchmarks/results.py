@@ -1,11 +1,39 @@
 """Result serialization, storage, and comparison for benchmark runs."""
 
+import hashlib
 import json
 import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import List, Optional
+
+# POSIX NAME_MAX. A run record is named after every task in the suite, so a
+# large slice runs straight past it: the 9-task ecommerce slice produced a
+# 268-byte basename and `save()` died with `OSError: [Errno 63] File name too
+# long` AFTER the whole run had executed, destroying the record and — because
+# the write precedes `_record_history()` — the attempts and duration ledgers
+# with it. Bound the name instead of losing the run.
+MAX_RUN_RECORD_BASENAME_BYTES = 255
+
+
+def run_record_basename(timestamp: str, suite: str) -> str:
+    """Name the run record without ever exceeding the filesystem's limit.
+
+    The untruncated suite always survives inside the JSON (`to_dict`), so the
+    only thing shortened is the filename. A digest of the full suite is appended
+    so two long slices that share a prefix cannot collapse onto one record.
+    """
+    candidate = f"{timestamp}_{suite}.json"
+    if len(candidate.encode()) <= MAX_RUN_RECORD_BASENAME_BYTES:
+        return candidate
+
+    digest = hashlib.sha256(suite.encode()).hexdigest()[:12]
+    prefix = f"{timestamp}_"
+    suffix = f"+{digest}.json"
+    budget = MAX_RUN_RECORD_BASENAME_BYTES - len(prefix.encode()) - len(suffix.encode())
+    trimmed = suite.encode()[:budget].decode("utf-8", errors="ignore")
+    return f"{prefix}{trimmed}{suffix}"
 
 
 @dataclass
@@ -116,7 +144,7 @@ class BenchmarkRun:
         os.makedirs(directory, exist_ok=True)
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}_{self.suite}.json"
+        filename = run_record_basename(ts, self.suite)
         path = os.path.join(directory, filename)
 
         with open(path, "w") as f:
