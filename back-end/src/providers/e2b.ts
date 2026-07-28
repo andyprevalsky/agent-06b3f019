@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
+import { retryWithBackoff } from './retry';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
@@ -182,6 +183,66 @@ export function resolveClaudeCodeTokenSource(
   return credentialMeta?.source ?? 'anthropic';
 }
 
+const SANDBOX_CREATE_ATTEMPTS = 3;
+const SANDBOX_CREATE_BASE_BACKOFF_MS = 500;
+
+/**
+ * A transport-level failure reaching the E2B control plane, as opposed to a
+ * rejection *by* it. `fetch` surfaces these as an opaque `TypeError: fetch
+ * failed` whose real reason hides in `.cause`, so match the message and the
+ * usual socket errno set.
+ *
+ * Auth failures, quota rejections, and bad-template errors are NOT transient —
+ * retrying those just burns time and money, so they fall through immediately.
+ */
+export function isTransientSandboxCreateError(error: unknown): boolean {
+  const parts: string[] = [];
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
+    if (cursor instanceof Error) {
+      parts.push(cursor.message);
+      const code = (cursor as NodeJS.ErrnoException).code;
+      if (typeof code === 'string') parts.push(code);
+      cursor = (cursor as { cause?: unknown }).cause;
+      continue;
+    }
+    parts.push(String(cursor));
+    break;
+  }
+  const haystack = parts.join(' | ');
+  if (/\b(401|403|404|invalid api key|unauthorized|forbidden|quota|not found)\b/i.test(haystack)) {
+    return false;
+  }
+  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EADDRNOTAVAIL|EAI_AGAIN|EPIPE|ENETUNREACH|socket hang up|UND_ERR|terminated/i.test(
+    haystack
+  );
+}
+
+/**
+ * Create an E2B sandbox, retrying only transport-level failures.
+ *
+ * Sandbox creation is a single un-retried outbound call on the critical path of
+ * every code agent. Under concurrent load one transient `fetch failed` turned
+ * into a hard 500 and failed the whole agent — reproducibly, 3/3, in the
+ * concurrent blackbox batch while passing 2/2 in isolation. At the 10k-agent
+ * design target this is the difference between a blip and a fleet-wide failure,
+ * so the retry belongs in the product path, not the test harness.
+ */
+async function createSandboxWithRetry(
+  templateId: string,
+  options: Parameters<typeof Sandbox.create>[1],
+  label: string
+): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
+  return retryWithBackoff(() => Sandbox.create(templateId, options), {
+    maxRetries: SANDBOX_CREATE_ATTEMPTS,
+    initialBackoffMs: SANDBOX_CREATE_BASE_BACKOFF_MS,
+    // Default `isRetryable` retries every TypeError, which would include a
+    // rejection surfaced as one. Classify explicitly instead.
+    isRetryable: isTransientSandboxCreateError,
+    component: `E2B:${label}`,
+  });
+}
+
 /**
  * Decide which auth env vars the Codex Code CLI sandbox should receive.
  *
@@ -337,11 +398,15 @@ export async function createClaudeCodeSession(
   }
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts
-  const sandbox = await Sandbox.create(process.env.E2B_CLAUDE_CODE_TEMPLATE_ID, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Claude Code'
+  );
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
@@ -559,11 +624,15 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const sandbox = await Sandbox.create(templateId, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    templateId,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Codex Code'
+  );
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);
