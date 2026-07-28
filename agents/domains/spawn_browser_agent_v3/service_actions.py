@@ -423,31 +423,62 @@ async def execute_action(  # noqa: C901
             }
 
         elif action_name == "read_network_requests":
-            if browser_network_recorder is None or not getattr(
-                browser_network_recorder, "persists_network_log", True
-            ):
+            if browser_network_recorder is None:
                 return {
                     "success": False,
                     "error": (
-                        "Network request capture is not active for this session, so there is "
+                        "Network capture is not attached to this browser session, so there is "
                         "nothing to read. Rely on the DOM tree and screenshots instead."
                     ),
                 }
+            include_bodies = bool(params.get("include_bodies"))
             requests = browser_network_recorder.query_requests(
                 url_pattern=str(params.get("url_pattern") or ""),
+                method=str(params.get("method") or ""),
+                status=str(params.get("status") or ""),
+                resource_type=str(params.get("resource_type") or ""),
                 limit=int(params.get("limit") or 100),
                 clear=bool(params.get("clear")),
+                include_query=bool(params.get("include_query")),
+                include_headers=bool(params.get("include_headers")),
+                include_bodies=include_bodies,
+                max_body_chars=int(params.get("max_body_chars") or 4000),
             )
+            with_bodies = sum(1 for row in requests if row.get("body_available"))
+            message = f"Captured {len(requests)} network request(s)."
+            if requests and not include_bodies and with_bodies:
+                # The single most common failure mode is the model concluding
+                # "this tool doesn't return response bodies" from a summary row.
+                # Say so on the row itself instead of letting it guess.
+                message += (
+                    f" {with_bodies} have a captured response body - re-run with include_bodies=true"
+                    " (optionally narrowed by url_pattern) to read them."
+                )
             await action_history.record_action(
                 dom_service=dom_service,
                 action="read_network_requests",
                 thinking=thinking,
-                params={k: params[k] for k in ("url_pattern", "limit", "clear") if k in params},
+                params={
+                    key: params[key]
+                    for key in (
+                        "url_pattern",
+                        "method",
+                        "status",
+                        "resource_type",
+                        "limit",
+                        "clear",
+                        "include_query",
+                        "include_headers",
+                        "include_bodies",
+                        "max_body_chars",
+                    )
+                    if key in params
+                },
                 result={"success": True, "count": len(requests)},
             )
             return {
                 "success": True,
-                "message": f"Captured {len(requests)} network request(s).",
+                "message": message,
                 "requests": requests,
             }
 

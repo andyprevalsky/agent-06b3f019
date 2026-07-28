@@ -385,19 +385,46 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
     },
     "read_network_requests": {
         "description": (
-            "Read HTTP network requests (XHR, Fetch, documents, etc.) made by the current page, "
-            "including cross-origin requests. Use this to detect a blocked or challenge response "
-            "(e.g. a 403, 429, or a Cloudflare 'verify you are human' challenge) by its status code "
-            "when the DOM/screenshot alone is ambiguous, or to discover the underlying API a page "
-            "calls so you can navigate or interact more directly instead of fighting the UI. "
-            "Returns a newest-first list of {url, method, status, resource_type}. Optional params: "
-            "'url_pattern' (substring filter, e.g. '/api/'), 'limit' (max results, default 100), and "
-            "'clear' (when true, empties the buffer after reading so the next call only shows new traffic)."
+            "Inspect the page's network traffic, like the DevTools Network panel. Every http(s) "
+            "request the page makes is captured (XHR, Fetch, documents, scripts, cross-origin), "
+            "along with its headers, redirect chain, timing, and response body when the body is "
+            "text (JSON/HTML/text/XML).\n"
+            "Use it to (a) detect a blocked or challenge response (403, 429, Cloudflare 'verify you "
+            "are human') by status code when the DOM/screenshot is ambiguous, (b) discover the API "
+            "a page calls and read its JSON directly instead of scraping the rendered UI, or "
+            "(c) debug a form submission by reading what was actually POSTed and what came back.\n"
+            "Returns newest-first rows of {id, url, method, status, resource_type, mime_type, "
+            "duration_ms, size_bytes, body_available}. A row with body_available=true has a "
+            "response body waiting - ask for it.\n"
+            "Filters: 'url_pattern' (URL substring, e.g. '/api/'), 'method' (e.g. 'POST'), 'status' "
+            "('403', '4xx', 'error', 'ok'), 'resource_type' ('XHR', 'Fetch', 'Document', ...), "
+            "'limit' (default 100).\n"
+            "Detail flags (off by default to keep listings small - turn them on once you have "
+            "narrowed with url_pattern): 'include_bodies' returns the request post data and the "
+            "response body (capped by 'max_body_chars', default 4000); 'include_headers' returns "
+            "request/response headers with cookie and authorization values masked; 'include_query' "
+            "returns full URLs including query strings instead of scheme://host/path.\n"
+            "'clear' empties the buffer after reading, so the next call shows only traffic caused by "
+            "what you did in between - the reliable way to isolate the request behind one click.\n"
+            "To replay an authenticated request yourself, use `evaluate` with fetch(): the session "
+            "cookies ride along automatically, which is why they are masked here."
         ),
         "params": {
             "url_pattern": {
                 "type": "string",
                 "description": "Optional substring to filter request URLs (e.g. '/api/', 'checkout').",
+            },
+            "method": {
+                "type": "string",
+                "description": "Optional HTTP method filter (e.g. 'POST').",
+            },
+            "status": {
+                "type": "string",
+                "description": "Optional status filter: '403', '4xx', 'error' (>=400 or failed), or 'ok'.",
+            },
+            "resource_type": {
+                "type": "string",
+                "description": "Optional resource-type filter (e.g. 'XHR', 'Fetch', 'Document', 'Script').",
             },
             "limit": {
                 "type": "integer",
@@ -406,6 +433,22 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "clear": {
                 "type": "boolean",
                 "description": "When true, clear the captured buffer after reading.",
+            },
+            "include_query": {
+                "type": "boolean",
+                "description": "When true, return full URLs including query strings.",
+            },
+            "include_headers": {
+                "type": "boolean",
+                "description": "When true, include request/response headers (cookie/authorization masked).",
+            },
+            "include_bodies": {
+                "type": "boolean",
+                "description": "When true, include request post data and captured response bodies.",
+            },
+            "max_body_chars": {
+                "type": "integer",
+                "description": "Per-body character cap when include_bodies is set (default 4000).",
             },
         },
     },
@@ -1043,12 +1086,15 @@ def _normalize_action_params(
 
     if normalized_action == "read_network_requests":
         network_params: Dict[str, Any] = {}
-        if params.get("url_pattern") is not None:
-            network_params["url_pattern"] = str(params["url_pattern"])
-        if params.get("limit") is not None:
-            network_params["limit"] = params["limit"]
-        if params.get("clear") is not None:
-            network_params["clear"] = bool(params["clear"])
+        for key in ("url_pattern", "method", "status", "resource_type"):
+            if params.get(key) is not None:
+                network_params[key] = str(params[key])
+        for key in ("limit", "max_body_chars"):
+            if params.get(key) is not None:
+                network_params[key] = params[key]
+        for key in ("clear", "include_query", "include_headers", "include_bodies"):
+            if params.get(key) is not None:
+                network_params[key] = bool(params[key])
         return network_params
 
     out: Dict[str, Any] = {}
