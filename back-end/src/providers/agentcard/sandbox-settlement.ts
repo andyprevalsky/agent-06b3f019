@@ -163,7 +163,16 @@ export async function settleAgentCardSandboxPayment(
 
   for (const purchase of candidates) {
     if (purchase.cardId === null) continue;
-    const pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
+    // A candidate we cannot resolve a PAN for is simply NOT this card — skip it. Settlement is now
+    // attempted for every PAN (routing is by ownership, not BIN), so an unrelated shopper card can
+    // legitimately scan past stale HELD purchases whose provider card no longer resolves. Throwing
+    // here would fail an ordinary Stripe checkout because of someone else's abandoned purchase.
+    let pan: string;
+    try {
+      pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
+    } catch {
+      continue;
+    }
     if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
 
     // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we
