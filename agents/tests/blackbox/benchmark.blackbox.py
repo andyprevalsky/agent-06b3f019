@@ -1467,6 +1467,120 @@ async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
     assert reads == 3
 
 
+def _replayed_8a5ff1db_tree_usage() -> tuple[dict, dict]:
+    """Root-only vs settled tree usage captured from cost-limited agent 8a5ff1db."""
+    early = {
+        "root_agent_id": "8a5ff1db",
+        "agent_count": 2,
+        "tool_usage_count": 1,
+        "llm_call_count": 1,
+        "total_cost_cents": 5.42,
+        "tokens_in": 9000,
+        "tokens_out": 400,
+    }
+    settled = {
+        "root_agent_id": "8a5ff1db",
+        "agent_count": 2,
+        "tool_usage_count": 2,
+        "llm_call_count": 9,
+        "total_cost_cents": 435.86,
+        "tokens_in": 412000,
+        "tokens_out": 7100,
+    }
+    return early, settled
+
+
+async def test_run_record_tool_usage_waits_for_late_subagent_cost():
+    """Terminal status precedes the last ToolUsage write, so the cost snapshot must settle.
+
+    Agent 8a5ff1db flipped to cost-limited 12.0s before its browser explore_agent persisted a
+    430.44c row; a single read recorded 5c / llm_call_count=1 for a 435.86c subtree.
+    """
+    import inspect
+
+    import benchmarks.run_benchmark as bench
+
+    early, settled = _replayed_8a5ff1db_tree_usage()
+    reads = 0
+
+    async def fetch_usage(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
+        return dict(early) if reads <= 6 else dict(settled)
+
+    usage = await bench._get_settled_tool_usage(
+        "http://localhost:55120",
+        "8a5ff1db",
+        retry_delay_seconds=0,
+        fetch_usage=fetch_usage,
+    )
+
+    assert usage["total_cost_cents"] == settled["total_cost_cents"]
+    assert usage["llm_call_count"] == settled["llm_call_count"]
+    assert reads > 1
+    # The run record itself must consume the settled read, not a raw single fetch.
+    assert "_get_settled_tool_usage(" in inspect.getsource(bench.run_single_task)
+
+
+async def test_settled_tool_usage_returns_promptly_and_stays_bounded():
+    """A covered, stable tree exits immediately; an incomplete tree still fails open, bounded."""
+    import benchmarks.run_benchmark as bench
+
+    _, settled = _replayed_8a5ff1db_tree_usage()
+    stable_reads = 0
+
+    async def fetch_settled(_base_url: str, _agent_id: str) -> dict:
+        nonlocal stable_reads
+        stable_reads += 1
+        return dict(settled)
+
+    usage = await bench._get_settled_tool_usage(
+        "http://localhost:55120",
+        "8a5ff1db",
+        retry_delay_seconds=0,
+        fetch_usage=fetch_settled,
+    )
+    assert usage["total_cost_cents"] == settled["total_cost_cents"]
+    assert stable_reads == 2
+
+    early, _ = _replayed_8a5ff1db_tree_usage()
+    stuck_reads = 0
+
+    async def fetch_stuck(_base_url: str, _agent_id: str) -> dict:
+        nonlocal stuck_reads
+        stuck_reads += 1
+        return dict(early)
+
+    usage = await bench._get_settled_tool_usage(
+        "http://localhost:55120",
+        "8a5ff1db",
+        max_attempts=4,
+        retry_delay_seconds=0,
+        fetch_usage=fetch_stuck,
+    )
+    assert stuck_reads == 4
+    assert usage["total_cost_cents"] == early["total_cost_cents"]
+
+    outage_reads = 0
+
+    async def fetch_outage(_base_url: str, _agent_id: str) -> dict:
+        nonlocal outage_reads
+        outage_reads += 1
+        raise RuntimeError("tool-usage endpoint unavailable")
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="unavailable after 3 reads"):
+        await bench._get_settled_tool_usage(
+            "http://localhost:55120",
+            "8a5ff1db",
+            max_attempts=3,
+            retry_delay_seconds=0,
+            fetch_usage=fetch_outage,
+        )
+    assert outage_reads == 3
+
+
 def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     """Checkout text alone cannot pass the AgentCard lifecycle benchmark."""
     from benchmarks.benchmark_tasks import get_task_by_name, get_tasks_by_tag, suite_tasks
@@ -2805,6 +2919,55 @@ def test_live_paid_bookings_require_grounded_payment_site():
         request["metadata"]["requestUserApproval"]["url"] = "https://checkout.attacker.example/order"
         reason = _validate_payment_receipt(task, request, messages=messages)
         assert reason is not None and "host" in reason
+
+
+def test_payment_merchant_accepts_bare_business_name_only_when_host_grounded():
+    """A bare merchant name is producible from the tool schema; the URL host proves the platform.
+
+    Replays the real browser-alchemy-springs-sauna emission (merchant "Alchemy Springs" with a
+    momence.com approval URL) against the "Business (Platform - host)" bookkeeping expectation.
+    Host grounding is NOT relaxed: the same bare name on a foreign checkout host must still fail.
+    """
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-alchemy-springs-sauna")
+    assert task.expected_payment_receipt["merchant"] == "Alchemy Springs (Momence - momence.com)"
+    base_request, messages = _captured_live_paid_payment_approval("browser-alchemy-springs-sauna")
+
+    def with_merchant(merchant: str, *, url: str | None = None) -> dict:
+        request = deepcopy(base_request)
+        approval = request["metadata"]["requestUserApproval"]
+        approval["requestPaymentCard"]["merchant"] = merchant
+        if url is not None:
+            approval["url"] = url
+        return request
+
+    # The platform convention is taught nowhere, so bare business names must be accepted.
+    for merchant in ("Alchemy Springs", "Alchemy Sauna Garden"):
+        assert _validate_payment_receipt(task, with_merchant(merchant), messages=messages) is None
+
+    # ...but only when the approval URL still grounds the expected platform host.
+    ungrounded = _validate_payment_receipt(
+        task,
+        with_merchant("Alchemy Springs", url="https://checkout.attacker.example/order"),
+        messages=messages,
+    )
+    assert ungrounded is not None and ungrounded.startswith("merchant host not grounded")
+
+    # A bare name that is not the expected business (or a declared alias) still fails.
+    wrong_business = _validate_payment_receipt(task, with_merchant("Totally Different Spa"), messages=messages)
+    assert wrong_business is not None and wrong_business.startswith("merchant mismatch")
+
+    # Bare-name acceptance must not leak into a *structured* answer naming the wrong platform.
+    wrong_platform = _validate_payment_receipt(
+        task,
+        with_merchant("Alchemy Springs (ClassPass - classpass.com)"),
+        messages=messages,
+    )
+    assert wrong_platform is not None and wrong_platform.startswith("merchant mismatch")
 
 
 def _amazon_attention_poll_task():
@@ -10842,6 +11005,14 @@ async def run_all_tests():
         "initial_payment_lifecycle_bounds_persistent_outage",
         test_initial_payment_lifecycle_bounds_persistent_provider_failure,
     )
+    await r.record_async(
+        "run_record_tool_usage_waits_for_late_subagent_cost",
+        test_run_record_tool_usage_waits_for_late_subagent_cost,
+    )
+    await r.record_async(
+        "settled_tool_usage_prompt_and_bounded",
+        test_settled_tool_usage_returns_promptly_and_stays_bounded,
+    )
     r.record(
         "agent_payment_requires_lifecycle_evidence",
         test_agent_payment_catalog_requires_terminal_lifecycle_evidence,
@@ -10965,6 +11136,10 @@ async def run_all_tests():
     r.record(
         "live_paid_bookings_grounded_site",
         test_live_paid_bookings_require_grounded_payment_site,
+    )
+    r.record(
+        "payment_merchant_bare_business_needs_grounded_host",
+        test_payment_merchant_accepts_bare_business_name_only_when_host_grounded,
     )
     await r.record_async(
         "amazon_beanie_poll_rejects_second_or_unrelated_approval",

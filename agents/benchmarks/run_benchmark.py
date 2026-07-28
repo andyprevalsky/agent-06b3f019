@@ -852,10 +852,13 @@ def _validate_payment_merchant_identity(
     actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
     if actual_match is None:
         actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    direct_merchant = (
-        expected_platform == ("direct",) and _merchant_identity_tokens(actual_merchant) in expected_businesses
-    )
-    if not direct_merchant:
+    # The request_payment_card schema only asks for a "Merchant or site name", so a bare
+    # business name is a legitimate emission on ANY platform — the "Business (Platform - host)"
+    # wording is a benchmark bookkeeping convention that is never taught to the agent. Accept a
+    # bare business (or declared alias) on business-token equality alone; the platform is still
+    # proven independently, and never bypassed, by the host-grounding check below.
+    bare_business_merchant = _merchant_identity_tokens(actual_merchant) in expected_businesses
+    if not bare_business_merchant:
         if (
             actual_match is None
             or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
@@ -1643,6 +1646,56 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
         if resp.status_code == 200:
             return resp.json()
         return {}
+
+
+async def _get_settled_tool_usage(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 10,
+    retry_delay_seconds: float = 2,
+    fetch_usage: Callable[[str, str], Awaitable[dict]] = get_tool_usage,
+) -> dict:
+    """Snapshot tree tool usage only after late ToolUsage writes have settled.
+
+    Terminal agent status is broadcast before every agent in the tree has persisted its
+    ToolUsage row: on agent 8a5ff1db the cost-limit flip landed 12.0s ahead of the browser
+    explore_agent's 430.44c row, so the single-read snapshot recorded 5c / llm_call_count=1
+    instead of the real 435.86c subtree cost. Poll — bounded, like
+    ``_get_initial_payment_lifecycle_with_retry`` — until the LLM call count stops growing
+    and covers every agent in the tree (each agent makes at least one LLM call, and
+    ``agent_count`` is derived from the busId tree rather than from the usage rows, so it is
+    an independent completeness signal).
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    best: Optional[dict] = None
+    best_calls = -1
+    previous_calls: Optional[int] = None
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            await asyncio.sleep(retry_delay_seconds)
+        try:
+            usage = await fetch_usage(base_url, agent_id)
+        except Exception as error:
+            last_error = error
+            print(f"    ⚠ Transient tree tool-usage read failed ({attempt}/{max_attempts}): {error}")
+            continue
+        calls = _as_nonnegative_int(usage.get("llm_call_count"))
+        if calls > best_calls:
+            best, best_calls = usage, calls
+        tree_covered = best_calls >= max(_as_nonnegative_int(usage.get("agent_count")), 1)
+        if previous_calls == calls and tree_covered:
+            return best if best is not None else usage
+        previous_calls = calls
+    if best is None:
+        raise RuntimeError(f"Tree tool usage remained unavailable after {max_attempts} reads: {last_error}")
+    print(
+        f"    ⚠ Tree tool usage never settled after {max_attempts} reads "
+        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))})"
+    )
+    return best
 
 
 async def get_agent_tool_usage(base_url: str, agent_id: str) -> dict:
@@ -7533,7 +7586,7 @@ async def run_single_task(
         tokens_in = 0
         tokens_out = 0
         try:
-            usage = await get_tool_usage(base_url, agent_id)
+            usage = await _get_settled_tool_usage(base_url, agent_id)
             cost_cents = usage.get("total_cost_cents", 0)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
