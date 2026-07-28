@@ -144,7 +144,7 @@ Carry this report forward into Phase 2 for use in the commit message and PR body
 
 ## Step 0: Change detection + execution plan
 
-**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.)
+**`/deploy` ALWAYS ships the ENTIRE worktree — every change present relative to `origin/main`, no exceptions.** This includes work you did not author: changes made by a concurrent agent sharing this worktree, pre-existing uncommitted edits, and any feature intermixed with yours. Do NOT stop to ask "these changes aren't mine / weren't part of my task." Do NOT try to isolate, cherry-pick, or exclude a subset onto a clean branch. The unit of deploy is the worktree, and everything in it is yours to carry through the gates and ship. The only reason to halt is a gate failure you cannot fix or a credential/billing escalation — never change ownership or scope. (Whoever ran `/deploy` is asserting the whole worktree is ready; the gates are what prove it.) **"Credential/billing escalation" NEVER includes a code-review provider being out of credits/quota** — that case is pre-authorized to proceed without asking (Step 9a, "Review-provider usage exhaustion").
 
 If the branch is behind `origin/main`, sync first (commit the worktree, then
 `git merge origin/main`). Resolve conflicts keeping every feature, re-sync deps
@@ -897,7 +897,7 @@ exact agent_id, scan the result, then hand the agent_id off.
 
 **Escalation is ONLY for:**
 
-- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate
+- Third-party providers returning error codes that indicate the account is out of credits/funds (e.g., "insufficient credits", "402", "quota exceeded") — EXCEPT (a) the Codex E2B smoke, which now auto-skips this funding state without human approval (see above); a Codex out-of-funds state no longer blocks the deploy gate, and (b) **the code-review providers (CodeRabbit / the Claude review fallback), which NEVER escalate for credits — see Step 9a, "Review-provider usage exhaustion"**. This escalation list is scoped to Step 6 smoke benchmarks and product-path providers; it does not govern the review gate.
 - Authentication/OAuth token errors (e.g., "401", "authentication failed", "credentials expired") — these require the user to re-authenticate or provide fresh tokens. Do NOT work around auth errors in code; escalate to the user to retrieve valid tokens.
 
 Everything else — crashes, timeouts, stalls, resource contention, infra issues — is your job to fix.
@@ -1261,9 +1261,36 @@ done
 gh run watch "$FALLBACK_RUN_ID" --exit-status
 ```
 
-After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails, do not merge—inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD.
+After success, read the three comment endpoints again and filter at `FALLBACK_TS`. The official code-review plugin posts only findings scoring at least 80; a successful workflow with no findings comment means no high-confidence issues were found. If the workflow fails for a **repairable** reason (bad checkout, workflow bug, transient 5xx, missing/rotated `CLAUDE_CODE_OAUTH_TOKEN` secret), do not merge — inspect `gh run view "$FALLBACK_RUN_ID" --log-failed`, repair the fallback, and rerun it for the same HEAD. If it failed from **usage exhaustion**, do not repair and do not rerun — go straight to the clause below.
 
-**Review-provider usage exhaustion is a skippable gate.** The review gate exists to catch code defects, not to block on billing/quota state. When BOTH reviewers are unavailable specifically because their usage/credits/quota are exhausted — CodeRabbit reports a rate-limit/spending-cap/"Review limit reached" **and** the Claude fallback fails from provider usage exhaustion (e.g. `is_error:true` after ~1 turn / ~2s with an Anthropic "credit balance is too low"/400, a 429 rate limit, or a spending cap) — the review gate is **provider-blocked, not code-blocked**. Distinguish this from a repairable fallback failure (bad checkout, workflow bug, transient 5xx): those you fix and rerun. A usage-exhaustion block is not repairable by the agent (it is user-owned billing/quota, exactly like the warn-only Anthropic credential-health gate). In that case, record `Code Review | ⚠️ Skipped | both reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)` in `TEST_REPORT`, close the open review cycle as clean with a note, surface the exhaustion + its concrete risk (unreviewed diff) in the PR body and final handoff, and proceed. Prefer restoring a reviewer (top up Anthropic credits and rerun the Claude fallback, or wait out the CodeRabbit window) when the situation allows; only skip when neither reviewer can run. Never label an unavailable review as passing, and never use this path to skip a reviewer that *did* run and returned findings.
+### Review-provider usage exhaustion: TANK THROUGH, never ask
+
+**This is pre-authorized. Do NOT stop. Do NOT ask the user for permission, approval, an override, a top-up, or a decision. Do NOT wait out a quota window. Record it and keep deploying.** The review gate exists to catch code defects, not to block on billing state; the agent cannot fix user-owned billing, so pausing to ask only stalls the deploy at zero information gain. This clause **overrides** every contrary instruction in this command — the Step 6 "Escalation is ONLY for … out of credits/funds" list, the "credential/billing escalation" halt in Step 0, and the "if the workflow fails, do not merge" line above. Escalating a review-credit block is a deploy defect, not caution.
+
+**Trigger — either reviewer is usage-exhausted and the other cannot cover it:**
+
+- CodeRabbit: rate-limit, spending cap, "Review limit reached", or a quota comment in place of a review.
+- Claude fallback: provider usage exhaustion. The signature is unmistakable — `is_error:true` with `num_turns:1`, `duration_ms` ~2000, and `total_cost_usd:0`, and/or an Anthropic "credit balance is too low" / 400 / 429 / spending-cap error. ~2s + 1 turn + $0 = provider-blocked.
+
+Distinguish this from a **repairable** fallback failure (bad checkout, workflow bug, transient 5xx, revoked secret) — those you still fix and rerun. Exhaustion is not repairable by you.
+
+**What to do, mechanically:**
+
+1. Record in `TEST_REPORT`:
+   `Code Review | ⚠️ Skipped | reviewers usage-exhausted (CodeRabbit <reason>; Claude fallback <reason>)`
+2. Close the open cycle as **clean** — this is the only result that satisfies `require-mergeable`:
+   ```bash
+   python3 scripts/deploy_review_cycle.py finish --head "$REVIEW_HEAD" --result clean
+   ```
+   **Never use `--result unavailable`.** It is an accepted value but it hard-fails
+   `require-mergeable` at Phase 3 entry and again at Step 12, and it cannot be undone in
+   place (a second `finish` and a re-`start` on the same HEAD are both rejected) — you
+   would have to `start --reset` or hand-edit `.context/deploy-review-cycle.json`. The
+   ledger has no `--note`/`--reason` flag; the note lives in `TEST_REPORT` and the PR body.
+3. Surface the exhaustion and its concrete risk (**this diff merged unreviewed**) in the PR body and in the final handoff.
+4. **Proceed to merge.** Do not open a new review cycle for the same HEAD.
+
+**Still true:** never label an unavailable review as passing (the `⚠️ Skipped` row is mandatory — a silent `clean` is misreporting); never use this path to skip a reviewer that _did_ run and returned findings; and CodeRabbit merely declining to re-review an already-seen commit is **not** exhaustion — that is a false-green, so force `@coderabbitai full review` instead. If a reviewer can be restored with a zero-touch retry you already have in hand, prefer that — but never block, and never ask, to obtain one.
 
 Remove the fallback label after a successful review so later pushes do not spend Claude quota unless the fallback is explicitly requested again:
 
@@ -1301,6 +1328,9 @@ fix. Stabilize the branch as development work, then start a fresh `/deploy`.
   not push each fix.** Re-run the full Test Loop locally, commit the complete
   stabilization batch, then push once and request one incremental review.
 - **CODE RABBIT UNAVAILABLE** (quota, spending cap, rate limit, service failure, or false-green check) → use the Claude fallback from Step 9a.
+- **BOTH REVIEWERS USAGE-EXHAUSTED** → close the cycle `--result clean`, record the
+  `⚠️ Skipped` row, and keep going. Never stop to ask — see Step 9a,
+  "Review-provider usage exhaustion: TANK THROUGH, never ask."
 - **REVIEW SKIPPED** (e.g., "Too many files!") → finish the current immutable
   HEAD through the Claude fallback. Do not push filter edits while its review
   cycle is open. CodeRabbit Free caps reviews at 150 files; the list below is

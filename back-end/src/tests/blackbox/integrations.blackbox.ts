@@ -4495,6 +4495,94 @@ async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() 
   }
 }
 
+/**
+ * Regression: a generic short cooldown must never SHORTEN a provider-supplied
+ * long reset window.
+ *
+ * Prod 2026-07-28 (agent 49b3cc7a): the compute-token endpoint marked the user's
+ * claude_code token rate-limited until 2026-07-30T22:00:00Z (the reset Anthropic
+ * actually reported) at 16:54:51, then a second generic call at 16:55:06 — with no
+ * `rateLimitedUntil` in the body — overwrote it with the default 5-minute window
+ * (17:00:06Z). Five minutes later the still-exhausted token was handed out again.
+ * Meanwhile, for every second the token was flagged, `fetchClaudeCodeCredentialsWithMeta`
+ * skipped it, the pool was exhausted too, and the Claude Code path fell through to
+ * the unfunded shared ANTHROPIC_API_KEY — surfacing as "Your credit balance is too
+ * low" and `POST /api/claude-code-session/create -> 500` ("No Claude Code credentials
+ * available"), even though a perfectly valid synced OAuth token was sitting in the row.
+ */
+async function testRotation_rateLimitWindowIsMonotonic() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  const longReset = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+  const markRateLimited = async (body: Record<string, unknown>) => {
+    const res = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify(body),
+    });
+    assertStatus(res.status, 200, res.data);
+  };
+
+  try {
+    // 1. Provider reported an explicit long reset.
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    const afterLong = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterLong?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `Expected the provider reset ${longReset.toISOString()}, got ${String(afterLong?.rateLimitedUntil)}`
+    );
+
+    // 2. A later generic backoff (no rateLimitedUntil → short default) must NOT shorten it.
+    await markRateLimited({ type: 'claude', source: 'user', userId: caller.userId });
+    const afterGeneric = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the provider reset window to ${String(afterGeneric?.rateLimitedUntil)} ` +
+        `(expected it to stay ${longReset.toISOString()}). An exhausted token would be re-served early, ` +
+        `and the Claude Code path would fall through to the unfunded ANTHROPIC_API_KEY.`
+    );
+
+    // 3. Same invariant on the pool side.
+    await markRateLimited({
+      type: 'claude',
+      source: 'pool',
+      poolTokenId: poolToken.id,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    await markRateLimited({ type: 'claude', source: 'pool', poolTokenId: poolToken.id });
+    const afterPoolGeneric = await prisma.integration.findUnique({ where: { id: poolToken.id } });
+    assert(
+      afterPoolGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the pool token's provider reset window to ${String(afterPoolGeneric?.rateLimitedUntil)}`
+    );
+
+    // 4. A genuinely LONGER window must still extend the backoff.
+    const longerReset = new Date(longReset.getTime() + 60 * 60 * 1000);
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longerReset.toISOString(),
+    });
+    const afterExtend = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterExtend?.rateLimitedUntil?.getTime() === longerReset.getTime(),
+      `A longer provider reset must extend the window, got ${String(afterExtend?.rateLimitedUntil)}`
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
 async function testRotation_gptUserAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
@@ -6057,6 +6145,10 @@ async function runAll() {
     {
       name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
       fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
+    },
+    {
+      name: 'rotation -- rate-limit window never shortens',
+      fn: testRotation_rateLimitWindowIsMonotonic,
     },
     {
       name: 'rotation -- GPT user auth_error disables token',

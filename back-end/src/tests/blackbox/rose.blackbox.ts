@@ -45,13 +45,16 @@ import {
   poolForModel,
   RoseAllFailed,
   RoseInvalidRequest,
+  RoseRateLimitError,
   RoseRefusalError,
   RoseStallError,
   SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
   responseModel,
   type CompletionChunk,
 } from '../../providers/rose';
+import { claudeAuthComplete } from '../../providers/rose/claudeAuth';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
+import { extractRateLimitedUntil, resetIsFarFuture } from '../../providers/rose/rateLimitReset';
 import {
   parseAnthropicSSE,
   parseOpenAISSE,
@@ -862,6 +865,164 @@ async function testClaudeAuth_429RetriesWithBackoffThenSucceeds() {
   } finally {
     restoreFetch();
   }
+}
+
+/**
+ * Regression: a terminal Anthropic 429 must carry the reset Anthropic reported.
+ *
+ * Prod 2026-07-28 (user 1f85ff25): the Python agent path read
+ * `anthropic-ratelimit-unified-7d-reset` and correctly backed the user's
+ * claude_code token off until 2026-07-30T22:00:00Z at 16:54:51. Fifteen seconds
+ * later this TS path 429'd on the SAME limit, but `RoseRateLimitError` carried
+ * only `(message, status)` — every reset header was dropped — so
+ * `markComputeTokenUnavailable` fell back to a synthetic +5m and overwrote the
+ * real window. The exhausted token was then re-served every 5 minutes, and while
+ * it was flagged the Claude Code path found no credential, fell through to the
+ * unfunded shared ANTHROPIC_API_KEY, and returned 500 "No Claude Code
+ * credentials available" / "Your credit balance is too low".
+ *
+ * `grep -rni anthropic-ratelimit back-end/src` returned ZERO hits before this fix.
+ */
+async function testClaudeAuth_429CarriesProviderResetWindow() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  delete process.env.ANTHROPIC_API_KEY;
+  // A 7-day usage window, far enough out that in-place retries cannot clear it.
+  const resetAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+  let anthropicCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return new Response(JSON.stringify({ error: { message: 'usage limit reached' } }), {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-ratelimit-unified-7d-reset': resetAt,
+        },
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    let captured: unknown = null;
+    try {
+      await collect(
+        claudeAuthComplete({
+          poolSpec: getPool('rose-1-lite'),
+          messages: [{ role: 'user', content: 'hi' }],
+          auth: { mode: 'oauth', token: 'test-token' },
+          requestId: 'test-429-reset',
+        })
+      );
+    } catch (err) {
+      captured = err;
+    }
+
+    assert(
+      captured instanceof RoseRateLimitError,
+      `expected RoseRateLimitError, got ${String(captured)}`
+    );
+    const rateLimitError = captured as RoseRateLimitError;
+    assert(
+      rateLimitError.rateLimitedUntil !== undefined,
+      'RoseRateLimitError dropped the provider reset — the caller will invent a short ' +
+        'cooldown and can clobber a real multi-day usage window (prod 2026-07-28)'
+    );
+    assertEqual(
+      new Date(rateLimitError.rateLimitedUntil!).getTime(),
+      new Date(resetAt).getTime(),
+      'rateLimitedUntil matches anthropic-ratelimit-unified-7d-reset'
+    );
+    // A far-future usage window is not clearable by retrying in place, so we must
+    // surface it immediately instead of burning the full in-place retry budget.
+    assertEqual(anthropicCalls, 1, 'far-future usage window rotates without in-place retries');
+  } finally {
+    restoreFetch();
+  }
+}
+
+/** Unit coverage for every extraction branch, mirroring claude_auth.py. */
+async function testRateLimitReset_extractionBranches() {
+  const iso = '2026-07-30T22:00:00.000Z';
+  const h = (init: Record<string, string>): Headers => new Headers(init);
+
+  assertEqual(
+    extractRateLimitedUntil(h({ 'anthropic-ratelimit-unified-reset': iso }), ''),
+    iso,
+    'unified reset header'
+  );
+  assertEqual(
+    extractRateLimitedUntil(h({ 'anthropic-ratelimit-unified-7d-reset': iso }), ''),
+    iso,
+    '7d reset header'
+  );
+
+  // Epoch seconds and milliseconds both normalize to the same instant.
+  const epochS = Math.floor(new Date(iso).getTime() / 1000);
+  assertEqual(
+    extractRateLimitedUntil(h({ 'x-ratelimit-reset': String(epochS) }), ''),
+    iso,
+    'epoch-seconds header'
+  );
+  assertEqual(
+    extractRateLimitedUntil(h({ 'ratelimit-reset': String(epochS * 1000) }), ''),
+    iso,
+    'epoch-millis header'
+  );
+
+  // No headers → scrape the body.
+  assertEqual(
+    extractRateLimitedUntil(h({}), `{"error":{"message":"limit reached, resets ${iso}"}}`),
+    iso,
+    'ISO timestamp scraped from body'
+  );
+
+  const fromDuration = extractRateLimitedUntil(h({}), 'please try again in 30 minutes');
+  assert(fromDuration !== null, 'duration phrase parsed from body');
+  const durationDeltaMs = new Date(fromDuration!).getTime() - Date.now();
+  assert(
+    durationDeltaMs > 29 * 60 * 1000 && durationDeltaMs <= 30 * 60 * 1000 + 5000,
+    `"in 30 minutes" → ~30min, got ${durationDeltaMs}ms`
+  );
+
+  // retry-after is the LAST resort, not the first.
+  const fromRetryAfter = extractRateLimitedUntil(h({ 'retry-after': '60' }), '');
+  assert(fromRetryAfter !== null, 'retry-after delta-seconds parsed');
+  const retryDeltaMs = new Date(fromRetryAfter!).getTime() - Date.now();
+  assert(
+    retryDeltaMs > 55_000 && retryDeltaMs <= 65_000,
+    `retry-after 60 → ~60s, got ${retryDeltaMs}ms`
+  );
+  assertEqual(
+    extractRateLimitedUntil(
+      h({ 'anthropic-ratelimit-unified-reset': iso, 'retry-after': '60' }),
+      ''
+    ),
+    iso,
+    'reset header wins over retry-after'
+  );
+
+  // Nothing supplied → null, so the caller knowingly uses a synthetic cooldown.
+  assertEqual(extractRateLimitedUntil(h({}), 'rate limited'), null, 'no timing → null');
+  assertEqual(extractRateLimitedUntil(null, ''), null, 'no headers at all → null');
+  // Garbage must not become a bogus far-future lockout.
+  assertEqual(
+    extractRateLimitedUntil(h({ 'retry-after': 'soon' }), ''),
+    null,
+    'unparseable → null'
+  );
+  assertEqual(
+    extractRateLimitedUntil(h({ 'x-ratelimit-reset': '42' }), ''),
+    null,
+    'sub-epoch → null'
+  );
+
+  assert(resetIsFarFuture(iso), 'multi-day reset is a usage window');
+  assert(
+    !resetIsFarFuture(new Date(Date.now() + 5_000).toISOString()),
+    '5s reset is a burst limit, not a usage window'
+  );
+  assert(!resetIsFarFuture(null), 'null reset is not far-future');
 }
 
 async function testClaudeAuth_noTokenGoesDirectToWaterfall() {
@@ -2880,6 +3041,14 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / 429 retries with backoff then succeeds',
       fn: testClaudeAuth_429RetriesWithBackoffThenSucceeds,
+    },
+    {
+      name: 'claudeAuth / 429 carries provider reset window',
+      fn: testClaudeAuth_429CarriesProviderResetWindow,
+    },
+    {
+      name: 'rateLimitReset / extraction branches',
+      fn: testRateLimitReset_extractionBranches,
     },
     {
       name: 'claudeAuth / no token goes direct to waterfall',

@@ -25,6 +25,7 @@ import {
   RoseStallError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import { extractRateLimitedUntil, resetIsFarFuture } from './rateLimitReset';
 import { parseAnthropicSSE } from './streaming';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
@@ -275,11 +276,24 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
+      // Capture Anthropic's own reset BEFORE deciding what to do with it. This
+      // is the value the credential cooldown must be stamped with; without it
+      // the caller invents a 5-minute default that can clobber a real 5h/7d
+      // usage window written by the Python agent path.
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      // A far-future reset is a usage-window limit, not a burst limit — retrying
+      // in place cannot clear it, so surface it immediately and let the caller
+      // rotate credentials. Mirrors _should_rotate_429_without_retry in
+      // agents/providers/rose/claude_auth.py.
+      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
-      throw new RoseRateLimitError(`Anthropic 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `Anthropic 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -327,14 +341,19 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
 }
 
 function backoffFor429(headers: Headers, attempt: number): number {
+  let delay: number;
   const retryAfter = headers.get('retry-after');
-  if (retryAfter) {
-    const parsed = Number.parseFloat(retryAfter);
-    if (!Number.isNaN(parsed)) {
-      return Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
-    }
+  const parsed = retryAfter !== null ? Number.parseFloat(retryAfter) : Number.NaN;
+  if (!Number.isNaN(parsed)) {
+    delay = Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
+  } else {
+    delay = Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
   }
-  return Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
+  // Jitter so concurrent workers retrying the same credential don't wake in
+  // lockstep and re-trigger the limit together. Matches _backoff_for_429 in
+  // agents/providers/rose/claude_auth.py (up to 25% of delay, capped at 1s).
+  const jitter = Math.random() * Math.min(delay * 0.25, 1000);
+  return Math.min(delay + jitter, BACKOFF_CAP_MS);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

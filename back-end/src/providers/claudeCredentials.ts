@@ -378,6 +378,33 @@ function resolveRateLimitedUntil(
 }
 
 /**
+ * Only ever EXTEND a backoff window — never shorten one.
+ *
+ * A token has exactly one `rateLimitedUntil`, but several independent consumers
+ * write it: the Rose completions waterfall, the Claude Code CLI exhaustion
+ * scanner, and the compute-token rotation endpoint. Some of those calls carry
+ * the precise reset Anthropic reported ("resets 2026-07-30T22:00Z"); others
+ * carry nothing and fall back to the generic short cooldown above.
+ *
+ * Before this guard the writes raced and the LAST one won, so a generic 5-minute
+ * default could clobber a real multi-day reset. Observed in prod 2026-07-28:
+ * 16:54:51 marked the user token until 2026-07-30T22:00:00Z, then 16:55:06
+ * overwrote it with 17:00:06Z — so five minutes later the still-exhausted token
+ * was served again, 429'd again, and in between the Claude Code path saw NO
+ * usable credential and fell through to the unfunded shared ANTHROPIC_API_KEY
+ * ("credit balance is too low" / 500 "No Claude Code credentials available").
+ *
+ * Expressed as a WHERE clause rather than read-modify-write so it stays a single
+ * statement with no lost-update race, regardless of how many agents back the
+ * same token off concurrently.
+ */
+function notAlreadyBackedOffLonger(until: Date) {
+  return {
+    OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: until } }],
+  };
+}
+
+/**
  * Fetch an available pool token from Integrations with poolingEnabled=true.
  * Selects the least-recently-used token that isn't rate-limited.
  * @param excludeIds - Integration IDs to skip (e.g. already tried and got 429)
@@ -425,10 +452,16 @@ export async function markPoolTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
-  await prisma.integration.update({
-    where: { id: poolTokenId },
+  const { count } = await prisma.integration.updateMany({
+    where: { id: poolTokenId, ...notAlreadyBackedOffLonger(until) },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    log.info(
+      `Pool token ${poolTokenId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`Pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
 }
 
@@ -465,14 +498,21 @@ export async function markUserTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
-  await prisma.integration.updateMany({
+  const { count } = await prisma.integration.updateMany({
     where: {
       userId,
       name: 'claude_code',
       status: { in: ['CONNECTED', 'EXPIRED'] },
+      ...notAlreadyBackedOffLonger(until),
     },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    log.info(
+      `User token for ${userId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`User token for ${userId} rate-limited until ${until.toISOString()}`);
 }
 

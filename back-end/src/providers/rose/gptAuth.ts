@@ -26,6 +26,7 @@ import {
   RoseServerError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import { extractRateLimitedUntil, resetIsFarFuture } from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
@@ -394,11 +395,18 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
+      // Carry the provider's own reset through to the credential cooldown —
+      // see the identical capture in claudeAuth.ts and rateLimitReset.ts.
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
-      throw new RoseRateLimitError(`Codex 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `Codex 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -497,11 +505,16 @@ export async function* openAiApiKeyComplete(
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
-      throw new RoseRateLimitError(`OpenAI 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `OpenAI 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -528,14 +541,18 @@ export async function* openAiApiKeyComplete(
 }
 
 function backoffFor429(headers: Headers, attempt: number): number {
+  let delay: number;
   const retryAfter = headers.get('retry-after');
-  if (retryAfter) {
-    const parsed = Number.parseFloat(retryAfter);
-    if (!Number.isNaN(parsed)) {
-      return Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
-    }
+  const parsed = retryAfter !== null ? Number.parseFloat(retryAfter) : Number.NaN;
+  if (!Number.isNaN(parsed)) {
+    delay = Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
+  } else {
+    delay = Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
   }
-  return Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
+  // Jitter so concurrent workers retrying the same credential don't wake in
+  // lockstep. Matches _backoff_for_429 in agents/providers/rose/gpt_auth.py.
+  const jitter = Math.random() * Math.min(delay * 0.25, 1000);
+  return Math.min(delay + jitter, BACKOFF_CAP_MS);
 }
 
 function sleep(ms: number, abortSignal?: AbortSignal): Promise<void> {
