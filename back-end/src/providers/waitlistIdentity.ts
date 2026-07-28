@@ -105,17 +105,27 @@ export function realWaitlistPersonSql(alias = ''): Prisma.Sql {
     WAITLIST_FIXTURE_EMAIL_ADDRESSES.map((address) => Prisma.sql`${address}`)
   );
 
+  // Normalize exactly once, the same way normalizeWaitlistEmail does (trim then
+  // lowercase), and derive the domain as everything after the LAST '@' to match
+  // `email.split('@').at(-1)`. `split_part(..., 2)` would take the SECOND
+  // segment instead, so an address with two '@' classified differently in SQL
+  // than in TS — and comparing untrimmed values let a padded fixture address
+  // slip through the list/count while the in-memory filter rejected it.
+  const email = Prisma.sql`lower(btrim(COALESCE(${prefix}"email", '')))`;
+  const emailDomain = Prisma.sql`substring(${email} from '[^@]*$')`;
+  const phone = Prisma.sql`'+' || regexp_replace(COALESCE(${prefix}"phone", ''), '[^0-9]', '', 'g')`;
+
   return Prisma.sql`(
     (
-      NULLIF(btrim(COALESCE(${prefix}"email", '')), '') IS NOT NULL
+      NULLIF(${email}, '') IS NOT NULL
       OR NULLIF(regexp_replace(COALESCE(${prefix}"phone", ''), '[^0-9]', '', 'g'), '') IS NOT NULL
     )
-    AND lower(split_part(COALESCE(${prefix}"email", ''), '@', 2)) NOT IN (${fixtureDomains})
-    AND lower(btrim(COALESCE(${prefix}"email", ''))) NOT IN (${fixtureAddresses})
-    AND lower(COALESCE(${prefix}"email", '')) NOT LIKE '%.test'
-    AND lower(COALESCE(${prefix}"email", '')) NOT LIKE '%.invalid'
-    AND lower(COALESCE(${prefix}"email", '')) NOT LIKE '%@invalid'
+    AND ${emailDomain} NOT IN (${fixtureDomains})
+    AND ${email} NOT IN (${fixtureAddresses})
+    AND ${emailDomain} NOT LIKE '%.test'
+    AND ${emailDomain} <> 'invalid'
+    AND ${emailDomain} NOT LIKE '%.invalid'
     AND lower(btrim(COALESCE(${prefix}"name", ''))) !~ ${RESERVED_NAME_PATTERN.source}
-    AND '+' || regexp_replace(COALESCE(${prefix}"phone", ''), '[^0-9]', '', 'g') NOT LIKE ALL (ARRAY[${fixturePhones}])
+    AND ${phone} NOT LIKE ALL (ARRAY[${fixturePhones}])
   )`;
 }

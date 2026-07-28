@@ -72,6 +72,12 @@ function testRejectsMalformedRowsInsteadOfDroppingThemSilently() {
   assert.equal(missingColumns.entries.length, 0);
   assert.match(missingColumns.errors[0], /expected 4 tab-separated columns/);
 
+  // A fifth column means the row is shifted or a category was split. Accepting
+  // it would silently import the wrong contact details under the right name.
+  const extraColumns = parseRoster('Ada\tada@lovelace.dev\t14155552671\tInvestor\tstray');
+  assert.equal(extraColumns.entries.length, 0);
+  assert.match(extraColumns.errors[0], /expected 4 tab-separated columns, got 5/);
+
   const missingName = parseRoster('\tada@lovelace.dev\t\tInvestor');
   assert.equal(missingName.entries.length, 0);
   assert.match(missingName.errors[0], /missing name/);
@@ -118,7 +124,7 @@ function testFillsMissingEmailOnAPhoneMatchedRow() {
     [
       {
         name: 'Veronica',
-        email: 'vero@example.com',
+        email: 'vero@correo.mx',
         phone: '529991089424',
         category: 'Collective',
       },
@@ -128,14 +134,14 @@ function testFillsMissingEmailOnAPhoneMatchedRow() {
 
   assert.equal(plan.creates.length, 0);
   assert.deepEqual(plan.updates, [
-    { name: 'Veronica', id: 'gated-1', data: { email: 'vero@example.com' } },
+    { name: 'Veronica', id: 'gated-1', data: { email: 'vero@correo.mx' } },
   ]);
 }
 
 function testNeverOverwritesAContactDetailAlreadyOnFile() {
-  const rows = [existing({ id: 'row-1', email: 'onfile@example.com', phone: '+529991089424' })];
+  const rows = [existing({ id: 'row-1', email: 'onfile@correo.mx', phone: '+529991089424' })];
   const plan = planRosterImport(
-    [{ name: 'Veronica', email: 'different@example.com', phone: '529991089424', category: 'C' }],
+    [{ name: 'Veronica', email: 'different@correo.mx', phone: '529991089424', category: 'C' }],
     rows
   );
 
@@ -150,16 +156,60 @@ function testNeverClaimsAnIdentifierAnotherRowOwns() {
   // would violate Waitlist_email_key.
   const rows = [
     existing({ id: 'phone-row', phone: '+529991089424' }),
-    existing({ id: 'email-row', email: 'vero@example.com' }),
+    existing({ id: 'email-row', email: 'vero@correo.mx' }),
   ];
   const plan = planRosterImport(
-    [{ name: 'Veronica', email: 'vero@example.com', phone: '529991089424', category: 'C' }],
+    [{ name: 'Veronica', email: 'vero@correo.mx', phone: '529991089424', category: 'C' }],
     rows
   );
 
   assert.equal(plan.creates.length, 0);
   assert.equal(plan.updates.length, 0);
   assert.equal(plan.skipped.length, 1);
+}
+
+function testDuplicateOfAPendingCreateNeverBecomesAnUpdate() {
+  // Regression: the second Alice matched the create planned for the first, and
+  // the planner emitted an update against the sentinel id "(pending)". The
+  // script applies updates before creates, so that update hit a row that did
+  // not exist yet and rolled the whole import back.
+  const plan = planRosterImport(
+    [
+      { name: 'Alice', email: 'alice@lovelace.dev', phone: null, category: 'Investor' },
+      { name: 'Alice', email: 'alice@lovelace.dev', phone: '14155552671', category: 'Investor' },
+    ],
+    []
+  );
+
+  assert.equal(plan.updates.length, 0, 'a pending create must never yield an update');
+  for (const update of plan.updates) {
+    assert.notEqual(update.id, '(pending)');
+  }
+  assert.equal(plan.creates.length, 1);
+  // The phone from the duplicate is merged into the single create, so no
+  // contact detail from the roster is lost.
+  assert.equal(plan.creates[0].email, 'alice@lovelace.dev');
+  assert.equal(plan.creates[0].phone, '+14155552671');
+}
+
+function testRosterFixtureIdentitiesAreRefused() {
+  const plan = planRosterImport(
+    [
+      { name: 'Ada Lovelace', email: 'ada@lovelace.dev', phone: null, category: 'Investor' },
+      { name: 'Ghost', email: 'seed@blackbox-test.dev', phone: null, category: 'Investor' },
+      { name: 'Ghost', email: 'seed@example.com', phone: null, category: 'Investor' },
+      { name: 'Test User', email: 'real@lovelace.dev', phone: null, category: 'Investor' },
+      { name: 'Ghost', email: null, phone: '+15551234567', category: 'Investor' },
+    ],
+    []
+  );
+
+  assert.equal(plan.creates.length, 1, 'only the real person may be created');
+  assert.equal(plan.creates[0].email, 'ada@lovelace.dev');
+  assert.equal(plan.skipped.length, 4);
+  for (const skip of plan.skipped) {
+    assert.match(skip.reason, /reserved test\/fixture contact/);
+  }
 }
 
 function testDuplicateWithinOneRosterCollapsesToASingleCreate() {
@@ -224,6 +274,8 @@ function main() {
   testFillsMissingEmailOnAPhoneMatchedRow();
   testNeverOverwritesAContactDetailAlreadyOnFile();
   testNeverClaimsAnIdentifierAnotherRowOwns();
+  testDuplicateOfAPendingCreateNeverBecomesAnUpdate();
+  testRosterFixtureIdentitiesAreRefused();
   testDuplicateWithinOneRosterCollapsesToASingleCreate();
   testRerunOfAnAppliedRosterIsANoOp();
   testEveryPlannedCreateCarriesAtLeastOneContactIdentifier();

@@ -146,6 +146,18 @@ async function testRealPersonRule_sqlMatchesTypescript() {
       email: null,
       phone: `+1555${String(randomInt(0, 1e7)).padStart(7, '0')}`,
     },
+    // Non-normalized and malformed addresses: the SQL twin compared untrimmed
+    // values and took split_part(email,'@',2) — the SECOND segment — while the
+    // TS rule trims and reads the LAST segment. Both classified these rows
+    // differently, so a padded or double-'@' fixture counted in the list/COUNT
+    // while the in-memory filter rejected it.
+    { label: 'padded-fixture-domain', email: `  ${fixtureEmail(`${marker}-h`)}  `, phone: null },
+    { label: 'padded-reserved-domain', email: ` ${marker}-i@example.com `, phone: null },
+    { label: 'uppercase-fixture-domain', email: `${marker}-J@BLACKBOX-TEST.DEV`, phone: null },
+    { label: 'double-at-fixture', email: `${marker}-k@inner@blackbox-test.dev`, phone: null },
+    { label: 'double-at-real', email: `${marker}-l@inner@collectiveacademy.com`, phone: null },
+    { label: 'bare-invalid-domain', email: `${marker}-m@invalid`, phone: null },
+    { label: 'dotted-invalid-domain', email: `${marker}-n@host.invalid`, phone: null },
   ];
   try {
     const created = [];
@@ -182,7 +194,9 @@ async function testRealPersonRule_sqlMatchesTypescript() {
     const reals = created
       .filter(({ row }) => isRealWaitlistPerson(row))
       .map(({ seed }) => seed.label);
-    const expected = ['phone-only', 'email-only', 'both', 'blank-phone'];
+    // `double-at-real` counts on purpose: its LAST '@' segment is a real domain,
+    // so it is a real person. Its fixture twin `double-at-fixture` must not.
+    const expected = ['phone-only', 'email-only', 'both', 'blank-phone', 'double-at-real'];
     if (JSON.stringify(reals.sort()) !== JSON.stringify([...expected].sort())) {
       throw new Error(
         `Expected exactly ${JSON.stringify(expected)} to count, got ${JSON.stringify(reals)}`
