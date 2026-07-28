@@ -37,6 +37,57 @@ export async function createInitialCredit(userId: string) {
 }
 
 /**
+ * Monthly allowance granted to anyone who joined via an invite code — the
+ * "free pro" grant. $30/month, expiring at the end of the calendar month.
+ */
+export const INVITE_MONTHLY_CREDIT_CENTS = 3000;
+
+/** Start of the next UTC calendar month — the allowance's expiry AND its idempotency key. */
+function startOfNextUtcMonth(now = new Date()): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+}
+
+/**
+ * Top up an invite-code user's monthly allowance.
+ *
+ * Invited users get a recurring $30/month instead of hitting the subscribe
+ * gate: with a positive balance `remaining > 0`, so every existing credit check
+ * (worker `has_credits`, agent resume) passes untouched. That is why this grants
+ * CREDIT rather than faking a Subscription row — no Stripe identifiers are
+ * invented and no downstream billing path changes behaviour.
+ *
+ * Deliberately lazy: it runs on the usage read the front-end and worker already
+ * perform, so there is no scheduler to own. The grant expires at the month
+ * boundary and that same boundary is the idempotency key, so repeated reads
+ * inside a month are a no-op and each new month grants exactly once.
+ *
+ * No-ops for users without `usedInviteCode`.
+ */
+export async function ensureInviteMonthlyCredit(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { userId },
+    select: { usedInviteCode: true },
+  });
+  if (user === null || user.usedInviteCode === null) return;
+
+  const periodEnd = startOfNextUtcMonth();
+  const alreadyGranted = await prisma.credit.findFirst({
+    where: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+    select: { id: true },
+  });
+  if (alreadyGranted !== null) return;
+
+  await prisma.credit.create({
+    data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+  });
+  log.info('Granted invite-code monthly credit', {
+    userId,
+    amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+    expiresAt: periodEnd.toISOString(),
+  });
+}
+
+/**
  * Calculate total available (non-expired) credits for a user
  * Returns amount in dollars (cents / 100)
  */

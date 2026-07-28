@@ -62,6 +62,72 @@ describe('lib/supabase', () => {
     expect(localStorage.getItem('rose-session')).toBeNull();
   });
 
+  // RCA cement. Impersonated sessions are deliberately short-lived (1h), and the
+  // expiry branch above called clearSession() -> clearImpersonationState(), which
+  // deleted the STASHED ADMIN SESSION. That stash is the only way back from an
+  // account switch, so a routine expiry silently stranded the admin: the switcher
+  // pill disappeared and every admin-gated call lost its authority at the same
+  // moment, with no recovery path. An expiring impersonation must unwind, not
+  // detonate.
+  it('getSession restores the admin session when an impersonated session expires', () => {
+    const adminSession = {
+      access_token: 'admin-token',
+      refresh_token: 'admin-refresh',
+      expires_in: 7776000,
+      expires_at: Math.floor(Date.now() / 1000) + 7776000,
+      token_type: 'bearer',
+      user: { id: 'admin-1' },
+    };
+    const expiredImpersonated = {
+      access_token: 'target-token',
+      refresh_token: 'target-refresh',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id: 'target-1' },
+    };
+    localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
+    localStorage.setItem('rose-admin-session', JSON.stringify(adminSession));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({
+        userId: 'target-1',
+        name: 'Grace',
+        email: null,
+        phone: null,
+        isAdmin: false,
+      }),
+    );
+
+    // The admin is handed back their own session rather than being logged out.
+    expect(getSession()?.user?.id).toBe('admin-1');
+    expect(getSession()?.access_token).toBe('admin-token');
+    // Impersonation bookkeeping is unwound, not left dangling.
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
+  it('getSession still clears when BOTH the impersonated and stashed sessions expired', () => {
+    const stale = (id: string) => ({
+      access_token: `${id}-token`,
+      refresh_token: 'r',
+      expires_in: 0,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id },
+    });
+    localStorage.setItem('rose-session', JSON.stringify(stale('target-1')));
+    localStorage.setItem('rose-admin-session', JSON.stringify(stale('admin-1')));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
   it('getSession returns null on parse error', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     localStorage.setItem('rose-session', 'not-json');

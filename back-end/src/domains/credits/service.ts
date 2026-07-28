@@ -4,6 +4,7 @@ import {
   getSubscriptionTier,
   getUpgradeOptions,
   createInitialCredit,
+  ensureInviteMonthlyCredit,
 } from '../../providers/credits';
 import { createLogger } from '../../providers/logger';
 import { isAdminUser } from '../../utils/adminAccess';
@@ -16,8 +17,15 @@ const log = createLogger('Credits');
  * Admins (ADMIN_USER_IDS — Andy + Tamy) are never blocked by the free-credit / subscription gate.
  * We surface an additive `unlimited` flag (rather than faking the balance) that the worker credit
  * check honors so `has_credits` is always true for them. Blast radius = 2 userIds.
+ *
+ * Invite-code users are topped up to their recurring monthly allowance first, so
+ * they clear the same credit checks without a subscription.
  */
 export async function getUsageSummary(userId: string) {
+  // Top up BEFORE reading the balance, so the grant rides the usage check the
+  // front-end and worker already make — no scheduler, and no credit-gate change.
+  await ensureInviteMonthlyCredit(userId);
+
   const [usage, tier] = await Promise.all([getUserUsage(userId), getSubscriptionTier(userId)]);
 
   return {

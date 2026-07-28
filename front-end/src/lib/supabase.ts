@@ -52,6 +52,46 @@ export function clearImpersonationState(): void {
   if (hadState) notifyImpersonationChanged();
 }
 
+/**
+ * Unwind an EXPIRED impersonated session back to the administrator.
+ *
+ * Impersonated sessions are intentionally short-lived (1h), so their expiry is
+ * routine, not a logout. Promote the stashed admin session back to the active
+ * one and drop the impersonation bookkeeping; returns the restored session, or
+ * null when this is an ordinary expiry with no impersonation in flight (the
+ * caller should fall back to its normal expiry handling).
+ *
+ * Lives here rather than in lib/impersonation.ts because getSession() runs on
+ * every auth read and impersonation.ts imports from this module — routing it the
+ * other way would create an import cycle.
+ */
+export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
+  if (typeof window === 'undefined') return null;
+  const stashed = window.localStorage.getItem(ADMIN_SESSION_KEY);
+  if (stashed === null) return null;
+
+  let adminSession: Session;
+  try {
+    adminSession = JSON.parse(stashed) as Session;
+  } catch {
+    clearImpersonationState();
+    return null;
+  }
+
+  // A stashed admin session that has ALSO expired is not a recovery path.
+  if (adminSession.expires_at && adminSession.expires_at * 1000 < Date.now()) {
+    clearImpersonationState();
+    return null;
+  }
+
+  window.localStorage.removeItem(ADMIN_SESSION_KEY);
+  window.localStorage.removeItem(IMPERSONATION_KEY);
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(adminSession));
+  notifyImpersonationChanged();
+  notifyAuthSessionChanged();
+  return adminSession;
+}
+
 // API Configuration
 const API_BASE_URL = BACKEND_BASE_URL;
 
@@ -133,6 +173,17 @@ export function getSession(): Session | null {
 
     // Check if expired
     if (session.expires_at && session.expires_at * 1000 < Date.now()) {
+      // While impersonating, the expired session belongs to the account an admin
+      // switched INTO — and impersonated sessions are deliberately short-lived.
+      // clearSession() would call clearImpersonationState() and destroy the
+      // stashed administrator session, which is the ONLY way back: the admin
+      // loses the switcher pill and every admin-gated call in one step, with no
+      // recovery path. Unwind to the administrator instead of wiping them out.
+      const restoredAdminSession = restoreAdminSessionOnImpersonationExpiry();
+      if (restoredAdminSession !== null) {
+        console.log('[Supabase] Impersonated session expired, restored admin session');
+        return restoredAdminSession;
+      }
       console.log('[Supabase] Session expired, clearing');
       clearSession();
       return null;
