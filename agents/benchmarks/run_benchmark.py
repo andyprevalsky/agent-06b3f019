@@ -5948,6 +5948,50 @@ def _webdecoy_exact_score_from_network_log(index_path: Path) -> Optional[float]:
     return scored_entries[-1][1]
 
 
+def _webdecoy_engine_version_from_network_log(index_path: Path) -> Optional[str]:
+    """Read the FCaptcha engine version the demo page advertised ("Running vX.Y.Z").
+
+    The gated score is produced by a third-party detector we do not control, so a
+    vendor release can move it with no change on our side. Capturing the version
+    next to the score is what makes those two cases distinguishable after the fact.
+    """
+    if not index_path.exists():
+        return None
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    entries = index.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if "webdecoy.com/product/fcaptcha-demo" not in str(entry.get("url") or ""):
+            continue
+        body_file = entry.get("body_file")
+        if not isinstance(body_file, str) or not body_file:
+            continue
+        try:
+            body = (index_path.parent / body_file).read_text(errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"Running v([0-9]+(?:\.[0-9]+)*)", body)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _webdecoy_engine_version_from_recordings(data: dict) -> Optional[str]:
+    for index_path in _webdecoy_network_recording_paths(data):
+        version = _webdecoy_engine_version_from_network_log(index_path)
+        if version is not None:
+            return version
+    return None
+
+
 def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     scores: List[float] = []
     for index_path in _webdecoy_network_recording_paths(data):
@@ -6002,10 +6046,24 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # code change — the current external anti-bot floor (Steel proxy IP reputation)
     # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
     WEBDECOY_RISK_RATCHET = 0.163
+    # Engine version is diagnostic only — it NEVER relaxes the comparison above.
+    # It exists so a vendor recalibration is visible in the failure line instead of
+    # being misread as an anti-detection regression on our side. Reference points:
+    # FCaptcha v1.14.0/v1.15.0 scored a bit-identical 0.15595 across 14 runs and 13
+    # distinct egress IPs (2026-07-18..07-26); the v1.18.0 release moved the same
+    # unchanged client to 0.18296 while every reported categoryScore sat at 0.
     if final_score > WEBDECOY_RISK_RATCHET:
+        engine_version = _webdecoy_engine_version_from_recordings(data)
+        version_note = (
+            f" [FCaptcha engine v{engine_version}; a version change here means the third-party"
+            f" detector was recalibrated — compare against the version on the last passing run"
+            f" before treating this as an anti-detection regression]"
+            if engine_version
+            else ""
+        )
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
-            f"(lower = more human; this gate only ratchets down, never up)"
+            f"(lower = more human; this gate only ratchets down, never up){version_note}"
         )
     return True, None
 

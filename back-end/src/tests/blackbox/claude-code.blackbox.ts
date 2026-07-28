@@ -493,23 +493,42 @@ function testResolveAuthEnvs_apiKeyFallbackRecordsSharedSource() {
 }
 
 function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
-  let threw = false;
+  let message = '';
   try {
     resolveClaudeCodeAuthEnvs(null, 'sk-ant-api03-key', true);
-  } catch {
-    threw = true;
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
   }
-  assert(threw, 'throws when no OAuth credential and api-key is on cooldown');
+  assert(message !== '', 'throws when no OAuth credential and api-key is on cooldown');
+  // The two throw branches (external funding vs local config gap) demand
+  // different remediation, so the message must name which one fired instead
+  // of forcing a DB/env investigation to tell them apart.
+  assert(
+    message.includes('configured but on its out-of-credits/bad-key cooldown'),
+    `cooldown throw must name the cooldown state, got: ${message}`
+  );
+  assert(
+    !message.includes('is not set'),
+    `cooldown throw must not claim the key is unset, got: ${message}`
+  );
 }
 
 function testResolveAuthEnvs_noCredsNoKeyThrows() {
-  let threw = false;
+  let message = '';
   try {
     resolveClaudeCodeAuthEnvs(null, undefined, false);
-  } catch {
-    threw = true;
+  } catch (err) {
+    message = err instanceof Error ? err.message : String(err);
   }
-  assert(threw, 'throws when no OAuth credential and no api-key configured');
+  assert(message !== '', 'throws when no OAuth credential and no api-key configured');
+  assert(
+    message.includes('ANTHROPIC_API_KEY is not set'),
+    `unset-key throw must name the missing key, got: ${message}`
+  );
+  assert(
+    !message.includes('cooldown'),
+    `unset-key throw must not blame a cooldown, got: ${message}`
+  );
 }
 
 async function testCreate_noAuth() {

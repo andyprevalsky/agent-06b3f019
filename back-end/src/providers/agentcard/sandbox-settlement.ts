@@ -1,5 +1,6 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../database';
+import { isAdminUser } from '../../utils/adminAccess';
 import { createCardProviderForAgent } from '../card-provider';
 import { callOrgTool } from './org-runtime';
 
@@ -9,10 +10,14 @@ export interface AgentCardSandboxSettlementInput {
   merchant: string;
 }
 
+/**
+ * `stripePaymentIntentId` is null for a company-funded ADMIN purchase, which has no Stripe hold by
+ * design. Callers must treat it as optional rather than assuming a capture exists.
+ */
 export interface AgentCardSandboxSettlementResult {
   purchaseId: string;
   cardId: string;
-  stripePaymentIntentId: string;
+  stripePaymentIntentId: string | null;
 }
 
 export interface HeldPurchase {
@@ -180,8 +185,12 @@ export async function settleAgentCardSandboxPayment(
     if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
 
     // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we
-    // cannot later capture.
-    if (purchase.stripePaymentIntentId === null) {
+    // cannot later capture. ADMIN purchases are the one legitimate exception: `issueAdminCompanyCard`
+    // funds the card entirely from the AgentCard org transfer and deliberately never authorizes a
+    // Stripe hold, so `stripePaymentIntentId` is null BY DESIGN and there is nothing to capture.
+    // For every other user the hold is authorized BEFORE the mint, so a HELD purchase carrying a card
+    // but no payment intent is genuinely corrupt and must not be charged.
+    if (purchase.stripePaymentIntentId === null && !isAdminUser(purchase.userId)) {
       throw new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502);
     }
 

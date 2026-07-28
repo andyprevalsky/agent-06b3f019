@@ -170,9 +170,17 @@ export function resolveClaudeCodeAuthEnvs(
     envs.ANTHROPIC_API_KEY = anthropicApiKey;
     return envs;
   }
+  // Name WHICH fallback state failed. "unset or on cooldown" forced every
+  // triage of this error into DB archaeology to tell a missing key (config
+  // gap, fixable here) apart from an out-of-credits/bad-key cooldown
+  // (external funding, not fixable here). The caller already resolved both
+  // inputs, so the distinction is free.
+  const fallbackState = anthropicApiKey
+    ? 'ANTHROPIC_API_KEY is configured but on its out-of-credits/bad-key cooldown'
+    : 'ANTHROPIC_API_KEY is not set';
   throw new Error(
     'No Claude Code credentials available: no synced user credentials, no available pool tokens, ' +
-      'and no usable ANTHROPIC_API_KEY fallback (unset or on cooldown)'
+      `and no usable ANTHROPIC_API_KEY fallback (${fallbackState})`
   );
 }
 

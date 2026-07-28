@@ -5482,6 +5482,88 @@ def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_
         assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
 
 
+def test_webdecoy_biometrics_failure_reports_third_party_engine_version():
+    """An over-ratchet failure must name the FCaptcha engine version that produced it.
+
+    The gated number comes from a detector we do not control, so a vendor release can
+    move it with zero change on our side. On 2026-07-28 exactly that happened: FCaptcha
+    v1.14.0/v1.15.0 returned a bit-identical 0.15595 across 14 runs and 13 distinct
+    egress IPs, then v1.18.0 returned 0.18296 for the same unchanged client while every
+    reported categoryScore sat at 0. Without the version in the failure line that reads
+    as an anti-detection regression and costs a full RCA cycle. The version is diagnostic
+    ONLY — it must never relax the ratchet comparison itself.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    def _build(tmp: str, score: float, engine_version: str) -> dict:
+        network_dir = Path(tmp) / "recording" / "network"
+        network_dir.mkdir(parents=True)
+        score_file = network_dir / "0001_score.json"
+        score_file.write_text(
+            json.dumps({"action": "form_submit", "recommendation": "allow", "score": score, "success": True})
+        )
+        page_file = network_dir / "0002_page.txt"
+        page_file.write_text(
+            "<html><body><a href=https://github.com/WebDecoy/FCaptcha/releases/tag/"
+            f"v{engine_version}>Running v{engine_version}</a></body></html>"
+        )
+        (network_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "method": "GET",
+                            "url": "https://webdecoy.com/product/fcaptcha-demo/",
+                            "response_ts_ms": 1,
+                            "body_file": page_file.name,
+                        },
+                        {
+                            "method": "POST",
+                            "url": "https://fcaptcha.webdecoy.com/api/score",
+                            "response_ts_ms": 123,
+                            "body_file": score_file.name,
+                        },
+                    ]
+                }
+            )
+        )
+        return {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked the checkbox mode verification control. "
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                        "Final visible FCaptcha Risk Score: 0.18."
+                    ),
+                    "metadata": {"network_recording_path": str(network_dir / "index.json")},
+                }
+            ]
+        }
+
+    # Over-ratchet: the failure line must carry the engine version for triage.
+    with tempfile.TemporaryDirectory() as tmp:
+        passed, reason = _evaluate_webdecoy_biometrics_result(_build(tmp, 0.18296, "1.18.0"))
+        assert passed is False
+        assert "0.183" in reason
+        assert "v1.18.0" in reason
+        assert "ratchet" in reason.lower()
+
+    # The version note must NOT buy a pass — a recalibrated engine still fails the ratchet.
+    with tempfile.TemporaryDirectory() as tmp:
+        passed, _ = _evaluate_webdecoy_biometrics_result(_build(tmp, 0.42, "99.0.0"))
+        assert passed is False
+
+    # Under the ratchet still passes cleanly, with no diagnostic noise appended.
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _evaluate_webdecoy_biometrics_result(_build(tmp, 0.1559512195121951, "1.15.0")) == (True, None)
+
+
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
     """Minted auth-bundle probes should include the strict WebDecoy score gate by default."""
     import os
@@ -10429,6 +10511,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_biometrics_exact_network_score",
         test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
+    )
+    r.record(
+        "webdecoy_biometrics_engine_version_in_failure",
+        test_webdecoy_biometrics_failure_reports_third_party_engine_version,
     )
     r.record(
         "auth_bundle_biometrics_gate_env",

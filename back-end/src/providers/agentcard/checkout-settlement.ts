@@ -15,6 +15,7 @@
  * merchant (no PCI scope, and live-mode raw-PAN tokenization is blocked anyway).
  */
 
+import { isAdminUser } from '../../utils/adminAccess';
 import { createCardProviderForAgent } from '../card-provider';
 import {
   AgentCardSandboxSettlementError,
@@ -31,10 +32,14 @@ export interface CheckoutSettlementInput {
   amountCents: number;
 }
 
+/**
+ * `stripePaymentIntentId` is the USER-side hold on the purchase, which is null for a company-funded
+ * ADMIN purchase (no personal charge was ever authorized). It is not the Checkout capture.
+ */
 export interface CheckoutSettlementResult {
   purchaseId: string;
   cardId: string;
-  stripePaymentIntentId: string;
+  stripePaymentIntentId: string | null;
 }
 
 interface CheckoutSettlementDependencies {
@@ -92,7 +97,10 @@ export async function settleRoseCardStripeCheckout(
     }
     if (last4 !== normalizedLast4) continue;
 
-    if (purchase.stripePaymentIntentId === null) {
+    // A company-funded ADMIN purchase never authorized a personal hold, so a null payment intent is
+    // expected there. For every other user the hold precedes the mint, so its absence means the row
+    // is corrupt and must not be reconciled as paid.
+    if (purchase.stripePaymentIntentId === null && !isAdminUser(purchase.userId)) {
       throw new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502);
     }
 
