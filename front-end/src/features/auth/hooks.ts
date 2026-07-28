@@ -15,6 +15,7 @@ import {
 } from '@/lib/supabase';
 import { checkNeedsInviteCode } from '@/lib/api';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
+import { getImpersonatedAccount } from '@/lib/impersonation';
 
 import { sendOTP, verifyOTP } from './api';
 import { initAuthSession, logAuth } from './hooks/initAuthSession';
@@ -172,6 +173,20 @@ function useAuthActions(setters: AuthStateSetters) {
     async (currentSession: Session | null, currentUser: User | null) => {
       if (!currentSession || isAnonymousUser(currentUser)) {
         setIsFullySignedIn(false);
+        return;
+      }
+      // The invite gate asks "has THIS account redeemed a code?" — a question
+      // about signup, not about authorization. While an admin is impersonating,
+      // the answer belongs to the account being inspected, but the person using
+      // the app is an authorized operator. Letting the target's answer win is
+      // what stranded admins: isFullySignedIn gates message sending
+      // (useMessageSending), goal submission (useTerminalAgents), and the user
+      // object the Terminal renders with — so switching into any not-yet-invited
+      // account produced a blacked-out waitlist modal, no usable terminal, and no
+      // way to act as the account that was just switched into.
+      if (getImpersonatedAccount() !== null) {
+        setIsFullySignedIn(true);
+        logAuth('Invite check skipped: impersonating');
         return;
       }
       try {

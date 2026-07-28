@@ -1,7 +1,8 @@
 /**
  * STATE MACHINE: WaitlistGate
  *
- * [HIDDEN] <-- auth loading, signed out, anonymous, or fully signed in
+ * [HIDDEN] <-- auth loading, signed out, anonymous, fully signed in, OR an
+ *              admin is impersonating (the gate must never trap an operator)
  *     |
  *     v (authenticated non-anonymous user without a redeemed invite code)
  * [WAITLIST] -- "You're On The Waitlist!" + invite code entry
@@ -16,15 +17,31 @@
  * waitlist view until a valid invite code is redeemed.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { useInviteCode as redeemInviteCode } from '@/lib/api';
+import { getImpersonatedAccount, IMPERSONATION_CHANGED_EVENT } from '@/lib/impersonation';
 import { AUTH_SESSION_CHANGED_EVENT } from '@/lib/supabase';
 
 import { useAuth } from '../hooks';
 
 import AuthLogo from './AuthLogo';
+
+/** Whether an admin is currently viewing the app as another account. */
+function useIsImpersonating(): boolean {
+  const [impersonating, setImpersonating] = useState(() => getImpersonatedAccount() !== null);
+  useEffect(() => {
+    const sync = () => setImpersonating(getImpersonatedAccount() !== null);
+    window.addEventListener(IMPERSONATION_CHANGED_EVENT, sync);
+    window.addEventListener('storage', sync);
+    return () => {
+      window.removeEventListener(IMPERSONATION_CHANGED_EVENT, sync);
+      window.removeEventListener('storage', sync);
+    };
+  }, []);
+  return impersonating;
+}
 
 const MODAL_STYLE = {
   position: 'fixed',
@@ -45,11 +62,18 @@ const WaitlistGate = () => {
   const { isAuthenticated, isAnonymous, isFullySignedIn, loading, signOut } = useAuth({
     passive: true,
   });
+  const impersonating = useIsImpersonating();
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const open = !loading && isAuthenticated && !isAnonymous && !isFullySignedIn;
+  // An admin inspecting someone else's account is not a user signing up. Without
+  // this, switching into any account that has not redeemed an invite code opens
+  // this modal over the entire app: because it is a modal Radix Dialog, its focus
+  // guards and overlay make the admin switcher pill unreachable, hide admin
+  // views, and block the terminal — so the admin cannot act as the account they
+  // switched into, and cannot switch back either.
+  const open = !loading && isAuthenticated && !isAnonymous && !isFullySignedIn && !impersonating;
   if (!open) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
