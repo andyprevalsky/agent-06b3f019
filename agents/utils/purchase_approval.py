@@ -27,7 +27,17 @@ _CHECKOUT_TOKEN_PAIRS = {
 }
 _CHECKOUT_LEADING_TOKENS = {"order", "orders", "pay"}
 
-_PRODUCT_QUERY_KEYS = {"id", "item", "item_id", "pid", "product", "product_id", "sku"}
+# Stored separator-free so one entry covers every spelling of the same key.
+# Merchants split roughly evenly between `item_id`, `itemId`, and `item-id`; the
+# comparison below strips `_`/`-` so all three resolve to `itemid`. Matching the
+# raw key rejected every camelCase spelling, which is the dominant web
+# convention (DoorDash's canonical item URL uses `?itemId=`).
+_PRODUCT_QUERY_KEYS = {"id", "item", "itemid", "pid", "product", "productid", "sku", "skuid"}
+
+
+def _is_product_query_key(key: str) -> bool:
+    """True when `key` names a product identifier in any separator convention."""
+    return key.lower().replace("_", "").replace("-", "") in _PRODUCT_QUERY_KEYS
 _PRODUCT_ROUTE_MARKERS = {
     "dp",
     "ip",
@@ -124,7 +134,7 @@ def _looks_like_product_route(value: str) -> bool:
     if any(segment.startswith("buy-") for segment in path_segments) and "shop" in path_segments:
         return True
     return any(
-        key.lower() in _PRODUCT_QUERY_KEYS and query_value.strip() for key, query_value in parse_qsl(parsed.query)
+        _is_product_query_key(key) and query_value.strip() for key, query_value in parse_qsl(parsed.query)
     )
 
 
@@ -144,7 +154,7 @@ def validate_product_detail_url(value: Any) -> str:
         raise ValueError("product_url must link to the product page, not cart or checkout")
 
     path_has_detail = bool(parsed.path.strip("/"))
-    query_has_product_id = any(key.lower() in _PRODUCT_QUERY_KEYS and value.strip() for key, value in query_pairs)
+    query_has_product_id = any(_is_product_query_key(key) and value.strip() for key, value in query_pairs)
     if not path_has_detail and not query_has_product_id:
         raise ValueError("product_url must identify a product, not the merchant homepage")
     return text
