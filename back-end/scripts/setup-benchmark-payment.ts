@@ -2,11 +2,23 @@ import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
+import { isAdminUser } from '../src/utils/adminAccess';
 import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-const DEFAULT_BENCHMARK_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+/**
+ * A NON-ADMIN synthetic user. Admins are routed to `issueAdminCompanyCard` (company-funded, no
+ * Stripe hold), which makes the lifecycle benchmarks' `stripeHold` assertions unreachable.
+ */
+const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
+/**
+ * Non-admin benchmark users are subject to the normal credit gate (`unlimited` is admin-only), so
+ * a depleted fixture user would stall every agent at OUT_OF_CREDITS. Top the balance up to this
+ * much headroom above recorded usage instead of deleting ledger rows.
+ */
+const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 
 async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
   const cardholderId =
@@ -32,6 +44,51 @@ async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Pr
   });
   console.log(
     `Seeded AgentCard org cardholder fixture ${cardholderId} for benchmark user ${userId}`
+  );
+}
+
+/**
+ * Keep the fixture user solvent without destroying its ledger. `getUserUsage` computes
+ * `remaining = credits - toolUsage`, so a synthetic user accumulates usage across runs and would
+ * eventually be gated at OUT_OF_CREDITS. Add only the deficit, so repeated seeding is idempotent.
+ */
+async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
+  const now = new Date();
+  const [creditTotal, usageTotal] = await Promise.all([
+    prisma.credit.aggregate({
+      where: { userId, OR: [{ expirationDate: null }, { expirationDate: { gt: now } }] },
+      _sum: { amountCents: true },
+    }),
+    prisma.toolUsage.aggregate({ where: { userId }, _sum: { totalCostCents: true } }),
+  ]);
+  const availableCents = creditTotal._sum.amountCents ?? 0;
+  const usedCents = usageTotal._sum.totalCostCents ?? 0;
+  const deficitCents = usedCents + BENCHMARK_CREDIT_HEADROOM_CENTS - availableCents;
+  if (deficitCents <= 0) {
+    console.log(
+      `Benchmark credit balance already sufficient for ${userId} ` +
+        `($${((availableCents - usedCents) / 100).toFixed(2)} remaining)`
+    );
+    return;
+  }
+  await prisma.credit.create({ data: { userId, amountCents: deficitCents, expirationDate: null } });
+  console.log(
+    `Topped up benchmark credits for ${userId} by $${(deficitCents / 100).toFixed(2)} ` +
+      `(used $${(usedCents / 100).toFixed(2)})`
+  );
+}
+
+/**
+ * The lifecycle benchmarks assert a personal Stripe hold, which only the non-admin funding path
+ * produces. Seeding an admin here would silently re-route every benchmark purchase to
+ * `issueAdminCompanyCard` and make those assertions unsatisfiable, so fail loudly instead.
+ */
+function assertNonAdminBenchmarkUser(userId: string): void {
+  if (!isAdminUser(userId)) return;
+  throw new Error(
+    `Refusing to seed the payment-lifecycle fixture for admin user ${userId}: admins mint ` +
+      'company-funded cards with no Stripe hold, so the lifecycle benchmarks can never pass. ' +
+      `Use the dedicated non-admin benchmark user (${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID}).`
   );
 }
 
@@ -81,15 +138,26 @@ async function main(): Promise<void> {
   assertBenchmarkOrgCardholderPair();
   const userId =
     argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
+  assertNonAdminBenchmarkUser(userId);
   const stripe = new Stripe(requireStripeTestKey(), { apiVersion: STRIPE_API_VERSION });
   const prisma = new PrismaClient();
 
   try {
+    // `offWaitlistAt` keeps the fixture user past the invite gate. Without it the benchmark's FE
+    // link (`?agent-id=…`) renders the "You're On The Waitlist!" overlay on top of the run, which
+    // makes every human verification of a benchmark agent look broken.
+    const onboarded = {
+      isAnonymous: false,
+      name: 'Rose Labs Benchmark Payer',
+      offWaitlistAt: new Date(),
+      onboardingCompletedAt: new Date(),
+    };
     await prisma.user.upsert({
       where: { userId },
-      update: { isAnonymous: true },
-      create: { userId, isAnonymous: true },
+      update: onboarded,
+      create: { userId, ...onboarded },
     });
+    await ensureBenchmarkCredits(prisma, userId);
 
     const customer = await stripe.customers.create({
       name: 'Rose Labs Benchmark User',

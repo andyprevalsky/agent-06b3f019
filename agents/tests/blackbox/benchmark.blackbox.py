@@ -1039,6 +1039,86 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
 
+def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
+    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+
+    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
+    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
+    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
+    benchmark user makes that assertion unreachable by construction. Three places must agree on
+    the identity — the harness run-user override, the local stack's fixture seeding, and the
+    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    """
+    import re
+
+    from benchmarks import local
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        AGENT_PAYMENT_LIFECYCLE_TASK_NAMES,
+        AGENT_PAYMENT_LIFECYCLE_USER_ID,
+        USER_ID,
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
+    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
+        "benchmark payment identity drifted between the harness and the back-end: "
+        f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
+    )
+    assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
+    assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
+    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+
+    for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
+        task = get_task_by_name(name)
+        assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
+        assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
+            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding "
+            "path can produce"
+        )
+        assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
+        assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+
+
+def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
+    """The admin funding path keeps a benchmark, and it only works if the stack grants admin.
+
+    `isAdminUser` honors extra ids ONLY from `ADMIN_USER_IDS_EXTRA`. Nothing else in the harness
+    sets it, so without this wiring `gate-subscription-card-mint-admin-bypass` ran as an ordinary
+    user and silently exercised the charged path — the exact opposite of what it asserts.
+    """
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+    from benchmarks.run_benchmark import (
+        ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
+        AGENT_PAYMENT_LIFECYCLE_TASK_NAMES,
+        GATE_FIXTURE_TASK_USER_IDS,
+        PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME,
+    )
+
+    assert local.ADMIN_BYPASS_TASK_NAME == PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME
+    assert local.ADMIN_BYPASS_USER_ID == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    assert GATE_FIXTURE_TASK_USER_IDS[local.ADMIN_BYPASS_TASK_NAME] == local.ADMIN_BYPASS_USER_ID
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
+        local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
+        assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
+
+    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
+        local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
+        assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
+
+
 def test_payment_receipt_validation_allows_partial_live_receipts():
     """Live merchant receipts should validate stable fields without pinning tax/price drift."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -10764,6 +10844,14 @@ async def run_all_tests():
     r.record(
         "agentcard_lifecycle_bootstrap_float",
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
+    )
+    r.record(
+        "agent_payment_lifecycle_user_is_non_admin",
+        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+    )
+    r.record(
+        "admin_bypass_gate_grants_synthetic_admin",
+        test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
     )
     r.record(
         "toast_payment_approval_complete_receipt",

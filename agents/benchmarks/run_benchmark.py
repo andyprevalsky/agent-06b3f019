@@ -189,6 +189,21 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
+# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
+# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
+# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
+# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
+# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
+# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
+# back-end/scripts/setup-benchmark-payment.ts. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+}
 # Repeatable-cache baselines from local smoke run
 # 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
 # agent identity + call site and excludes one-shot calls. Per the one-way
@@ -1780,7 +1795,10 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
             headers=headers,
-            json={"userId": USER_ID, "action": action},
+            # The AgentCard integration must be reset/completed for the user the task actually runs
+            # as. Hardcoding the default benchmark user left the run user's integration untouched,
+            # so the setup fixture silently configured the wrong account.
+            json={"userId": _current_benchmark_user_id(), "action": action},
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
@@ -7281,6 +7299,10 @@ async def run_single_task(
         os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
     elif task.name in GATE_FIXTURE_TASK_USER_IDS:
         os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]
+    elif task.name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
+        # Non-admin identity: the admin funding path mints a company-funded card with no personal
+        # Stripe hold, which these tasks explicitly assert. See AGENT_PAYMENT_LIFECYCLE_USER_ID.
+        os.environ["BENCHMARK_RUN_USER_ID"] = AGENT_PAYMENT_LIFECYCLE_USER_ID
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)

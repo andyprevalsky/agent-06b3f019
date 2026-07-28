@@ -2829,6 +2829,28 @@
         "openKinds": []
       }
     },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+    },
     "bench": "pipeline-e2e",
     "group": "daily",
     "min_steps": {
@@ -2930,6 +2952,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3034,6 +3078,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3161,6 +3227,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e"
   },

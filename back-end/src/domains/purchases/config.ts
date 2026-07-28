@@ -49,6 +49,20 @@ export const AGENTCARD_COMPANY_FLOW_RETRY_MS = parsePositiveIntEnv(
 );
 const BENCHMARK_KYC_REQUIRED_USER_ID = '00000000-0000-4000-8000-000000000103';
 
+/**
+ * Dedicated synthetic identity for the AgentCard payment-lifecycle benchmarks
+ * (`agent-payment-test-shop`, `-setup-resume`, `-idempotent-abandonment`, `-abandonment`).
+ *
+ * It MUST stay OUT of `ADMIN_USER_IDS` / `ADMIN_USER_IDS_EXTRA`: `resolveAndIssuePurchaseCard`
+ * routes admins to `issueAdminCompanyCard`, which mints off the AgentCard org transfer and never
+ * authorizes a personal Stripe hold. Those benchmarks assert the real end-user lifecycle
+ * (hold -> mint -> capture -> clear/refund), so running them as an admin makes their
+ * `stripeHold` assertions unsatisfiable by construction. Seeded by
+ * `back-end/scripts/setup-benchmark-payment.ts`; the agents harness runs those tasks as this user.
+ * The admin funding path keeps its own benchmark (`gate-subscription-card-mint-admin-bypass`).
+ */
+export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106';
+
 function benchmarkModeEnabled(): boolean {
   const enabled = new Set(['1', 'true', 'yes', 'on']);
   return (

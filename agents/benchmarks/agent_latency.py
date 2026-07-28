@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import json
 import os
 import re
@@ -64,8 +65,35 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-WORKER_LOG = os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
-BACKEND_LOG = os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
+
+
+def _log_paths_from_env(var: str, default: str) -> List[str]:
+    """
+    Resolve log locations, preferring an explicit env override.
+
+    An ISOLATED benchmark stack (`scripts/run-bench`) does not write to the default single-process
+    log files — it writes `<run-dir>/logs/backend.log` plus one `worker.N.log` PER worker process.
+    Pointing this tool at the default paths silently produced "No log lines found" for every failed
+    benchmark, so the runner exports these vars. Accepts a comma/os.pathsep-separated list of paths
+    or globs; every match is read.
+    """
+    raw = os.environ.get(var, "").strip()
+    if raw == "":
+        return [default]
+    patterns = [p.strip() for p in raw.replace(os.pathsep, ",").split(",") if p.strip()]
+    resolved: List[str] = []
+    for pattern in patterns:
+        matches = sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
+        resolved.extend(m for m in matches if m not in resolved)
+    return resolved or [default]
+
+
+WORKER_LOGS = _log_paths_from_env(
+    "NAVI_WORKER_LOGS", os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
+)
+BACKEND_LOGS = _log_paths_from_env(
+    "NAVI_BACKEND_LOGS", os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
+)
 RESEARCH_LOG = os.path.join(REPO_ROOT, "research", "research-logs.log")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -151,59 +179,65 @@ class _RawEvent:
 
 
 def _read_worker_raw() -> List[_RawEvent]:
-    if not os.path.exists(WORKER_LOG):
-        return []
     out: List[_RawEvent] = []
-    with open(WORKER_LOG, errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ts_str = d.get("timestamp")
-            if not ts_str:
-                continue
-            out.append(_RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d))
+    # A benchmark stack runs many worker PROCESSES, each with its own log; one agent's spans are
+    # split across them, so every file must be merged and re-sorted by timestamp.
+    for path in WORKER_LOGS:
+        if not os.path.exists(path):
+            continue
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_str = d.get("timestamp")
+                if not ts_str:
+                    continue
+                out.append(_RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d))
+    out.sort(key=lambda event: event.ts)
     return out
 
 
 def _read_backend_raw() -> List[_RawEvent]:
-    if not os.path.exists(BACKEND_LOG):
-        return []
     out: List[_RawEvent] = []
     # [2026-04-17T21:07:35.352Z] INFO [HTTP] message key=value key=value
     head = re.compile(
         r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
     )
-    with open(BACKEND_LOG, errors="replace") as f:
-        for raw in f:
-            line = ANSI_RE.sub("", raw).rstrip("\n")
-            m = head.match(line)
-            if not m:
-                continue
-            ts = parse_ts(m.group("ts"))
-            rest = m.group("rest")
-            # First token (before a space followed by `key=`) is the message;
-            # the remainder is k=v pairs.
-            mm = re.match(r"(?P<msg>.*?)(?=\s+\w+=)(?P<kv>.*)$", rest)
-            if mm:
-                msg = mm.group("msg").strip()
-                kv_str = mm.group("kv")
-            else:
-                msg = rest.strip()
-                kv_str = ""
-            data: Dict[str, Any] = {
-                "level": m.group("level"),
-                "component": m.group("comp"),
-                "message": msg,
-            }
-            # Extract k=value pairs (greedy value until next `\s\w+=` or EOL)
-            for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
-                data[km.group(1)] = km.group(2).strip()
-            out.append(_RawEvent(ts, "backend", msg, data))
+    for path in BACKEND_LOGS:
+        if not os.path.exists(path):
+            continue
+        with open(path, errors="replace") as f:
+            for raw in f:
+                line = ANSI_RE.sub("", raw).rstrip("\n")
+                m = head.match(line)
+                if not m:
+                    continue
+                ts = parse_ts(m.group("ts"))
+                rest = m.group("rest")
+                # First token (before a space followed by `key=`) is the message;
+                # the remainder is k=v pairs.
+                mm = re.match(r"(?P<msg>.*?)(?=\s+\w+=)(?P<kv>.*)$", rest)
+                if mm:
+                    msg = mm.group("msg").strip()
+                    kv_str = mm.group("kv")
+                else:
+                    msg = rest.strip()
+                    kv_str = ""
+                data: Dict[str, Any] = {
+                    "level": m.group("level"),
+                    "component": m.group("comp"),
+                    "message": msg,
+                }
+                # Extract k=value pairs (greedy value until next `\s\w+=` or EOL)
+                for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
+                    data[km.group(1)] = km.group(2).strip()
+                out.append(_RawEvent(ts, "backend", msg, data))
+    out.sort(key=lambda event: event.ts)
     return out
 
 
