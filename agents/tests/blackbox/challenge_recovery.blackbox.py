@@ -277,6 +277,47 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
     )
 
 
+def test_challenge_page_classifier_detects_non_cloudflare_vendors():
+    """HTTP-200 interstitials from non-Cloudflare vendors are still challenges.
+
+    These walls return 200 with benign title/body, so only the HTML fingerprint
+    can catch them. When the classifier matched Cloudflare markers only, a
+    DataDome interstitial read as a clean page: `recover_from_challenge` reported
+    success, the caller re-probed, and one Expedia run burned four cycles / 312s
+    looping on false recoveries. Vendor coverage here is kept at parity with
+    `_CHALLENGE_COOKIE_RE`.
+    """
+    datadome = (
+        '<html><head><title>expedia.com</title></head><body>'
+        '<div id="ddchallengebody"></div>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "</body></html>"
+    )
+    assert page_looks_challenged(status=200, title="expedia.com", body_text="", html=datadome)
+    assert page_looks_challenged(
+        status=200,
+        title="",
+        body_text="loading",
+        html='<script src="//client.perimeterx.net/px.js"></script>',
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="",
+        body_text="loading",
+        html='<iframe src="/_Incapsula_Resource?SWKMTFSR=1"></iframe>',
+    )
+
+
+def test_challenge_page_classifier_ignores_incidental_captcha_prose():
+    """Widening vendor coverage must not flag pages that merely discuss captchas."""
+    assert not page_looks_challenged(
+        status=200,
+        title="Help Center",
+        body_text="How do I solve a captcha?",
+        html="<article><p>How do I solve a captcha?</p></article>",
+    )
+
+
 async def test_live_cookie_commit_requires_two_clean_loads():
     class FakeContext:
         def __init__(self):
@@ -368,6 +409,14 @@ async def run_all_tests():
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    result.record(
+        "challenge_page_classifier_vendors",
+        test_challenge_page_classifier_detects_non_cloudflare_vendors,
+    )
+    result.record(
+        "challenge_page_classifier_prose",
+        test_challenge_page_classifier_ignores_incidental_captcha_prose,
+    )
     await result.record_async(
         "live_cookie_commit_two_passes",
         test_live_cookie_commit_requires_two_clean_loads,

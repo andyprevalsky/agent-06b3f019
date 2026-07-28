@@ -66,6 +66,28 @@ _CHALLENGE_TEXT_MARKERS = (
     "unusual traffic from your computer network",
     "verify you are human",
 )
+# Vendor fingerprints for interstitials that return HTTP 200 with benign text, so
+# neither the status nor the text markers above can catch them. This list is kept
+# at parity with `_CHALLENGE_COOKIE_RE`: that regex already recognises DataDome,
+# PerimeterX, and Imperva/Incapsula cookies, but the page detector used to match
+# Cloudflare only. A DataDome interstitial therefore read as a clean page, so
+# `recover_from_challenge` reported success and the caller looped -- four cycles
+# and 312s on one Expedia run, each "recovery" followed by the same challenge.
+_CHALLENGE_HTML_MARKERS = (
+    # Cloudflare
+    "/cdn-cgi/challenge-platform",
+    "cf-chl-",
+    "challenges.cloudflare.com/turnstile",
+    # DataDome
+    "captcha-delivery.com",
+    "ddchallengebody",
+    # PerimeterX
+    "perimeterx.net",
+    "px-captcha",
+    # Imperva / Incapsula
+    "_incapsula_resource",
+    "incapsula incident id",
+)
 
 
 @dataclass(frozen=True)
@@ -136,14 +158,7 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True
-    return any(
-        marker in normalized_html
-        for marker in (
-            "/cdn-cgi/challenge-platform",
-            "cf-chl-",
-            "challenges.cloudflare.com/turnstile",
-        )
-    )
+    return any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS)
 
 
 async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:
