@@ -3,7 +3,23 @@
  * tab (task catalog + stats, metadata edits, run dispatch, run archive).
  */
 
+import { getAdminAccessToken } from '@/lib/impersonation';
+
 import { API_BASE_WITH_PATH, getAuthHeaders } from './client';
+
+/**
+ * Benchmarks is an admin-gated surface, so it signs with the ADMIN token rather
+ * than the active session. While an admin is impersonating, the active session
+ * belongs to the target account and the backend admin gate rejects it — which is
+ * what made Benchmarks unreachable after switching. Falls back to the normal
+ * session headers when not impersonating, so behaviour is unchanged otherwise.
+ */
+function adminAuthHeaders(): Record<string, string> {
+  const base = getAuthHeaders();
+  const adminToken = getAdminAccessToken();
+  if (adminToken === null) return base;
+  return { ...base, Authorization: `Bearer ${adminToken}` };
+}
 
 export interface HubTaskStats {
   attempts: number;
@@ -164,7 +180,7 @@ export interface HubAgentView {
 async function hubFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE_WITH_PATH}${path}`, {
     ...init,
-    headers: { ...getAuthHeaders(), ...init.headers },
+    headers: { ...adminAuthHeaders(), ...init.headers },
   });
   if (!response.ok) {
     let detail = '';

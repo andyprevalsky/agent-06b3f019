@@ -228,3 +228,64 @@ describe('an impersonating admin can still use the app', () => {
     });
   });
 });
+
+/**
+ * "I should STILL see Benchmarks and Health after switching."
+ *
+ * Both surfaces were gated on the IMPERSONATED identity, so they vanished the
+ * moment an admin switched into a non-admin — and even if shown, their API calls
+ * were signed with the target's session, which the backend admin gate rejects.
+ */
+describe('admin surfaces survive an account switch', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    stubReload();
+    server.use(
+      http.post(`${API_BASE}/admin-health/impersonate`, () =>
+        HttpResponse.json({
+          session: session('target-token', TARGET_ID, '+12125550100'),
+          user: {
+            userId: TARGET_ID,
+            name: 'Gated Target',
+            email: null,
+            phone: '+12125550100',
+            isAdmin: false,
+          },
+        }),
+      ),
+    );
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('still treats the operator as an admin for Health/Benchmarks visibility', async () => {
+    localStorage.setItem('rose-session', JSON.stringify(session('admin-token', ANDY_ID)));
+    await switchToAccount(TARGET_ID);
+
+    const { isAdminOperator } = await import('@/lib/adminAccounts');
+
+    // The signed-in identity is now a non-admin, yet the operator is still an admin.
+    expect(isAdminOperator({ id: TARGET_ID, phone: '+12125550100' })).toBe(true);
+  });
+
+  it('signs admin-health calls with the stashed admin token while impersonating', async () => {
+    localStorage.setItem('rose-session', JSON.stringify(session('admin-token', ANDY_ID)));
+    await switchToAccount(TARGET_ID);
+
+    let seenAuth: string | null = null;
+    server.use(
+      http.get(`${API_BASE}/admin-health`, ({ request }) => {
+        seenAuth = request.headers.get('authorization');
+        return HttpResponse.json({ timeSlice: 'weekly', series: [], summary: {} });
+      }),
+    );
+
+    const { fetchAdminHealthData } = await import('@/features/admin-health/api');
+    await fetchAdminHealthData('weekly').catch(() => undefined);
+
+    expect(seenAuth).toBe('Bearer admin-token');
+  });
+});
