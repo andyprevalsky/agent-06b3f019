@@ -15,7 +15,7 @@ export interface AgentCardSandboxSettlementResult {
   stripePaymentIntentId: string;
 }
 
-interface HeldPurchase {
+export interface HeldPurchase {
   id: string;
   userId: string;
   agentId: string | null;
@@ -44,7 +44,7 @@ export class AgentCardSandboxSettlementError extends Error {
   }
 }
 
-async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
+export async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
   return prisma.purchaseSpend.findMany({
     where: { totalCents: amountCents, status: PurchaseSpendStatus.HELD, cardId: { not: null } },
     orderBy: { createdAt: 'desc' },
@@ -67,7 +67,11 @@ async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurcha
  * static provider in prod, which rejects any card id but its own synthetic one, so this lookup threw
  * for exactly the benchmark runs that need it.
  */
-async function getCardPan(userId: string, agentId: string | null, cardId: string): Promise<string> {
+export async function getCardPan(
+  userId: string,
+  agentId: string | null,
+  cardId: string
+): Promise<string> {
   const provider = await createCardProviderForAgent(userId, agentId);
   const details = await provider.getDetails(cardId);
   return details.pan;
@@ -97,7 +101,7 @@ async function testCharge(input: {
  * caller won the reservation. Two concurrent settlement requests that select the same HELD purchase
  * cannot both win — the loser gets `false` and must not issue the non-idempotent charge.
  */
-async function claimHeldPurchaseForCharge(purchaseId: string): Promise<boolean> {
+export async function claimHeldPurchaseForCharge(purchaseId: string): Promise<boolean> {
   const claimed = await prisma.purchaseSpend.updateMany({
     where: { id: purchaseId, status: PurchaseSpendStatus.HELD },
     data: { status: PurchaseSpendStatus.CHARGING },
@@ -118,7 +122,7 @@ const CONSUMABLE_FUNDING_SOURCE_STATUSES = [
   PurchaseWalletFundingStatus.RECLAIM_FAILED,
 ];
 
-async function markPurchaseCleared(purchaseId: string): Promise<void> {
+export async function markPurchaseCleared(purchaseId: string): Promise<void> {
   await prisma.$transaction(async (tx) => {
     const updated = await tx.purchaseSpend.updateMany({
       where: { id: purchaseId, status: PurchaseSpendStatus.CHARGING },

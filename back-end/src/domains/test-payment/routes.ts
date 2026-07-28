@@ -7,6 +7,8 @@ import {
   configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
+  createTestPaymentCheckoutSession,
+  settleTestPaymentCheckoutSession,
   findAgentOwnerId,
   getTestPaymentCatalog,
   getTestPaymentLifecycle,
@@ -14,6 +16,7 @@ import {
   resolvePublicBaseUrl,
   TestPaymentError,
 } from './service';
+import type { TestPaymentLineItem } from './types';
 
 const router = Router();
 
@@ -236,6 +239,45 @@ router.post(
         return;
       }
       res.status(500).json({ error: 'Failed to confirm test payment' });
+    }
+  })
+);
+
+// Real-merchant path: hand the shopper a hosted Stripe Checkout instead of taking the PAN
+// ourselves. This is the only way a LIVE Rose-minted card can be authorized (AgentCard's
+// test_charge is sandbox-only; live-mode raw-PAN tokenization is blocked by Stripe).
+router.post(
+  '/checkout-session',
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    try {
+      res.json(
+        await createTestPaymentCheckoutSession(req.body as { items: TestPaymentLineItem[] })
+      );
+    } catch (error) {
+      if (error instanceof TestPaymentError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to create test payment checkout session' });
+    }
+  })
+);
+
+router.post(
+  '/checkout-settle',
+  asyncHandler(async (req, res) => {
+    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    try {
+      const body = req.body as Record<string, unknown>;
+      const sessionId = typeof body.checkoutSessionId === 'string' ? body.checkoutSessionId : '';
+      res.json(await settleTestPaymentCheckoutSession(sessionId));
+    } catch (error) {
+      if (error instanceof TestPaymentError) {
+        res.status(error.statusCode).json({ error: error.message });
+        return;
+      }
+      res.status(500).json({ error: 'Failed to settle test payment checkout session' });
     }
   })
 );

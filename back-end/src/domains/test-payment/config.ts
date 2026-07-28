@@ -24,3 +24,12 @@ export function getPhoneBenchmarkPaymentAuditPathOverride(): string {
 export function getBenchmarkAgentCardCardholderIdOverride(): string {
   return (process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID ?? '').trim();
 }
+
+/**
+ * Where Stripe returns the shopper after a hosted Checkout. Prefers the tunnel/base URL a benchmark
+ * stack advertises so a cloud browser agent lands somewhere it can actually reach; falls back to
+ * production. Stripe requires an absolute URL, so this can never be a relative path.
+ */
+export const TEST_PAYMENT_CHECKOUT_RETURN_URL = (
+  TEST_PAYMENT_PUBLIC_BASE_URL !== '' ? TEST_PAYMENT_PUBLIC_BASE_URL : 'https://roselabs.ai'
+).replace(/\/+$/, '');
