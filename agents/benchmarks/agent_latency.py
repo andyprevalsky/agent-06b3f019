@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import glob
 import json
 import os
 import re
@@ -67,6 +68,15 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 WORKER_LOG = os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
 BACKEND_LOG = os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
 RESEARCH_LOG = os.path.join(REPO_ROOT, "research", "research-logs.log")
+
+# Isolated benchmark stacks (scripts/run-bench --local, run-predeploy-local) do
+# NOT write to the shared logs above: each run gets its own
+# .context/benchmarks/<run-id>/logs/{backend,worker.N}.log. Every /deploy smoke
+# failure therefore lives ONLY in a per-run directory, and reading just the
+# shared paths made this tool report "No log lines found" for exactly the
+# failures it exists to explain. Consider both, newest isolated runs first.
+ISOLATED_STACK_ROOT = os.path.join(REPO_ROOT, ".context", "benchmarks")
+MAX_ISOLATED_STACKS = int(os.getenv("AGENT_LATENCY_MAX_ISOLATED_STACKS", "3"))
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -150,35 +160,71 @@ class _RawEvent:
     data: Dict[str, Any]
 
 
+def isolated_stack_log_dirs() -> List[str]:
+    """Per-run log dirs for isolated benchmark stacks, newest first.
+
+    BENCHMARK_CONTEXT_DIR pins one run when the caller already knows it;
+    otherwise the most recent runs are scanned. Events are filtered by agent id
+    downstream, so scanning extra runs costs parse time, never correctness.
+    """
+    dirs: List[str] = []
+    explicit = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    if explicit:
+        pinned = os.path.join(explicit, "logs")
+        if os.path.isdir(pinned):
+            dirs.append(pinned)
+    if os.path.isdir(ISOLATED_STACK_ROOT):
+        candidates = []
+        for name in os.listdir(ISOLATED_STACK_ROOT):
+            log_dir = os.path.join(ISOLATED_STACK_ROOT, name, "logs")
+            if os.path.isdir(log_dir) and log_dir not in dirs:
+                candidates.append(log_dir)
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        dirs.extend(candidates[:MAX_ISOLATED_STACKS])
+    return dirs
+
+
+def _log_paths(shared: str, isolated_glob: str) -> List[str]:
+    paths = [shared] if os.path.exists(shared) else []
+    for log_dir in isolated_stack_log_dirs():
+        paths.extend(sorted(glob.glob(os.path.join(log_dir, isolated_glob))))
+    return paths
+
+
 def _read_worker_raw() -> List[_RawEvent]:
-    if not os.path.exists(WORKER_LOG):
-        return []
     out: List[_RawEvent] = []
-    with open(WORKER_LOG, errors="replace") as f:
-        for line in f:
-            line = line.strip()
-            if not line or not line.startswith("{"):
-                continue
-            try:
-                d = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            ts_str = d.get("timestamp")
-            if not ts_str:
-                continue
-            out.append(_RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d))
+    # An isolated stack runs several worker processes, each with its own file.
+    for path in _log_paths(WORKER_LOG, "worker*.log"):
+        with open(path, errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts_str = d.get("timestamp")
+                if not ts_str:
+                    continue
+                out.append(_RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d))
     return out
 
 
 def _read_backend_raw() -> List[_RawEvent]:
-    if not os.path.exists(BACKEND_LOG):
-        return []
     out: List[_RawEvent] = []
     # [2026-04-17T21:07:35.352Z] INFO [HTTP] message key=value key=value
     head = re.compile(
         r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
     )
-    with open(BACKEND_LOG, errors="replace") as f:
+    for path in _log_paths(BACKEND_LOG, "backend*.log"):
+        out.extend(_parse_backend_lines(path, head))
+    return out
+
+
+def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
+    out: List[_RawEvent] = []
+    with open(path, errors="replace") as f:
         for raw in f:
             line = ANSI_RE.sub("", raw).rstrip("\n")
             m = head.match(line)
