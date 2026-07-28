@@ -7159,6 +7159,85 @@ def test_network_recorder_body_cache_is_byte_bounded():
     assert recorder._body_byte_sizes == {"ascii": 50}
 
 
+def test_network_recorder_request_body_truncates_on_bytes_not_chars():
+    """POST data is capped by a BYTE budget, so truncation must count bytes.
+
+    Character-count truncation let a non-ASCII payload (unicode form fields,
+    CJK JSON) retain up to ~4x _max_body_bytes, multiplied across every
+    retained request. CodeRabbit #2 on the incremental review.
+    """
+    from domains.spawn_browser_agent_v3.recording import _encoded_len, _truncate_text_to_bytes
+
+    # 40 four-byte code points = 160 bytes.
+    payload = "\U0001f600" * 40
+    assert _encoded_len(payload) == 160
+    assert len(payload) == 40
+
+    kept = _truncate_text_to_bytes(payload, 100)
+    # Byte-accurate: never exceeds the cap, and drops the partial code point
+    # at the boundary rather than raising.
+    assert _encoded_len(kept) <= 100
+    assert kept == "\U0001f600" * 25
+    # Under the cap the payload is returned untouched.
+    assert _truncate_text_to_bytes("short", 100) == "short"
+    assert _truncate_text_to_bytes(None, 100) is None
+
+
+def test_network_recorder_redirect_location_survives_header_casing():
+    """CDP preserves the server's header casing; real servers send "Location".
+
+    Reading a hardcoded lowercase key off the RAW header bag returned None on
+    every standard redirect, silently emptying the redirect chain's location.
+    CodeRabbit #3 on the incremental review.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 100
+    recorder._max_body_bytes = 262144
+    recorder._max_total_body_bytes = 1_000_000
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder.entries = {}
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "r1",
+            "request": {"url": "https://shop.test/login", "method": "POST"},
+            "type": "Document",
+        },
+        "sess",
+    )
+    # Second requestWillBeSent for the SAME requestId carries the prior hop.
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "r1",
+            "request": {"url": "https://shop.test/2fa", "method": "GET"},
+            "type": "Document",
+            "redirectResponse": {
+                "url": "https://shop.test/login",
+                "status": 302,
+                "headers": {"Location": "https://shop.test/2fa"},
+            },
+        },
+        "sess",
+    )
+
+    entry = recorder.entries[recorder._request_key("r1")]
+    assert len(entry["redirects"]) == 1
+    assert entry["redirects"][0]["status"] == 302
+    assert entry["redirects"][0]["location"] == "https://shop.test/2fa"
+
+    rows = recorder.query_requests(include_query=True)
+    assert rows[0]["redirects"][0]["location"] == "https://shop.test/2fa"
+    assert isinstance(recorder, BrowserNetworkRecorder)
+
+
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
     """Finished and failed requests are terminal, not in flight. Repeated clears
     must not retain their IDs forever in the pre-clear ignore set."""
@@ -13616,6 +13695,14 @@ async def run_all_tests():
     r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
     r.record("network_recorder_full_detail", test_network_recorder_captures_every_resource_and_full_detail)
     r.record("network_recorder_body_cache_bounded", test_network_recorder_body_cache_is_byte_bounded)
+    r.record(
+        "network_recorder_request_body_byte_truncation",
+        test_network_recorder_request_body_truncates_on_bytes_not_chars,
+    )
+    r.record(
+        "network_recorder_redirect_location_casing",
+        test_network_recorder_redirect_location_survives_header_casing,
+    )
     await r.record_async(
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,

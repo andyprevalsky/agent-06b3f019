@@ -217,6 +217,34 @@ def _mask_sensitive_headers(headers: Any) -> Dict[str, str]:
     return masked
 
 
+def _encoded_len(text: Any) -> int:
+    """UTF-8 byte length — the unit every *_BYTES budget is denominated in."""
+    if text is None:
+        return 0
+    value = text if isinstance(text, str) else str(text)
+    return len(value.encode("utf-8"))
+
+
+def _truncate_text_to_bytes(text: Any, max_bytes: int) -> Optional[str]:
+    """Truncate on ENCODED bytes, not characters.
+
+    `_max_body_bytes` (BROWSER_AGENT_NETWORK_MAX_BODY_BYTES) is a byte budget
+    bounding worker heap. Slicing by character count lets a non-ASCII payload
+    (unicode form fields, CJK JSON) retain up to ~4x the intended bytes, and at
+    `_max_entries` retained requests that multiplies. errors="ignore" drops a
+    trailing partial code point rather than raising.
+    """
+    if text is None:
+        return None
+    value = text if isinstance(text, str) else str(text)
+    if max_bytes <= 0:
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
 def _truncate_text(text: Any, max_chars: int) -> Optional[str]:
     if text is None:
         return None
@@ -2230,7 +2258,10 @@ class BrowserNetworkRecorder:
                     {
                         "url": (existing or {}).get("url") or redirect_response.get("url") or "",
                         "status": redirect_response.get("status"),
-                        "location": (redirect_response.get("headers") or {}).get("location"),
+                        # CDP preserves the server's header casing, and real
+                        # servers send "Location". Coerce to lowercase keys
+                        # first or this silently reads None on every redirect.
+                        "location": _coerce_header_map(redirect_response.get("headers")).get("location"),
                     }
                 )
             self.entries[request_key] = {
@@ -2241,8 +2272,8 @@ class BrowserNetworkRecorder:
                 "url": url,
                 "resource_type": resource_type,
                 "request_headers": _coerce_header_map(request.get("headers")),
-                "request_body": _truncate_text(post_data, self._max_body_bytes),
-                "request_body_truncated": bool(post_data and len(post_data) > self._max_body_bytes),
+                "request_body": _truncate_text_to_bytes(post_data, self._max_body_bytes),
+                "request_body_truncated": bool(post_data and _encoded_len(post_data) > self._max_body_bytes),
                 "has_post_data": bool(request.get("hasPostData") or post_data),
                 "initiator": (event.get("initiator") or {}).get("type"),
                 "redirects": redirects,
