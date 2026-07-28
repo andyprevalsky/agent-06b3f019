@@ -92,30 +92,36 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted missing {required_field}")
 
-    invalid_product_urls = (
+    # product_url is validated for WELL-FORMEDNESS ONLY. Page-type inference
+    # (product vs checkout vs storefront) was removed by decision: every merchant
+    # invents its own conventions, so the heuristic only ever recognised shapes we
+    # had already been burned by, and each miss rejected a receipt from a WORKING
+    # checkout. These URLs are now accepted deliberately.
+    formerly_rejected_urls = (
         "https://example.com/checkout/payment",
-        "https://example.com/checkout.html",
         "https://checkout.example.com/products/desk-lamp",
-        "https://secure-checkout.example.com/session/123",
         "https://pay.example.com/session/123",
-        "https://secure-pay.example.com/session/123",
         "https://example.com/order/ABC123",
-        "https://example.com/order-confirmation/ABC123",
-        "https://example.com/check%6fut/session/123",
-        "https://example.com/check-out/session/123",
         "https://example.com",
-        # RCA: a checkout token in a real subdomain/path is still rejected even
-        # when the registrable domain is an ordering platform (order.online).
         "https://order.online/business/156787/checkout/3ebc87b0-5761-4afc-9bfd",
-        "https://checkout.order.online/products/desk-lamp",
     )
-    for product_url in invalid_product_urls:
+    for product_url in formerly_rejected_urls:
+        PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
+
+    # The one guarantee retained: it must actually be an absolute http(s) URL.
+    for product_url in (
+        "not a url",
+        "/checkout/session/123",
+        "example.com/products/desk-lamp",
+        "ftp://example.com/products/desk-lamp",
+        "https://example.com/p/1?a=<script>",
+    ):
         try:
             PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
         except ValidationError:
             pass
         else:
-            raise AssertionError(f"PaymentLineItem accepted non-product URL {product_url}")
+            raise AssertionError(f"PaymentLineItem accepted non-URL {product_url}")
 
     apple_item = {
         **valid_item,

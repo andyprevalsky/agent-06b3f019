@@ -536,7 +536,7 @@ def test_write_lock_purchase_schema_rejects_missing_product_context():
         raise AssertionError("purchase approval accepted an item without reviews and a product URL")
 
 
-def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link():
+def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
@@ -565,13 +565,14 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
                 },
             }
         )
-    except ValidationError as error:
-        assert "current checkout or session page" in str(error)
-    else:
-        raise AssertionError("purchase approval accepted the current session URL as a product link")
+    except ValidationError as error:  # pragma: no cover - documents the removed rule
+        raise AssertionError(
+            "product_url is validated for well-formedness only; the current session URL "
+            f"must be accepted: {error}"
+        ) from error
 
 
-def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
+def test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser():
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
@@ -602,10 +603,11 @@ def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser
             payload,
             context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
         )
-    except ValidationError as error:
-        assert "host was not observed" in str(error)
-    else:
-        raise AssertionError("purchase approval accepted an unobserved product host")
+    except ValidationError as error:  # pragma: no cover - documents the removed rule
+        raise AssertionError(
+            "browser-trajectory grounding was removed by decision; an unobserved product "
+            f"host must be accepted: {error}"
+        ) from error
 
 
 def test_normalize_write_lock_notification_tool_call_preserves_params():
@@ -1719,12 +1721,12 @@ async def run_all_tests():
         test_write_lock_purchase_schema_rejects_missing_product_context,
     )
     r.record(
-        "write_lock_notification_rejects_current_session_link",
-        test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link,
+        "write_lock_notification_accepts_current_session_link",
+        test_write_lock_purchase_schema_accepts_current_page_as_product_link,
     )
     r.record(
-        "write_lock_notification_rejects_unobserved_product_host",
-        test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser,
+        "write_lock_notification_accepts_unobserved_product_host",
+        test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser,
     )
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)

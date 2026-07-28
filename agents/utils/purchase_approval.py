@@ -3,79 +3,8 @@
 import re
 from collections.abc import Iterable
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlparse
+from urllib.parse import urlparse
 
-_CHECKOUT_ROUTE_TOKENS = {
-    "basket",
-    "baskets",
-    "cart",
-    "carts",
-    "checkout",
-    "checkouts",
-    "payment",
-    "payments",
-}
-
-_CHECKOUT_TOKEN_PAIRS = {
-    ("check", "out"),
-    ("order", "confirmation"),
-    ("order", "history"),
-    ("order", "status"),
-    ("pay", "ment"),
-    ("secure", "order"),
-    ("secure", "pay"),
-}
-_CHECKOUT_LEADING_TOKENS = {"order", "orders", "pay"}
-
-# Analytics parameters carry no product identity, so they cannot distinguish an
-# item from the bare page it sits on. This set is deliberately the ONLY query
-# vocabulary here: it is bounded and stable across the web, unlike merchant
-# product-key names, which every store invents for itself.
-_TRACKING_QUERY_KEYS = {
-    "fbclid",
-    "gclid",
-    "igshid",
-    "mc_cid",
-    "mc_eid",
-    "msclkid",
-    "ref",
-    "referrer",
-    "utm_campaign",
-    "utm_content",
-    "utm_medium",
-    "utm_source",
-    "utm_term",
-}
-
-
-def _has_distinguishing_query(query: str) -> bool:
-    """True when the query carries any non-analytics parameter with a value.
-
-    `_looks_like_product_route` is only ever consulted when the submitted URL has
-    the SAME host and path as a page the browser is already on, so the path
-    cannot distinguish anything and the query is the only place identity can
-    live. That makes the parameter's NAME irrelevant — an allowlist of product
-    key names (`item_id`, `itemId`, `sku`, ...) could only ever list the ones we
-    had already been burned by, and missing one costs a whole run (DoorDash's
-    `?itemId=` burned 62% of a run before this was removed).
-    """
-    return any(
-        key.lower() not in _TRACKING_QUERY_KEYS and value.strip() for key, value in parse_qsl(query)
-    )
-_PRODUCT_ROUTE_MARKERS = {
-    "dp",
-    "ip",
-    "item",
-    "items",
-    "itm",
-    "listing",
-    "listings",
-    "p",
-    "pdp",
-    "product",
-    "products",
-    "sku",
-}
 _PLACEHOLDER_RE = re.compile(r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b", re.IGNORECASE)
 _RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
 _REVIEW_COUNT_RE = re.compile(
@@ -84,131 +13,44 @@ _REVIEW_COUNT_RE = re.compile(
 )
 
 
-def _decode_url_component(value: str) -> str:
-    decoded = value
-    for _ in range(2):
-        next_value = unquote(decoded)
-        if next_value == decoded:
-            break
-        decoded = next_value
-    return decoded
-
-
-def _url_tokens(value: str) -> set[str]:
-    return {token for token in re.split(r"[^a-z0-9]+", _decode_url_component(value).lower()) if token}
-
-
-def _url_token_sequence(value: str) -> list[str]:
-    return [token for token in re.split(r"[^a-z0-9]+", _decode_url_component(value).lower()) if token]
-
-
-def _hostname_subdomain_token_sequence(hostname: str) -> list[str]:
-    """Tokens from a hostname's SUBDOMAIN labels only.
-
-    A checkout-ish word is a real routing signal when it names a subdomain
-    (``checkout.example.com``, ``secure-checkout.shop.example.com``) but not
-    when it *is* the registrable domain of a legitimate ordering platform
-    (``order.online``, ``orders.com``, ``pay.com``). Without a public-suffix
-    list we approximate the registrable domain as the final two labels and
-    treat everything to their left as subdomain labels. Hosts with two or
-    fewer labels have no subdomain and therefore contribute no checkout signal.
-    """
-    labels = [label for label in _decode_url_component(hostname).lower().split(".") if label]
-    subdomain_labels = labels[:-2]
-    return [
-        token for label in subdomain_labels for token in re.split(r"[^a-z0-9]+", label) if token
-    ]
-
-
-def _contains_checkout_route(value: str, *, hostname: bool = False) -> bool:
-    if hostname:
-        # Only inspect subdomain labels: the registrable domain of an ordering
-        # platform (order.online) must never be misread as a checkout page.
-        tokens = _hostname_subdomain_token_sequence(value)
-        if set(tokens) & (_CHECKOUT_ROUTE_TOKENS | _CHECKOUT_LEADING_TOKENS):
-            return True
-        return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
-    tokens = _url_token_sequence(value)
-    if set(tokens) & _CHECKOUT_ROUTE_TOKENS:
-        return True
-    if tokens and tokens[0] in _CHECKOUT_LEADING_TOKENS:
-        return True
-    return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
-
-
-def _normalized_page_route(value: str) -> tuple[str, str]:
-    parsed = urlparse(value)
-    hostname = (parsed.hostname or "").lower().removeprefix("www.")
-    path = re.sub(r"/+", "/", _decode_url_component(parsed.path).lower()).rstrip("/") or "/"
-    return hostname, path
-
-
-def _same_merchant_host(left: str, right: str) -> bool:
-    """Match an observed merchant host, including its own subdomains."""
-    if not left or not right:
-        return False
-    return left == right or left.endswith(f".{right}") or right.endswith(f".{left}")
-
-
-def _looks_like_product_route(value: str) -> bool:
-    parsed = urlparse(value)
-    path_segments = [segment for segment in _decode_url_component(parsed.path).lower().split("/") if segment]
-    if _url_tokens(parsed.path) & _PRODUCT_ROUTE_MARKERS:
-        return True
-    if any(segment.startswith("buy-") for segment in path_segments) and "shop" in path_segments:
-        return True
-    return _has_distinguishing_query(parsed.query)
-
-
-def validate_product_detail_url(value: Any) -> str:
-    text = str(value or "").strip()
-    if any(character.isspace() for character in text) or "<" in text or ">" in text:
-        raise ValueError("product_url must not contain whitespace or markup")
-    parsed = urlparse(text)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("product_url must be an absolute http(s) product-detail URL")
-
-    if _contains_checkout_route(parsed.hostname or "", hostname=True):
-        raise ValueError("product_url must link to the product page, not cart or checkout")
-
-    if _contains_checkout_route(parsed.path):
-        raise ValueError("product_url must link to the product page, not cart or checkout")
-
-    path_has_detail = bool(parsed.path.strip("/"))
-    query_has_product_id = _has_distinguishing_query(parsed.query)
-    if not path_has_detail and not query_has_product_id:
-        raise ValueError("product_url must identify a product, not the merchant homepage")
-    return text
-
-
-def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
-    return validate_product_url_for_pages(value, [current_page_url])
-
-
-def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any]) -> str:
-    """Require a product URL to use a merchant host observed by the browser."""
-    product_url = validate_product_detail_url(value)
-    product_host, product_path = _normalized_page_route(product_url)
-    observed_routes = [
-        _normalized_page_route(str(page_url).strip())
-        for page_url in trusted_page_urls
-        if str(page_url or "").strip().startswith(("http://", "https://"))
-    ]
-    if not any(_same_merchant_host(product_host, observed_host) for observed_host, _ in observed_routes):
-        raise ValueError("product_url host was not observed in the browser trajectory")
-    if any(
-        (product_host, product_path) == observed_route and not _looks_like_product_route(product_url)
-        for observed_route in observed_routes
-    ):
-        raise ValueError("product_url must identify the product, not the current checkout or session page")
-    return product_url
-
 
 def _validated_review_text(value: Any) -> str:
     text = str(value or "").strip()
     if not text or _PLACEHOLDER_RE.search(text):
         raise ValueError("purchase approvals require real product review information")
     return text
+
+
+def validate_product_detail_url(value: Any) -> str:
+    """Require a well-formed absolute http(s) URL. Nothing more.
+
+    This deliberately does NOT infer what KIND of page the URL points at.
+    Guessing "is this a product page?" from path tokens and query-key names is
+    unguaranteeable across merchants: every store invents its own conventions,
+    so the heuristic could only ever recognise the shapes we had already been
+    burned by. Each miss rejected a receipt from a WORKING checkout and sent the
+    agent hunting for another URL -- one such miss (DoorDash's `?itemId=`) cost
+    62% of a benchmark run before this validation was removed.
+    """
+    text = str(value or "").strip()
+    if any(character.isspace() for character in text) or "<" in text or ">" in text:
+        raise ValueError("product_url must not contain whitespace or markup")
+    parsed = urlparse(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("product_url must be an absolute http(s) URL")
+    return text
+
+
+def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
+    """Retained for call-site compatibility; page context no longer constrains the URL."""
+    del current_page_url
+    return validate_product_detail_url(value)
+
+
+def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any]) -> str:
+    """Retained for call-site compatibility; trajectory no longer constrains the URL."""
+    del trusted_page_urls
+    return validate_product_detail_url(value)
 
 
 def validate_product_rating(value: Any) -> str:

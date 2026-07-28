@@ -7470,7 +7470,7 @@ async def test_execute_action_request_payment_card_rejects_empty_receipt():
     assert "total_cents" in out["error"]
 
 
-async def test_execute_action_request_payment_card_rejects_current_session_product_link():
+async def test_execute_action_request_payment_card_accepts_current_session_product_link():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
@@ -7504,8 +7504,12 @@ async def test_execute_action_request_payment_card_rejects_current_session_produ
         current_url=current_url,
     )
 
-    assert out["success"] is False
-    assert "current checkout or session page" in out["error"]
+    # Accepted by decision: product_url is validated for well-formedness only, so
+    # submitting the current session URL is no longer an error. Pinned so the
+    # removed page-type rule cannot creep back in silently.
+    assert "error" not in out, out
+    assert out["status"] == "awaiting_payment_card_approval"
+    assert out["payment_request"]
 
 
 async def test_execute_action_request_payment_card_rejects_duplicate_after_card_ready():
@@ -12902,8 +12906,12 @@ def test_payment_card_tool_args_raise_typed_validation_error():
     except BrowserToolArgsValidationError as err:
         assert err.tool_name == "request_payment_card"
         assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
-        # The feedback the model receives must name all three unsatisfiable fields.
-        assert "product_url" in err.detail
+        # product_url is no longer a rejection reason: it is validated for
+        # well-formedness only, and the Toast checkout URL is a real URL. The
+        # RCA property under test is unchanged -- unsatisfiable args must surface
+        # as a TYPED error the loop feeds back, not a bare ValidationError the
+        # infra handler swallows into a mislabeled "Max Steps".
+        assert "product_url" not in err.detail
         assert "rating" in err.detail
         assert "review_count" in err.detail
         # It must be a distinct type, not a bare pydantic ValidationError.
@@ -12949,7 +12957,8 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
     assert tool_msgs, "validation error was not appended to browser_turn_messages"
     tool_blob = json.dumps(tool_msgs[-1])
-    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    # product_url no longer participates: it is validated for well-formedness only.
+    assert "rating" in tool_blob and "review_count" in tool_blob
     # 2) Recorded in action history as a failed attempt the model can see.
     entries = action_history.get_entries()
     assert entries and entries[-1]["action"] == "request_payment_card"
@@ -13556,8 +13565,8 @@ async def run_all_tests():
         test_execute_action_request_payment_card_rejects_empty_receipt,
     )
     await r.record_async(
-        "execute_action_request_payment_card_rejects_current_session_link",
-        test_execute_action_request_payment_card_rejects_current_session_product_link,
+        "execute_action_request_payment_card_accepts_current_session_link",
+        test_execute_action_request_payment_card_accepts_current_session_product_link,
     )
     await r.record_async(
         "execute_action_request_payment_card_rejects_duplicate_after_card_ready",

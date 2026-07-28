@@ -1,10 +1,11 @@
 """Blackbox tests for the purchase-approval product-URL validator.
 
-This module had no coverage, which is how a validator that rejected every
-camelCase product-identifier query key reached production. A DoorDash checkout
-was abandoned mid-flow because `?itemId=` was not recognised as a product route,
-so these tests pin both the separator-insensitive matching AND the checkout /
-homepage rejections that must NOT be loosened to achieve it.
+`product_url` is validated for WELL-FORMEDNESS ONLY. Inferring what kind of page
+a URL points at — product vs checkout vs storefront — was removed deliberately:
+every merchant invents its own path and query conventions, so the heuristic could
+only ever recognise shapes we had already been burned by, and each miss rejected
+a receipt from a working checkout. These tests pin that the validator accepts any
+real URL and still refuses input that is not a URL at all.
 """
 
 import asyncio
@@ -12,112 +13,98 @@ import asyncio
 from _test_utils import BlackboxResult
 
 from utils.purchase_approval import (
-    _looks_like_product_route,
     validate_product_detail_url,
+    validate_product_url_for_page,
+    validate_product_url_for_pages,
 )
 
 
-def test_camel_case_product_keys_are_product_routes():
-    """camelCase identifiers are product routes (regression: DoorDash `?itemId=`)."""
-    # The exact URL shape the DoorDash agent submitted and had rejected.
-    assert _looks_like_product_route("https://www.doordash.com/store/1111604/?itemId=abc123")
-    assert _looks_like_product_route("https://example.com/store/9/?productId=xyz")
-    assert _looks_like_product_route("https://example.com/store/9/?skuId=xyz")
+def test_any_well_formed_merchant_url_is_accepted():
+    """No page-type inference: product, storefront, and checkout URLs all pass."""
+    for url in (
+        # The exact URL that was rejected mid-checkout and cost 62% of a run.
+        "https://www.doordash.com/store/1111604/?itemId=abc123",
+        # Conventions no allowlist would have contained.
+        "https://example.com/store/9/?fooBarBaz=xyz",
+        "https://example.com/store/9/?menuItemUuid=abc",
+        # Shapes the old heuristic actively rejected.
+        "https://example.com/checkout?itemId=1",
+        "https://example.com/cart",
+        "https://example.com/",
+        "https://example.com/store/1111604/",
+        "https://example.com/store/9/?utm_source=email",
+    ):
+        assert validate_product_detail_url(url) == url, url
 
 
-def test_unknown_product_key_names_are_product_routes():
-    """No allowlist: a key name we have never seen still identifies a product.
-
-    This is the case an allowlist can never cover — it could only ever contain
-    the names we had already been burned by. `?itemId=` cost 62% of a run.
-    """
-    assert _looks_like_product_route("https://example.com/store/9/?fooBarBaz=xyz")
-    assert _looks_like_product_route("https://example.com/store/9/?variant_uuid=7f3a")
-    assert _looks_like_product_route("https://example.com/store/9/?menuItemUuid=abc")
-
-
-def test_separator_conventions_are_equivalent():
-    """snake_case, camelCase, and kebab-case spellings resolve identically."""
-    for query in ("item_id=abc", "itemId=abc", "item-id=abc", "ITEM_ID=abc"):
-        assert _looks_like_product_route(f"https://example.com/store/9/?{query}"), query
-
-
-def test_tracking_only_queries_are_not_product_routes():
-    """Analytics parameters carry no product identity, so they distinguish nothing."""
-    assert not _looks_like_product_route("https://example.com/store/9/?ref=homepage")
-    assert not _looks_like_product_route("https://example.com/store/9/?utm_source=email")
-    assert not _looks_like_product_route(
-        "https://example.com/store/9/?utm_source=email&utm_medium=cpc&gclid=abc"
-    )
-
-
-def test_bare_store_page_is_not_a_product_route():
-    """The actual failure this guard exists for: echoing the page already open."""
-    assert not _looks_like_product_route("https://www.doordash.com/store/1111604/")
-    assert not _looks_like_product_route("https://www.doordash.com/")
-
-
-def test_blank_product_id_value_is_not_a_product_route():
-    """A product key with no value identifies nothing."""
-    assert not _looks_like_product_route("https://example.com/store/9/?itemId=")
-    assert not _looks_like_product_route("https://example.com/store/9/?itemId=%20")
-
-
-def test_camel_case_product_url_validates():
-    """The validator accepts the previously rejected canonical URL unchanged."""
-    url = "https://www.doordash.com/store/1111604/?itemId=abc123"
+def test_url_is_returned_unchanged():
+    """The validator normalises nothing; it only accepts or rejects."""
+    url = "https://Example.com/Store/9/?itemId=AbC&utm_source=x"
     assert validate_product_detail_url(url) == url
 
 
-def test_checkout_urls_are_still_rejected():
-    """Guard: widening key matching must not let checkout pages through."""
-    for url in (
-        "https://example.com/checkout?itemId=1",
-        "https://example.com/cart?itemId=1",
-    ):
-        try:
-            validate_product_detail_url(url)
-        except ValueError:
-            continue
-        raise AssertionError(f"checkout URL was accepted: {url}")
-
-
-def test_merchant_homepage_is_still_rejected():
-    """Guard: a bare homepage still identifies no product."""
-    try:
-        validate_product_detail_url("https://example.com/?ref=x")
-    except ValueError:
-        return
-    raise AssertionError("merchant homepage was accepted")
-
-
-def test_markup_and_relative_urls_are_still_rejected():
-    """Guard: input hygiene is unchanged by the key normalisation."""
-    for url in (
-        "https://example.com/p/1?itemId=<script>",
+def test_non_urls_are_still_rejected():
+    """The one guarantee kept: it must actually be an absolute http(s) URL."""
+    for value in (
+        "not a url",
         "/store/1111604/?itemId=abc",
-        "https://example.com/p 1?itemId=abc",
+        "example.com/p/1",
+        "ftp://example.com/p/1",
+        "javascript:alert(1)",
+        "",
+        None,
     ):
         try:
-            validate_product_detail_url(url)
+            validate_product_detail_url(value)
         except ValueError:
             continue
-        raise AssertionError(f"invalid URL was accepted: {url}")
+        raise AssertionError(f"non-URL was accepted: {value!r}")
+
+
+def test_markup_and_whitespace_are_still_rejected():
+    """Input hygiene survives: a URL carrying markup is not a URL."""
+    for value in (
+        "https://example.com/p/1?itemId=<script>",
+        "https://example.com/p 1?itemId=abc",
+        "https://example.com/p/1?a=b>c",
+    ):
+        try:
+            validate_product_detail_url(value)
+        except ValueError:
+            continue
+        raise AssertionError(f"malformed URL was accepted: {value!r}")
+
+
+def test_page_context_no_longer_constrains_the_url():
+    """Trajectory grounding was removed by decision; pin it so it cannot creep back silently."""
+    unvisited = "https://never-visited.example/p?x=1"
+    assert validate_product_url_for_pages(unvisited, ["https://other.example/a"]) == unvisited
+    assert validate_product_url_for_pages(unvisited, []) == unvisited
+    assert validate_product_url_for_page(unvisited, "https://other.example/a") == unvisited
+
+
+def test_page_context_helpers_still_reject_non_urls():
+    """The compatibility wrappers keep the well-formedness guarantee."""
+    for helper, second in (
+        (validate_product_url_for_pages, ["https://example.com/a"]),
+        (validate_product_url_for_page, "https://example.com/a"),
+    ):
+        try:
+            helper("not a url", second)
+        except ValueError:
+            continue
+        raise AssertionError(f"{helper.__name__} accepted a non-URL")
 
 
 async def run_all_tests():
     print("purchase-approval blackbox tests:")
     r = BlackboxResult()
-    r.record("camel_case_product_keys", test_camel_case_product_keys_are_product_routes)
-    r.record("separator_conventions", test_separator_conventions_are_equivalent)
-    r.record("tracking_only_queries", test_tracking_only_queries_are_not_product_routes)
-    r.record("bare_store_page", test_bare_store_page_is_not_a_product_route)
-    r.record("unknown_product_keys", test_unknown_product_key_names_are_product_routes)
-    r.record("blank_product_id", test_blank_product_id_value_is_not_a_product_route)
-    r.record("camel_case_validates", test_camel_case_product_url_validates)
-    r.record("checkout_rejected", test_checkout_urls_are_still_rejected)
-    r.record("homepage_rejected", test_merchant_homepage_is_still_rejected)
-    r.record("markup_rejected", test_markup_and_relative_urls_are_still_rejected)
+    r.record("any_well_formed_url", test_any_well_formed_merchant_url_is_accepted)
+    r.record("url_returned_unchanged", test_url_is_returned_unchanged)
+    r.record("non_urls_rejected", test_non_urls_are_still_rejected)
+    r.record("markup_rejected", test_markup_and_whitespace_are_still_rejected)
+    r.record("page_context_unconstraining", test_page_context_no_longer_constrains_the_url)
+    r.record("wrappers_reject_non_urls", test_page_context_helpers_still_reject_non_urls)
     return r.all_passed
 
 
