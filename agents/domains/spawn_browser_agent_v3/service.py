@@ -15,7 +15,11 @@ from urllib.parse import urlparse
 import structlog
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
-from domains.spawn_browser_agent_v3.config import KERNEL_COST_CENTS_PER_MS, STEEL_COST_CENTS_PER_MS
+from domains.spawn_browser_agent_v3.config import (
+    BROWSER_USE_PRICING_POOL,
+    KERNEL_COST_CENTS_PER_MS,
+    STEEL_COST_CENTS_PER_MS,
+)
 from domains.spawn_browser_agent_v3.repo import (
     download_session_file,
     list_session_files,
@@ -646,13 +650,23 @@ def build_usage_items(
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
 ) -> List[Dict[str, Any]]:
-    """Build standardized usage items for cost tracking."""
+    """Build standardized usage items for cost tracking.
+
+    The llm row MUST carry `model`. The workflow (`_track_usage`) resolves
+    pricing from that field and falls back to the ROOT agent's pool when it is
+    missing — which silently priced browser tokens at the parent's cheaper rate.
+    `model_pricing` here is the rose-1-browser-use pool pricing the caller
+    already resolved, so the pre-computed `cost_cents` and the workflow's
+    recomputation now agree; the workflow remains the single source of truth
+    (it also applies cache discounts, which this aggregate has no data for).
+    """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
     cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
     return [
         {
             "type": "llm",
+            "model": BROWSER_USE_PRICING_POOL,
             "cost_cents": round(
                 (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"]
                 + (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
@@ -668,6 +682,39 @@ def build_usage_items(
             "provider": service_provider,
         },
     ]
+
+
+def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]]) -> Dict[str, list]:
+    """Map activity `usage_items` onto the workflow `_track_usage` payload shape.
+
+    The workflow is THE single point where LLM cost is computed, so llm rows
+    carry tokens + the model that produced them (never a pre-computed price);
+    only service rows carry `cost_cents`.
+    """
+    tool_usage: Dict[str, list] = {"llm": [], "service": []}
+    for item in usage_items or []:
+        if item.get("type") == "llm":
+            tool_usage["llm"].append(
+                {
+                    "tokens_in": item.get("input_tokens", 0),
+                    "tokens_out": item.get("output_tokens", 0),
+                    "model": item.get("model"),
+                    "provider": item.get("provider", ""),
+                    "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
+                    "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
+                    # Propagate fast-cache replay so replayed browser
+                    # steps bill $0 instead of their replayed tokens.
+                    "from_fast_cache": item.get("from_fast_cache", False),
+                }
+            )
+        else:
+            tool_usage["service"].append(
+                {
+                    "cost_cents": item.get("cost_cents", 0),
+                    "provider": item.get("provider", ""),
+                }
+            )
+    return tool_usage
 
 
 # ========================================

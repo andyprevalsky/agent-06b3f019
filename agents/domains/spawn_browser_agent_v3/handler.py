@@ -68,6 +68,7 @@ from .config import (
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
     BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+    BROWSER_USE_PRICING_POOL,
     BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
     HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
@@ -113,6 +114,7 @@ from .repo import (
 from .service import (
     AuthRuntimeState,
     append_completion_evidence,
+    browser_usage_items_to_tool_usage,
     build_action_titles,
     build_auth_assistance_resume_user_message,
     build_best_effort_response,
@@ -3887,7 +3889,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
         else:
             browser_use_mode = None
 
-    model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+    model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
     task_prompt = build_browser_task_prompt(goal)
     dynamic_system_context = build_browser_dynamic_system_context(
         "# Simulated Browser Runtime\n"
@@ -5155,7 +5157,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
             _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
-            _model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+            _model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
             _record_timing("parallel.data.instructions", t)
 
             return (
@@ -8419,30 +8421,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 break
 
-            tool_usage: Dict[str, list] = {"llm": [], "service": []}
-            if result.get("usage_items"):
-                for item in result["usage_items"]:
-                    if item.get("type") == "llm":
-                        tool_usage["llm"].append(
-                            {
-                                "tokens_in": item.get("input_tokens", 0),
-                                "tokens_out": item.get("output_tokens", 0),
-                                "model": item.get("model"),
-                                "provider": item.get("provider", ""),
-                                "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
-                                "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
-                                # Propagate fast-cache replay so replayed browser
-                                # steps bill $0 instead of their replayed tokens.
-                                "from_fast_cache": item.get("from_fast_cache", False),
-                            }
-                        )
-                    else:
-                        tool_usage["service"].append(
-                            {
-                                "cost_cents": item.get("cost_cents", 0),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
+            tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR

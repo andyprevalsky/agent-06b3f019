@@ -63,6 +63,12 @@ EXTRACT_LLM_TEMPERATURE = 0.1
 # Rose API model name
 ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 
+# Canonical pool name that browser-agent LLM usage is priced against. Browser
+# steps race through the rose-1-browser-use pool, NOT the parent agent's pool,
+# so every emitted usage row must carry this model — otherwise the workflow
+# falls back to the root model and prices those tokens at the wrong rate.
+BROWSER_USE_PRICING_POOL = "rose-1-browser-use"
+
 # Verifier settings
 # `check_progress` (helpers/llm.py) forces rose-1-ultra + claude_token
 # internally — there is no LITE fallback anymore (B2). The model arg is

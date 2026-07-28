@@ -6081,6 +6081,44 @@ def test_build_usage_items():
     assert steel_items[1]["provider"] == "Steel.dev Browser"
 
 
+def test_build_usage_items_carries_browser_pool_model():
+    """Regression (A-02): browser llm usage rows MUST name the browser pool.
+
+    Without `model`, `AgentWorkflow._track_usage` falls back to the ROOT
+    agent's pool and prices browser tokens at the parent's rate. The real path
+    must match the simulated path's contract, which always emits `model`.
+    """
+    from domains.spawn_browser_agent_v3.config import BROWSER_USE_PRICING_POOL
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_usage_items
+    from domains.spawn_browser_agent_v3.service import (
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+
+    pricing = {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}
+    items = build_usage_items(
+        total_input_tokens=1_186_754,
+        total_output_tokens=40_000,
+        model_pricing=pricing,
+        execution_time_ms=900_000,
+    )
+    llm_item = next(i for i in items if i["type"] == "llm")
+    assert "model" in llm_item, "llm usage item dropped the model key"
+    assert llm_item["model"] == BROWSER_USE_PRICING_POOL
+
+    # Contract parity with the simulated path: both emit `model` on llm rows.
+    simulated = _simulated_browser_usage_items(10, 20, pricing, usage_by_model={"claude-opus-4-8-claude": {}})
+    sim_llm = next(i for i in simulated if i["type"] == "llm")
+    assert set(llm_item) == set(sim_llm), f"real path {sorted(llm_item)} != simulated {sorted(sim_llm)}"
+
+    # ...and the manager boundary hands that model to the workflow.
+    tool_usage = browser_usage_items_to_tool_usage(items)
+    assert tool_usage["llm"][0]["model"] == BROWSER_USE_PRICING_POOL
+    assert tool_usage["llm"][0]["tokens_in"] == 1_186_754
+    assert tool_usage["llm"][0]["tokens_out"] == 40_000
+    assert tool_usage["service"][0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+
+
 def test_get_browser_system_prompt_with_files():
     from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
 
@@ -13278,6 +13316,10 @@ async def run_all_tests():
     r.record("build_context_summary_failure", test_build_context_summary_failure_with_error)
     r.record("build_context_summary_trims_lists", test_build_context_summary_trims_lists)
     r.record("build_usage_items", test_build_usage_items)
+    r.record(
+        "build_usage_items_carries_browser_pool_model",
+        test_build_usage_items_carries_browser_pool_model,
+    )
     r.record(
         "get_browser_system_prompt_with_files",
         test_get_browser_system_prompt_with_files,

@@ -2761,6 +2761,88 @@ async def test_workflow_track_usage_fast_cache_replay_is_zero_cost():
         _restore_workflow(original)
 
 
+async def test_workflow_track_usage_browser_items_price_at_browser_pool():
+    """Regression (A-02): browser tokens must price at rose-1-browser-use.
+
+    Full seam: build_usage_items (activity) -> browser_usage_items_to_tool_usage
+    (manager) -> _track_usage (workflow). Before the fix the llm row carried no
+    `model`, so the workflow fell back to the ROOT pool (rose-1-ultra,
+    0.35/1.85) and under-billed browser tokens raced through the browser pool
+    (0.5/2.75).
+    """
+    from domains.spawn_browser_agent_v3.handler import _simulated_browser_usage_items
+    from domains.spawn_browser_agent_v3.service import (
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+    from providers.rose.pricing import get_model_pricing
+
+    browser_pricing = get_model_pricing("rose-1-browser-use")
+    root_pricing = get_model_pricing("rose-1-ultra")
+    tokens_in, tokens_out = 1_186_754, 40_000
+    expected = (tokens_in / 1000) * browser_pricing["input_cents_per_1k"] + (tokens_out / 1000) * browser_pricing[
+        "output_cents_per_1k"
+    ]
+    root_priced = (tokens_in / 1000) * root_pricing["input_cents_per_1k"] + (tokens_out / 1000) * root_pricing[
+        "output_cents_per_1k"
+    ]
+    assert root_priced < expected  # guard: the two rates must actually differ
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-1-ultra"
+    wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        items = build_usage_items(tokens_in, tokens_out, browser_pricing, 900_000)
+        await wf._track_usage(
+            browser_usage_items_to_tool_usage(items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+    saved = next(i for i in save_call[1][3] if i["type"] == "llm")
+    assert saved["model"] == "rose-1-browser-use", f"browser usage priced as {saved['model']!r}"
+    assert abs(saved["cost_cents"] - expected) < 0.01, f"{saved['cost_cents']} != {expected} (browser pool rate)"
+    assert abs(saved["cost_cents"] - root_priced) > 1.0, "browser tokens were priced at the root pool rate"
+
+    # A direct-compute-token browser row (-claude suffix) must reach the $0 branch.
+    wf2 = _bare_workflow_instance()
+    wf2.agent_id = "a"
+    wf2.user_id = "u"
+    wf2.model = "rose-1-ultra"
+    wf2.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf2.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake2 = _FakeWorkflowModule()
+    original = _patch_workflow(fake2)
+    try:
+        direct_items = _simulated_browser_usage_items(
+            50_000,
+            1_000,
+            browser_pricing,
+            usage_by_model={"claude-opus-4-8-claude": {"input_tokens": 50_000, "output_tokens": 1_000}},
+        )
+        await wf2._track_usage(
+            browser_usage_items_to_tool_usage(direct_items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call2 = next(c for c in fake2.activity_calls if c[0] == "save_tool_usage")
+    direct_row = next(i for i in save_call2[1][3] if i["type"] == "llm")
+    assert direct_row["model"] == "claude-opus-4-8-claude"
+    assert direct_row["cost_cents"] == 0
+    assert direct_row["tokens_in"] == 50_000
+
+
 async def test_workflow_update_cost_and_signal_parent_root_checks_limit():
     wf = _bare_workflow_instance()
     wf.agent_id = "root"
@@ -5660,6 +5742,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_track_usage_fast_cache_replay",
         test_workflow_track_usage_fast_cache_replay_is_zero_cost,
+    )
+    await r.record_async(
+        "wf_track_usage_browser_pool_pricing",
+        test_workflow_track_usage_browser_items_price_at_browser_pool,
     )
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
