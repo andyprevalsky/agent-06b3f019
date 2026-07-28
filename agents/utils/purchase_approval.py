@@ -27,17 +27,41 @@ _CHECKOUT_TOKEN_PAIRS = {
 }
 _CHECKOUT_LEADING_TOKENS = {"order", "orders", "pay"}
 
-# Stored separator-free so one entry covers every spelling of the same key.
-# Merchants split roughly evenly between `item_id`, `itemId`, and `item-id`; the
-# comparison below strips `_`/`-` so all three resolve to `itemid`. Matching the
-# raw key rejected every camelCase spelling, which is the dominant web
-# convention (DoorDash's canonical item URL uses `?itemId=`).
-_PRODUCT_QUERY_KEYS = {"id", "item", "itemid", "pid", "product", "productid", "sku", "skuid"}
+# Analytics parameters carry no product identity, so they cannot distinguish an
+# item from the bare page it sits on. This set is deliberately the ONLY query
+# vocabulary here: it is bounded and stable across the web, unlike merchant
+# product-key names, which every store invents for itself.
+_TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "msclkid",
+    "ref",
+    "referrer",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
 
 
-def _is_product_query_key(key: str) -> bool:
-    """True when `key` names a product identifier in any separator convention."""
-    return key.lower().replace("_", "").replace("-", "") in _PRODUCT_QUERY_KEYS
+def _has_distinguishing_query(query: str) -> bool:
+    """True when the query carries any non-analytics parameter with a value.
+
+    `_looks_like_product_route` is only ever consulted when the submitted URL has
+    the SAME host and path as a page the browser is already on, so the path
+    cannot distinguish anything and the query is the only place identity can
+    live. That makes the parameter's NAME irrelevant — an allowlist of product
+    key names (`item_id`, `itemId`, `sku`, ...) could only ever list the ones we
+    had already been burned by, and missing one costs a whole run (DoorDash's
+    `?itemId=` burned 62% of a run before this was removed).
+    """
+    return any(
+        key.lower() not in _TRACKING_QUERY_KEYS and value.strip() for key, value in parse_qsl(query)
+    )
 _PRODUCT_ROUTE_MARKERS = {
     "dp",
     "ip",
@@ -133,9 +157,7 @@ def _looks_like_product_route(value: str) -> bool:
         return True
     if any(segment.startswith("buy-") for segment in path_segments) and "shop" in path_segments:
         return True
-    return any(
-        _is_product_query_key(key) and query_value.strip() for key, query_value in parse_qsl(parsed.query)
-    )
+    return _has_distinguishing_query(parsed.query)
 
 
 def validate_product_detail_url(value: Any) -> str:
@@ -149,12 +171,11 @@ def validate_product_detail_url(value: Any) -> str:
     if _contains_checkout_route(parsed.hostname or "", hostname=True):
         raise ValueError("product_url must link to the product page, not cart or checkout")
 
-    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
     if _contains_checkout_route(parsed.path):
         raise ValueError("product_url must link to the product page, not cart or checkout")
 
     path_has_detail = bool(parsed.path.strip("/"))
-    query_has_product_id = any(_is_product_query_key(key) and value.strip() for key, value in query_pairs)
+    query_has_product_id = _has_distinguishing_query(parsed.query)
     if not path_has_detail and not query_has_product_id:
         raise ValueError("product_url must identify a product, not the merchant homepage")
     return text

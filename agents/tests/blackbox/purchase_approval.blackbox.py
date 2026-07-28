@@ -25,16 +25,36 @@ def test_camel_case_product_keys_are_product_routes():
     assert _looks_like_product_route("https://example.com/store/9/?skuId=xyz")
 
 
+def test_unknown_product_key_names_are_product_routes():
+    """No allowlist: a key name we have never seen still identifies a product.
+
+    This is the case an allowlist can never cover — it could only ever contain
+    the names we had already been burned by. `?itemId=` cost 62% of a run.
+    """
+    assert _looks_like_product_route("https://example.com/store/9/?fooBarBaz=xyz")
+    assert _looks_like_product_route("https://example.com/store/9/?variant_uuid=7f3a")
+    assert _looks_like_product_route("https://example.com/store/9/?menuItemUuid=abc")
+
+
 def test_separator_conventions_are_equivalent():
     """snake_case, camelCase, and kebab-case spellings resolve identically."""
     for query in ("item_id=abc", "itemId=abc", "item-id=abc", "ITEM_ID=abc"):
         assert _looks_like_product_route(f"https://example.com/store/9/?{query}"), query
 
 
-def test_non_product_query_keys_are_not_product_routes():
-    """Normalisation must not turn unrelated keys into product identifiers."""
+def test_tracking_only_queries_are_not_product_routes():
+    """Analytics parameters carry no product identity, so they distinguish nothing."""
     assert not _looks_like_product_route("https://example.com/store/9/?ref=homepage")
     assert not _looks_like_product_route("https://example.com/store/9/?utm_source=email")
+    assert not _looks_like_product_route(
+        "https://example.com/store/9/?utm_source=email&utm_medium=cpc&gclid=abc"
+    )
+
+
+def test_bare_store_page_is_not_a_product_route():
+    """The actual failure this guard exists for: echoing the page already open."""
+    assert not _looks_like_product_route("https://www.doordash.com/store/1111604/")
+    assert not _looks_like_product_route("https://www.doordash.com/")
 
 
 def test_blank_product_id_value_is_not_a_product_route():
@@ -90,7 +110,9 @@ async def run_all_tests():
     r = BlackboxResult()
     r.record("camel_case_product_keys", test_camel_case_product_keys_are_product_routes)
     r.record("separator_conventions", test_separator_conventions_are_equivalent)
-    r.record("non_product_keys", test_non_product_query_keys_are_not_product_routes)
+    r.record("tracking_only_queries", test_tracking_only_queries_are_not_product_routes)
+    r.record("bare_store_page", test_bare_store_page_is_not_a_product_route)
+    r.record("unknown_product_keys", test_unknown_product_key_names_are_product_routes)
     r.record("blank_product_id", test_blank_product_id_value_is_not_a_product_route)
     r.record("camel_case_validates", test_camel_case_product_url_validates)
     r.record("checkout_rejected", test_checkout_urls_are_still_rejected)
