@@ -1,14 +1,12 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
+import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID } from './config';
 import {
   abandonTestPayment,
   configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
-  createTestPaymentCheckoutSession,
-  settleTestPaymentCheckoutSession,
   findAgentOwnerId,
   getTestPaymentCatalog,
   getTestPaymentLifecycle,
@@ -16,9 +14,14 @@ import {
   resolvePublicBaseUrl,
   TestPaymentError,
 } from './service';
-import type { TestPaymentLineItem } from './types';
+import { checkoutRouter } from './routes.checkout';
+import { rejectWhenDisabled } from './routes.guards';
 
 const router = Router();
+
+// Real-merchant (hosted Stripe Checkout) endpoints live in their own module to keep this file
+// inside the max-lines budget.
+router.use(checkoutRouter);
 
 /**
  * Caller authorization scope for the benchmark lifecycle routes.
@@ -81,17 +84,6 @@ async function authorizeAgentForCaller(
     res.status(403).json({ error: 'Payment benchmark access denied for this agent' });
     return false;
   }
-  return true;
-}
-
-function rejectWhenDisabled(
-  res: Response,
-  options: { allowProductionBenchmark?: boolean } = {}
-): boolean {
-  if (TEST_PAYMENT_ENABLED || (options.allowProductionBenchmark === true && isProductionEnv())) {
-    return false;
-  }
-  res.status(404).json({ error: 'Not found' });
   return true;
 }
 
@@ -239,45 +231,6 @@ router.post(
         return;
       }
       res.status(500).json({ error: 'Failed to confirm test payment' });
-    }
-  })
-);
-
-// Real-merchant path: hand the shopper a hosted Stripe Checkout instead of taking the PAN
-// ourselves. This is the only way a LIVE Rose-minted card can be authorized (AgentCard's
-// test_charge is sandbox-only; live-mode raw-PAN tokenization is blocked by Stripe).
-router.post(
-  '/checkout-session',
-  asyncHandler(async (req, res) => {
-    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
-    try {
-      res.json(
-        await createTestPaymentCheckoutSession(req.body as { items: TestPaymentLineItem[] })
-      );
-    } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to create test payment checkout session' });
-    }
-  })
-);
-
-router.post(
-  '/checkout-settle',
-  asyncHandler(async (req, res) => {
-    if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
-    try {
-      const body = req.body as Record<string, unknown>;
-      const sessionId = typeof body.checkoutSessionId === 'string' ? body.checkoutSessionId : '';
-      res.json(await settleTestPaymentCheckoutSession(sessionId));
-    } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to settle test payment checkout session' });
     }
   })
 );
