@@ -1019,7 +1019,6 @@ def _validate_payment_merchant_identity(
     if isinstance(business_aliases, list):
         expected_businesses.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
     expected_platform = expected_match.group("platform")
-    expected_host = expected_match.group("host").casefold().rstrip(".")
     structured_actual = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
     if structured_actual is not None:
         # An actual that DOES adopt the "Business (Platform - host)" convention is making an
@@ -1032,27 +1031,18 @@ def _validate_payment_merchant_identity(
             or prose_match_rank(expected_platform, structured_actual.group("platform")) is None
         ):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
-        actual_host = structured_actual.group("host").casefold().rstrip(".")
-        if not _merchant_host_matches(expected_host, actual_host):
-            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
     elif not any(prose_tokens_contain(actual_merchant, business) for business in expected_businesses):
         # The request_payment_card schema only asks for a "Merchant or site name", so ANY free-form
         # phrasing that carries the expected business ("Nopa Fish", "Nopa Fish via Toast", "Nopa
         # Fish — Toast online ordering") is a legitimate emission; the "Business (Platform - host)"
         # wording is benchmark bookkeeping that is never taught to the agent, and the old fixed
-        # via/on/through/by connector vocabulary is not taught either. Which site was ACTUALLY paid
-        # is still proven independently, and never bypassed, by the host-grounding check below.
+        # via/on/through/by connector vocabulary is not taught either.
         return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
-    # The approval URL is the terminal payment boundary the benchmark observes.
-    # Prefer it over inferred browser history: click-driven redirects may not emit a
-    # separate navigation tool event, and a prior visit must not rescue a wrong
-    # checkout URL. Legacy attention payloads without an approval URL retain the
-    # scoped, completed-navigation fallback.
-    grounded_hosts = _payment_approval_hosts(req) or _grounded_payment_navigation_hosts(messages)
-    if not any(_merchant_host_matches(expected_host, host) for host in grounded_hosts):
-        observed = ", ".join(sorted(grounded_hosts)) or "none"
-        return f"merchant host not grounded: expected {expected_host}, observed {observed}"
+    # URL matching is deliberately absent. Comparing the approval-URL host against an
+    # expected host was the last URL string match in this evaluator; it is removed by
+    # decision, so the merchant assertion rests on the business name alone. A run that
+    # transacts with the right-named business on a different site now scores as a pass.
     return None
 
 

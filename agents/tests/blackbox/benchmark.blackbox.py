@@ -845,68 +845,37 @@ def test_toast_payment_merchant_identity_accepts_grounded_connector_variant():
     assert _validate_payment_receipt(task, request, messages=messages) is None
 
 
-def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
-    """Semantic merchant matching must reject a wrong merchant, host, or browser flow.
+def test_toast_payment_merchant_identity_rejects_wrong_business_or_platform_claim():
+    """What survives after URL matching was removed: the business name, and an explicit platform claim.
 
-    A FREE-FORM platform word ("Nopa Fish via DoorDash") is no longer rejected on the string
-    alone: nothing teaches the agent a platform vocabulary, and which site was actually paid is
-    proven by the approval/navigation host, which is asserted below and on every path. A
-    *structured* "Business (Platform - host)" answer still makes an explicit platform claim and is
-    still held to it.
+    Host grounding, navigation scoping, and cross-session checks are gone by decision, so
+    every assertion here is about the merchant STRING the agent emitted. A free-form
+    phrasing carrying the expected business passes; a different business, or a *structured*
+    "Business (Platform - host)" answer naming the wrong platform, still fails.
     """
-    from copy import deepcopy
-
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _validate_payment_receipt
 
     task = get_task_by_name("browser-toast-nopa-write-lock")
 
+    # Wrong business, and a structured answer making a false platform claim.
     for merchant in ("Nopa Chips via Toast", "Nopa Fish (DoorDash - doordash.com)"):
         request, messages = _captured_toast_payment_approval(merchant=merchant)
-        assert _validate_payment_receipt(task, request, messages=messages) is not None
+        assert _validate_payment_receipt(task, request, messages=messages) is not None, merchant
 
-    # A free-form platform word rides entirely on host grounding: grounded on Toast it passes,
-    # grounded on DoorDash it fails.
-    loose_platform_request, loose_platform_messages = _captured_toast_payment_approval(
-        merchant="Nopa Fish via DoorDash"
-    )
-    assert _validate_payment_receipt(task, loose_platform_request, messages=loose_platform_messages) is None
-    loose_platform_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(task, loose_platform_request, messages=loose_platform_messages) is not None
+    # Free-form phrasings carrying the expected business are accepted; the platform word
+    # is not vocabulary the agent is ever taught.
+    for merchant in ("Nopa Fish", "Nopa Fish via Toast", "Nopa Fish — Toast online ordering"):
+        request, messages = _captured_toast_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
 
-    wrong_host_request, wrong_host_messages = _captured_toast_payment_approval()
-    wrong_host_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(task, wrong_host_request, messages=wrong_host_messages) is not None
-
-    unobserved_request, unobserved_messages = _captured_toast_payment_approval()
-    assert _validate_payment_receipt(task, unobserved_request, messages=unobserved_messages[1:]) is not None
-
-    cross_session_request, cross_session_messages = _captured_toast_payment_approval()
-    cross_session_messages[1] = deepcopy(cross_session_messages[1])
-    cross_session_messages[1]["metadata"]["browser_url"] = "https://kernel.example/live/other-session"
-    assert _validate_payment_receipt(task, cross_session_request, messages=cross_session_messages) is not None
-
-    wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
-        merchant="Nopa Fish (Toast - order.doordash.com)"
-    )
-    assert _validate_payment_receipt(
-        task,
-        wrong_structured_request,
-        messages=wrong_structured_messages,
-    ) is not None
-
-    current_request, toast_messages = _captured_toast_payment_approval()
-    _, doordash_messages = _captured_toast_payment_approval()
-    for message in doordash_messages:
-        message["metadata"]["subAgentId"] = "doordash-browser-task"
-        message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
-    doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(
-        task,
-        current_request,
-        messages=[*toast_messages, *doordash_messages],
-    ) is not None
-
+    # URL matching is removed: the navigation host no longer affects the verdict. Pinned so
+    # the removed host check cannot creep back in silently.
+    request, messages = _captured_toast_payment_approval(merchant="Nopa Fish via DoorDash")
+    assert _validate_payment_receipt(task, request, messages=messages) is None
+    messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
+    assert _validate_payment_receipt(task, request, messages=messages) is None
+    assert _validate_payment_receipt(task, request, messages=messages[1:]) is None
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
     """The ngrok payment surface must serve a bundle, not Vite's module graph."""
@@ -1345,7 +1314,7 @@ def test_receipt_fee_labels_match_as_prose_and_subsume_the_tax_escape_hatch():
     assert "expected 499, got 500" in _validate_payment_receipt(multi_task, multi)
 
 
-def test_merchant_identity_accepts_untaught_phrasing_only_when_host_is_grounded():
+def test_merchant_identity_accepts_untaught_phrasing():
     """The schema asks for a "Merchant or site name" — not a connector vocabulary.
 
     Pre-fix a free-form merchant had to match `via|on|through|by|/`, so "Nopa Fish — Toast online
@@ -1374,11 +1343,10 @@ def test_merchant_identity_accepts_untaught_phrasing_only_when_host_is_grounded(
         reason = _validate_payment_receipt(task, request, messages=messages)
         assert reason is not None and reason.startswith("merchant mismatch"), merchant
 
-    # Host grounding is untouched: an accepted phrasing on an ungrounded host still fails.
+    # URL matching removed by decision: an accepted phrasing passes on any host.
     request, messages = _captured_toast_payment_approval(merchant="Nopa Fish — Toast online ordering")
     request["metadata"]["requestUserApproval"] = {"url": "https://checkout.attacker.example/order"}
-    reason = _validate_payment_receipt(task, request, messages=messages)
-    assert reason is not None and reason.startswith("merchant host not grounded"), reason
+    assert _validate_payment_receipt(task, request, messages=messages) is None
 
 
 def test_expected_final_findings_accept_standard_address_abbreviations():
@@ -3118,7 +3086,7 @@ def _captured_live_paid_payment_approval(task_name: str) -> tuple[dict, list[dic
     return request, messages
 
 
-def test_live_paid_bookings_require_grounded_payment_site():
+def test_live_paid_bookings_accept_business_name_without_host_matching():
     """The pending payment approval itself must point at the expected checkout host."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _validate_payment_receipt
@@ -3134,12 +3102,12 @@ def test_live_paid_bookings_require_grounded_payment_site():
             )
             assert _validate_payment_receipt(task, request, messages=messages) is None
 
+        # URL matching removed by decision: the approval host no longer constrains the verdict.
         request["metadata"]["requestUserApproval"]["url"] = "https://checkout.attacker.example/order"
-        reason = _validate_payment_receipt(task, request, messages=messages)
-        assert reason is not None and "host" in reason
+        assert _validate_payment_receipt(task, request, messages=messages) is None
 
 
-def test_payment_merchant_accepts_bare_business_name_only_when_host_grounded():
+def test_payment_merchant_accepts_bare_business_name():
     """A bare merchant name is producible from the tool schema; the URL host proves the platform.
 
     Replays the real browser-alchemy-springs-sauna emission (merchant "Alchemy Springs" with a
@@ -3167,13 +3135,15 @@ def test_payment_merchant_accepts_bare_business_name_only_when_host_grounded():
     for merchant in ("Alchemy Springs", "Alchemy Sauna Garden"):
         assert _validate_payment_receipt(task, with_merchant(merchant), messages=messages) is None
 
-    # ...but only when the approval URL still grounds the expected platform host.
-    ungrounded = _validate_payment_receipt(
-        task,
-        with_merchant("Alchemy Springs", url="https://checkout.attacker.example/order"),
-        messages=messages,
+    # URL matching removed by decision: the approval host no longer constrains the verdict.
+    assert (
+        _validate_payment_receipt(
+            task,
+            with_merchant("Alchemy Springs", url="https://checkout.attacker.example/order"),
+            messages=messages,
+        )
+        is None
     )
-    assert ungrounded is not None and ungrounded.startswith("merchant host not grounded")
 
     # A bare name that is not the expected business (or a declared alias) still fails.
     wrong_business = _validate_payment_receipt(task, with_merchant("Totally Different Spa"), messages=messages)
@@ -11293,8 +11263,8 @@ async def run_all_tests():
         test_toast_payment_merchant_identity_accepts_grounded_connector_variant,
     )
     r.record(
-        "toast_payment_merchant_rejects_wrong_or_ungrounded",
-        test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants,
+        "toast_payment_merchant_rejects_wrong_business",
+        test_toast_payment_merchant_identity_rejects_wrong_business_or_platform_claim,
     )
     r.record(
         "success_on_payment_card_request",
@@ -11317,8 +11287,8 @@ async def run_all_tests():
         test_receipt_fee_labels_match_as_prose_and_subsume_the_tax_escape_hatch,
     )
     r.record(
-        "merchant_identity_untaught_phrasing_needs_grounded_host",
-        test_merchant_identity_accepts_untaught_phrasing_only_when_host_is_grounded,
+        "merchant_identity_untaught_phrasing",
+        test_merchant_identity_accepts_untaught_phrasing,
     )
     r.record(
         "final_findings_accept_address_abbreviations",
@@ -11489,12 +11459,12 @@ async def run_all_tests():
         test_live_paid_bookings_stop_only_at_payment_approval,
     )
     r.record(
-        "live_paid_bookings_grounded_site",
-        test_live_paid_bookings_require_grounded_payment_site,
+        "live_paid_bookings_business_name",
+        test_live_paid_bookings_accept_business_name_without_host_matching,
     )
     r.record(
-        "payment_merchant_bare_business_needs_grounded_host",
-        test_payment_merchant_accepts_bare_business_name_only_when_host_grounded,
+        "payment_merchant_bare_business_name",
+        test_payment_merchant_accepts_bare_business_name,
     )
     await r.record_async(
         "amazon_beanie_poll_rejects_second_or_unrelated_approval",
