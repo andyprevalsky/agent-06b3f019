@@ -349,10 +349,18 @@ If any verifier fails, fix and re-run the full Step 0 → verifier flow. Do not 
 
 ## Step 1: Prettier format
 
-If `$CHANGED_TS` is non-empty, format them:
+If `$CHANGED_TS` is non-empty, format them.
+
+**Write the file list to a file and feed it via `xargs` — do not interpolate
+`$CHANGED_TS` directly.** These newline-separated lists rely on word splitting,
+which `bash` does and **`zsh` does not**. Under zsh (the default interactive
+shell on this machine) a bare `$CHANGED_TS` expands to ONE argument and the
+command dies with `ENAMETOOLONG: name too long` naming a bogus multi-line path.
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage prettier -- npx prettier --write $CHANGED_TS
+printf '%s\n' "$CHANGED_TS" | grep -v '^$' > .context/deploy-changed-ts.txt
+cd back-end && bash ../scripts/run-deploy-stage prettier -- \
+  bash -c 'xargs npx prettier --write < ../.context/deploy-changed-ts.txt'
 ```
 
 If any files were modified by this step, stage and commit them:
@@ -371,16 +379,25 @@ not a sufficient deploy gate. Changes to package manifests, TypeScript config,
 or ESLint config set `$LINT_TS` to the entire source tree because those inputs
 can change the meaning of every unchanged file.
 
+Feed `$LINT_TS` through a file + `xargs` for the same zsh word-splitting reason
+described in Step 1 — never interpolate the list directly.
+
+```bash
+printf '%s\n' "$LINT_TS" | grep -v '^$' > .context/deploy-lint-ts.txt
+```
+
 **Step 2a (mutator — runs before the parallel verifier batch):**
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- node scripts/lint-affected.mjs --fix $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint-fix -- \
+  bash -c 'xargs node scripts/lint-affected.mjs --fix < ../.context/deploy-lint-ts.txt'
 ```
 
 **Step 2b (verifier — runs in parallel with Steps 3, 4, 4a):**
 
 ```bash
-cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- node scripts/lint-affected.mjs $LINT_TS
+cd back-end && bash ../scripts/run-deploy-stage eslint --reuse-passed -- \
+  bash -c 'xargs node scripts/lint-affected.mjs < ../.context/deploy-lint-ts.txt'
 ```
 
 If there are remaining errors, fix them manually. Loop until the affected-file lint reports 0 errors.
