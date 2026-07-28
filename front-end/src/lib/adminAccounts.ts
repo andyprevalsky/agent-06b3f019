@@ -1,3 +1,5 @@
+import { getImpersonatedAccount } from './impersonation';
+
 /** Canonical front-end allowlist for product-wide administrator capabilities. */
 export interface AdminAccount {
   userId: string;
@@ -11,3 +13,27 @@ export const ADMIN_ACCOUNTS: readonly AdminAccount[] = [
 ];
 
 export const ADMIN_USER_IDS: readonly string[] = ADMIN_ACCOUNTS.map((account) => account.userId);
+
+/** Digits-only phone numbers that carry admin capabilities. */
+export const ADMIN_PHONE_DIGITS: readonly string[] = ['19729777432', '9729777432'];
+
+/**
+ * Whether the PERSON using the app is an administrator.
+ *
+ * This is deliberately not "is the signed-in account an admin". While an admin
+ * is impersonating, the active session belongs to the target account, so an
+ * identity-only check hides every admin surface (Health, Benchmarks, debug
+ * panels) from an operator who is still an admin — and who reaches those
+ * surfaces with the STASHED admin token, which the backend authorizes.
+ *
+ * Impersonation implies admin by construction: only an admin can start it, and
+ * getImpersonatedAccount() returns null unless a live, unexpired admin session
+ * is stashed. The backend remains the real gate; this only decides what to show.
+ */
+export function isAdminOperator(user: { id?: string; phone?: string } | null): boolean {
+  if (getImpersonatedAccount() !== null) return true;
+  if (!user) return false;
+  if (user.id !== undefined && user.id !== '' && ADMIN_USER_IDS.includes(user.id)) return true;
+  const phoneDigits = (user.phone ?? '').replace(/\D/g, '');
+  return ADMIN_PHONE_DIGITS.includes(phoneDigits);
+}
