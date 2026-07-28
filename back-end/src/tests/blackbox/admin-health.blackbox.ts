@@ -28,6 +28,10 @@ import {
   type AdminHealthResponse,
 } from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
+
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -500,10 +504,12 @@ async function testAdminHappyYearly() {
   assertNoImpossibleConversion(body);
 }
 
-// Waitlist signups are a phone-verified product signal: entries without a phone
-// number (the legacy email-only waitlist) must be cleared out of the metric.
-async function testWaitlist_excludesPhonelessSignups() {
-  const marker = `blackbox-wl-${Date.now()}-${process.pid}`;
+// A signup counts on email OR phone. This metric used to require a phone as a
+// stand-in for "not fixture junk", which silently discarded every real
+// email-only signup — the entire public landing-form population, which never
+// collects a phone. Fixtures are excluded by classification instead.
+async function testWaitlist_countsEmailOrPhoneAndExcludesFixtures() {
+  const marker = `wlcase-wl-${Date.now()}-${process.pid}`;
   const start = new Date('2000-01-01T00:00:00.000Z');
   const end = new Date('2000-01-02T00:00:00.000Z');
   const at = new Date('2000-01-01T12:00:00.000Z');
@@ -512,24 +518,44 @@ async function testWaitlist_excludesPhonelessSignups() {
   // a coverage run killed on timeout) would leave a `phone: ''` row behind and
   // make every subsequent run collide. Purge any leaked fixture rows first so
   // the test self-heals instead of staying wedged.
-  await prisma.waitlist.deleteMany({ where: { name: { startsWith: 'blackbox-wl-' } } });
+  await prisma.waitlist.deleteMany({ where: { name: { startsWith: 'wlcase-wl-' } } });
   try {
     await prisma.waitlist.createMany({
       data: [
-        { name: marker, phone: `+1999${Date.now() % 10000000}`, createdAt: at },
-        { name: marker, email: `${marker}-a@example.com`, phone: null, createdAt: at },
-        { name: marker, email: `${marker}-b@example.com`, phone: '', createdAt: at },
+        // Counts: phone-bearing.
+        {
+          name: `${marker}-phone`,
+          phone: `+1206555${String(Date.now() % 10000).padStart(4, '0')}`,
+          createdAt: at,
+        },
+        // Counts: email-only — the case the old phone filter threw away.
+        {
+          name: `${marker}-email`,
+          email: `${marker}-a@waitlist-case.dev`,
+          phone: null,
+          createdAt: at,
+        },
+        // Counts: a blank phone string is still an email-bearing signup.
+        {
+          name: `${marker}-blank`,
+          email: `${marker}-b@waitlist-case.dev`,
+          phone: '',
+          createdAt: at,
+        },
+        // Excluded: one of our own fixtures, which is what the phone filter was
+        // really trying (and failing) to keep out of the metric.
+        { name: `${marker}-fixture`, email: `${marker}-c@blackbox-test.dev`, createdAt: at },
       ],
     });
     const rows = await findWaitlistSignupsBetween(start, end);
-    if (rows.length !== 1) {
+    if (rows.length !== 3) {
       throw new Error(
-        `Expected exactly 1 phone-bearing signup in the window, got ${rows.length} ` +
-          `(phone-less rows must be excluded)`
+        `Expected 3 real signups (phone, email-only, blank-phone+email) in the window, ` +
+          `got ${rows.length} — fixtures must be excluded and email-only rows must count`
       );
     }
   } finally {
-    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.waitlist.deleteMany({ where: { name: { startsWith: marker } } });
   }
 }
 
@@ -554,8 +580,8 @@ async function main() {
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
     {
-      name: 'waitlist metric excludes phone-less signups',
-      fn: testWaitlist_excludesPhonelessSignups,
+      name: 'waitlist metric counts email-or-phone signups and excludes fixtures',
+      fn: testWaitlist_countsEmailOrPhoneAndExcludesFixtures,
     },
   ];
 

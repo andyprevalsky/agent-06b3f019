@@ -982,29 +982,37 @@ print(label[:50].strip("-"))
 PY
 }
 
+# Reserve an ngrok domain, defaulting to this worktree's primary domain.
+# Callers may pass an explicit domain (the smoke fallback reserves its own) and
+# may pass `soft` to warn instead of exiting when reservation fails, so a
+# best-effort fallback path never kills the whole stack.
 ensure_ngrok_domain_reserved() {
+    local domain="${1:-$WORKTREE_DOMAIN}"
+    local failure_mode="${2:-fatal}"
     if [ -z "${NGROK_API_KEY:-}" ]; then
         return 0
     fi
-    echo "🌐 Checking ngrok reserved domain $WORKTREE_DOMAIN"
+    echo "🌐 Checking ngrok reserved domain $domain"
     local domains_json
     domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 1000 2>&1) || {
         echo "$domains_json"
         echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
+        [ "$failure_mode" = "soft" ] && return 1
         exit 1
     }
-    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$WORKTREE_DOMAIN\""; then
-        echo "🌐 Reserved domain already exists: $WORKTREE_DOMAIN"
+    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
+        echo "🌐 Reserved domain already exists: $domain"
         return 0
     fi
-    echo "🌐 Reserving ngrok domain $WORKTREE_DOMAIN"
+    echo "🌐 Reserving ngrok domain $domain"
     local create_output
     create_output=$(ngrok api reserved-domains create \
         --api-key "$NGROK_API_KEY" \
-        --domain "$WORKTREE_DOMAIN" \
+        --domain "$domain" \
         --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
         echo "$create_output"
-        echo "❌ Could not reserve $WORKTREE_DOMAIN. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        echo "❌ Could not reserve $domain. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
+        [ "$failure_mode" = "soft" ] && return 1
         exit 1
     }
 }
@@ -1117,9 +1125,18 @@ start_cloudflare_quick_tunnel() {
 # no recourse. ngrok is already a supported provider here and uses independent
 # infrastructure, so an ephemeral ngrok endpoint is a clean second source.
 #
-# Ephemeral on purpose: no --domain, so this needs no reserved domain and no
-# paid ngrok plan — it is a disposable per-run URL, exactly like the quick tunnel
-# it replaces.
+# Uses a reserved per-worktree fallback domain, NOT a bare `ngrok http`.
+#
+# A bare agent binds the account's single free static endpoint, so two worktrees
+# that both fell back at once collided with ERR_NGROK_334 and the second one's
+# whole stack died (observed 2026-07-28: an ashgabat smoke run lost the endpoint
+# to a concurrent port-vila deploy). We are on a paid plan and already reserve
+# `rose-<worktree>` for the primary tunnel, so the fallback reserves its own
+# `rose-<worktree>-bench` — distinct from the primary so a worktree's Step 5
+# stack and its isolated benchmark stack can hold tunnels simultaneously.
+#
+# Reservation is best-effort: without NGROK_API_KEY (or if the API refuses) this
+# still falls back to a bare agent, which works fine for a lone worktree.
 start_ngrok_ephemeral_tunnel() {
     command -v ngrok >/dev/null 2>&1 || {
         echo "   ngrok fallback unavailable: ngrok is not installed."
@@ -1132,9 +1149,30 @@ start_ngrok_ephemeral_tunnel() {
 
     mkdir -p "$RUN_CONTEXT_DIR"
     local ngrok_log="$RUN_CONTEXT_DIR/ngrok-fallback.log"
-    echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
 
-    ngrok http "$FRONTEND_PORT" \
+    # Always name the endpoint. Pre-reservation needs NGROK_API_KEY (which lives
+    # in back-end/.env and is NOT in this script's environment on the benchmark
+    # path), but --domain works without it on our plan — the primary tunnel below
+    # relies on exactly that. Gating the domain on the API key would silently
+    # drop every fallback back onto the shared free endpoint, which is the
+    # collision this is here to prevent.
+    local fallback_label fallback_domain
+    fallback_label="$(dns_label_from_workspace)" || return 1
+    fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+    if [ -n "${NGROK_API_KEY:-}" ]; then
+        ensure_ngrok_domain_reserved "$fallback_domain" soft ||
+            echo "   Proceeding without pre-reservation of $fallback_domain."
+    fi
+
+    local -a ngrok_args=("http" "$FRONTEND_PORT")
+    if [ -n "$fallback_domain" ]; then
+        ngrok_args+=("--domain" "$fallback_domain")
+        echo "🌐 Falling back to ngrok (reserved $fallback_domain) → localhost:$FRONTEND_PORT"
+    else
+        echo "🌐 Falling back to an ephemeral ngrok tunnel → localhost:$FRONTEND_PORT"
+    fi
+
+    ngrok "${ngrok_args[@]}" \
         --log stdout --log-format json --log-level info > "$ngrok_log" 2>&1 &
     NGROK_PID=$!
     PUBLIC_TUNNEL_SERVICE_NAME="ngrok"

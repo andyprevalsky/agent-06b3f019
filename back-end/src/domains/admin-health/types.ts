@@ -89,11 +89,12 @@ export interface AdminWaitlistPerson {
   id: string;
   name: string;
   email: string | null;
-  phone: string;
+  /** Null for email-only signups — the public landing form collects no phone. */
+  phone: string | null;
   variant: string | null;
   joinedAt: string;
   invitedAt: string | null;
-  /** A signed-up account exists for this phone. */
+  /** A signed-up account exists for this phone. Always false without one. */
   hasAccount: boolean;
   /** Account exists but is still behind the invite gate (usedInviteCode null). */
   isGated: boolean;
