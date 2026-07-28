@@ -644,38 +644,96 @@ def build_browser_task_prompt(goal: str) -> str:
 # ========================================
 
 
+def accumulate_model_usage(
+    usage_by_model: Dict[str, Dict[str, int]],
+    actual_model: Optional[str],
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Add one LLM call's tokens to the per-actual-model usage ledger.
+
+    Keyed by the model the inference ACTUALLY ran on (`actual_model`), which is
+    what decides price: the browser pool races several underlying models, and a
+    `-claude`/`-gpt` suffix means the step ran on the user's own compute token
+    (billed $0 by `AgentWorkflow._track_usage`).
+    """
+    bucket = usage_by_model.setdefault(str(actual_model or ""), {"input_tokens": 0, "output_tokens": 0})
+    bucket["input_tokens"] += int(input_tokens or 0)
+    bucket["output_tokens"] += int(output_tokens or 0)
+
+
+def build_browser_llm_usage_items(
+    total_input_tokens: int,
+    total_output_tokens: int,
+    model_pricing: Dict[str, Any],
+    usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+) -> List[Dict[str, Any]]:
+    """Build one llm usage row per model that ACTUALLY ran inference.
+
+    `model` must be the real `actual_model` from each LLM call, never a static
+    pool constant: (1) the browser pool races several underlying models at
+    different prices, and (2) `AgentWorkflow._track_usage` routes models whose
+    name ends in `-claude`/`-gpt` to a $0 direct-compute-token branch that a
+    pool name can never match — so a hardcoded pool bills the user's own
+    compute-token steps as paid waterfall usage.
+
+    Callers that genuinely have no per-model breakdown pass `usage_by_model`
+    empty/None and get the historical single aggregate row, priced at the
+    browser pool so the workflow does not fall back to the ROOT agent's pool.
+
+    Token conservation: with a populated ledger the emitted rows sum exactly to
+    the ledger; the `total_*` args are only the single-row fallback's totals.
+    """
+    model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
+    items: List[Dict[str, Any]] = []
+    for model, usage in model_rows.items():
+        input_tokens = int((usage or {}).get("input_tokens") or 0)
+        output_tokens = int((usage or {}).get("output_tokens") or 0)
+        items.append(
+            {
+                "type": "llm",
+                # Unattributed tokens still price at the browser pool rather
+                # than falling through to the parent agent's cheaper pool.
+                "model": model or BROWSER_USE_PRICING_POOL,
+                "cost_cents": round(
+                    (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
+                    + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
+                    4,
+                ),
+                "provider": "Rose 1 Browser Use",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            }
+        )
+    return items
+
+
 def build_usage_items(
     total_input_tokens: int,
     total_output_tokens: int,
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
+    usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
     """Build standardized usage items for cost tracking.
 
-    The llm row MUST carry `model`. The workflow (`_track_usage`) resolves
-    pricing from that field and falls back to the ROOT agent's pool when it is
-    missing — which silently priced browser tokens at the parent's cheaper rate.
-    `model_pricing` here is the rose-1-browser-use pool pricing the caller
-    already resolved, so the pre-computed `cost_cents` and the workflow's
-    recomputation now agree; the workflow remains the single source of truth
-    (it also applies cache discounts, which this aggregate has no data for).
+    One llm row per ACTUAL inference model (see `build_browser_llm_usage_items`)
+    plus one browser-time `service` row, which is not per-model. `model_pricing`
+    is the browser-pool pricing the caller resolved; the pre-computed
+    `cost_cents` on llm rows is informational only — the workflow recomputes
+    from `model` + tokens and remains the single source of cost truth (it also
+    applies cache discounts, which this aggregate has no data for).
     """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
     cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
     return [
-        {
-            "type": "llm",
-            "model": BROWSER_USE_PRICING_POOL,
-            "cost_cents": round(
-                (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"]
-                + (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
-                4,
-            ),
-            "provider": "Rose 1 Browser Use",
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-        },
+        *build_browser_llm_usage_items(
+            total_input_tokens,
+            total_output_tokens,
+            model_pricing,
+            usage_by_model,
+        ),
         {
             "type": "service",
             "cost_cents": round(execution_time_ms * cost_per_ms, 4),

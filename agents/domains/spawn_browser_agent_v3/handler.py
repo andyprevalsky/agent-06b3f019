@@ -113,12 +113,14 @@ from .repo import (
 )
 from .service import (
     AuthRuntimeState,
+    accumulate_model_usage,
     append_completion_evidence,
     browser_usage_items_to_tool_usage,
     build_action_titles,
     build_auth_assistance_resume_user_message,
     build_best_effort_response,
     build_browser_dynamic_system_context,
+    build_browser_llm_usage_items,
     build_browser_task_prompt,
     build_browser_verifier_context,
     build_context_summary,
@@ -3795,25 +3797,14 @@ def _simulated_browser_usage_items(
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
-    items: List[Dict[str, Any]] = []
-    for model, usage in model_rows.items():
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        items.append(
-            {
-                "type": "llm",
-                "model": model or None,
-                "cost_cents": round(
-                    (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
-                    + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
-                    4,
-                ),
-                "provider": "Rose 1 Browser Use",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-        )
+    """Simulated twin of `build_usage_items`: same per-actual-model llm rows,
+    a free World-Model-Harness service row instead of a paid browser row."""
+    items = build_browser_llm_usage_items(
+        total_input_tokens,
+        total_output_tokens,
+        model_pricing,
+        usage_by_model,
+    )
     items.append({"type": "service", "cost_cents": 0, "provider": "World Model Harness"})
     return items
 
@@ -4117,13 +4108,12 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             output_tokens = int(usage.get("completion_tokens") or 0)
             total_input_tokens += input_tokens
             total_output_tokens += output_tokens
-            actual_model = str(llm_result.get("actual_model") or "")
-            model_usage = usage_by_model.setdefault(
-                actual_model,
-                {"input_tokens": 0, "output_tokens": 0},
+            accumulate_model_usage(
+                usage_by_model,
+                llm_result.get("actual_model"),
+                input_tokens,
+                output_tokens,
             )
-            model_usage["input_tokens"] += input_tokens
-            model_usage["output_tokens"] += output_tokens
             action = dict(llm_result.get("action") or {})
             action_name = str(action.get("action") or "")
             thinking = str(action.get("thinking") or "")
@@ -4527,6 +4517,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
     total_input_tokens = 0
     total_output_tokens = 0
+    # Per-ACTUAL-model token ledger. The browser pool races several underlying
+    # models at different prices, and `-claude`/`-gpt` steps ran on the user's
+    # own compute token ($0). Usage rows are emitted per entry here so the
+    # workflow prices each model correctly instead of collapsing everything
+    # onto the pool constant.
+    usage_by_model: Dict[str, Dict[str, int]] = {}
     visited_urls: List[str] = []
     reasoning_messages: List[str] = []
     action_summary: List[str] = []
@@ -5925,10 +5921,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_use_mode = None
 
                 usage = llm_result.get("usage", {})
-                response_mode = llm_result.get("mode", "")
-                if response_mode not in ("claude", "gpt"):
-                    total_input_tokens += usage.get("prompt_tokens", 0)
-                    total_output_tokens += usage.get("completion_tokens", 0)
+                # Record EVERY step against the model that actually ran it —
+                # including claudeAuth/gptAuth steps. `_track_usage` zeroes
+                # `-claude`/`-gpt` rows by model name, so they no longer have
+                # to be dropped here to avoid being billed as paid waterfall.
+                step_input_tokens = usage.get("prompt_tokens", 0) or 0
+                step_output_tokens = usage.get("completion_tokens", 0) or 0
+                total_input_tokens += step_input_tokens
+                total_output_tokens += step_output_tokens
+                accumulate_model_usage(
+                    usage_by_model,
+                    llm_result.get("actual_model"),
+                    step_input_tokens,
+                    step_output_tokens,
+                )
 
             except asyncio.TimeoutError:
                 consecutive_api_failures += 1
@@ -6238,6 +6244,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     total_output_tokens,
                     model_pricing,
                     execution_time_ms,
+                    usage_by_model,
                 )
                 await _propagate_browser_credentials_with_progress(
                     config=config,
@@ -6513,6 +6520,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     total_output_tokens,
                     model_pricing,
                     execution_time_ms,
+                    usage_by_model,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
@@ -6610,12 +6618,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                     v_usage = progress_result.get("usage", {})
-                    verifier_actual_model = v_usage.get("actual_model", "")
-                    if not (
-                        str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")
-                    ):
-                        total_input_tokens += v_usage.get("prompt_tokens", 0)
-                        total_output_tokens += v_usage.get("completion_tokens", 0)
+                    v_input_tokens = v_usage.get("prompt_tokens", 0) or 0
+                    v_output_tokens = v_usage.get("completion_tokens", 0) or 0
+                    total_input_tokens += v_input_tokens
+                    total_output_tokens += v_output_tokens
+                    accumulate_model_usage(
+                        usage_by_model,
+                        v_usage.get("actual_model"),
+                        v_input_tokens,
+                        v_output_tokens,
+                    )
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
@@ -6720,6 +6732,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             total_output_tokens,
                             model_pricing,
                             execution_time_ms,
+                            usage_by_model,
                         )
                         await _propagate_browser_credentials_with_progress(
                             config=config,
@@ -7359,10 +7372,16 @@ Based on this feedback, I need to continue working on the task and address the i
                     start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                 )
                 fv_usage = final_progress.get("usage", {})
-                fv_model = fv_usage.get("actual_model", "")
-                if not (str(fv_model).endswith("-claude") or str(fv_model).endswith("-gpt")):
-                    total_input_tokens += fv_usage.get("prompt_tokens", 0)
-                    total_output_tokens += fv_usage.get("completion_tokens", 0)
+                fv_input_tokens = fv_usage.get("prompt_tokens", 0) or 0
+                fv_output_tokens = fv_usage.get("completion_tokens", 0) or 0
+                total_input_tokens += fv_input_tokens
+                total_output_tokens += fv_output_tokens
+                accumulate_model_usage(
+                    usage_by_model,
+                    fv_usage.get("actual_model"),
+                    fv_input_tokens,
+                    fv_output_tokens,
+                )
                 if final_progress.get("structured_response") is not None:
                     latest_structured_response = final_progress["structured_response"]
             except Exception as final_verifier_error:
@@ -7398,7 +7417,13 @@ Based on this feedback, I need to continue working on the task and address the i
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
-        usage_items = build_usage_items(total_input_tokens, total_output_tokens, model_pricing, execution_time_ms)
+        usage_items = build_usage_items(
+            total_input_tokens,
+            total_output_tokens,
+            model_pricing,
+            execution_time_ms,
+            usage_by_model,
+        )
         await _propagate_browser_credentials_with_progress(
             config=config,
             agent_id=agent_id,

@@ -6119,6 +6119,119 @@ def test_build_usage_items_carries_browser_pool_model():
     assert tool_usage["service"][0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
 
 
+def test_build_usage_items_emits_one_row_per_actual_model():
+    """The llm rows must name the model that ACTUALLY ran inference.
+
+    `rose-1-browser-use` is a POOL that races several underlying models at
+    different prices, and `-claude`/`-gpt` steps ran on the user's own compute
+    token ($0 in `_track_usage`). Collapsing everything onto the pool constant
+    both mis-prices the race and makes the $0 branch unreachable.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    usage_by_model = {
+        "claude-opus-4-8-claude": {"input_tokens": 50_000, "output_tokens": 1_000},
+        "google/gemini-3.1-pro-preview": {"input_tokens": 20_000, "output_tokens": 4_000},
+    }
+    total_in = sum(u["input_tokens"] for u in usage_by_model.values())
+    total_out = sum(u["output_tokens"] for u in usage_by_model.values())
+
+    # Assert BEHAVIOR, not signature: if the per-model parameter is ever
+    # dropped, this still fails on the row assertions below rather than on a
+    # TypeError, so the contract can't be regressed by renaming it away.
+    supported = "usage_by_model" in inspect.signature(build_usage_items).parameters
+    items = build_usage_items(
+        total_in,
+        total_out,
+        {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75},
+        900_000,
+        **({"usage_by_model": usage_by_model} if supported else {}),
+    )
+    llm_rows = [i for i in items if i["type"] == "llm"]
+    service_rows = [i for i in items if i["type"] == "service"]
+
+    assert [r["model"] for r in llm_rows] == list(usage_by_model), "one llm row per ACTUAL model, in ledger order"
+    assert all(r["model"] != "rose-1-browser-use" for r in llm_rows), "pool constant leaked back into per-model rows"
+
+    # Token conservation: per-model rows must sum to the reported totals.
+    assert sum(r["input_tokens"] for r in llm_rows) == total_in
+    assert sum(r["output_tokens"] for r in llm_rows) == total_out
+
+    # The browser-time service row is NOT per-model and stays a single row.
+    assert len(service_rows) == 1
+    assert service_rows[0]["provider"] in ("Kernel Browser", "Steel.dev Browser")
+
+
+def test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool():
+    """No per-model data => historical single row, priced at the browser pool.
+
+    Never `None`: a missing model makes `_track_usage` fall back to the ROOT
+    agent's cheaper pool and under-bill browser tokens (regression A-02).
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3.config import BROWSER_USE_PRICING_POOL
+    from domains.spawn_browser_agent_v3.service import build_usage_items
+
+    pricing = {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}
+    supported = "usage_by_model" in inspect.signature(build_usage_items).parameters
+    for empty in (None, {}):
+        items = build_usage_items(1_000, 200, pricing, 1_000, **({"usage_by_model": empty} if supported else {}))
+        llm_rows = [i for i in items if i["type"] == "llm"]
+        assert len(llm_rows) == 1
+        assert llm_rows[0]["model"] == BROWSER_USE_PRICING_POOL
+        assert llm_rows[0]["input_tokens"] == 1_000
+        assert llm_rows[0]["output_tokens"] == 200
+
+
+def test_real_browser_path_attributes_every_token_to_its_actual_model():
+    """The REAL activity must never bill tokens it did not attribute to a model.
+
+    Guards two things at once in `_spawn_browser_agent_activity_v3_real`:
+      1. every `build_usage_items(...)` call forwards `usage_by_model`, and
+      2. every `total_input_tokens +=` is paired with an
+         `accumulate_model_usage(...)`, so the per-model ledger can never drift
+         from the totals it is asserted to sum to.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = textwrap.dedent(inspect.getsource(handler._spawn_browser_agent_activity_v3_real))
+    tree = ast.parse(source)
+
+    build_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "build_usage_items"
+    ]
+    assert len(build_calls) == 4, f"expected 4 build_usage_items call sites, found {len(build_calls)}"
+    for build_call in build_calls:
+        forwarded = [ast.unparse(a) for a in build_call.args] + [ast.unparse(k.value) for k in build_call.keywords]
+        assert "usage_by_model" in forwarded, f"call site drops usage_by_model: {ast.unparse(build_call)}"
+
+    accumulate_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "accumulate_model_usage"
+    ]
+    total_increments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AugAssign)
+        and isinstance(node.op, ast.Add)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "total_input_tokens"
+    ]
+    assert total_increments, "no total_input_tokens accumulation found — test is looking at the wrong function"
+    assert len(accumulate_calls) == len(total_increments), (
+        f"{len(total_increments)} token accumulations but only {len(accumulate_calls)} "
+        "accumulate_model_usage calls — some tokens are billed without a real model"
+    )
+
+
 def test_get_browser_system_prompt_with_files():
     from domains.spawn_browser_agent_v3.service import get_browser_system_prompt
 
@@ -9168,8 +9281,8 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
     assert session.get_or_create_cdp_session.await_count == 4
-    for call in session.get_or_create_cdp_session.await_args_list:
-        assert call.kwargs == {"focus": True}
+    for cdp_session_call in session.get_or_create_cdp_session.await_args_list:
+        assert cdp_session_call.kwargs == {"focus": True}
     assert cdp_client.send.Runtime.evaluate.await_count == 4
     evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
     assert evaluate_kwargs["session_id"] == "cdp-1"
@@ -13319,6 +13432,18 @@ async def run_all_tests():
     r.record(
         "build_usage_items_carries_browser_pool_model",
         test_build_usage_items_carries_browser_pool_model,
+    )
+    r.record(
+        "build_usage_items_emits_one_row_per_actual_model",
+        test_build_usage_items_emits_one_row_per_actual_model,
+    )
+    r.record(
+        "build_usage_items_unattributed_fall_back_to_browser_pool",
+        test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool,
+    )
+    r.record(
+        "real_browser_path_attributes_every_token_to_its_actual_model",
+        test_real_browser_path_attributes_every_token_to_its_actual_model,
     )
     r.record(
         "get_browser_system_prompt_with_files",

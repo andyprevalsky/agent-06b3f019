@@ -63,10 +63,15 @@ EXTRACT_LLM_TEMPERATURE = 0.1
 # Rose API model name
 ROSE_BROWSER_USE_MODEL = "rose-labs/rose-1-browser-use"
 
-# Canonical pool name that browser-agent LLM usage is priced against. Browser
-# steps race through the rose-1-browser-use pool, NOT the parent agent's pool,
-# so every emitted usage row must carry this model — otherwise the workflow
-# falls back to the root model and prices those tokens at the wrong rate.
+# Pricing-lookup KEY for the browser-use pool. This is a POOL name, never the
+# model that actually ran inference — the pool races several underlying models
+# at different prices, and claudeAuth/gptAuth steps run on the user's own
+# compute token for $0. Usage rows therefore carry the real `actual_model`
+# returned by each LLM call (see `build_browser_llm_usage_items`); this
+# constant is only used for (a) `get_model_pricing_with_fallback` pool lookups
+# and (b) the last-resort row model when a call reported no `actual_model` at
+# all, so the workflow prices those orphan tokens at the browser pool instead
+# of falling back to the ROOT agent's cheaper pool.
 BROWSER_USE_PRICING_POOL = "rose-1-browser-use"
 
 # Verifier settings

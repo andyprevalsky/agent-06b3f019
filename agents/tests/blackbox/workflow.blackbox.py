@@ -2843,6 +2843,83 @@ async def test_workflow_track_usage_browser_items_price_at_browser_pool():
     assert direct_row["tokens_in"] == 50_000
 
 
+async def test_workflow_track_usage_browser_rows_carry_real_inference_model():
+    """Browser usage must be attributed per ACTUAL model through the REAL path.
+
+    Seam: build_usage_items (REAL activity helper, not the simulated twin)
+    -> browser_usage_items_to_tool_usage -> _track_usage. A hardcoded
+    `rose-1-browser-use` pool name collapses the race into one row AND can
+    never match the `-claude`/`-gpt` $0 direct-compute-token branch, so steps
+    that ran on the user's own token are billed as paid waterfall usage.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3.service import (
+        browser_usage_items_to_tool_usage,
+        build_usage_items,
+    )
+    from providers.rose.pricing import get_model_pricing
+
+    browser_pricing = get_model_pricing("rose-1-browser-use")
+    root_pricing = get_model_pricing("rose-1-ultra")
+    usage_by_model = {
+        "claude-opus-4-8-claude": {"input_tokens": 50_000, "output_tokens": 1_000},
+        "google/gemini-3.1-pro-preview": {"input_tokens": 20_000, "output_tokens": 4_000},
+    }
+    total_in = sum(u["input_tokens"] for u in usage_by_model.values())
+    total_out = sum(u["output_tokens"] for u in usage_by_model.values())
+
+    wf = _bare_workflow_instance()
+    wf.agent_id = "a"
+    wf.user_id = "u"
+    wf.model = "rose-1-ultra"
+    wf.input_cents_per_1k = root_pricing["input_cents_per_1k"]
+    wf.output_cents_per_1k = root_pricing["output_cents_per_1k"]
+    fake = _FakeWorkflowModule()
+    original = _patch_workflow(fake)
+    try:
+        # Behavioral assertion: tolerate the parameter being absent so the
+        # failure is "rows lost the real model" rather than a TypeError.
+        supported = "usage_by_model" in inspect.signature(build_usage_items).parameters
+        items = build_usage_items(
+            total_in,
+            total_out,
+            browser_pricing,
+            900_000,
+            **({"usage_by_model": usage_by_model} if supported else {}),
+        )
+        await wf._track_usage(
+            browser_usage_items_to_tool_usage(items),
+            tool_name="spawn_browser_agent",
+            call_site="browser_agent",
+        )
+    finally:
+        _restore_workflow(original)
+
+    save_call = next(c for c in fake.activity_calls if c[0] == "save_tool_usage")
+    llm_rows = [i for i in save_call[1][3] if i["type"] == "llm"]
+
+    assert len(llm_rows) == 2, f"expected one row per actual model, got {[r['model'] for r in llm_rows]}"
+    by_model = {r["model"]: r for r in llm_rows}
+    assert set(by_model) == set(usage_by_model), "usage rows lost the real inference model names"
+    assert "rose-1-browser-use" not in by_model, "hardcoded pool constant leaked into per-model rows"
+
+    # The user's own compute token must reach the $0 branch through the REAL path.
+    claude_row = by_model["claude-opus-4-8-claude"]
+    assert claude_row["cost_cents"] == 0, f"claudeAuth browser tokens billed {claude_row['cost_cents']}c"
+    assert claude_row["tokens_in"] == 50_000
+    assert claude_row["tokens_out"] == 1_000
+
+    # ...while the waterfall model is still billed.
+    paid_row = by_model["google/gemini-3.1-pro-preview"]
+    assert paid_row["cost_cents"] > 0
+    assert paid_row["tokens_in"] == 20_000
+
+    # Token conservation across the whole seam.
+    assert sum(r["tokens_in"] for r in llm_rows) == total_in
+    assert sum(r["tokens_out"] for r in llm_rows) == total_out
+
+
 async def test_workflow_update_cost_and_signal_parent_root_checks_limit():
     wf = _bare_workflow_instance()
     wf.agent_id = "root"
@@ -5746,6 +5823,10 @@ async def run_all_tests():
     await r.record_async(
         "wf_track_usage_browser_pool_pricing",
         test_workflow_track_usage_browser_items_price_at_browser_pool,
+    )
+    await r.record_async(
+        "wf_track_usage_browser_real_inference_model",
+        test_workflow_track_usage_browser_rows_carry_real_inference_model,
     )
     await r.record_async("wf_update_cost_root_limit", test_workflow_update_cost_and_signal_parent_root_checks_limit)
     await r.record_async("wf_update_cost_non_root_signal", test_workflow_update_cost_and_signal_parent_non_root_signals)
