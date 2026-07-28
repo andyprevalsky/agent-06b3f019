@@ -4,6 +4,8 @@
  * Handles credit allocation, usage tracking, and balance calculations
  */
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -71,20 +73,43 @@ export async function ensureInviteMonthlyCredit(userId: string): Promise<void> {
   if (user === null || user.usedInviteCode === null) return;
 
   const periodEnd = startOfNextUtcMonth();
-  const alreadyGranted = await prisma.credit.findFirst({
-    where: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
-    select: { id: true },
-  });
-  if (alreadyGranted !== null) return;
 
-  await prisma.credit.create({
-    data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
-  });
-  log.info('Granted invite-code monthly credit', {
-    userId,
-    amountCents: INVITE_MONTHLY_CREDIT_CENTS,
-    expiresAt: periodEnd.toISOString(),
-  });
+  // check-then-insert must be ATOMIC: this runs on a hot read that the front-end
+  // and every worker credit check hit, so concurrent requests can otherwise all
+  // observe "not granted" and each insert their own $30. Serializable isolation
+  // makes the losers abort with a serialization failure (P2034 / 40001) instead
+  // of duplicating the grant — no schema change or unique index required.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const alreadyGranted = await tx.credit.findFirst({
+          where: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+          select: { id: true },
+        });
+        if (alreadyGranted !== null) return;
+
+        await tx.credit.create({
+          data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+        });
+        log.info('Granted invite-code monthly credit', {
+          userId,
+          amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+          expiresAt: periodEnd.toISOString(),
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
+  } catch (error) {
+    // A serialization failure means a concurrent request granted this period
+    // first — the desired end state, so it is a no-op rather than an error. The
+    // allowance is also self-healing: the next usage read retries.
+    const code = (error as { code?: string }).code;
+    if (code === 'P2034' || code === 'P2002') return;
+    log.error('Failed to grant invite-code monthly credit', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

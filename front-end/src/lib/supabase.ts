@@ -65,27 +65,62 @@ export function clearImpersonationState(): void {
  * every auth read and impersonation.ts imports from this module — routing it the
  * other way would create an import cycle.
  */
+/**
+ * Whether a parsed localStorage value is a restorable, still-valid session.
+ *
+ * `JSON.parse` output is untrusted: a type assertion alone lets `null` throw on
+ * property access, and lets `{}` or `{"expires_at": 0}` through — 0 is falsy, so
+ * a truthiness check on `expires_at` SKIPS the expiry test and promotes a junk
+ * record to the active non-expiring session. Require a finite, future timestamp
+ * and the token fields a session is useless without.
+ */
+function isRestorableSession(value: unknown): value is Session {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Partial<Session>;
+  if (typeof candidate.access_token !== 'string' || candidate.access_token === '') return false;
+  if (typeof candidate.expires_at !== 'number' || !Number.isFinite(candidate.expires_at)) {
+    return false;
+  }
+  return candidate.expires_at * 1000 > Date.now();
+}
+
 export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
   if (typeof window === 'undefined') return null;
   const stashed = window.localStorage.getItem(ADMIN_SESSION_KEY);
   if (stashed === null) return null;
 
-  let adminSession: Session;
+  // Logout wins over restoration. Another tab may have signed out between the
+  // read below and the write further down; restoring then would resurrect a
+  // session AFTER an explicit logout. LOGOUT_PENDING_KEY is set by clearSession()
+  // and is the cross-tab record that a logout has taken effect.
+  if (window.localStorage.getItem(LOGOUT_PENDING_KEY) !== null) {
+    clearImpersonationState();
+    return null;
+  }
+
+  let parsed: unknown;
   try {
-    adminSession = JSON.parse(stashed) as Session;
+    parsed = JSON.parse(stashed);
   } catch {
     clearImpersonationState();
     return null;
   }
 
-  // A stashed admin session that has ALSO expired is not a recovery path.
-  if (adminSession.expires_at && adminSession.expires_at * 1000 < Date.now()) {
+  // A malformed, or ALSO-expired, stash is not a recovery path.
+  if (!isRestorableSession(parsed)) {
     clearImpersonationState();
     return null;
   }
+  const adminSession = parsed;
 
   window.localStorage.removeItem(ADMIN_SESSION_KEY);
   window.localStorage.removeItem(IMPERSONATION_KEY);
+  // Re-check immediately before the write: a logout that landed while we were
+  // parsing must not be undone by this restore.
+  if (window.localStorage.getItem(LOGOUT_PENDING_KEY) !== null) {
+    notifyImpersonationChanged();
+    return null;
+  }
   window.localStorage.setItem(SESSION_KEY, JSON.stringify(adminSession));
   notifyImpersonationChanged();
   notifyAuthSessionChanged();

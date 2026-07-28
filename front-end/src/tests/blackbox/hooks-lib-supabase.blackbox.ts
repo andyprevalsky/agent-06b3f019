@@ -128,6 +128,71 @@ describe('lib/supabase', () => {
     expect(localStorage.getItem('rose-admin-session')).toBeNull();
   });
 
+  // A stashed value is untrusted localStorage. `expires_at: 0` is FALSY, so a
+  // truthiness check skips the expiry test and promotes junk to the active
+  // non-expiring session; `null` throws on property access. Both must fail the
+  // recovery, not silently become the signed-in identity.
+  it.each([
+    ['null', 'null'],
+    ['empty object', '{}'],
+    ['epoch-zero expiry', '{"access_token":"t","expires_at":0}'],
+    ['non-finite expiry', '{"access_token":"t","expires_at":null}'],
+    ['missing access token', `{"expires_at":${Math.floor(Date.now() / 1000) + 9999}}`],
+  ])('getSession refuses to restore a malformed stashed admin session (%s)', (_label, stash) => {
+    const expiredImpersonated = {
+      access_token: 'target-token',
+      refresh_token: 'r',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id: 'target-1' },
+    };
+    localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
+    localStorage.setItem('rose-admin-session', stash);
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
+  // Logout must win over restoration: another tab signing out while this one is
+  // unwinding an impersonation must not have its logout undone.
+  it('getSession does not resurrect the admin session when a logout is pending', () => {
+    const adminSession = {
+      access_token: 'admin-token',
+      refresh_token: 'admin-refresh',
+      expires_in: 7776000,
+      expires_at: Math.floor(Date.now() / 1000) + 7776000,
+      token_type: 'bearer',
+      user: { id: 'admin-1' },
+    };
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({
+        access_token: 'target-token',
+        refresh_token: 'r',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) - 10,
+        token_type: 'bearer',
+        user: { id: 'target-1' },
+      }),
+    );
+    localStorage.setItem('rose-admin-session', JSON.stringify(adminSession));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+    localStorage.setItem('rose-session-logout-pending', '1');
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+  });
+
   it('getSession returns null on parse error', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     localStorage.setItem('rose-session', 'not-json');
