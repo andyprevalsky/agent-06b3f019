@@ -6889,6 +6889,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
     recorder._active_request_ids = set()
     recorder._patterns = []
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder.entries = {
         "1": {
@@ -6973,6 +6974,7 @@ def test_network_recorder_updates_status_at_capacity():
     recorder._active_request_ids = set()
     recorder._patterns = []
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._started_at = 0.0
     recorder.entries = {"r1": {"request_id": "r1", "url": "https://x/api", "resource_type": "XHR", "status": None}}
@@ -7030,6 +7032,7 @@ def test_network_recorder_captures_every_resource_and_full_detail():
     recorder._active_request_ids = set()
     recorder._patterns = []
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._started_at = 0.0
     recorder.entries = {}
@@ -7125,6 +7128,7 @@ def test_network_recorder_body_cache_is_byte_bounded():
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._max_total_body_bytes = 100
 
@@ -7139,6 +7143,21 @@ def test_network_recorder_body_cache_is_byte_bounded():
     recorder._store_body("c", "z" * 500)
     assert recorder._bodies == {"c": "z" * 500}
 
+    # The budget is charged in ENCODED bytes. Counting characters would let a
+    # non-ASCII payload occupy several times the configured cap in real memory,
+    # which is the whole point of the bound (CodeRabbit #1).
+    recorder._bodies.clear()
+    recorder._body_byte_sizes.clear()
+    recorder._body_bytes = 0
+    # 40 chars, but 4 bytes each in UTF-8 = 160 bytes > the 100-byte budget.
+    recorder._store_body("emoji", "\U0001f600" * 40)
+    assert recorder._body_bytes == 160
+    # A second body must evict it rather than stacking 320 bytes under a 100-byte cap.
+    recorder._store_body("ascii", "a" * 50)
+    assert "emoji" not in recorder._bodies
+    assert recorder._body_bytes == 50
+    assert recorder._body_byte_sizes == {"ascii": 50}
+
 
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
     """Finished and failed requests are terminal, not in flight. Repeated clears
@@ -7152,6 +7171,7 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
     recorder._active_request_ids = {"failed", "finished"}
     recorder._patterns = []
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._tasks = set()
     recorder._cdp_client = None
@@ -7194,6 +7214,7 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._max_total_body_bytes = 1_000_000
     recorder.persists_network_log = False
@@ -7274,6 +7295,7 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
     recorder._bodies = {}
+    recorder._body_byte_sizes = {}
     recorder._body_bytes = 0
     recorder._max_total_body_bytes = 1_000_000
     recorder.persists_network_log = False

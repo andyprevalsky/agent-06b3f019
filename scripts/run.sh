@@ -1264,7 +1264,44 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then ngrok)." >&2
+            # Last resort: this worktree's already-reserved stable domain.
+            #
+            # Both providers above are ACCOUNT-GLOBAL and can be exhausted by
+            # something this run does not own: trycloudflare rate-limits per IP
+            # (429/1015), and ngrok's free ephemeral endpoint is a single shared
+            # name, so a sibling Conductor worktree holding it fails this run
+            # with ERR_NGROK_334. Neither is a defect in the code under test, and
+            # killing a neighbor's stack to reclaim the slot is never this
+            # script's call — so an isolated run would hard-fail /deploy's smoke
+            # gate for a reason entirely outside the branch.
+            #
+            # The worktree domain is per-worktree, already reserved (no new
+            # PAYG reservation), and contended only by a shared dev stack in
+            # THIS worktree. If that stack holds it we still fail, exactly as
+            # before, so this strictly widens the set of runs that can proceed.
+            echo "⚠️  cloudflare and ephemeral ngrok are both unavailable; trying this worktree's reserved domain." >&2
+            # An isolated run renames the workspace to "<worktree>-bench-<run id>",
+            # which would derive a per-run domain that is NOT reserved. Binding it
+            # fails, and reserving it would mint a billable PAYG domain per
+            # benchmark run. Strip the run-scoped suffix so we reuse the domain the
+            # worktree already owns, and hide NGROK_API_KEY so this path can only
+            # ever BIND an existing reservation, never create one.
+            if [ -z "${NGROK_WORKTREE_DOMAIN:-}" ]; then
+                local base_label="${CONDUCTOR_WORKSPACE_NAME%%-bench-*}"
+                base_label="$(printf '%s' "$base_label" | tr '[:upper:]' '[:lower:]' |
+                    sed 's/[^a-z0-9-]\{1,\}/-/g; s/-\{1,\}/-/g; s/^-*//; s/-*$//')"
+                [ -n "$base_label" ] || base_label="$(basename "$(cd "$SCRIPT_DIR/.." && pwd)")"
+                export NGROK_WORKTREE_DOMAIN="rose-${base_label}.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
+                echo "   Reusing the worktree's reserved domain: $NGROK_WORKTREE_DOMAIN" >&2
+            fi
+            local saved_ngrok_api_key="${NGROK_API_KEY:-}"
+            unset NGROK_API_KEY
+            if start_ngrok_public_tunnel; then
+                [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
+                return 0
+            fi
+            [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, then the worktree domain)." >&2
             echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
             exit 1
             ;;

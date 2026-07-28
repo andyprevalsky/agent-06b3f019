@@ -2008,6 +2008,9 @@ class BrowserNetworkRecorder:
         # unbounded axis: one browser session must not hold tens of MB of page
         # payloads while thousands of agents share a worker.
         self._bodies: Dict[str, str] = {}
+        # Encoded size per cached body, so the budget is charged in real bytes
+        # and eviction is O(1) instead of re-encoding each candidate.
+        self._body_byte_sizes: Dict[str, int] = {}
         self._body_bytes = 0
         self._max_total_body_bytes = max(
             self._max_body_bytes,
@@ -2161,15 +2164,24 @@ class BrowserNetworkRecorder:
             self._discard_body(oldest_key)
 
     def _discard_body(self, request_key: str) -> None:
-        body = self._bodies.pop(request_key, None)
-        if body is not None:
-            self._body_bytes = max(0, self._body_bytes - len(body))
+        self._bodies.pop(request_key, None)
+        self._body_bytes = max(0, self._body_bytes - self._body_byte_sizes.pop(request_key, 0))
 
     def _store_body(self, request_key: str, body_text: str) -> None:
-        """Cache a decoded response body under the shared byte budget."""
+        """Cache a decoded response body under the shared byte budget.
+
+        The budget is accounted in ENCODED bytes, not characters: a JSON API
+        returning non-ASCII text costs up to 4 bytes per character, so charging
+        len(str) would let the cache grow several times past
+        _max_total_body_bytes — defeating the heap bound it exists to enforce.
+        The size is measured once here and remembered, so eviction never has to
+        re-encode a payload it is about to drop.
+        """
         self._discard_body(request_key)
+        body_bytes = len(body_text.encode("utf-8", errors="replace"))
         self._bodies[request_key] = body_text
-        self._body_bytes += len(body_text)
+        self._body_byte_sizes[request_key] = body_bytes
+        self._body_bytes += body_bytes
         while self._body_bytes > self._max_total_body_bytes and self._bodies:
             oldest_key = next(iter(self._bodies))
             if oldest_key == request_key and len(self._bodies) == 1:
@@ -2564,6 +2576,7 @@ class BrowserNetworkRecorder:
             self._ignored_request_ids.update(self._active_request_ids)
             self.entries.clear()
             self._bodies.clear()
+            self._body_byte_sizes.clear()
             self._body_bytes = 0
         return rows
 
