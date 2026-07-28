@@ -1,6 +1,6 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../database';
-import { createCardProvider } from '../card-provider';
+import { createCardProviderForAgent } from '../card-provider';
 import { callOrgTool } from './org-runtime';
 
 export interface AgentCardSandboxSettlementInput {
@@ -18,13 +18,14 @@ export interface AgentCardSandboxSettlementResult {
 interface HeldPurchase {
   id: string;
   userId: string;
+  agentId: string | null;
   cardId: string | null;
   stripePaymentIntentId: string | null;
 }
 
 interface AgentCardSandboxSettlementDependencies {
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
-  getCardPan?: (userId: string, cardId: string) => Promise<string>;
+  getCardPan?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
   claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
   testCharge?: (input: {
     cardId: string;
@@ -51,14 +52,24 @@ async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurcha
     select: {
       id: true,
       userId: true,
+      agentId: true,
       cardId: true,
       stripePaymentIntentId: true,
     },
   });
 }
 
-async function getCardPan(userId: string, cardId: string): Promise<string> {
-  const details = await createCardProvider(userId).getDetails(cardId);
+/**
+ * Read the minted card's PAN through the AGENT-scoped provider factory. Production keeps
+ * `AGENTCARD_MINT_ENABLED` off so real users get the static Brex card, but a benchmark agent must
+ * still resolve the real AgentCard it just minted — the durable `Agent.isBenchmark` bit is the only
+ * thing that can force that per-request. Using the env-only `createCardProvider` here returned the
+ * static provider in prod, which rejects any card id but its own synthetic one, so this lookup threw
+ * for exactly the benchmark runs that need it.
+ */
+async function getCardPan(userId: string, agentId: string | null, cardId: string): Promise<string> {
+  const provider = await createCardProviderForAgent(userId, agentId);
+  const details = await provider.getDetails(cardId);
   return details.pan;
 }
 
@@ -152,7 +163,7 @@ export async function settleAgentCardSandboxPayment(
 
   for (const purchase of candidates) {
     if (purchase.cardId === null) continue;
-    const pan = await readPan(purchase.userId, purchase.cardId);
+    const pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
     if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
 
     // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we

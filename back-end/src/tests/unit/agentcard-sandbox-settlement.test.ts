@@ -21,17 +21,19 @@ async function main(): Promise<void> {
         {
           id: 'wrong-purchase',
           userId: 'user-1',
+          agentId: null,
           cardId: 'wrong-card',
           stripePaymentIntentId: 'pi_wrong',
         },
         {
           id: 'purchase-1',
           userId: 'user-1',
+          agentId: null,
           cardId: 'card-1',
           stripePaymentIntentId: 'pi_hold_1',
         },
       ],
-      getCardPan: async (_userId, cardId) =>
+      getCardPan: async (_userId, _agentId, cardId) =>
         cardId === 'card-1' ? '4242 4242 4242 0640' : '4242 4242 4242 9999',
       claimHeldPurchaseForCharge: async (purchaseId) => {
         claims.push(purchaseId);
@@ -79,6 +81,7 @@ async function main(): Promise<void> {
             {
               id: 'purchase-race',
               userId: 'user-1',
+              agentId: null,
               cardId: 'card-race',
               stripePaymentIntentId: 'pi_hold_race',
             },
@@ -110,6 +113,7 @@ async function main(): Promise<void> {
             {
               id: 'purchase-no-hold',
               userId: 'user-1',
+              agentId: null,
               cardId: 'card-no-hold',
               stripePaymentIntentId: null,
             },
@@ -154,6 +158,7 @@ async function main(): Promise<void> {
             {
               id: 'purchase-2',
               userId: 'user-1',
+              agentId: null,
               cardId: 'card-2',
               stripePaymentIntentId: 'pi_hold_2',
             },
