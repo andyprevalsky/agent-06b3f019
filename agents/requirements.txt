@@ -25,6 +25,7 @@ playwright>=1.51.0  # Humanized CDP input + IndexedDB storage_state for provider
 # Utilities
 python-dotenv>=1.0.0
 pydantic>=2.5.0
+pydantic-settings>=2.0.0  # browser_use.config imports it but does not declare it
 python-dateutil>=2.9.0
 numpy>=2.0.0
 

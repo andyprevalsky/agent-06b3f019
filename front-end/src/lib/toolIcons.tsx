@@ -44,6 +44,16 @@ import {
   Cloud,
   LifeBuoy,
   CreditCard,
+  Network,
+  ShieldCheck,
+  KeyRound,
+  Activity,
+  ShoppingCart,
+  Video,
+  Power,
+  Share2,
+  RotateCcw,
+  BellRing,
   type LucideIcon,
 } from 'lucide-react';
 
@@ -184,6 +194,24 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   done: CheckCircle,
   attempt_completion: CheckCircle,
   auth_assistance: LifeBuoy,
+  read_network_requests: Network,
+  recover_from_challenge: ShieldCheck,
+  request_payment_card: CreditCard,
+  generate_write_lock_notification: BellRing,
+
+  // Browser lifecycle action_types (emitted by spawn_browser_agent_v3 outside
+  // the model's action loop: session setup, recovery, and recording events)
+  session_init: Power,
+  browser_challenge_recovery: ShieldCheck,
+  supervisor_recovery: RotateCcw,
+  credential_propagation: KeyRound,
+  credential_ref: KeyRound,
+  diagnostics: Activity,
+  recording: Video,
+  network_recording: Network,
+  purchase: ShoppingCart,
+  email_send: Mail,
+  social_post: Share2,
 
   // Tab management tools
   switch_tab: Layers,

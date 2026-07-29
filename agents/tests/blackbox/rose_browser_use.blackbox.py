@@ -910,13 +910,28 @@ def test_read_network_requests_tool_advertised_and_normalized():
     read_network_requests tool (1:1 with Claude Code) so it can detect a
     403/challenge by status code or find the underlying API instead of fighting
     an opaque DOM. Guards the multi-file wiring: catalog entry, tool-description
-    generation, and param passthrough for url_pattern/limit/clear.
+    generation, and passthrough of every filter/detail param.
     """
     assert "read_network_requests" in BROWSER_USE_TOOLS
     desc = generate_tool_descriptions(["read_network_requests"])
     assert "read_network_requests" in desc
     # params render without raising (schema dicts, not bare strings)
-    assert "url_pattern" in desc and "limit" in desc and "clear" in desc
+    for param in (
+        "url_pattern",
+        "method",
+        "status",
+        "resource_type",
+        "limit",
+        "clear",
+        "include_query",
+        "include_headers",
+        "include_bodies",
+        "max_body_chars",
+    ):
+        assert param in desc, f"{param} missing from read_network_requests description"
+    # The description must tell the model bodies ARE available; agents that read
+    # only a summary row conclude "this tool doesn't return response bodies".
+    assert "include_bodies" in BROWSER_USE_TOOLS["read_network_requests"]["description"]
 
     flat = normalize_browser_use_response(
         {
@@ -925,14 +940,32 @@ def test_read_network_requests_tool_advertised_and_normalized():
                 {
                     "action_name": "read_network_requests",
                     "url_pattern": "/api/",
+                    "method": "POST",
+                    "status": "4xx",
+                    "resource_type": "XHR",
                     "limit": 50,
                     "clear": True,
+                    "include_query": True,
+                    "include_headers": True,
+                    "include_bodies": True,
+                    "max_body_chars": 8000,
                 }
             ],
         }
     )
     assert flat["action"] == "read_network_requests"
-    assert flat["params"] == {"url_pattern": "/api/", "limit": 50, "clear": True}
+    assert flat["params"] == {
+        "url_pattern": "/api/",
+        "method": "POST",
+        "status": "4xx",
+        "resource_type": "XHR",
+        "limit": 50,
+        "clear": True,
+        "include_query": True,
+        "include_headers": True,
+        "include_bodies": True,
+        "max_body_chars": 8000,
+    }
 
     nested = normalize_browser_use_response({"action": [{"read_network_requests": {"url_pattern": "checkout"}}]})
     assert nested["action"] == "read_network_requests"
@@ -1375,7 +1408,12 @@ async def test_complete_browser_use_waterfall_only_path():
     assert all("api.anthropic.com" not in u for u in captured)
     assert any("openrouter.ai" in u for u in captured)
     assert captured_bodies
-    body = captured_bodies[0]
+    # Index by URL, not position: the mock handler is process-global, so a stray
+    # request from another test's still-draining stream can land at index 0 and
+    # turn this assertion into a KeyError flake.
+    openrouter_bodies = [captured_bodies[index] for index, url in enumerate(captured) if "openrouter.ai" in url]
+    assert openrouter_bodies
+    body = openrouter_bodies[0]
     assert body["tool_choice"] == "auto"
     assert body["tools"][0]["function"]["name"] == "click"
     assert body["tools"][0]["function"]["description"] == BROWSER_USE_TOOLS["click"]["description"]

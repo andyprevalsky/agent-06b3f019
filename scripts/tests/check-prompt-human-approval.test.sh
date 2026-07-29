@@ -183,6 +183,44 @@ TS
 git -C "$instructions_repo" add src/agent.ts
 expect_fail "$instructions_repo" "instruction string assignment requires approval"
 
+tool_description_repo="$(new_repo tool-description)"
+mkdir -p "$tool_description_repo/agents/providers/rose"
+cat >"$tool_description_repo/agents/providers/rose/browser_use.py" <<'PY'
+BROWSER_USE_TOOLS = {
+    "read_network_requests": {
+        "description": (
+            "Inspect the page's network traffic, like the DevTools Network panel."
+        ),
+        "params": {},
+    },
+}
+PY
+git -C "$tool_description_repo" add agents/providers/rose/browser_use.py
+expect_fail "$tool_description_repo" "tool description text requires approval"
+expect_flag_pass "$tool_description_repo" "approval flag permits a tool description edit"
+
+pydantic_field_repo="$(new_repo pydantic-tool-field)"
+mkdir -p "$pydantic_field_repo/agents/browser_tools"
+cat >"$pydantic_field_repo/agents/browser_tools/schemas.py" <<'PY'
+class ReadNetworkRequestsBrowserTool(BaseModel):
+    tool: Literal["read_network_requests"]
+    include_bodies: Optional[bool] = Field(
+        default=None, description="When true, include captured response bodies."
+    )
+PY
+git -C "$pydantic_field_repo" add agents/browser_tools/schemas.py
+expect_fail "$pydantic_field_repo" "Pydantic tool Field description requires approval"
+
+description_passthrough_repo="$(new_repo description-passthrough)"
+mkdir -p "$description_passthrough_repo/src"
+cat >"$description_passthrough_repo/src/registry.ts" <<'TS'
+export function toTool(entry: CatalogEntry) {
+  return { name: entry.name, description: entry.description };
+}
+TS
+git -C "$description_passthrough_repo" add src/registry.ts
+expect_pass "$description_passthrough_repo" "passing an existing description through is not a prompt edit"
+
 ordinary_code_repo="$(new_repo ordinary-code)"
 mkdir -p "$ordinary_code_repo/src"
 cat >"$ordinary_code_repo/src/usage.ts" <<'TS'
