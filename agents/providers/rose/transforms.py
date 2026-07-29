@@ -819,11 +819,104 @@ def _strip_system_prompt_boundary(msg: Dict[str, Any]) -> None:
     msg["content"] = blocks
 
 
+def _message_content_to_text(content: Any) -> str:
+    """Best-effort flatten of a message `content` value into plain text."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                text = block.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+            elif isinstance(block, str) and block:
+                parts.append(block)
+        return "\n".join(parts)
+    return json.dumps(content)
+
+
+def flatten_tool_history_to_text(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Rewrite tool-call history into plain text for a request that declares no tools.
+
+    Google rejects a request whose contents carry functionCall /
+    functionResponse parts while `functionDeclarations` is absent, with a
+    deterministic 400 INVALID_ARGUMENT. That combination is reachable on the
+    waterfall: client.py sends `response_format=None if tools else
+    response_format`, so a structured-output call drops `tools` while the
+    conversation still carries assistant `tool_calls` and `role:"tool"` replies
+    from earlier turns.
+
+    Observed in a benchmark run (agent 64fe48c1, browser-smoke): the identical
+    execute_loop request succeeded on Gemini while the history was 5
+    system/user messages, then failed 10/10 once it reached 8 messages
+    including assistant(tool_calls) + tool.
+
+    Dropping the history outright would lose tool results the model still needs,
+    so preserve them as readable text instead:
+      - assistant.tool_calls -> "[Called <name>(<args>)]" folded into content,
+        with the `tool_calls` key removed.
+      - role:"tool"          -> a user message "[Result of <name>] <content>".
+    Messages with no tool history pass through unchanged.
+    """
+    out: List[Dict[str, Any]] = []
+    # tool_call_id -> function name, so a result can name the call it answers.
+    call_names: Dict[str, str] = {}
+
+    for msg in messages:
+        role = msg.get("role")
+        tool_calls = msg.get("tool_calls")
+
+        if role == "assistant" and isinstance(tool_calls, list) and tool_calls:
+            rewritten = dict(msg)
+            rewritten.pop("tool_calls", None)
+            summaries: List[str] = []
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                fn = call.get("function") if isinstance(call.get("function"), dict) else call
+                name = str(fn.get("name") or "tool")
+                call_id = call.get("id")
+                if isinstance(call_id, str) and call_id:
+                    call_names[call_id] = name
+                args = fn.get("arguments")
+                if not isinstance(args, str):
+                    args = json.dumps(args) if args is not None else ""
+                summaries.append(f"[Called {name}({args})]")
+            existing_text = _message_content_to_text(rewritten.get("content"))
+            joined = "\n".join(summaries)
+            rewritten["content"] = f"{existing_text}\n{joined}".strip() if existing_text else joined
+            out.append(rewritten)
+            continue
+
+        if role == "tool":
+            name = call_names.get(str(msg.get("tool_call_id") or ""), "tool")
+            text = _message_content_to_text(msg.get("content"))
+            # Re-role to `user`: a bare `tool` role is equally invalid without
+            # declared tools, and the result is input the model must still see.
+            out.append({"role": "user", "content": f"[Result of {name}] {text}".strip()})
+            continue
+
+        out.append(dict(msg))
+
+    return out
+
+
 def transform_messages_for_openai(
     messages: List[Dict[str, Any]],
+    *,
+    tools_declared: bool = True,
 ) -> List[Dict[str, Any]]:
     """Transform for OpenAI-compatible providers (OpenRouter, Gemini-via-OR,
     Kimi-via-OR, Anthropic-via-OR).
+
+    When `tools_declared` is False, tool-call history is flattened to text
+    first — see `flatten_tool_history_to_text` for the Gemini 400 it avoids.
+    Defaults to True so existing callers keep today's behavior.
 
     cache_control placement contract (waterfall path, OpenRouter-targeted):
 
@@ -844,7 +937,8 @@ def transform_messages_for_openai(
     should set cache_control explicitly on the relevant content blocks
     before calling — those markers are preserved here.
     """
-    out = [dict(m) for m in messages]
+    source = messages if tools_declared else flatten_tool_history_to_text(messages)
+    out = [dict(m) for m in source]
     if not out:
         return out
 
