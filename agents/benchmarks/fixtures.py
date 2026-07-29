@@ -24,6 +24,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 DEFAULT_BASE_IMAGE = "base:victoria-prod-sync-v1"
 
+WHATSAPP_BASE_IMAGE = "base:victoria-whatsapp-v1"
+
 BASE_IMAGES: dict[str, dict[str, str]] = {
     DEFAULT_BASE_IMAGE: {
         "description": (
@@ -31,6 +33,19 @@ BASE_IMAGES: dict[str, dict[str, str]] = {
             "integrations, browser state, credentials)."
         ),
         "create": "bash scripts/setup-db.sh",
+    },
+    WHATSAPP_BASE_IMAGE: {
+        "description": (
+            "Prod-sync base plus a real WhatsApp history sync (MessageRecord rows "
+            "with channel=WHATSAPP, their Person threads, and a CONNECTED whatsapp "
+            "Integration). Produced by pairing the mac-app WhatsApp client, which "
+            "uploads history through /api/integrations/whatsapp/upload. Kept as a "
+            "SEPARATE image rather than folded into the prod-sync default so tasks "
+            "that assume no WhatsApp data stay unaffected. The snapshot lives under "
+            "the gitignored .context/ tree — it contains real personal messages and "
+            "must never be committed."
+        ),
+        "create": "bash scripts/setup-db.sh && bash mac-app/scripts/whatsapp-live.sh",
     },
 }
 

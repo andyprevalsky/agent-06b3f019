@@ -483,6 +483,14 @@ async function testWhatsappUpload_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testWhatsappConnect_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testTelegramConnect_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
     method: 'POST',
@@ -1206,6 +1214,51 @@ async function testWhatsappUpload_happyPath() {
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(MessagingUploadResponse, res.data, 'whatsapp happy');
+}
+
+async function testWhatsappConnect_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(TelegramConnectResponse, res.data, 'whatsapp connect');
+}
+
+/**
+ * Re-connecting an existing WhatsApp integration must merge config, not clobber
+ * it — re-pairing is routine and must not drop stored integration settings.
+ */
+async function testWhatsappConnect_preservesExistingConfig() {
+  const { accessToken } = await createAnonSession();
+
+  const createRes = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify({
+      name: 'whatsapp',
+      type: 'DATA_SOURCE',
+      config: { existingPolicy: 'preserve-me', nested: { value: 1 } },
+    }),
+  });
+  assertStatus(createRes.status, 200, createRes.data);
+
+  const connectRes = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(connectRes.status, 200, connectRes.data);
+  const body = assertSchema(TelegramConnectResponse, connectRes.data, 'whatsapp connect preserve');
+  const integration = IntegrationSchema.passthrough().parse(body.integration);
+  const config = integration.config as Record<string, unknown>;
+  assert(
+    config.existingPolicy === 'preserve-me',
+    `Expected existing config to survive, got ${JSON.stringify(config)}`
+  );
+  assert(
+    typeof config.lastConnectedAt === 'string',
+    `Expected lastConnectedAt string, got ${JSON.stringify(config)}`
+  );
 }
 
 async function testTelegramConnect_happyPath() {
@@ -2996,6 +3049,26 @@ async function testBoundary_telegramConnectNoOutbound() {
   assert(
     relevant.length === 0,
     `Expected 0 outbound calls for telegram/connect, got ${relevant.length}: ${JSON.stringify(relevant.map((c) => c.url))}`
+  );
+}
+
+/**
+ * POST /api/integrations/whatsapp/connect makes NO outbound calls.
+ * All work is local (DB upsert only).
+ */
+async function testBoundary_whatsappConnectNoOutbound() {
+  const token = captureToken('whatsapp-connect');
+
+  await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
+  });
+
+  const calls = await readCapturesForToken(token);
+  const relevant = filterInfraCalls(calls);
+  assert(
+    relevant.length === 0,
+    `Expected 0 outbound calls for whatsapp/connect, got ${relevant.length}: ${JSON.stringify(relevant.map((c) => c.url))}`
   );
 }
 
@@ -5540,6 +5613,7 @@ async function runAll() {
     { name: 'DELETE /:name no auth -> 401', fn: testDelete_noAuth },
     { name: 'POST /imessage/upload no auth -> 401', fn: testImessageUpload_noAuth },
     { name: 'POST /whatsapp/upload no auth -> 401', fn: testWhatsappUpload_noAuth },
+    { name: 'POST /whatsapp/connect no auth -> 401', fn: testWhatsappConnect_noAuth },
     { name: 'POST /telegram/connect no auth -> 401', fn: testTelegramConnect_noAuth },
     { name: 'POST /telegram/upload no auth -> 401', fn: testTelegramUpload_noAuth },
     { name: 'POST /cookies/upload no auth -> 401', fn: testCookiesUpload_noAuth },
@@ -5627,6 +5701,11 @@ async function runAll() {
     { name: 'POST /imessage/upload happy path', fn: testImessageUpload_happyPath },
     { name: 'POST /whatsapp/upload empty contacts -> 400', fn: testWhatsappUpload_emptyContacts },
     { name: 'POST /whatsapp/upload happy path', fn: testWhatsappUpload_happyPath },
+    { name: 'POST /whatsapp/connect happy path', fn: testWhatsappConnect_happyPath },
+    {
+      name: 'POST /whatsapp/connect preserves existing config',
+      fn: testWhatsappConnect_preservesExistingConfig,
+    },
     { name: 'POST /telegram/connect happy path', fn: testTelegramConnect_happyPath },
     { name: 'POST /telegram/upload empty contacts -> 400', fn: testTelegramUpload_emptyContacts },
     { name: 'POST /telegram/upload happy path', fn: testTelegramUpload_happyPath },
@@ -6142,6 +6221,10 @@ async function runAll() {
         fn: testBoundary_emailMessagesValidationNoOutbound,
       },
       { name: 'boundary -- passwords/request SMS boundary', fn: testBoundary_passwordsRequestSms },
+      {
+        name: 'boundary -- whatsapp/connect no outbound',
+        fn: testBoundary_whatsappConnectNoOutbound,
+      },
       {
         name: 'boundary -- telegram/connect no outbound',
         fn: testBoundary_telegramConnectNoOutbound,

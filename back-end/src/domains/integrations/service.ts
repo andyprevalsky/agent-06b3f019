@@ -53,6 +53,7 @@ export {
   processContactsUpload,
   processEmailZipUpload,
   processIMessageUpload,
+  processWhatsAppConnect,
   processWhatsAppUpload,
   processTelegramConnect,
   processTelegramUpload,

@@ -67,6 +67,18 @@ if docker ps -a --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' | grep -
         docker start "$DB_CONTAINER" >/dev/null 2>&1 || true
     fi
 else
+    # Same conflict check as the recreate path above. On a fresh workspace whose
+    # derived LOCAL_DB_PORT is already bound by a sibling workspace's container,
+    # `docker run` otherwise fails with a raw "port is already allocated" daemon
+    # error naming neither the owner nor the fix.
+    CONFLICT_OWNER="$(db_port_conflict_owner "$DB_CONTAINER" "$LOCAL_DB_PORT" "$(docker ps --format '{{.Names}} {{.Ports}}')")"
+    if [ -n "$CONFLICT_OWNER" ]; then
+        echo "❌ Target DB port $LOCAL_DB_PORT is already bound by container '$CONFLICT_OWNER' (a different workspace)." >&2
+        echo "   Cannot create '$DB_CONTAINER' on a port another workspace already owns." >&2
+        echo "   Likely cause: a foreign CONDUCTOR_PORT ($CONDUCTOR_PORT) leaked into this shell, or two workspaces derived colliding ports." >&2
+        echo "   Fix: re-run from this workspace's own Conductor shell, or export a CONDUCTOR_PORT whose +5 is free." >&2
+        exit 1
+    fi
     echo "🐘 Creating local Postgres container..."
     docker run -d \
         --name "$DB_CONTAINER" \

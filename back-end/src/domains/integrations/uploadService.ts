@@ -16,6 +16,7 @@ export {
 
 export {
   processIMessageUpload,
+  processWhatsAppConnect,
   processWhatsAppUpload,
   processTelegramConnect,
   processTelegramUpload,

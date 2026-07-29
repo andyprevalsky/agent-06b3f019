@@ -249,6 +249,17 @@ router.post(
   })
 );
 
+/** POST /api/integrations/whatsapp/connect */
+router.post(
+  '/whatsapp/connect',
+  authenticate,
+  asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user!.id;
+    const integration = await service.processWhatsAppConnect(userId);
+    res.json({ message: 'WhatsApp connected successfully', integration });
+  })
+);
+
 /** POST /api/integrations/telegram/connect */
 router.post(
   '/telegram/connect',

@@ -20,6 +20,7 @@
  */
 import { AuthService } from '../../services/auth';
 import { BatchUploader } from '../../services/batchUploader';
+import { Uploader } from '../../services/uploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 // Imported via the legacy shim path so blackbox tests' vi.mock() on
@@ -78,12 +79,60 @@ export class WhatsAppSync {
       });
     });
 
-    await this.client.connect(callbacks);
+    // Registration lives here rather than in the IPC handler so EVERY connect
+    // path gets it — including SyncManager.startWhatsAppRealTime(), which
+    // auto-connects on app start and would otherwise never mark the
+    // integration connected, deadlocking its own uploads.
+    let registered = false;
+    const registerOnce = async (): Promise<void> => {
+      if (registered) return;
+      registered = true;
+      await this.registerWithBackend();
+    };
+
+    await this.client.connect({
+      onQRCode: (qr: string) => callbacks?.onQRCode(qr),
+      onConnected: async () => {
+        await registerOnce();
+        await callbacks?.onConnected?.();
+      },
+    });
+    // Covers the already-paired path, where the socket can open before
+    // `onConnected` is wired and the callback therefore never fires.
+    if (this.client.isConnected()) {
+      await registerOnce();
+    }
 
     // Start flush timer
     this.startFlushTimer();
 
     console.log('[WhatsAppSync] Connected and listening for messages');
+  }
+
+  /**
+   * Mark the integration CONNECTED in the backend. The uploader refuses to
+   * flush until this row exists, and the row is otherwise only created by an
+   * upload — so skipping this silently drops every synced message.
+   */
+  private static async registerWithBackend(): Promise<void> {
+    try {
+      const session = await AuthService.getSession();
+      if (session === null) {
+        console.log('[WhatsAppSync] Skipping backend registration - not authenticated');
+        return;
+      }
+
+      const result = await Uploader.registerWhatsAppConnected(session.access_token);
+      if (result.success) {
+        console.log('[WhatsAppSync] Integration registered with backend');
+        // Invalidate so the next flush's connected-check sees the new row.
+        IntegrationCache.invalidate();
+      } else {
+        console.error('[WhatsAppSync] Failed to register integration:', result.message);
+      }
+    } catch (err) {
+      console.error('[WhatsAppSync] Error registering integration:', err);
+    }
   }
 
   /** Disconnect from WhatsApp. */

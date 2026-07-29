@@ -4359,5 +4359,63 @@
       ".context/blue-bottle-bench-findings.md",
       "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
     ]
+  },
+  {
+    "name": "whatsapp-history-recall",
+    "title": "WhatsApp History Recall",
+    "description": "Answer three factual questions about synced WhatsApp history using local data search.",
+    "prompt": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "whatsapp", "messages"],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": ["whatsapp_messages_v1"],
+      "base_images": ["base:victoria-whatsapp-v1"],
+      "live_fixtures": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
+    },
+    "evaluators": [
+      {
+        "id": "whatsapp-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          { "type": "no_tool_failures" },
+          { "type": "agent_status", "value": "COMPLETED" }
+        ]
+      },
+      {
+        "id": "whatsapp-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own WhatsApp data (grep against the whatsapp/messages source, or the local data summary) rather than answering from assumption",
+          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?', sent by the user on 2026-07-29",
+          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823, with approximately 2197 messages - far more than any other contact",
+          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages across roughly 561 contacts/threads, spanning about July 2022 to July 2026",
+          "All three questions are answered in the final response"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable: '2,197' equals '2197', a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Score 1.0 only when all three questions are answered and each matches the expected value. Score 0.0 if any answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user:whatsapp-bench-2026-07-29"]
   }
 ]
