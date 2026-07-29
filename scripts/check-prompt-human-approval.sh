@@ -103,6 +103,15 @@ DIFF_PROMPT_FILES="$(
       # Prompt-bearing fields usually assign string content to these names.
       if (code ~ /(^|[^A-Za-z0-9_])(prompt|instructions|rubric|persona)([^A-Za-z0-9_]|$)/ && code ~ /[:=][[:space:]]*[`"'"'"']/) return 1
 
+      # Tool descriptions ARE prompt text: every one is serialized into the tool
+      # schema the model reads, so rewording one changes model behavior exactly
+      # like editing a system prompt. Filename patterns above only catch files
+      # named *tool_schemas*; tool catalogs and Pydantic tool models live under
+      # ordinary names (browser_use.py, schemas.py), so match the assignment
+      # itself. Requires string content, so `description=None`, a variable
+      # passthrough, or a bare mention stays quiet.
+      if (code ~ /(^|[^A-Za-z0-9_])(description|Description)["'"'"']?[[:space:]]*[:=][[:space:]]*[`"'"'"'(]/) return 1
+
       # Direct prompt text edits embedded in code. Do not flag generic
       # references to "system prompt"; normalization/cache code often talks
       # about prompt hashes without changing LLM instructions.

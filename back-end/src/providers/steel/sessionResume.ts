@@ -27,6 +27,28 @@ function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
 }
 
+/**
+ * The recorded provider profile id that Steel may legitimately reload.
+ *
+ * Only a prior STEEL session's recorded profile is a valid Steel profile id.
+ * On a provider switch (e.g. the rotate ladder's Kernel → Steel rung) the
+ * recorded providerProfileId belongs to the other provider — a non-UUID Kernel
+ * profile — which Steel rejects with "400 profileId must be a valid UUID".
+ * Returns null for any non-Steel-origin or unrecorded profile so the caller
+ * falls back to the context's Steel-native persisted profile (or none).
+ */
+export function reusableSteelRecordedProfileId(oldSession: {
+  provider: string;
+  providerProfileId?: string | null;
+}): string | null {
+  const wasSteel = oldSession.provider !== 'kernel';
+  return wasSteel &&
+    typeof oldSession.providerProfileId === 'string' &&
+    oldSession.providerProfileId !== ''
+    ? oldSession.providerProfileId
+    : null;
+}
+
 class ConcurrentSessionReplacementError extends Error {
   constructor(taskId: string) {
     super(`Browser session changed concurrently while recreating task ${taskId}`);
@@ -141,7 +163,17 @@ export async function recreateSession(
   const proxyGeo = await proxyLocationForAgent(oldSession.agentId);
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
-  const persistedProfileId = await getProviderProfile(oldSession.contextId, 'steel');
+  const steelRecordedProfileId = reusableSteelRecordedProfileId(oldSession);
+  const persistedProfileId =
+    steelRecordedProfileId ?? (await getProviderProfile(oldSession.contextId, 'steel'));
+  const boundProfile =
+    steelRecordedProfileId !== null
+      ? {
+          profileId: steelRecordedProfileId,
+          profileSource: oldSession.providerProfileSource ?? 'session_bound',
+          persistProfile: oldSession.providerProfilePersist ?? true,
+        }
+      : undefined;
   let dropProxyCity = isKnownRejectedProxyCity(proxyGeo);
 
   let lastError: Error | null = null;
@@ -155,10 +187,15 @@ export async function recreateSession(
         dropProxyCity,
         options.forceManagedRotation
       );
-      const profile = resolveSteelProfileForSession(oldSession.agentId, persistedProfileId);
+      const profile = resolveSteelProfileForSession(
+        oldSession.agentId,
+        persistedProfileId,
+        null,
+        boundProfile
+      );
       const session = await dependencies.createSession({
         profileId: profile.profileId,
-        persistProfile: envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true),
+        persistProfile: profile.persistProfile,
         userAgent:
           userAgent !== undefined && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
             ? userAgent
@@ -172,8 +209,16 @@ export async function recreateSession(
       });
       createdSessionId = session.id;
 
+      if (profile.profileId !== undefined && session.profileId !== profile.profileId) {
+        throw new Error(
+          `Steel loaded profile ${session.profileId ?? 'NONE'} instead of bound profile ${profile.profileId}`
+        );
+      }
+
       log.info(`  Created new Steel session: ${session.id}`);
-      rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
+      if (profile.profileSource.startsWith('benchmark_anon')) {
+        rememberBenchmarkAnonSteelProfile(oldSession.agentId, session.profileId);
+      }
       const debugUrl = steelDebugUrl(session.debugUrl);
       const wsUrl = steelCdpUrl(session.id);
 
@@ -191,13 +236,20 @@ export async function recreateSession(
           status: 'ACTIVE',
           closedAt: null,
           provider: 'steel',
+          providerProfileId: session.profileId ?? profile.profileId ?? null,
+          providerProfileSource: profile.profileSource,
+          providerProfilePersist: profile.persistProfile,
           ...(options.forceManagedRotation ? { proxyTier: 'residential' } : {}),
         },
       });
       if (replaced.count !== 1) throw new ConcurrentSessionReplacementError(taskId);
       committed = true;
 
-      if (session.profileId && !profile.profileSource.startsWith('benchmark_anon')) {
+      if (
+        profile.persistProfile &&
+        session.profileId &&
+        !profile.profileSource.startsWith('benchmark_anon')
+      ) {
         await rememberProviderProfile(oldSession.contextId, 'steel', session.profileId).catch(
           (profileError) => {
             log.warn('Failed to persist Steel provider profile after session replacement', {

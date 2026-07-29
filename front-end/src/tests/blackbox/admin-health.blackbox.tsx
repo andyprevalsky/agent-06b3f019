@@ -9,8 +9,8 @@ import { Toaster } from '@/components/ui/toaster';
 import AdminHealth from '@/pages/AdminHealth';
 import { fetchAdminHealthData } from '@/features/admin-health/api';
 import { funnelEndToEnd } from '@/features/admin-health/components/metricComparison';
-import WaitlistPeopleSection from '@/features/admin-health/components/WaitlistPeopleSection';
-import type { AdminWaitlistPerson } from '@/features/admin-health/types';
+import UsersSection from '@/features/admin-health/components/UsersSection';
+import type { AdminDirectoryPerson } from '@/lib/adminUsers';
 
 const API_BASE = 'http://localhost:3001/api';
 const defaultResizeObserver = window.ResizeObserver;
@@ -195,7 +195,7 @@ function installAdminHealthHandler() {
     }),
     // The Waitlist People section fetches this on mount; default to empty so the
     // full-page tests don't trip the onUnhandledRequest guard.
-    http.get(`${API_BASE}/admin-health/waitlist`, () => HttpResponse.json(waitlistResponse([]))),
+    http.get(`${API_BASE}/admin-health/users`, () => HttpResponse.json(directoryResponse([]))),
   );
 }
 
@@ -231,13 +231,13 @@ describe('AdminHealth page', () => {
     expect(
       screen.getByText((text) => text.startsWith('Email + phone entries per')),
     ).toBeInTheDocument();
-    expect(screen.getByText('# of Users')).toBeInTheDocument();
+    expect(screen.getByText('# of People in App')).toBeInTheDocument();
     expect(screen.getAllByText('42').length).toBeGreaterThan(0);
-    expect(screen.getByText('2 new users this period.')).toBeInTheDocument();
+    expect(screen.getByText('2 new people in app this period.')).toBeInTheDocument();
     expect(screen.getAllByText('Avg Tasks / User / 30 Days').length).toBeGreaterThan(0);
     expect(screen.getAllByText('3.05').length).toBeGreaterThan(0);
     expect(
-      screen.getByText('128 root tasks in the last 30 complete UTC days / 42 users.'),
+      screen.getByText('128 root tasks in the last 30 complete UTC days / 42 people in app.'),
     ).toBeInTheDocument();
     expect(screen.queryByText('Tasks and Users')).not.toBeInTheDocument();
     expect(screen.getByText('Output Tokens / Task')).toBeInTheDocument();
@@ -253,7 +253,7 @@ describe('AdminHealth page', () => {
     expect(within(connectorAdoption).getByText('Financials')).toBeInTheDocument();
     expect(within(connectorAdoption).getByText('75%')).toBeInTheDocument();
     expect(
-      within(connectorAdoption).getByText('18 of 24 verified users connected'),
+      within(connectorAdoption).getByText('18 of 24 people in app connected'),
     ).toBeInTheDocument();
     expect(screen.getByText('Conversion Funnels')).toBeInTheDocument();
     expect(screen.getByText('Website Acquisition')).toBeInTheDocument();
@@ -444,24 +444,27 @@ describe('AdminHealth page', () => {
   });
 });
 
-function waitlistPerson(overrides: Partial<AdminWaitlistPerson> = {}): AdminWaitlistPerson {
+function directoryPerson(overrides: Partial<AdminDirectoryPerson> = {}): AdminDirectoryPerson {
   return {
-    id: 'wl-1',
+    key: 'user:acct-1',
+    userId: 'acct-1',
+    waitlistId: 'wl-1',
     name: 'Ada Lovelace',
     email: 'ada@example.com',
     phone: '+13234498210',
-    variant: 'gated-login',
     joinedAt: '2026-07-01T00:00:00.000Z',
     invitedAt: null,
     hasAccount: true,
+    hasSubscription: false,
     isGated: true,
+    isAdmin: false,
     ...overrides,
   };
 }
 
-function waitlistResponse(
-  people: AdminWaitlistPerson[],
-  options: { total?: number; page?: number; pageSize?: number } = {},
+function directoryResponse(
+  people: AdminDirectoryPerson[],
+  options: { total?: number; page?: number; pageSize?: number; search?: string } = {},
 ) {
   const total = options.total ?? people.length;
   const page = options.page ?? 1;
@@ -472,10 +475,11 @@ function waitlistResponse(
     page,
     pageSize,
     totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    search: options.search ?? '',
   };
 }
 
-describe('WaitlistPeopleSection', () => {
+describe('UsersSection', () => {
   beforeEach(() => {
     sessionStorage.clear();
     mockSession();
@@ -489,8 +493,8 @@ describe('WaitlistPeopleSection', () => {
   it('texts and emails an invite, then pulls the person off the waitlist', async () => {
     clearCaptures();
     server.use(
-      http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json(waitlistResponse([waitlistPerson()])),
+      http.get(`${API_BASE}/admin-health/users`, () =>
+        HttpResponse.json(directoryResponse([directoryPerson()])),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
         HttpResponse.json({
@@ -506,7 +510,7 @@ describe('WaitlistPeopleSection', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(<WaitlistPeopleSection />);
+    renderWithProviders(<UsersSection />);
 
     const inviteButton = await screen.findByRole('button', { name: /Invite, text & email/ });
     await user.click(inviteButton);
@@ -534,8 +538,8 @@ describe('WaitlistPeopleSection', () => {
     clearCaptures();
     let attempts = 0;
     server.use(
-      http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json(waitlistResponse([waitlistPerson()])),
+      http.get(`${API_BASE}/admin-health/users`, () =>
+        HttpResponse.json(directoryResponse([directoryPerson()])),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) => {
         attempts += 1;
@@ -555,7 +559,7 @@ describe('WaitlistPeopleSection', () => {
     );
 
     const user = userEvent.setup();
-    renderWithProviders(<WaitlistPeopleSection />);
+    renderWithProviders(<UsersSection />);
     const inviteButton = await screen.findByRole('button', { name: /Invite, text & email/ });
     await user.click(inviteButton);
     await waitFor(() => expect(attempts).toBe(1));
@@ -582,8 +586,17 @@ describe('WaitlistPeopleSection', () => {
 
   it('describes a no-account invite outcome without claiming the account was flagged', async () => {
     server.use(
-      http.get(`${API_BASE}/admin-health/waitlist`, () =>
-        HttpResponse.json(waitlistResponse([waitlistPerson({ hasAccount: false })])),
+      http.get(`${API_BASE}/admin-health/users`, () =>
+        HttpResponse.json(
+          directoryResponse([
+            directoryPerson({
+              userId: null,
+              key: 'waitlist:wl-1',
+              hasAccount: false,
+              isGated: false,
+            }),
+          ]),
+        ),
       ),
       http.post(`${API_BASE}/admin-health/waitlist/:id/invite`, ({ params }) =>
         HttpResponse.json({
@@ -601,7 +614,7 @@ describe('WaitlistPeopleSection', () => {
     const user = userEvent.setup();
     renderWithProviders(
       <>
-        <WaitlistPeopleSection />
+        <UsersSection />
         <Toaster />
       </>,
     );

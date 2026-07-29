@@ -65,36 +65,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-
-def _log_paths_from_env(var: str, default: str) -> List[str]:
-    """
-    Resolve log locations, preferring an explicit env override.
-
-    An ISOLATED benchmark stack (`scripts/run-bench`) does not write to the default single-process
-    log files — it writes `<run-dir>/logs/backend.log` plus one `worker.N.log` PER worker process.
-    Pointing this tool at the default paths silently produced "No log lines found" for every failed
-    benchmark, so the runner exports these vars. Accepts a comma/os.pathsep-separated list of paths
-    or globs; every match is read.
-    """
-    raw = os.environ.get(var, "").strip()
-    if raw == "":
-        return [default]
-    patterns = [p.strip() for p in raw.replace(os.pathsep, ",").split(",") if p.strip()]
-    resolved: List[str] = []
-    for pattern in patterns:
-        matches = sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
-        resolved.extend(m for m in matches if m not in resolved)
-    return resolved or [default]
-
-
-WORKER_LOGS = _log_paths_from_env(
-    "NAVI_WORKER_LOGS", os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
-)
-BACKEND_LOGS = _log_paths_from_env(
-    "NAVI_BACKEND_LOGS", os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
-)
+WORKER_LOG = os.path.join(REPO_ROOT, "agents", "navi-worker-log.txt")
+BACKEND_LOG = os.path.join(REPO_ROOT, "back-end", "backend-logs.log")
 RESEARCH_LOG = os.path.join(REPO_ROOT, "research", "research-logs.log")
+
+# Isolated benchmark stacks (scripts/run-bench --local, run-predeploy-local) do
+# NOT write to the shared logs above: each run gets its own
+# .context/benchmarks/<run-id>/logs/{backend,worker.N}.log. Every /deploy smoke
+# failure therefore lives ONLY in a per-run directory, and reading just the
+# shared paths made this tool report "No log lines found" for exactly the
+# failures it exists to explain. Consider both, newest isolated runs first.
+ISOLATED_STACK_ROOT = os.path.join(REPO_ROOT, ".context", "benchmarks")
+MAX_ISOLATED_STACKS = int(os.getenv("AGENT_LATENCY_MAX_ISOLATED_STACKS", "3"))
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -178,11 +160,52 @@ class _RawEvent:
     data: Dict[str, Any]
 
 
+def isolated_stack_log_dirs() -> List[str]:
+    """Per-run log dirs for isolated benchmark stacks, newest first.
+
+    BENCHMARK_CONTEXT_DIR pins one run when the caller already knows it;
+    otherwise the most recent runs are scanned. Events are filtered by agent id
+    downstream, so scanning extra runs costs parse time, never correctness.
+    """
+    dirs: List[str] = []
+    explicit = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    if explicit:
+        pinned = os.path.join(explicit, "logs")
+        if os.path.isdir(pinned):
+            dirs.append(pinned)
+    if os.path.isdir(ISOLATED_STACK_ROOT):
+        candidates = []
+        for name in os.listdir(ISOLATED_STACK_ROOT):
+            log_dir = os.path.join(ISOLATED_STACK_ROOT, name, "logs")
+            if os.path.isdir(log_dir) and log_dir not in dirs:
+                candidates.append(log_dir)
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        dirs.extend(candidates[:MAX_ISOLATED_STACKS])
+    return dirs
+
+
+def _log_paths(shared: str, isolated_glob: str, env_var: str) -> List[str]:
+    """Resolve an explicit runner-provided log set or discover recent stacks."""
+    raw = os.environ.get(env_var, "").strip()
+    if raw:
+        patterns = [part.strip() for part in raw.replace(os.pathsep, ",").split(",") if part.strip()]
+        explicit: List[str] = []
+        for pattern in patterns:
+            matches = sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
+            explicit.extend(path for path in matches if path not in explicit)
+        if explicit:
+            return explicit
+
+    paths = [shared] if os.path.exists(shared) else []
+    for log_dir in isolated_stack_log_dirs():
+        paths.extend(sorted(glob.glob(os.path.join(log_dir, isolated_glob))))
+    return paths
+
+
 def _read_worker_raw() -> List[_RawEvent]:
     out: List[_RawEvent] = []
-    # A benchmark stack runs many worker PROCESSES, each with its own log; one agent's spans are
-    # split across them, so every file must be merged and re-sorted by timestamp.
-    for path in WORKER_LOGS:
+    # An isolated stack runs several worker processes, each with its own file.
+    for path in _log_paths(WORKER_LOG, "worker*.log", "NAVI_WORKER_LOGS"):
         if not os.path.exists(path):
             continue
         with open(path, errors="replace") as f:
@@ -208,36 +231,42 @@ def _read_backend_raw() -> List[_RawEvent]:
     head = re.compile(
         r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
     )
-    for path in BACKEND_LOGS:
+    for path in _log_paths(BACKEND_LOG, "backend*.log", "NAVI_BACKEND_LOGS"):
         if not os.path.exists(path):
             continue
-        with open(path, errors="replace") as f:
-            for raw in f:
-                line = ANSI_RE.sub("", raw).rstrip("\n")
-                m = head.match(line)
-                if not m:
-                    continue
-                ts = parse_ts(m.group("ts"))
-                rest = m.group("rest")
-                # First token (before a space followed by `key=`) is the message;
-                # the remainder is k=v pairs.
-                mm = re.match(r"(?P<msg>.*?)(?=\s+\w+=)(?P<kv>.*)$", rest)
-                if mm:
-                    msg = mm.group("msg").strip()
-                    kv_str = mm.group("kv")
-                else:
-                    msg = rest.strip()
-                    kv_str = ""
-                data: Dict[str, Any] = {
-                    "level": m.group("level"),
-                    "component": m.group("comp"),
-                    "message": msg,
-                }
-                # Extract k=value pairs (greedy value until next `\s\w+=` or EOL)
-                for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
-                    data[km.group(1)] = km.group(2).strip()
-                out.append(_RawEvent(ts, "backend", msg, data))
+        out.extend(_parse_backend_lines(path, head))
     out.sort(key=lambda event: event.ts)
+    return out
+
+
+def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
+    out: List[_RawEvent] = []
+    with open(path, errors="replace") as f:
+        for raw in f:
+            line = ANSI_RE.sub("", raw).rstrip("\n")
+            m = head.match(line)
+            if not m:
+                continue
+            ts = parse_ts(m.group("ts"))
+            rest = m.group("rest")
+            # First token (before a space followed by `key=`) is the message;
+            # the remainder is k=v pairs.
+            mm = re.match(r"(?P<msg>.*?)(?=\s+\w+=)(?P<kv>.*)$", rest)
+            if mm:
+                msg = mm.group("msg").strip()
+                kv_str = mm.group("kv")
+            else:
+                msg = rest.strip()
+                kv_str = ""
+            data: Dict[str, Any] = {
+                "level": m.group("level"),
+                "component": m.group("comp"),
+                "message": msg,
+            }
+            # Extract k=value pairs (greedy value until next `\s\w+=` or EOL)
+            for km in re.finditer(r"(\w+)=((?:(?!\s+\w+=).)+)", kv_str):
+                data[km.group(1)] = km.group(2).strip()
+            out.append(_RawEvent(ts, "backend", msg, data))
     return out
 
 

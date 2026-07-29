@@ -23,8 +23,15 @@ import { isCacheableAdminHealthResponse } from '../../domains/admin-health/servi
 import {
   assertConnectorAdoption,
   assertDatabaseActivationCounts,
+  AdminHealthResponseSchema,
+  ErrorResponseSchema,
+  type AdminHealthResponse,
 } from './admin-health.blackbox.helpers';
 import { prisma } from '../../providers/database';
+
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -33,101 +40,6 @@ const CASE_CONCURRENCY = Number(
 );
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const NON_ADMIN_USER_ID = 'admin-health-non-admin-user';
-
-const MetricStatusSchema = z.union([
-  z.literal('ready'),
-  z.literal('unavailable'),
-  z.literal('error'),
-]);
-const VelocityMetricSchema = z.object({
-  label: z.string(),
-  value: z.number().nullable(),
-  status: MetricStatusSchema,
-  detail: z.string().optional(),
-});
-const AdminHealthResponseSchema = z.object({
-  timeSlice: z.union([
-    z.literal('weekly'),
-    z.literal('monthly'),
-    z.literal('quarterly'),
-    z.literal('yearly'),
-  ]),
-  generatedAt: z.string(),
-  range: z.object({ start: z.string(), end: z.string() }),
-  historyRange: z.object({ start: z.string(), end: z.string() }),
-  summary: z.object({
-    revenueCents: z.number().nullable(),
-    userCount: z.number(),
-    taskCount: z.number(),
-    tasksIssuedPerUser: z.number(),
-    outputTokensPerTask: z.number(),
-    taskCompletionRate: z.number(),
-  }),
-  series: z.array(
-    z.object({
-      key: z.string(),
-      label: z.string(),
-      start: z.string(),
-      end: z.string(),
-      revenueCents: z.number().nullable(),
-      userCount: z.number(),
-      newUsers: z.number(),
-      taskCount: z.number(),
-      tasksIssuedPerUser: z.number(),
-      outputTokensPerTask: z.number(),
-      taskCompletionRate: z.number(),
-      andyLinearPoints: z.number().nullable(),
-      githubCommits: z.number().nullable(),
-      tamaraLinearPoints: z.number().nullable(),
-    })
-  ),
-  retentionCohorts: z.array(
-    z.object({
-      cohortWeek: z.string(),
-      label: z.string(),
-      size: z.number(),
-      points: z.array(
-        z.object({
-          week: z.number(),
-          retainedUsers: z.number(),
-          retentionRate: z.number(),
-        })
-      ),
-    })
-  ),
-  funnel: z.object({
-    steps: z.array(
-      z.object({
-        id: z.string(),
-        label: z.string(),
-        count: z.number().nullable(),
-        previousCount: z.number().nullable(),
-        conversionRate: z.number().nullable(),
-        previousConversionRate: z.number().nullable(),
-        conversionRateChange: z.number().nullable(),
-        source: z.union([z.literal('database'), z.literal('client_analytics')]),
-        status: z.union([z.literal('ready'), z.literal('unavailable')]),
-        detail: z.string().optional(),
-      })
-    ),
-    endToEnd: z.object({
-      conversionRate: z.number().nullable(),
-      previousConversionRate: z.number().nullable(),
-      conversionRateChange: z.number().nullable(),
-    }),
-  }),
-  velocity: z.object({
-    dev: z.object({
-      linearPointsCompleted: VelocityMetricSchema,
-      githubCommitsLanded: VelocityMetricSchema,
-    }),
-    ops: z.object({
-      linearPointsCompleted: VelocityMetricSchema,
-    }),
-  }),
-});
-const ErrorResponseSchema = z.object({ error: z.string() });
-type AdminHealthResponse = z.infer<typeof AdminHealthResponseSchema>;
 
 interface TestResult {
   name: string;
@@ -329,6 +241,19 @@ async function expectedAdminHealthUserIds(): Promise<Set<string>> {
   });
   const userIdByPhone = new Map(additionalUsers.map((u) => [u.phone, u.userId]));
   for (const userId of userIdByPhone.values()) userIds.add(userId);
+
+  // Mirror findInviteCodeRedeemers: the metric counts people IN THE APP, and a
+  // redeemed invite code clears the waitlist gate just like a subscription does.
+  // Someone who got in on a code but never paid is still a person in the app.
+  const redeemers = await prisma.user.findMany({
+    where: { usedInviteCode: { not: null }, phone: { not: null } },
+    select: { userId: true, phone: true },
+  });
+  for (const redeemer of redeemers) {
+    if ((redeemer.phone ?? '').trim() === '') continue;
+    if (ADMIN_HEALTH_EXCLUDED_USER_IDS.has(redeemer.userId)) continue;
+    userIds.add(redeemer.userId);
+  }
   return userIds;
 }
 
@@ -579,10 +504,12 @@ async function testAdminHappyYearly() {
   assertNoImpossibleConversion(body);
 }
 
-// Waitlist signups are a phone-verified product signal: entries without a phone
-// number (the legacy email-only waitlist) must be cleared out of the metric.
-async function testWaitlist_excludesPhonelessSignups() {
-  const marker = `blackbox-wl-${Date.now()}-${process.pid}`;
+// A signup counts on email OR phone. This metric used to require a phone as a
+// stand-in for "not fixture junk", which silently discarded every real
+// email-only signup — the entire public landing-form population, which never
+// collects a phone. Fixtures are excluded by classification instead.
+async function testWaitlist_countsEmailOrPhoneAndExcludesFixtures() {
+  const marker = `wlcase-wl-${Date.now()}-${process.pid}`;
   const start = new Date('2000-01-01T00:00:00.000Z');
   const end = new Date('2000-01-02T00:00:00.000Z');
   const at = new Date('2000-01-01T12:00:00.000Z');
@@ -591,24 +518,44 @@ async function testWaitlist_excludesPhonelessSignups() {
   // a coverage run killed on timeout) would leave a `phone: ''` row behind and
   // make every subsequent run collide. Purge any leaked fixture rows first so
   // the test self-heals instead of staying wedged.
-  await prisma.waitlist.deleteMany({ where: { name: { startsWith: 'blackbox-wl-' } } });
+  await prisma.waitlist.deleteMany({ where: { name: { startsWith: 'wlcase-wl-' } } });
   try {
     await prisma.waitlist.createMany({
       data: [
-        { name: marker, phone: `+1999${Date.now() % 10000000}`, createdAt: at },
-        { name: marker, email: `${marker}-a@example.com`, phone: null, createdAt: at },
-        { name: marker, email: `${marker}-b@example.com`, phone: '', createdAt: at },
+        // Counts: phone-bearing.
+        {
+          name: `${marker}-phone`,
+          phone: `+1206555${String(Date.now() % 10000).padStart(4, '0')}`,
+          createdAt: at,
+        },
+        // Counts: email-only — the case the old phone filter threw away.
+        {
+          name: `${marker}-email`,
+          email: `${marker}-a@waitlist-case.dev`,
+          phone: null,
+          createdAt: at,
+        },
+        // Counts: a blank phone string is still an email-bearing signup.
+        {
+          name: `${marker}-blank`,
+          email: `${marker}-b@waitlist-case.dev`,
+          phone: '',
+          createdAt: at,
+        },
+        // Excluded: one of our own fixtures, which is what the phone filter was
+        // really trying (and failing) to keep out of the metric.
+        { name: `${marker}-fixture`, email: `${marker}-c@blackbox-test.dev`, createdAt: at },
       ],
     });
     const rows = await findWaitlistSignupsBetween(start, end);
-    if (rows.length !== 1) {
+    if (rows.length !== 3) {
       throw new Error(
-        `Expected exactly 1 phone-bearing signup in the window, got ${rows.length} ` +
-          `(phone-less rows must be excluded)`
+        `Expected 3 real signups (phone, email-only, blank-phone+email) in the window, ` +
+          `got ${rows.length} — fixtures must be excluded and email-only rows must count`
       );
     }
   } finally {
-    await prisma.waitlist.deleteMany({ where: { name: marker } });
+    await prisma.waitlist.deleteMany({ where: { name: { startsWith: marker } } });
   }
 }
 
@@ -633,8 +580,8 @@ async function main() {
     { name: 'GET /api/admin-health quarterly admin -> metrics', fn: testAdminHappyQuarterly },
     { name: 'GET /api/admin-health yearly admin -> metrics', fn: testAdminHappyYearly },
     {
-      name: 'waitlist metric excludes phone-less signups',
-      fn: testWaitlist_excludesPhonelessSignups,
+      name: 'waitlist metric counts email-or-phone signups and excludes fixtures',
+      fn: testWaitlist_countsEmailOrPhoneAndExcludesFixtures,
     },
   ];
 

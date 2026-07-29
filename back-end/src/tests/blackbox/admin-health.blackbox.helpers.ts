@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import { retryWithBackoff } from '../../providers/retry';
 
 export interface ConnectorAdoptionResponse {
@@ -127,3 +128,102 @@ export async function assertDatabaseActivationCounts(
     { maxRetries: 5, initialBackoffMs: 500, isRetryable: () => true, component: 'AdminHealthRAW' }
   );
 }
+
+// ---------------------------------------------------------------------------
+// Response schemas for GET /api/admin-health
+// ---------------------------------------------------------------------------
+
+export const MetricStatusSchema = z.union([
+  z.literal('ready'),
+  z.literal('unavailable'),
+  z.literal('error'),
+]);
+export const VelocityMetricSchema = z.object({
+  label: z.string(),
+  value: z.number().nullable(),
+  status: MetricStatusSchema,
+  detail: z.string().optional(),
+});
+export const AdminHealthResponseSchema = z.object({
+  timeSlice: z.union([
+    z.literal('weekly'),
+    z.literal('monthly'),
+    z.literal('quarterly'),
+    z.literal('yearly'),
+  ]),
+  generatedAt: z.string(),
+  range: z.object({ start: z.string(), end: z.string() }),
+  historyRange: z.object({ start: z.string(), end: z.string() }),
+  summary: z.object({
+    revenueCents: z.number().nullable(),
+    userCount: z.number(),
+    taskCount: z.number(),
+    tasksIssuedPerUser: z.number(),
+    outputTokensPerTask: z.number(),
+    taskCompletionRate: z.number(),
+  }),
+  series: z.array(
+    z.object({
+      key: z.string(),
+      label: z.string(),
+      start: z.string(),
+      end: z.string(),
+      revenueCents: z.number().nullable(),
+      userCount: z.number(),
+      newUsers: z.number(),
+      taskCount: z.number(),
+      tasksIssuedPerUser: z.number(),
+      outputTokensPerTask: z.number(),
+      taskCompletionRate: z.number(),
+      andyLinearPoints: z.number().nullable(),
+      githubCommits: z.number().nullable(),
+      tamaraLinearPoints: z.number().nullable(),
+    })
+  ),
+  retentionCohorts: z.array(
+    z.object({
+      cohortWeek: z.string(),
+      label: z.string(),
+      size: z.number(),
+      points: z.array(
+        z.object({
+          week: z.number(),
+          retainedUsers: z.number(),
+          retentionRate: z.number(),
+        })
+      ),
+    })
+  ),
+  funnel: z.object({
+    steps: z.array(
+      z.object({
+        id: z.string(),
+        label: z.string(),
+        count: z.number().nullable(),
+        previousCount: z.number().nullable(),
+        conversionRate: z.number().nullable(),
+        previousConversionRate: z.number().nullable(),
+        conversionRateChange: z.number().nullable(),
+        source: z.union([z.literal('database'), z.literal('client_analytics')]),
+        status: z.union([z.literal('ready'), z.literal('unavailable')]),
+        detail: z.string().optional(),
+      })
+    ),
+    endToEnd: z.object({
+      conversionRate: z.number().nullable(),
+      previousConversionRate: z.number().nullable(),
+      conversionRateChange: z.number().nullable(),
+    }),
+  }),
+  velocity: z.object({
+    dev: z.object({
+      linearPointsCompleted: VelocityMetricSchema,
+      githubCommitsLanded: VelocityMetricSchema,
+    }),
+    ops: z.object({
+      linearPointsCompleted: VelocityMetricSchema,
+    }),
+  }),
+});
+export const ErrorResponseSchema = z.object({ error: z.string() });
+export type AdminHealthResponse = z.infer<typeof AdminHealthResponseSchema>;

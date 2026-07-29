@@ -11,12 +11,23 @@ import { retryWithBackoff } from '../retry';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
-import { benchmarkIsolatedBrowserProfilesEnabled } from '../browser/benchmarkProfileIsolation';
 import {
   summarizeSteelCaptchaStatus,
   type BrowserCaptchaTelemetry,
 } from '../browser/captchaTelemetry';
+import {
+  envEnabled,
+  rememberBenchmarkAnonSteelProfile,
+  resolveSteelProfileForSession,
+  shouldWriteSteelProfileToBrowserContext,
+} from './profileBinding';
 export { resumeSession } from './sessionResume';
+export {
+  envEnabled,
+  rememberBenchmarkAnonSteelProfile,
+  resolveSteelProfileForSession,
+  shouldWriteSteelProfileToBrowserContext,
+} from './profileBinding';
 export {
   STEEL_API_BASE_URL,
   STEEL_CDP_BASE_URL,
@@ -42,60 +53,6 @@ export class SteelSessionCleanupError extends Error {
       `Failed to release Steel session ${sessionId} after bounded retries: ${cause instanceof Error ? cause.message : String(cause)}`
     );
     this.name = 'SteelSessionCleanupError';
-  }
-}
-
-const benchmarkAnonProfilesByAgent = new Map<string, string>();
-
-export function envEnabled(name: string, defaultValue = true): boolean {
-  const raw = process.env[name];
-  if (raw === undefined) return defaultValue;
-  return !['0', 'false', 'no', 'off', 'disabled'].includes(raw.trim().toLowerCase());
-}
-
-function benchmarkAnonSteelProfileEnabled(): boolean {
-  return (
-    benchmarkIsolatedBrowserProfilesEnabled() ||
-    ['1', 'true', 'yes'].includes(
-      (process.env.BENCHMARK_ANON_STEEL_PROFILE ?? '').trim().toLowerCase()
-    )
-  );
-}
-
-export function resolveSteelProfileForSession(
-  agentId: string | null,
-  persistedProfileId: string | null
-) {
-  if (!envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true)) {
-    return {
-      profileId: undefined,
-      profileSource: 'disabled',
-    } as const;
-  }
-
-  if (!benchmarkAnonSteelProfileEnabled()) {
-    return {
-      profileId: persistedProfileId ?? undefined,
-      profileSource: persistedProfileId ? 'user_persistent' : 'new_user_persistent',
-    } as const;
-  }
-
-  const benchmarkProfileId =
-    agentId === null ? undefined : benchmarkAnonProfilesByAgent.get(agentId);
-  return {
-    profileId: benchmarkProfileId,
-    profileSource: benchmarkProfileId ? 'benchmark_anon_persistent' : 'benchmark_anon_fresh',
-  } as const;
-}
-
-export function rememberBenchmarkAnonSteelProfile(
-  agentId: string | null,
-  profileId: string | null | undefined
-) {
-  if (agentId === null || !benchmarkAnonSteelProfileEnabled() || !profileId) return;
-  if (!benchmarkAnonProfilesByAgent.has(agentId)) {
-    benchmarkAnonProfilesByAgent.set(agentId, profileId);
-    log.info(`  🧪 Captured benchmark anon Steel profileId for agent ${agentId}: ${profileId}`);
   }
 }
 
@@ -302,7 +259,11 @@ export async function createSessionWithContext(
   agentId: string,
   geolocation: ProxyGeoLocation = DEFAULT_GEOLOCATION,
   startUrl?: string,
-  options?: { keepValidationConnection?: boolean; proxyMode?: 'managed' | 'fixed' }
+  options?: {
+    keepValidationConnection?: boolean;
+    proxyMode?: 'managed' | 'fixed';
+    requiredSteelProfileId?: string;
+  }
 ): Promise<{
   sessionId: string;
   debugUrl: string;
@@ -338,7 +299,10 @@ export async function createSessionWithContext(
     log.info(`  Using user's fingerprint User-Agent: ${userAgent.substring(0, 60)}...`);
   }
 
-  const localSession = await createLocalBrowserSession(dbContextId, agentId, startUrl);
+  const localSession =
+    options?.requiredSteelProfileId === undefined
+      ? await createLocalBrowserSession(dbContextId, agentId, startUrl)
+      : null;
   if (localSession) return { ...localSession, validationBrowser: null };
 
   let lastError: Error | null = null;
@@ -363,10 +327,14 @@ export async function createSessionWithContext(
         false,
         options?.proxyMode
       );
-      const profile = resolveSteelProfileForSession(agentId, dbContext.contextId);
+      const profile = resolveSteelProfileForSession(
+        agentId,
+        dbContext.contextId,
+        options?.requiredSteelProfileId ?? null
+      );
       const session = (await steel.sessions.create({
         profileId: profile.profileId, // Use existing profile if available
-        persistProfile: envEnabled('BROWSER_AGENT_STEEL_PROFILE_ENABLED', true), // Auto-persist browser state to profile on session close
+        persistProfile: profile.persistProfile,
         userAgent:
           userAgent && envEnabled('BROWSER_AGENT_STEEL_USER_AGENT_ENABLED', true)
             ? userAgent
@@ -387,8 +355,24 @@ export async function createSessionWithContext(
         },
       })) as SteelSessionResult;
 
+      if (
+        options?.requiredSteelProfileId !== undefined &&
+        session.profileId !== options.requiredSteelProfileId
+      ) {
+        try {
+          await releaseSteelRemoteSession(session.id);
+        } catch (releaseError) {
+          throw new SteelSessionCleanupError(session.id, releaseError);
+        }
+        throw new Error(
+          `Steel loaded profile ${session.profileId ?? 'NONE'} instead of required authenticated profile ${options.requiredSteelProfileId}`
+        );
+      }
+
       log.info(`Steel Session: ${logJson(session)}`);
-      rememberBenchmarkAnonSteelProfile(agentId, session.profileId);
+      if (profile.profileSource.startsWith('benchmark_anon')) {
+        rememberBenchmarkAnonSteelProfile(agentId, session.profileId);
+      }
 
       // Steel provides debugUrl for unauthenticated live viewing (anyone with URL can view)
       // sessionViewerUrl requires Steel dashboard login - don't use that
@@ -418,9 +402,9 @@ export async function createSessionWithContext(
       // If this was the first session for the user, claim the provider profile
       // atomically. Concurrent first sessions can each get a new Steel profile;
       // only one should become the persistent profile for future sessions.
-      if (benchmarkAnonSteelProfileEnabled()) {
+      if (!shouldWriteSteelProfileToBrowserContext(profile)) {
         log.info(
-          `  🧪 Benchmark anon profile mode active; not writing Steel profileId ${session.profileId || '(pending)'} to BrowserContext`
+          `  🧪 Session-scoped Steel profile active; not writing profileId ${session.profileId || '(pending)'} to BrowserContext`
         );
       } else if (session.profileId && dbContext.contextId === null) {
         log.info(`  📝 Claiming new Steel profileId: ${session.profileId}`);
@@ -472,6 +456,10 @@ export async function createSessionWithContext(
           wsUrl,
           status: 'ACTIVE',
           startUrl: startUrl || undefined,
+          provider: 'steel',
+          providerProfileId: session.profileId ?? profile.profileId ?? null,
+          providerProfileSource: profile.profileSource,
+          providerProfilePersist: profile.persistProfile,
         },
       });
 

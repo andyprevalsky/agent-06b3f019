@@ -105,12 +105,16 @@ test('browser-auth sync includes every durable credential reference', async () =
   );
 
   for (const model of ['cookieBundle', 'steelSessionAuth']) {
+    // Readers take (where, page) since the browser-auth seed was made paged —
+    // an unpaged whole-table read of the multi-MB origin blobs OOM-killed every
+    // bench guest. Still asserts the reader is wired to the production model
+    // and that browser-state sync goes through the scoped reader.
     assert(
-      source.includes(`${model}: (where) => remote.${model}.findMany`),
+      source.includes(`${model}: (where, page) => remote.${model}.findMany`),
       `expected production ${model} reader`
     );
     assert(
-      browserState.includes(`scopedRemoteBrowserAuth.${model}()`),
+      browserState.includes(`scopedRemoteBrowserAuth.${model}(`),
       `expected scoped production ${model} read`
     );
     assert(

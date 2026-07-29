@@ -1202,7 +1202,12 @@ async def _update_world_model_before_simulation(args) -> None:
         )
 
 
-def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
+def _extract_agent_payment_output_blob(data: dict) -> str:
+    """Collect the browser sub-agent's populated structured output(s) — key-agnostic — as a JSON blob
+    for the reusable semantic output judge. The browser agent's output_schema is LLM-synthesized per
+    run, so the confirmation id may land under order_id, order_confirmation_id, payment_confirmation_id,
+    receipt_id, etc.; the judge maps it by meaning, so we keep every populated structured response."""
+    blobs: List[dict] = []
     for message in data.get("messages", []) or []:
         if not isinstance(message, dict) or message.get("role") != "TOOL":
             continue
@@ -1212,12 +1217,26 @@ def _evaluate_agent_payment_result(data: dict) -> tuple[bool, str | None]:
         if metadata.get("toolName") != "spawn_browser_agent" or metadata.get("toolStatus") != "FINISHED":
             continue
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
-        if not isinstance(structured, dict):
-            continue
-        order_id = structured.get("order_confirmation_id") or structured.get("payment_confirmation_id")
-        if isinstance(order_id, str) and re.fullmatch(r"tp_[0-9a-f]{8}", order_id):
-            return True, None
-    return False, "agent did not return a grounded browser payment confirmation order id"
+        if isinstance(structured, dict):
+            blobs.append(structured)
+    return json.dumps(blobs, default=str) if blobs else ""
+
+
+async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id: str) -> Optional[str]:
+    """Semantic gate for the payment lifecycle's browser-purchase step. The browser agent's populated
+    output must let the STANDARD semantic output judge recover a grounded payment confirmation id
+    (tp_<8 hex>) under ANY key name. Replaces the old exact-key (order_confirmation_id /
+    payment_confirmation_id) match that failed genuinely-successful runs whose LLM-synthesized schema
+    emitted the id under `order_id` instead. Returns None on pass, else the failure reason."""
+    blob = _extract_agent_payment_output_blob(data)
+    if not blob:
+        return "agent did not return a grounded browser payment confirmation order id"
+    return await _judge_output_recovers_expected_fields(
+        root_agent_id,
+        blob,
+        SEMANTIC_OUTPUT_EXPECTATIONS["agent-payment"],
+        AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    )
 
 
 async def _evaluate_phone_call_task(
@@ -2239,6 +2258,23 @@ SEMANTIC_OUTPUT_EXPECTATIONS: Dict[str, Dict[str, Any]] = {
                 ),
             }
             for provider in ("chatgpt", "claude", "apple_notes", "obsidian")
+        ]
+    },
+    "agent-payment": {
+        "fields": [
+            {
+                "name": "order_confirmation_id",
+                "type": "str",
+                "description": (
+                    "Recover the grounded order/payment confirmation id the browser agent read off "
+                    "the checkout success page: a value shaped 'tp_' followed by exactly 8 lowercase "
+                    "hex characters (for example tp_c9123127). Match by MEANING regardless of the "
+                    "agent's key name — order_id, order_confirmation_id, payment_confirmation_id, "
+                    "confirmation, receipt_id, etc. all count. It is populatable ONLY if such a "
+                    "tp_<8 hex> id is actually present in the agent's produced output; an absent, "
+                    "malformed, or fabricated id (not tp_ + 8 hex) is NOT populatable."
+                ),
+            },
         ]
     },
 }
@@ -3769,10 +3805,9 @@ def evaluate_task(
         if not passed:
             return False, reason
 
-    if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME:
-        passed, reason = _evaluate_agent_payment_result(data)
-        if not passed:
-            return False, reason
+    # agent-payment-test-shop's grounded-confirmation-id check is a semantic gate run in the async
+    # post-eval pass (validate_agent_payment_confirmation_contract) so the browser agent's
+    # LLM-synthesized output schema is judged by MEANING, not an exact key name.
     if task.expected_payment_lifecycle:
         lifecycle_error = _validate_payment_lifecycle(task, data)
         if lifecycle_error:
@@ -7830,6 +7865,18 @@ async def run_single_task(
             except Exception as e:
                 passed = False
                 failure_reason = f"User-data prod grep contract check failed: {e}"
+
+        if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME and passed:
+            try:
+                payment_confirmation_error = await validate_agent_payment_confirmation_contract(
+                    data, agent_id
+                )
+                if payment_confirmation_error:
+                    passed = False
+                    failure_reason = payment_confirmation_error
+            except Exception as e:
+                passed = False
+                failure_reason = f"Agent payment confirmation contract check failed: {e}"
 
         cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
         if cleanup_lifecycle is not None:

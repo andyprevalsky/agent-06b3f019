@@ -992,21 +992,36 @@ for snapshot in snapshots:
             echo "❌ could not verify snapshot inventory" >&2
             return 1
         fi
-        read -r candidate state <<< "$(printf '%s' "$snapshots_json" | BEFORE_IDS="$before_ids" python3 -c '
+        read -r candidate state candidate_ids <<< "$(printf '%s' "$snapshots_json" \
+            | BEFORE_IDS="$before_ids" BOUND_ID="$CREATED_SNAPSHOT_ID" python3 -c '
 import json, os, sys
 snapshots = json.load(sys.stdin)
 if not isinstance(snapshots, list): raise SystemExit(1)
+valid = {"created", "complete", "completed", "ready"}
 before = set(os.environ.get("BEFORE_IDS", "").splitlines())
-new = [s for s in snapshots if isinstance(s, dict) and s.get("id") not in before]
-if len(new) > 1: print("ambiguous ambiguous")
-elif not new: print("missing missing")
+bound = os.environ.get("BOUND_ID", "")
+if bound:
+    matches = [s for s in snapshots if isinstance(s, dict) and s.get("id") == bound]
+    ready = any(str(s.get("status") or "").lower() in valid and int(s.get("size") or 0) > 0 for s in matches)
+    print(bound, "complete" if ready else "pending")
 else:
-    snapshot = new[0]
-    ready = str(snapshot.get("status") or "").lower() in {"created", "complete", "completed", "ready"} and int(snapshot.get("size") or 0) > 0
-    print(snapshot["id"], "complete" if ready else "pending")
+    new_by_id = {}
+    for snapshot in snapshots:
+        if not isinstance(snapshot, dict): continue
+        snapshot_id = snapshot.get("id")
+        if snapshot_id and snapshot_id not in before:
+            new_by_id.setdefault(snapshot_id, []).append(snapshot)
+    if len(new_by_id) > 1:
+        print("ambiguous ambiguous", ",".join(sorted(new_by_id)))
+    elif not new_by_id:
+        print("missing missing")
+    else:
+        snapshot_id, records = next(iter(new_by_id.items()))
+        ready = any(str(s.get("status") or "").lower() in valid and int(s.get("size") or 0) > 0 for s in records)
+        print(snapshot_id, "complete" if ready else "pending")
 ' 2>/dev/null || echo unreadable unreadable)"
         [ "$candidate" = "ambiguous" ] && {
-            echo "❌ multiple new snapshots appeared; refusing to guess transaction ownership" >&2
+            echo "❌ multiple new snapshots appeared before ownership was bound (${candidate_ids:-unknown}); refusing to guess transaction ownership" >&2
             return 1
         }
         [ "$candidate" = "unreadable" ] && { echo "❌ could not parse snapshot inventory" >&2; return 1; }

@@ -161,6 +161,9 @@ export interface IPC {
   // Claude Code setup status events
   onClaudeSetupStatus?: (callback: (status: string) => void) => () => void;
 
+  // Codex/ChatGPT setup status events (install + `codex login` progress)
+  onGptSetupStatus?: (callback: (status: string) => void) => () => void;
+
   // Atlas credentials
   atlas?: {
     storePassword: (password: string) => Promise<{ success: boolean; error?: string }>;

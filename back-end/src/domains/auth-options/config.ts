@@ -1,5 +1,4 @@
-export function benchmarkSavedBrowserAuthDisabled(): boolean {
-  return ['1', 'true', 'yes', 'on'].includes(
-    (process.env.BENCHMARK_DISABLE_SAVED_BROWSER_AUTH ?? '').trim().toLowerCase()
-  );
-}
+// Benchmark saved-browser-auth kill-switch moved to
+// providers/benchmarkBrowserAuth.ts so it is defined once and shared across the
+// auth-options provider, steel injection, and browser-session profile binding.
+export {};

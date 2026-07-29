@@ -66,8 +66,7 @@ function collectFiles(dir: string): string[] {
   return out.sort();
 }
 
-function parseImports(abs: string): string[] {
-  const content = fs.readFileSync(abs, 'utf8');
+function extractImports(content: string): string[] {
   const imports: string[] = [];
   const regexes = [
     /(?:import|export)\s*(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g,
@@ -79,6 +78,25 @@ function parseImports(abs: string): string[] {
     while ((match = regex.exec(content)) !== null) imports.push(match[1]);
   }
   return imports;
+}
+
+function parseImports(abs: string): string[] {
+  return extractImports(fs.readFileSync(abs, 'utf8'));
+}
+
+/**
+ * Imports that still exist after compilation.
+ *
+ * `import type` / `export type` specifiers are erased by TypeScript, so they
+ * cannot participate in a runtime require cycle. Counting them reports
+ * CIRCULAR IMPORT for pairs that are perfectly legal — a value module and the
+ * module that only borrows its type.
+ */
+function parseRuntimeImports(abs: string): string[] {
+  const content = fs
+    .readFileSync(abs, 'utf8')
+    .replace(/\b(?:import|export)\s+type\s[\s\S]*?\sfrom\s*['"][^'"]+['"]/g, '');
+  return extractImports(content);
 }
 
 function stripComments(content: string): string {
@@ -414,7 +432,7 @@ function checkCircularImports(): void {
   const sourceFiles = [...mainDomainFiles, ...uiFeatureFiles];
   const graph = new Map<string, string[]>();
   for (const file of sourceFiles) {
-    const imports = parseImports(file.abs)
+    const imports = parseRuntimeImports(file.abs)
       .map((raw) => resolveImport(raw, file.abs))
       .filter((imp) => !imp.external && imp.rel !== null)
       .map((imp) => imp.rel as string)

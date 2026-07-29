@@ -1,2 +1,3 @@
 export { useAdminHealthData } from './useAdminHealthData';
-export { useWaitlistPeople } from './useWaitlistPeople';
+export { useAccountSwitch } from './useAccountSwitch';
+export { useUserDirectory } from './useUserDirectory';

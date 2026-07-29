@@ -1,6 +1,7 @@
-import { IntegrationStatus, Prisma, type AgentStatus } from '@prisma/client';
+import { IntegrationStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
+import { isRealWaitlistPerson } from '../../providers/waitlistIdentity';
 
 export interface AdminUserRecord {
   userId: string;
@@ -74,6 +75,27 @@ export async function findVerifiedUsersCreatedBefore(
 }
 
 /**
+ * Users who redeemed an invite code — in the app without paying.
+ *
+ * A redeemed invite code is one of the two ways the waitlist gate opens (the
+ * other is an active subscription — see providers/inviteGate.ts:isUserGated),
+ * so these people are in the product and must be counted alongside subscribers.
+ *
+ * createdAt stands in for "when they got in": redemption happens during
+ * onboarding, right after the account row is written, and the schema keeps no
+ * separate redemption timestamp.
+ */
+export async function findInviteCodeRedeemers(): Promise<UserCreatedRecord[]> {
+  const users = await prisma.user.findMany({
+    where: { usedInviteCode: { not: null }, phone: { not: null } },
+    select: { userId: true, phone: true, createdAt: true },
+  });
+  return users
+    .filter((user) => (user.phone ?? '').trim() !== '')
+    .map(({ userId, createdAt }) => ({ userId, createdAt }));
+}
+
+/**
  * Active connector rows that have reached a connected state. SYNCING is
  * included only for already-active rows (for example Gmail during a refresh),
  * while first-time uploads remain inactive until their import succeeds.
@@ -122,162 +144,21 @@ export async function findWaitlistSignupsBetween(
   start: Date,
   end: Date
 ): Promise<WaitlistSignupRecord[]> {
-  // Only phone-bearing signups count. The legacy email waitlist (~3k rows with
-  // no phone) is not a real product signup, so entries without a phone number
-  // are cleared out of this metric.
+  // A signup counts on email OR phone. This used to require a phone as a proxy
+  // for "not fixture junk" — the ~2.7k phone-less rows are almost entirely our
+  // own @blackbox-test.dev / @contract-test.dev fixtures — but that also
+  // discarded every real email-only signup, including the whole public landing
+  // form population. Fixtures are excluded by classification instead.
   const rows = await prisma.waitlist.findMany({
-    where: { createdAt: { gte: start, lt: end }, phone: { not: null } },
-    select: { createdAt: true, phone: true },
+    where: { createdAt: { gte: start, lt: end } },
+    select: { createdAt: true, name: true, email: true, phone: true },
   });
-  return rows
-    .filter((row) => (row.phone ?? '').trim() !== '')
-    .map(({ createdAt }) => ({ createdAt }));
+  return rows.filter(isRealWaitlistPerson).map(({ createdAt }) => ({ createdAt }));
 }
 
-export interface WaitlistPersonRow {
-  id: string;
-  name: string;
-  email: string | null;
-  phone: string;
-  variant: string | null;
-  createdAt: Date;
-  invitedAt: Date | null;
-}
-
-export interface WaitlistPeoplePage {
-  rows: WaitlistPersonRow[];
-  total: number;
-}
-
-/**
- * One bounded page of actionable waitlist people — the same phone-bearing
- * population the signup metric counts. Newest first, with id as the stable
- * tie-breaker. Email-only legacy rows (no phone) are excluded because they
- * can't be texted.
- */
-export async function findWaitlistPeople(params: {
-  skip: number;
-  take: number;
-}): Promise<WaitlistPeoplePage> {
-  const [rows, total] = await prisma.$transaction(
-    [
-      prisma.$queryRaw<WaitlistPersonRow[]>`
-        SELECT
-          "id",
-          "name",
-          "email",
-          "phone",
-          "variant",
-          "created_at" AS "createdAt",
-          "invited_at" AS "invitedAt"
-        FROM "Waitlist"
-        WHERE "phone" IS NOT NULL
-          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
-        ORDER BY "created_at" DESC, "id" DESC
-        OFFSET ${params.skip}
-        LIMIT ${params.take}
-      `,
-      prisma.$queryRaw<Array<{ count: number }>>`
-        SELECT COUNT(*)::int AS "count"
-        FROM "Waitlist"
-        WHERE "phone" IS NOT NULL
-          AND regexp_replace("phone", '[[:space:]]', '', 'g') <> ''
-      `,
-    ],
-    { isolationLevel: Prisma.TransactionIsolationLevel.RepeatableRead }
-  );
-  return {
-    rows,
-    total: total[0]?.count ?? 0,
-  };
-}
-
-export async function findWaitlistPersonById(id: string): Promise<WaitlistPersonRow | null> {
-  const row = await prisma.waitlist.findUnique({
-    where: { id },
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      variant: true,
-      createdAt: true,
-      invitedAt: true,
-    },
-  });
-  if (row === null || (row.phone ?? '').trim() === '') return null;
-  return {
-    id: row.id,
-    name: row.name,
-    email: row.email,
-    phone: row.phone as string,
-    variant: row.variant,
-    createdAt: row.createdAt,
-    invitedAt: row.invitedAt,
-  };
-}
-
-export async function findUserEmailById(userId: string): Promise<string | null> {
-  const user = await prisma.user.findUnique({
-    where: { userId },
-    select: { email: true },
-  });
-  const email = user?.email?.trim() ?? '';
-  return email === '' ? null : email;
-}
-
-export interface AccountGateRecord {
-  phone: string;
-  usedInviteCode: number | null;
-  hasActiveSubscription: boolean;
-}
-
-function phoneDigits(phone: string | null | undefined): string {
-  return (phone ?? '').replace(/\D/g, '');
-}
-
-/**
- * Accounts matching any of the given phone numbers, with gate state. Matches on
- * canonical digits ('+digits' or bare 'digits') so a differently-formatted
- * User.phone still resolves, and reports whether each holds an active
- * subscription (which clears the invite gate).
- */
-export async function findAccountsByPhones(phones: string[]): Promise<AccountGateRecord[]> {
-  const candidates = new Set<string>();
-  for (const phone of phones) {
-    const digits = phoneDigits(phone);
-    if (digits === '') continue;
-    candidates.add('+' + digits);
-    candidates.add(digits);
-  }
-  if (candidates.size === 0) return [];
-
-  const users = await prisma.user.findMany({
-    where: { phone: { in: Array.from(candidates) } },
-    select: { userId: true, phone: true, usedInviteCode: true },
-  });
-  const userIds = users.map((user) => user.userId);
-  const activeSubs =
-    userIds.length === 0
-      ? []
-      : await prisma.subscription.findMany({
-          where: { userId: { in: userIds }, currentPeriodEnd: { gt: new Date() } },
-          select: { userId: true },
-        });
-  const activeSubUserIds = new Set(activeSubs.map((sub) => sub.userId));
-
-  return users
-    .filter((user) => (user.phone ?? '').trim() !== '')
-    .map((user) => ({
-      phone: user.phone as string,
-      usedInviteCode: user.usedInviteCode,
-      hasActiveSubscription: activeSubUserIds.has(user.userId),
-    }));
-}
-
-export async function markWaitlistInvited(id: string, invitedAt: Date): Promise<void> {
-  await prisma.waitlist.update({ where: { id }, data: { invitedAt } });
-}
+// Waitlist-people queries live in their own file (per-file line budget) but
+// stay reachable through this module so consumers import one repo namespace.
+export * from './repoWaitlist';
 
 export async function findRootTasksBetween(start: Date, end: Date): Promise<RootTaskRecord[]> {
   const [liveTasks, archivedTasks] = await Promise.all([

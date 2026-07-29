@@ -51,14 +51,39 @@ class ExtractTool(BaseModel):
 
 
 class ReadNetworkRequestsBrowserTool(BaseModel):
-    """Read captured HTTP network requests (XHR/Fetch/documents) made by the current page."""
+    """Read the HTTP network requests made by the current page, with optional headers and bodies."""
 
     tool: Literal["read_network_requests"]
     url_pattern: Optional[str] = Field(
         default=None, description="Optional substring to filter request URLs (e.g. '/api/')."
     )
+    method: Optional[str] = Field(default=None, description="Optional HTTP method filter (e.g. 'POST').")
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional status filter: exact ('403'), class ('4xx'), 'error' (>=400 or failed), or 'ok'.",
+    )
+    resource_type: Optional[str] = Field(
+        default=None,
+        description="Optional resource-type filter (e.g. 'XHR', 'Fetch', 'Document', 'Script').",
+    )
     limit: Optional[int] = Field(default=None, description="Maximum number of requests to return (default 100).")
     clear: Optional[bool] = Field(default=None, description="When true, clear the captured buffer after reading.")
+    include_query: Optional[bool] = Field(
+        default=None,
+        description="When true, return full URLs including query strings instead of scheme://host/path only.",
+    )
+    include_headers: Optional[bool] = Field(
+        default=None,
+        description="When true, include request and response headers (cookie/authorization values are masked).",
+    )
+    include_bodies: Optional[bool] = Field(
+        default=None,
+        description="When true, include request post data and captured response bodies.",
+    )
+    max_body_chars: Optional[int] = Field(
+        default=None,
+        description="Per-body character cap when include_bodies is set (default 4000).",
+    )
 
 
 # ============================================================================
@@ -275,9 +300,19 @@ class PaymentLineItem(BaseModel):
         ),
         validation_alias=AliasChoices("product_url", "productUrl"),
     )
-    rating: str = Field(description="Product rating shown on the product page, such as '4.8 stars'")
+    rating: str = Field(
+        description=(
+            "Product rating shown on the product page, such as '4.8 stars'. If the page "
+            "genuinely shows no rating (e.g. a service, ticket, or event booking), pass "
+            "'0 stars', never 'N/A', 'none', 'unknown', or a made-up number."
+        )
+    )
     review_count: str = Field(
-        description="Product review count shown on the product page, preserving visible formatting",
+        description=(
+            "Product review count shown on the product page, preserving visible formatting. "
+            "If the page genuinely shows no reviews (e.g. a service, ticket, or event "
+            "booking), pass '0 reviews', never 'N/A', 'none', 'unknown', or a made-up number."
+        ),
         validation_alias=AliasChoices("review_count", "reviewCount"),
     )
     unit_price_cents: int = Field(

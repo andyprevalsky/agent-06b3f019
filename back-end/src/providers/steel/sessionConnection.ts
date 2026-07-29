@@ -100,6 +100,10 @@ export async function createLocalBrowserSession(
       wsUrl,
       status: 'ACTIVE',
       startUrl: startUrl !== undefined && startUrl !== '' ? startUrl : undefined,
+      provider: 'steel',
+      providerProfileId: null,
+      providerProfileSource: 'local',
+      providerProfilePersist: false,
     },
   });
 

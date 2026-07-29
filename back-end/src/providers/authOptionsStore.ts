@@ -1,8 +1,17 @@
 import { prisma } from './database';
 
-export async function findSteelSessionAuth(userId: string, authRealm: string) {
+export async function findSteelSessionAuth(
+  userId: string,
+  authRealm: string,
+  contextId?: string | null
+) {
+  if (contextId === null) return null;
   const rows = await prisma.steelSessionAuth.findMany({
-    where: { userId, authRealm },
+    where: {
+      userId,
+      authRealm,
+      ...(contextId === undefined ? {} : { contextId }),
+    },
   });
   rows.sort((a, b) => {
     if ((a.disabledAt === null) !== (b.disabledAt === null)) {

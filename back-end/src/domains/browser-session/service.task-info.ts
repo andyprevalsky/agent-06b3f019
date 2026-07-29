@@ -99,11 +99,7 @@ function buildTaskInfoResponse(
   injection: Awaited<ReturnType<typeof collectUserInjectionData>>
 ): TaskInfoResponse {
   const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
-  const providerProfile = session.context.providerProfiles.find(
-    (profile) => profile.provider === provider
-  );
-  const profileId =
-    providerProfile?.profileId ?? (provider === 'steel' ? session.context.contextId : null);
+  const profileId = resolveTaskInfoProfileId(session);
   return {
     task_id: session.id,
     session_id: session.sessionId,
@@ -123,6 +119,31 @@ function buildTaskInfoResponse(
       ...(provider === 'steel' ? { steel_profile_id: profileId } : {}),
     },
   };
+}
+
+/**
+ * Reporting-only compatibility for sessions that existed before profile
+ * binding was recorded on BrowserSession. Credential authorization deliberately
+ * does not use this fallback: new bindings are authoritative, and legacy JIT
+ * auth without one must fail closed.
+ */
+export function resolveTaskInfoProfileId(session: {
+  provider: string;
+  providerProfileId: string | null;
+  providerProfileSource: string | null;
+  context: {
+    contextId: string | null;
+    providerProfiles: Array<{ provider: string; profileId: string }>;
+  };
+}): string | null {
+  if (session.providerProfileSource !== null || session.providerProfileId !== null) {
+    return session.providerProfileId;
+  }
+  const provider = session.provider === 'kernel' ? 'kernel' : 'steel';
+  const providerProfile = session.context.providerProfiles.find(
+    (profile) => profile.provider === provider
+  );
+  return providerProfile?.profileId ?? (provider === 'steel' ? session.context.contextId : null);
 }
 
 async function applyLiveSessionAvailability(

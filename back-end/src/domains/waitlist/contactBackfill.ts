@@ -1,3 +1,9 @@
+import {
+  isWaitlistTestContact,
+  normalizeWaitlistEmail,
+  normalizeWaitlistPhone,
+} from '../../providers/waitlistIdentity';
+
 export const WAITLIST_CONTACT_BACKFILL_VARIANT = 'database-contact-backfill';
 
 export interface WaitlistContactSource {
@@ -69,37 +75,19 @@ interface CreateTarget {
 
 type BackfillTarget = ExistingTarget | CreateTarget;
 
-export function normalizeWaitlistEmail(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase() ?? '';
-  return normalized === '' ? null : normalized;
-}
-
-export function normalizeWaitlistPhone(value: string | null | undefined): string | null {
-  const digits = value?.replace(/\D/g, '') ?? '';
-  return digits === '' ? null : `+${digits}`;
-}
-
-export function isWaitlistTestContact(input: {
-  name: string | null;
-  email: string | null;
-  phone: string | null;
-}): boolean {
-  const name = input.name?.trim().toLowerCase() ?? '';
-  const email = normalizeWaitlistEmail(input.email);
-  const phone = normalizeWaitlistPhone(input.phone);
-  const domain = email?.split('@').at(-1) ?? '';
-  const reservedName =
-    /^(?:test|test[-_ ].*|blackbox|blackbox[-_ ].*|benchmark|benchmark[-_ ].*|smoke|smoke[-_ ].*|coverage|coverage[-_ ].*)$/.test(
-      name
-    );
-  const reservedDomain =
-    ['example.com', 'example.net', 'example.org', 'example.test'].includes(domain) ||
-    domain.endsWith('.test') ||
-    domain === 'invalid' ||
-    domain.endsWith('.invalid');
-  const reservedPhone = phone?.startsWith('+1555') === true || phone?.startsWith('+1999') === true;
-  return reservedName || reservedDomain || reservedPhone;
-}
+/**
+ * Contact normalization and fixture classification are canonical in
+ * providers/waitlistIdentity so domains/admin-health can share them (cross-domain
+ * imports are banned). Re-exported here because scripts and suites have long
+ * imported them from this module.
+ */
+export {
+  isRealWaitlistPerson,
+  isWaitlistTestContact,
+  normalizeWaitlistEmail,
+  normalizeWaitlistPhone,
+  WAITLIST_FIXTURE_EMAIL_DOMAINS,
+} from '../../providers/waitlistIdentity';
 
 function normalizeName(value: string | null | undefined): string | null {
   const normalized = value?.trim() ?? '';

@@ -14,6 +14,8 @@ import {
   SteelSessionCleanupError,
   buildSteelProxySettings,
   isInvalidSteelProxyConfiguration,
+  resolveSteelProfileForSession,
+  shouldWriteSteelProfileToBrowserContext,
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
@@ -144,6 +146,123 @@ function testInvalidProxyConfigurationClassification(): void {
   );
 }
 
+function testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation(): void {
+  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
+  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
+  try {
+    const profile = resolveSteelProfileForSession(
+      'agent-1',
+      'shared-browser-context',
+      'steel-auth-profile'
+    );
+
+    assert(
+      profile.profileId === 'steel-auth-profile',
+      'isolated saved auth must load the authenticated Steel snapshot'
+    );
+    assert(
+      profile.profileSource === 'steel_session_auth_read_only',
+      'isolated saved auth must be distinguishable from mutable anonymous profiles'
+    );
+    assert(
+      profile.persistProfile === false,
+      'isolated saved auth sessions must never write back to the shared Steel profile'
+    );
+    assert(
+      !shouldWriteSteelProfileToBrowserContext(profile),
+      'isolated saved auth must not overwrite BrowserContext.contextId'
+    );
+  } finally {
+    if (previousIsolated === undefined) {
+      delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+    } else {
+      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
+    }
+    if (previousProfileEnabled === undefined) {
+      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+    } else {
+      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
+    }
+  }
+}
+
+function testSavedSteelProfilePersistenceByEnvironment(): void {
+  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+  const previousAnon = process.env.BENCHMARK_ANON_STEEL_PROFILE;
+  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'false';
+  process.env.BENCHMARK_ANON_STEEL_PROFILE = 'false';
+  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
+  try {
+    const profile = resolveSteelProfileForSession(
+      'agent-prod',
+      'shared-browser-context',
+      'steel-auth-profile'
+    );
+    assert(
+      profile.profileId === 'steel-auth-profile',
+      'production must use the saved Steel profile'
+    );
+    assert(
+      profile.profileSource === 'steel_session_auth',
+      'production source must remain explicit'
+    );
+    assert(
+      profile.persistProfile === true,
+      'normal production must keep profile persistence enabled'
+    );
+  } finally {
+    if (previousIsolated === undefined) delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+    else process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
+    if (previousAnon === undefined) delete process.env.BENCHMARK_ANON_STEEL_PROFILE;
+    else process.env.BENCHMARK_ANON_STEEL_PROFILE = previousAnon;
+    if (previousProfileEnabled === undefined) {
+      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+    } else {
+      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
+    }
+  }
+}
+
+function testSavedSteelResolutionDoesNotContaminateAnonymousProfiles(): void {
+  const previousIsolated = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+  const previousProfileEnabled = process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+  process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
+  process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = 'true';
+  try {
+    const agentId = `isolation-${Date.now()}`;
+    const saved = resolveSteelProfileForSession(
+      agentId,
+      'shared-browser-context',
+      'steel-auth-profile'
+    );
+    const anonymous = resolveSteelProfileForSession(agentId, 'shared-browser-context');
+
+    assert(saved.persistProfile === false, 'saved snapshot must be read-only');
+    assert(
+      anonymous.profileId === undefined,
+      'loading saved auth must not populate the anonymous per-agent profile map'
+    );
+    assert(
+      anonymous.profileSource === 'benchmark_anon_fresh',
+      'a later anonymous session must still receive a fresh isolated profile'
+    );
+  } finally {
+    if (previousIsolated === undefined) {
+      delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+    } else {
+      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolated;
+    }
+    if (previousProfileEnabled === undefined) {
+      delete process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED;
+    } else {
+      process.env.BROWSER_AGENT_STEEL_PROFILE_ENABLED = previousProfileEnabled;
+    }
+  }
+}
+
 async function testReplacementRetryDropsRejectedCity(): Promise<void> {
   const browserSessionFindUnique = prisma.browserSession.findUnique;
   const browserSessionUpdateMany = prisma.browserSession.updateMany;
@@ -228,6 +347,98 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
     assert(secondGeo?.city === undefined, 'replacement retry did not drop rejected city');
     assert(secondGeo?.state === 'CA', 'replacement retry dropped state with city');
     assert(secondGeo?.country === 'US', 'replacement retry dropped country with city');
+
+    (
+      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
+    ).findUnique = (async () => ({
+      id: 'replacement-city-retry-task',
+      sessionId: 'steel-read-only-old',
+      provider: 'steel',
+      providerProfileId: 'steel-auth-profile',
+      providerProfileSource: 'steel_session_auth_read_only',
+      providerProfilePersist: false,
+      currentUrl: null,
+      startUrl: null,
+      agentId: 'replacement-city-retry-agent',
+      contextId: 'replacement-city-retry-context',
+      context: { userId: 'replacement-city-retry-user' },
+    })) as typeof prisma.browserSession.findUnique;
+    const replacementWrites: Array<Record<string, unknown>> = [];
+    (
+      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
+    ).updateMany = (async (args: { data: Record<string, unknown> }) => {
+      replacementWrites.push(args.data);
+      return { count: 1 };
+    }) as typeof prisma.browserSession.updateMany;
+    let readOnlyCreateInput: Record<string, unknown> | undefined;
+    await recreateSession(
+      'replacement-city-retry-task',
+      { forceManagedRotation: true },
+      {
+        createSession: async (input) => {
+          readOnlyCreateInput = input as unknown as Record<string, unknown>;
+          return {
+            id: 'steel-read-only-new',
+            debugUrl: 'https://steel.example/debug',
+            profileId: 'steel-auth-profile',
+          };
+        },
+        validateConnection: async () => true,
+      }
+    );
+    assert(
+      readOnlyCreateInput?.profileId === 'steel-auth-profile',
+      'resume did not reload the session-bound profile'
+    );
+    assert(
+      readOnlyCreateInput?.persistProfile === false,
+      'resume enabled writes to an isolated saved-auth profile'
+    );
+    assert(
+      replacementWrites[0]?.providerProfileId === 'steel-auth-profile' &&
+        replacementWrites[0]?.providerProfileSource === 'steel_session_auth_read_only' &&
+        replacementWrites[0]?.providerProfilePersist === false,
+      'resume did not preserve the read-only session profile binding'
+    );
+
+    let mismatchCreateAttempts = 0;
+    let mismatchReleaseCount = 0;
+    let mismatchFailure: unknown;
+    try {
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: false },
+        {
+          createSession: async (input) => {
+            mismatchCreateAttempts += 1;
+            assert(
+              input.profileId === 'steel-auth-profile' && input.persistProfile === false,
+              'mismatch retry changed the bound profile contract'
+            );
+            return {
+              id: `steel-profile-mismatch-${mismatchCreateAttempts}`,
+              debugUrl: 'https://steel.example/debug',
+              profileId: 'wrong-profile',
+            };
+          },
+          validateConnection: async () => true,
+          releaseSession: async () => {
+            mismatchReleaseCount += 1;
+          },
+        }
+      );
+    } catch (error) {
+      mismatchFailure = error;
+    }
+    assert(mismatchFailure instanceof Error, 'profile mismatch did not fail closed');
+    assert(
+      mismatchReleaseCount === mismatchCreateAttempts && mismatchReleaseCount > 0,
+      'profile mismatch did not release every uncommitted remote session'
+    );
+    assert(
+      replacementWrites.length === 1,
+      'profile mismatch wrote a replacement BrowserSession binding'
+    );
 
     let cleanupCreateAttempts = 0;
     let cleanupFailure: unknown;
@@ -335,6 +546,18 @@ async function main(): Promise<void> {
     {
       name: 'invalid Steel proxy configuration triggers location fallback',
       fn: testInvalidProxyConfigurationClassification,
+    },
+    {
+      name: 'isolated saved Steel auth loads a read-only profile snapshot',
+      fn: testSavedSteelProfileIsReadOnlyDuringBenchmarkIsolation,
+    },
+    {
+      name: 'normal production saved Steel auth remains persistent',
+      fn: testSavedSteelProfilePersistenceByEnvironment,
+    },
+    {
+      name: 'saved Steel auth does not contaminate anonymous profile isolation',
+      fn: testSavedSteelResolutionDoesNotContaminateAnonymousProfiles,
     },
     {
       name: 'Steel replacement retries rejected cities and stops after cleanup failure',

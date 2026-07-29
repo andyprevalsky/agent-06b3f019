@@ -19,6 +19,7 @@ import {
   syncCookieCredentials,
   syncIntegrationCredentials,
   syncOriginCredentials,
+  syncPagedCredentials,
   syncPasskeyCredentialRows,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
@@ -105,21 +106,50 @@ if (requestedSeedModes.length > 1) {
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+/**
+ * Deterministic ordering is what makes `skip`/`take` paging safe — without it
+ * Postgres may return overlapping or missing rows across pages.
+ */
+function pagedArgs(where: unknown, page?: { skip: number; take: number }) {
+  return page
+    ? { where: where as never, skip: page.skip, take: page.take, orderBy: { id: 'asc' as const } }
+    : { where: where as never };
+}
+
 const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
   {
-    cookie: (where) => remote.cookie.findMany({ where: where as never }),
-    cookieBundle: (where) => remote.cookieBundle.findMany({ where: where as never }),
-    steelSessionAuth: (where) => remote.steelSessionAuth.findMany({ where: where as never }),
-    localStorageOrigin: (where) => remote.localStorageOrigin.findMany({ where: where as never }),
-    indexedDBOrigin: (where) => remote.indexedDBOrigin.findMany({ where: where as never }),
-    browserPermission: (where) => remote.browserPermission.findMany({ where: where as never }),
-    cacheStorageOrigin: (where) => remote.cacheStorageOrigin.findMany({ where: where as never }),
-    browserPassword: (where) => remote.browserPassword.findMany({ where: where as never }),
-    passkeyCredential: (where) => remote.passkeyCredential.findMany({ where: where as never }),
+    cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
+    cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
+    steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) =>
+      remote.localStorageOrigin.findMany(pagedArgs(where, page)),
+    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
+    browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) =>
+      remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
+    passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
   DEV_USER_ID,
   SEED_COOKIE_DOMAINS
 );
+
+/**
+ * Page sizes are per-table because the blobs are not uniform. Peak heap is
+ * driven by (page size x row size), so the right page is the one that keeps
+ * that product bounded — a row count alone is not a memory bound.
+ *
+ * LocalStorageOrigin.entries averages ~23KB over ~3.7k prod rows, so a 100-row
+ * page is a couple of MB. IndexedDBOrigin.databases averages ~2.5MB over only
+ * 16 rows and its largest single row is 38MB uncompressed, so the same 100-row
+ * page would read the entire table and reproduce the original OOM.
+ */
+const ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_ORIGIN_PAGE_SIZE ?? 100);
+// Measured: with a 400MB heap the 38MB row still OOMs at page size 1, and it
+// succeeds at 900MB — so ~0.5-0.9GB is the irreducible cost of parsing that one
+// row. Peak is therefore bounded by the LARGEST SINGLE ROW, which is the best
+// achievable without streaming the blob itself, and fits any bench guest.
+const BLOB_ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_BLOB_ORIGIN_PAGE_SIZE ?? 1);
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
   await runSyncStep(name, fn);
@@ -312,22 +342,31 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   );
 
   // ── LocalStorage Origins ──
+  // Paged: `entries` holds the encrypted localStorage payload (84MB across
+  // ~3.7k rows in prod today) and parsing it all at once is what exhausted the
+  // heap on every bench guest.
   await syncRequiredTable(
     'LocalStorage',
-    async () => {
-      const origins = await scopedRemoteBrowserAuth.localStorageOrigin();
-      return syncOriginCredentials(local.localStorageOrigin, origins);
-    },
+    async () =>
+      syncPagedCredentials(
+        (page) => scopedRemoteBrowserAuth.localStorageOrigin(page),
+        (origins) => syncOriginCredentials(local.localStorageOrigin, origins),
+        ORIGIN_SYNC_PAGE_SIZE
+      ),
     failures
   );
 
   // ── IndexedDB Origins ──
+  // Paged: few rows, but `databases` is the single largest blob in the seed
+  // (one prod row is 38MB uncompressed).
   await syncRequiredTable(
     'IndexedDB',
-    async () => {
-      const origins = await scopedRemoteBrowserAuth.indexedDBOrigin();
-      return syncOriginCredentials(local.indexedDBOrigin, origins);
-    },
+    async () =>
+      syncPagedCredentials(
+        (page) => scopedRemoteBrowserAuth.indexedDBOrigin(page),
+        (origins) => syncOriginCredentials(local.indexedDBOrigin, origins),
+        BLOB_ORIGIN_SYNC_PAGE_SIZE
+      ),
     failures
   );
 
@@ -344,10 +383,12 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Cache Storage Origins ──
   await syncRequiredTable(
     'Cache Storage',
-    async () => {
-      const caches = await scopedRemoteBrowserAuth.cacheStorageOrigin();
-      return syncOriginCredentials(local.cacheStorageOrigin, caches);
-    },
+    async () =>
+      syncPagedCredentials(
+        (page) => scopedRemoteBrowserAuth.cacheStorageOrigin(page),
+        (caches) => syncOriginCredentials(local.cacheStorageOrigin, caches),
+        ORIGIN_SYNC_PAGE_SIZE
+      ),
     failures
   );
 }

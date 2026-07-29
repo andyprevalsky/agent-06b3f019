@@ -178,34 +178,38 @@ def test_cloudbench_result_accepts_only_fresh_exact_passing_task_set():
     assert errors == []
 
 
-def test_agent_payment_evaluator_accepts_confirmed_paid_order_language():
-    """Alternate confirmation wording still requires grounded browser evidence."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+def test_agent_payment_output_blob_is_key_agnostic():
+    """The payment confirmation is now judged semantically (SEMANTIC_OUTPUT_EXPECTATIONS['agent-payment']
+    via _judge_output_recovers_expected_fields), so the blob extractor must surface the browser agent's
+    populated structured output regardless of the LLM-synthesized key name — the judge maps the grounded
+    tp_<8hex> id by meaning. This pins the exact regression: a genuinely-successful run emitting the id
+    under `order_id` (not `order_confirmation_id`) must still reach the judge."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
-    passed, reason = _evaluate_agent_payment_result(
-        {
-            "messages": [
-                {
-                    "role": "TOOL",
-                    "message": (
-                        "The payment was confirmed. The confirmation page shows: "
-                        "Order ID: tp_c5053b1b. Total charged: $43.96. "
-                        "The order was placed successfully."
-                    ),
-                    "metadata": {
-                        "toolName": "spawn_browser_agent",
-                        "toolStatus": "FINISHED",
-                        "structured_response": {
-                            "order_confirmation_id": "tp_c5053b1b",
-                            "total_price_paid": 43.96,
+    def blob_for(structured):
+        return _extract_agent_payment_output_blob(
+            {
+                "messages": [
+                    {
+                        "role": "TOOL",
+                        "metadata": {
+                            "toolName": "spawn_browser_agent",
+                            "toolStatus": "FINISHED",
+                            "structured_response": structured,
                         },
-                    },
-                },
-            ]
-        }
-    )
+                    }
+                ]
+            }
+        )
 
-    assert passed, reason
+    # The regression: agent emitted `order_id`, not `order_confirmation_id`.
+    assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
+    # Legacy/alternate key names surface too.
+    assert "tp_c5053b1b" in blob_for(
+        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
+    )
+    # No populated browser output → empty blob (the semantic gate fails closed on empty).
+    assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
 
 def test_cloudbench_result_preserves_fresh_failure_but_never_counts_it_as_pass():
@@ -253,6 +257,29 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert "create-worktree-patch.sh" in controller
     assert "remote-logs/cloudbench-driver.log" in controller
     assert "logs/worker.log" in controller
+
+
+def test_cloud_fleet_controller_detaches_by_default():
+    """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
+    repo_root = Path(__file__).resolve().parents[3]
+    fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
+    detach_default = next(
+        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
+    )
+
+    assert detach_default == 'DETACH="1"', (
+        f"fleet launch mode was {detach_default}; paid runs must detach by default"
+    )
+    assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
+    assert '--foreground)     DETACH="0"' in fleet
+    assert "--recover-stale-owner)" in fleet
+    assert "recover_exact_stale_fleet_owner" in fleet
+    assert "volume_id=%s" in fleet
+    assert "Never sweep app-global unattached" in fleet
+    assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
+        "cloudbench_controller_lock_acquire"
+    )
 
 
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
@@ -1653,8 +1680,15 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
 
 
 def test_agent_payment_accepts_grounded_structured_browser_confirmation():
-    """A verified browser result must not depend on one exact prose inflection."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+    """A verified browser result must not depend on one exact prose inflection.
+
+    Ported from the deleted `_evaluate_agent_payment_result` exact-key matcher to the
+    current pipeline (c747ca4fd), which left these two cases importing a symbol that no
+    longer exists — the agents `benchmark` domain has been red on main since. The pass/fail
+    verdict now lives in the async semantic gate rather than a pure function, so the
+    contract this case can still pin is that the grounded id REACHES that judge.
+    """
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
     data = {
         "agent": {
@@ -1676,12 +1710,16 @@ def test_agent_payment_accepts_grounded_structured_browser_confirmation():
         ],
     }
 
-    assert _evaluate_agent_payment_result(data) == (True, None)
+    assert "tp_6faab326" in _extract_agent_payment_output_blob(data)
 
 
 def test_agent_payment_accepts_current_payment_confirmation_schema_key():
-    """The browser payment task currently asks for payment_confirmation_id."""
-    from benchmarks.run_benchmark import _evaluate_agent_payment_result
+    """The browser payment task currently asks for payment_confirmation_id.
+
+    Same port as above: pins that this schema key's grounded id, alongside the
+    purchased product names, survives extraction into the semantic judge's blob.
+    """
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
 
     data = {
         "messages": [
@@ -1706,7 +1744,9 @@ def test_agent_payment_accepts_current_payment_confirmation_schema_key():
         ],
     }
 
-    assert _evaluate_agent_payment_result(data) == (True, None)
+    blob = _extract_agent_payment_output_blob(data)
+    assert "tp_058813d0" in blob
+    assert "Aurora Notebook" in blob
 
 
 def test_production_payment_lifecycle_refuses_sandbox_target():
@@ -10211,6 +10251,81 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
 
 
+def test_agent_latency_reads_isolated_benchmark_stack_logs():
+    """agent_latency.py must see isolated-stack logs, not just the shared ones.
+
+    Every /deploy smoke failure runs on an isolated stack, which writes to
+    .context/benchmarks/<run-id>/logs/{worker.N,backend}.log instead of
+    agents/navi-worker-log.txt. Reading only the shared paths made the primary
+    latency tool print "No log lines found" for exactly the failures it exists
+    to explain, so all three 2026-07-28 smoke failures had to be diagnosed by
+    hand.
+    """
+    import importlib
+    import tempfile
+    from unittest.mock import patch
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "1785261402-99080-80974", "logs")
+        os.makedirs(log_dir)
+        # An isolated stack runs many worker processes, one file each.
+        with open(os.path.join(log_dir, "worker.4.log"), "w") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-28T17:58:34.644000Z",
+                        "event": "span.end",
+                        "agent_id": "053a9066-28d1-4f34-a558-cc7cd402520d",
+                        "span_name": "llm.attempt",
+                    }
+                )
+                + "\n"
+            )
+        with open(os.path.join(log_dir, "backend.log"), "w") as handle:
+            handle.write("[2026-07-28T17:58:34.647Z] WARN [ComputeCredentials] backed off reason=x\n")
+
+        original_root = latency.ISOLATED_STACK_ROOT
+        original_worker = latency.WORKER_LOG
+        original_backend = latency.BACKEND_LOG
+        try:
+            latency.ISOLATED_STACK_ROOT = tmp
+            # Point the shared paths at nonexistent files so the ONLY way these
+            # events can be found is via isolated-stack discovery.
+            latency.WORKER_LOG = os.path.join(tmp, "absent-worker.txt")
+            latency.BACKEND_LOG = os.path.join(tmp, "absent-backend.log")
+
+            assert latency.isolated_stack_log_dirs() == [log_dir]
+            worker_events = latency._read_worker_raw()
+            backend_events = latency._read_backend_raw()
+
+            # The isolated runner exports the exact log set before diagnostics.
+            # That must take precedence over recent-run discovery so concurrent
+            # workspaces cannot contaminate the failed agent's evidence.
+            latency.ISOLATED_STACK_ROOT = os.path.join(tmp, "missing")
+            with patch.dict(
+                os.environ,
+                {
+                    "NAVI_WORKER_LOGS": os.path.join(log_dir, "worker.4.log"),
+                    "NAVI_BACKEND_LOGS": os.path.join(log_dir, "backend.log"),
+                },
+            ):
+                explicit_worker_events = latency._read_worker_raw()
+                explicit_backend_events = latency._read_backend_raw()
+        finally:
+            latency.ISOLATED_STACK_ROOT = original_root
+            latency.WORKER_LOG = original_worker
+            latency.BACKEND_LOG = original_backend
+
+    assert len(worker_events) == 1, "isolated-stack worker.N.log must be read"
+    assert worker_events[0].data["agent_id"] == "053a9066-28d1-4f34-a558-cc7cd402520d"
+    assert len(backend_events) == 1, "isolated-stack backend.log must be read"
+    assert backend_events[0].source == "backend"
+    assert len(explicit_worker_events) == 1, "runner-provided worker logs must be read"
+    assert len(explicit_backend_events) == 1, "runner-provided backend logs must be read"
+
+
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
     """Raw idea kernels have a home before they become runnable evals."""
     from benchmarks.long_horizon import load_idea_bank
@@ -10508,8 +10623,8 @@ async def run_all_tests():
         test_cloudbench_result_accepts_only_fresh_exact_passing_task_set,
     )
     r.record(
-        "agent_payment_accepts_confirmed_paid_order_language",
-        test_agent_payment_evaluator_accepts_confirmed_paid_order_language,
+        "agent_payment_output_blob_is_key_agnostic",
+        test_agent_payment_output_blob_is_key_agnostic,
     )
     r.record(
         "cloudbench_preserves_failure_without_passing",
@@ -10522,6 +10637,10 @@ async def run_all_tests():
     await r.record_async(
         "required_attachment_upload_failure_is_fatal",
         test_required_attachment_upload_failure_is_fatal,
+    )
+    r.record(
+        "cloud_fleet_controller_detaches_by_default",
+        test_cloud_fleet_controller_detaches_by_default,
     )
     r.record(
         "cloudbench_prisma_freshness_permanent_gate",
@@ -11314,4 +11433,5 @@ async def run_all_tests():
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
+    r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
     return r.all_passed

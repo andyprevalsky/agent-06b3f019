@@ -158,6 +158,52 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
             raise AssertionError(f"PaymentLineItem accepted placeholder {field_name}")
 
 
+def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
+    """H-01: a review-less service/ticket page must be satisfiable with '0'.
+
+    The validators already accept '0 stars'/'0 reviews' — the failure mode was the
+    agent emitting 'N/A' (rejected) because nothing told it the canonical zero
+    value. This cements the zero case AND that every LLM-facing surface (tool
+    schema + Pydantic descriptions + retry error) teaches it, so the model stops
+    hallucinating or hunting a rating that a booking page never shows. Placeholder
+    rejection stays intact (asserted above), so this is guidance, not relaxation.
+    """
+    from browser_tools.schemas import PaymentLineItem
+
+    valid_item = _sample_tool_call()["line_items"][0]
+    # The exact values the guidance tells the agent to use on a review-less page.
+    zeroed = PaymentLineItem.model_validate(
+        {**valid_item, "rating": "0 stars", "review_count": "0 reviews"}
+    )
+    assert zeroed.rating == "0 stars"
+    assert zeroed.review_count == "0 reviews"
+
+    # 1) Rose browser-use tool schema teaches the zero case for both fields.
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    props = BROWSER_USE_TOOLS["request_payment_card"]["params"]["line_items"]["items"][
+        "properties"
+    ]
+    for field in ("rating", "review_count"):
+        desc = props[field]["description"].lower()
+        assert "0 stars" in desc or "0 reviews" in desc
+        assert "made-up" in desc  # forbids hallucinated / placeholder values
+
+    # 2) Pydantic field descriptions carry the same guidance.
+    fields = PaymentLineItem.model_fields
+    assert "0 stars" in (fields["rating"].description or "")
+    assert "0 reviews" in (fields["review_count"].description or "")
+
+    # 3) The retry error tells the agent to pass 0 (self-correction), not to keep hunting.
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    action_src = inspect.getsource(service_actions)
+    assert "0 stars" in action_src and "0 reviews" in action_src
+    assert "do not keep searching" in action_src
+
+
 def test_payment_tool_accepts_camel_case_transport_fields():
     from pydantic import ValidationError
 
@@ -643,6 +689,10 @@ async def run_all_tests():
     result.record("domain_package_exports", test_domain_package_eager_and_lazy_exports)
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
+    result.record(
+        "reviewless_bookings_pass_with_zero",
+        test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
+    )
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
     result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)
     result.record(

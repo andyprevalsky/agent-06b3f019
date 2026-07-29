@@ -41,6 +41,21 @@ Implications sections.
 4. **Actively drive asynchronous work.** Poll benchmark controllers and deploy
    workers on the CLAUDE.md cadence. Check both output growth and liveness.
    Never fire and passively wait.
+4a. **Zero started tasks after 5 minutes is a fault, not a slow start.** A
+   generous configured budget is never evidence of progress. If a run has
+   produced no task in a started/running state 5 minutes after launch, stop
+   treating elapsed time as normal: poll every 60 seconds and, on every poll,
+   prove liveness from the WORK ITSELF — never from the controller's own
+   "waiting" line. A controller printing `still waiting (Ns): status=none` is
+   reporting its own patience, not the guest's health, and a dashboard showing
+   `queued` only means no result was ever produced. Each poll must show at
+   least one of: a task state transition, the guest driver's state file/log
+   advancing, or a clean guest process check. Pull the guest's own evidence —
+   driver state, driver exit code, `dmesg` for `oom-kill`/`Killed process`. If
+   the same wait line repeats with no underlying state change, classify the run
+   INFRA-failing, capture on-guest evidence BEFORE teardown destroys it, then
+   stop the run rather than let it burn. Never report a run that never started
+   as healthy boot progress.
 5. **Infra is in scope.** RCA and fix every harness, fleet, credential plumbing,
    capacity, teardown, and control-plane failure. Never kill a benchmark fleet
    not launched by this session.
