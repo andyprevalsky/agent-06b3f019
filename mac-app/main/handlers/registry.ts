@@ -19,6 +19,7 @@ import { GptCredentialSync } from '../services/gptCredentialSync';
 import { WhatsAppSync } from '../services/messaging/platforms/whatsapp/WhatsAppSync';
 import { TelegramSync } from '../services/messaging/platforms/telegram/TelegramSync';
 import { SyncManager } from '../services/sync/SyncManager';
+import { accessTokenIsImpersonated } from '../domains/auth/impersonation';
 import { IntegrationCache } from '../services/sync/IntegrationCache';
 import { enrollPasskey } from '../domains/passkey-enroll/service';
 import { refreshCredentialExchangeActivityBridge } from '../domains/passkey-import/activity-bridge';
@@ -94,6 +95,22 @@ export function registerHandlers() {
     AuthService.setSession(session);
     logConsole('IPC Auth', 'Session saved to store');
 
+    // An admin switching accounts lands here with the TARGET's session. The three
+    // post-auth syncs below upload THIS machine's iMessage history, cookies, and
+    // browser state — so running them now would write the operator's personal data
+    // straight into the account they just switched into. Watchers armed under the
+    // previous identity must also be torn down: they would keep streaming outward
+    // under the new session. Cross-account writes are unrecoverable, so this is
+    // refused rather than reconciled.
+    if (accessTokenIsImpersonated(session?.access_token)) {
+      logConsole('IPC Auth', 'Impersonated session saved — skipping syncs, stopping watchers');
+      void SyncManager.stopAll().catch((err) =>
+        logConsoleError('IPC Auth', 'Error stopping syncs for impersonation', err)
+      );
+      logIpc('OUT', 'auth:save', { success: true, impersonated: true });
+      return { success: true };
+    }
+
     // Trigger syncs after successful auth (all run in parallel)
     IMessageSync.sync().catch((err) =>
       logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err)
@@ -112,6 +129,11 @@ export function registerHandlers() {
   ipcMain.handle('auth:clear', () => {
     logIpc('IN', 'auth:clear');
     logConsole('IPC Auth', 'clear() called');
+    // Stop watchers BEFORE dropping the session: they hold the outgoing identity
+    // and would otherwise keep syncing this machine's data after sign-out.
+    void SyncManager.stopAll().catch((err) =>
+      logConsoleError('IPC Auth', 'Error stopping syncs on auth clear', err)
+    );
     AuthService.clearSession();
     logIpc('OUT', 'auth:clear', { success: true });
     return { success: true };

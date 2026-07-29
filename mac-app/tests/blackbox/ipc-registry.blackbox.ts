@@ -254,8 +254,12 @@ vi.mock('../../main/services/messaging/platforms/telegram/TelegramSync', () => (
 }));
 
 const syncManagerStart = vi.fn(async () => undefined);
+const syncManagerStop = vi.fn(async () => undefined);
 vi.mock('../../main/services/sync/SyncManager', () => ({
-  SyncManager: { startAll: (...a: unknown[]) => syncManagerStart(...a) },
+  SyncManager: {
+    startAll: (...a: unknown[]) => syncManagerStart(...a),
+    stopAll: (...a: unknown[]) => syncManagerStop(...a),
+  },
 }));
 
 const requestPasskeyAutoFillPermission = vi.fn(async () => ({
@@ -411,6 +415,46 @@ describe('ipc-registry: auth channels', () => {
     const result = await invoke('auth:save', fakeSession);
     expect(authSetSession).toHaveBeenCalledWith(fakeSession);
     expect(result).toEqual({ success: true });
+  });
+
+  /**
+   * auth:save is the switch path: the renderer syncs the newly minted session to
+   * the bridge, and the handler immediately uploads THIS machine's iMessage
+   * history, cookies, and browser state. While impersonating, that session is the
+   * TARGET user, so those uploads would write the operator's personal data into
+   * someone else's account — unrecoverable cross-account corruption.
+   */
+  it('auth:save skips post-auth syncs and stops watchers for an impersonated session', async () => {
+    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const impersonatedToken =
+      `${b64({ alg: 'HS256', typ: 'JWT' })}.` +
+      `${b64({ sub: 'target-user', act: { sub: 'admin-user' } })}.sig`;
+
+    imsgSyncRun.mockClear();
+    syncManagerStop.mockClear();
+
+    const result = await invoke('auth:save', { ...fakeSession, access_token: impersonatedToken });
+
+    expect(result).toEqual({ success: true });
+    expect(imsgSyncRun).not.toHaveBeenCalled();
+    expect(syncManagerStop).toHaveBeenCalled();
+  });
+
+  it('auth:save still runs post-auth syncs on the operator OWN session', async () => {
+    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const ownToken = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: 'admin-user' })}.sig`;
+
+    imsgSyncRun.mockClear();
+
+    await invoke('auth:save', { ...fakeSession, access_token: ownToken });
+
+    expect(imsgSyncRun).toHaveBeenCalled();
+  });
+
+  it('auth:clear stops watchers so nothing syncs after sign-out', async () => {
+    syncManagerStop.mockClear();
+    await invoke('auth:clear');
+    expect(syncManagerStop).toHaveBeenCalled();
   });
 
   it('auth:clear wipes the session', async () => {

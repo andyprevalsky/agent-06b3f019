@@ -143,7 +143,10 @@ export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
     clearImpersonationState();
     return null;
   }
-  const adminSession = parsed;
+  // Persist the NORMALIZED session, not the raw parse: a legacy millisecond stash
+  // would otherwise re-poison SESSION_KEY on restore and stay immortal until some
+  // later getSession() happened to repair it.
+  const adminSession = normalizeSessionExpiry(parsed);
 
   window.localStorage.removeItem(ADMIN_SESSION_KEY);
   window.localStorage.removeItem(IMPERSONATION_KEY);
