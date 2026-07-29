@@ -249,7 +249,23 @@ export function getSession(): Session | null {
     const session = normalizeSessionExpiry(parsed);
     if (session !== parsed) {
       console.warn('[Supabase] Repairing millisecond expires_at on stored session');
-      window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+      // Only rewrite the exact value we read, and only when no logout has landed.
+      // Another tab can refresh or clear SESSION_KEY between the read above and
+      // this write; blindly persisting would resurrect a stale token after an
+      // explicit logout. The repair is an optimization — losing the race is fine,
+      // because the next getSession() repairs whatever is current instead.
+      if (
+        window.localStorage.getItem(SESSION_KEY) === stored &&
+        window.localStorage.getItem(LOGOUT_PENDING_KEY) === null
+      ) {
+        try {
+          window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        } catch (persistError) {
+          // Quota/storage-security failures must NOT bubble into the outer catch:
+          // returning null there would sign out a user whose session is valid.
+          console.warn('[Supabase] Failed to persist normalized session', persistError);
+        }
+      }
     }
 
     // Check if expired
