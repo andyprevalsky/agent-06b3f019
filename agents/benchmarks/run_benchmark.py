@@ -52,6 +52,7 @@ import httpx
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from benchmarks.benchmark_tasks import (
+    RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
     all_tasks,
     apply_sub_agent_count,
@@ -4164,7 +4165,45 @@ def _database_urls_equivalent(left: str, right: str) -> bool:
     return identity(left) == identity(right)
 
 
+# Docker Desktop's daemon socket briefly refuses connections while it reaps a
+# previous run's containers, so a back-to-back benchmark can hit it mid-startup.
+# That is infrastructure noise, not a benchmark result — retrying it is what
+# stops a transient blip from being recorded as a task failure in the ledger.
+_TRANSIENT_LOCAL_SQL_MARKERS = (
+    "cannot connect to the docker daemon",
+    "docker daemon is not running",
+    "error during connect",
+    "connection refused",
+    "the database system is starting up",
+    "server closed the connection unexpectedly",
+)
+_LOCAL_SQL_ATTEMPTS = 4
+_LOCAL_SQL_RETRY_DELAY_SECONDS = 2.0
+
+
+def _is_transient_local_sql_error(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _TRANSIENT_LOCAL_SQL_MARKERS)
+
+
 def _run_local_victoria_sql(sql: str) -> str:
+    last_error = ""
+    for attempt in range(_LOCAL_SQL_ATTEMPTS):
+        try:
+            return _run_local_victoria_sql_once(sql)
+        except RuntimeError as error:
+            last_error = str(error)
+            if not _is_transient_local_sql_error(last_error) or attempt == _LOCAL_SQL_ATTEMPTS - 1:
+                raise
+            print(
+                f"    ⏳ Local DB unavailable (attempt {attempt + 1}/{_LOCAL_SQL_ATTEMPTS}), "
+                f"retrying: {last_error[:120]}"
+            )
+            time.sleep(_LOCAL_SQL_RETRY_DELAY_SECONDS)
+    raise RuntimeError(f"Local DB SQL failed: {last_error}")
+
+
+def _run_local_victoria_sql_once(sql: str) -> str:
     container = _local_victoria_db_container()
     if container:
         result = subprocess.run(
@@ -7245,6 +7284,13 @@ async def run_single_task(
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    # The SMS supervisor is not a Temporal agent — it is an in-backend tool loop
+    # woken by an inbound text. It gets its own driver; everything around this
+    # call (selection, concurrency, history, run records) is unchanged.
+    if task.runner == "sms":
+        from benchmarks.sms_runner import build_deps_from_module, run_sms_task
+
+        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
     # Parallel suites can queue a long-running Claude task for several minutes.
     # A credential that was available during the suite-level preflight may be
     # invalidated or enter cooldown before this task obtains its execution slot.
@@ -8079,11 +8125,11 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     explicit_task_names = task_names_from_args(args)
     if explicit_task_names:
         tasks = [get_task_by_name(name) for name in explicit_task_names]
-        non_agent_tasks = [task for task in tasks if task.runner != "agent"]
-        if non_agent_tasks:
-            names = ", ".join(f"{task.name} ({task.runner})" for task in non_agent_tasks)
+        unsupported = [task for task in tasks if task.runner not in RUNNABLE_TASK_RUNNERS]
+        if unsupported:
+            names = ", ".join(f"{task.name} ({task.runner})" for task in unsupported)
             raise ValueError(
-                f"Task(s) {names} are not agent evals — run them via "
+                f"Task(s) {names} are not runnable here — run them via "
                 f"benchmarks/run_eval_suite.py or their own test runner, not run_benchmark.py."
             )
     elif args.suite:
@@ -8109,7 +8155,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         # Suite selection only runs complete benchmark evals. `status == "incomplete"`
         # entries (missing fixtures/judges) are skipped; explicit --task still targets
         # incomplete agent evals for dev iteration.
-        tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
+        tasks = [t for t in tasks if t.runner in RUNNABLE_TASK_RUNNERS and t.status == "ready"]
         if not getattr(args, "prod", False):
             tasks = [t for t in tasks if not t.production_only]
 
@@ -8794,6 +8840,12 @@ def _parallel_task_runners(
         "on",
     }
     browser_profile_writer = None if isolated_browser_profiles else asyncio.Semaphore(1)
+    # The SMS supervisor is a per-user singleton: one phone, one SmsSession row,
+    # one web_search fixture file. Two SMS tasks in flight together interleave
+    # inbound texts on the same transcript, and each one's _reset_session wipes
+    # the other's. Serialize them against each other; they still run alongside
+    # non-SMS work.
+    sms_surface = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -8806,6 +8858,11 @@ def _parallel_task_runners(
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
             async with browser_profile_writer:
+                return await run_with_batch_limit(task)
+        # getattr: the parallel-scheduler test drives this with a minimal task
+        # stub, and a missing runner just means the default agent runner.
+        if getattr(task, "runner", "agent") == "sms":
+            async with sms_surface:
                 return await run_with_batch_limit(task)
         return await run_with_batch_limit(task)
 

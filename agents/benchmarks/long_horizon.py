@@ -46,12 +46,25 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "expected_payment_receipt",
     "no_browser_agent_failures",
     "no_tool_failures",
+    # runner="sms" — trajectory checks over the literal outbound text thread.
+    # Implemented in benchmarks/sms_runner.py:run_sms_static_check.
+    "sms_no_forbidden_phrases",
+    "sms_no_repeated_outbound",
+    "sms_no_unrequested_spend",
+    "sms_agents_started",
+    "sms_completion_accepted",
+    "sms_lifecycle_announced",
+    "sms_outbound_budget",
 }
 ENVIRONMENT_MODES = {"synthetic", "live", "hybrid"}
 # "retired" = kept for ledger/history integrity (names are cross-store primary
 # keys) but hidden from every surface: eval suite, hub catalog, query-box picker.
 TASK_STATUSES = {"ready", "incomplete", "retired"}
-TASK_RUNNERS = {"agent"}
+# "agent"  = POST /api/agents → Temporal agent workflow (the default surface).
+# "sms"    = inbound Surge webhook → the in-backend SMS supervisor tool loop.
+#            Local-only: outbound Surge is intercepted by the benchmark stack's
+#            capture harness, so a run never texts a human. See sms_runner.py.
+TASK_RUNNERS = {"agent", "sms"}
 # pipeline-e2e = e2e test that a harness pipe/quirk works (write locks trigger,
 # cookies inject, tool plumbing). rose-bench = harness-INDEPENDENT capability
 # measurement: fixture + prompt + evaluators are portable to any harness

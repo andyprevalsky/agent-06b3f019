@@ -68,7 +68,6 @@ function cookieDomainWhere(authRealm: string) {
   };
 }
 
-
 function envEnabled(name: string, defaultValue = true): boolean {
   const raw = process.env[name];
   if (raw === undefined) return defaultValue;

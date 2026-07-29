@@ -8,6 +8,11 @@ from typing import List, Optional
 from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import resolve_live_fixtures
 
+# Runners run_benchmark.py can dispatch directly. "agent" drives the Temporal
+# agent workflow; "sms" drives the in-backend SMS supervisor through an inbound
+# Surge webhook (benchmarks/sms_runner.py). Suite selection filters on this.
+RUNNABLE_TASK_RUNNERS = {"agent", "sms"}
+
 DEFAULT_MIN_STEPS_BY_AGENT_CLASS: dict[str, int] = {"browser": 5}
 
 
@@ -84,6 +89,11 @@ class BenchmarkTask:
     label_eval: Optional[str] = None  # Human-readable summary of the benchmark pass condition
     label_notes: Optional[str] = None  # Human-readable cleanup/review notes
     mid_run_feedback: Optional[dict] = None  # Live USER message injected after a durable root-message boundary
+    # runner="sms" only. Scripted inbound-SMS thread plus the agent state it runs
+    # against: {seed_agents: [{goal, status, progress}], turns: [{inbound,
+    # max_outbound, min_outbound}], settle_seconds,
+    # turn_timeout_seconds}. Validated by benchmarks/sms_runner.py:parse_sms_script.
+    sms_script: Optional[dict] = None
     expected_browser_provider: Optional[str] = None
     expected_credential_ref_kind: Optional[str] = None
     forbidden_credential_ref_kinds: List[str] = field(default_factory=list)

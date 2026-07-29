@@ -9075,6 +9075,7 @@ def test_message_side_effect_benchmarks_force_fast_cache_off():
 
 def test_unified_catalog_validates_and_covers_benchmark_tasks():
     """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
+    from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
 
     tasks = validate_catalog()
@@ -9083,7 +9084,10 @@ def test_unified_catalog_validates_and_covers_benchmark_tasks():
     statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
     assert ("agent", "ready") in statuses
     assert ("agent", "incomplete") in statuses
-    assert {runner for runner, _ in statuses} == {"agent"}
+    # Every declared runner must be one run_benchmark.py can actually dispatch,
+    # otherwise a suite run silently skips the task.
+    assert {runner for runner, _ in statuses} <= RUNNABLE_TASK_RUNNERS
+    assert ("sms", "ready") in statuses
     methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
     assert methods == EVALUATION_METHODS
     # Enriched long-horizon migrations carry the full environment contract

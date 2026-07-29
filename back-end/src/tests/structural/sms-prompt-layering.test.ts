@@ -164,10 +164,17 @@ runCheck(
   SMS_SURFACE_OVERLAY.includes('primarily through grep'),
   'grep grounding sentence missing from the SMS overlay'
 );
+// The overlay must teach both halves of the send/stop contract the loop
+// enforces: a send does NOT end the run, and attempt_completion carries no
+// message (so it can never be used to talk to the user). Asserted on meaning
+// rather than one exact sentence — the overlay is written as surface mechanics
+// and gets reworded; the contract it describes must not quietly disappear.
 runCheck(
   'block 3 separates send_user_message from attempt_completion',
-  SMS_SURFACE_OVERLAY.includes('attempt_completion sends nothing') &&
-    SMS_SURFACE_OVERLAY.includes('Sending a message does not end your run'),
+  /does not end your run/i.test(SMS_SURFACE_OVERLAY) &&
+    /attempt_completion carries no message|attempt_completion sends nothing/i.test(
+      SMS_SURFACE_OVERLAY
+    ),
   'SMS send/completion contract missing from the overlay'
 );
 

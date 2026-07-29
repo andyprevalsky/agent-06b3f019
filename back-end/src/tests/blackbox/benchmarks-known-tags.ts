@@ -76,4 +76,7 @@ export const KNOWN_TAGS = [
   'rotate-ip',
   'proxy',
   'proxy-rotation',
+  // SMS supervisor trajectory slice — runner="sms" tasks that drive the real
+  // inbound-SMS surface (see agents/benchmarks/sms_runner.py).
+  'sms',
 ];

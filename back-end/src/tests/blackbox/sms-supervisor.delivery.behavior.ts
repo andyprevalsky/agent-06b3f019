@@ -6,6 +6,7 @@ import {
   parseSmsSessionMessages,
   recordInboundSms,
 } from '../../providers/smsSupervisor/sessionStore';
+import { MAX_USER_MESSAGES_PER_RUN } from '../../providers/smsSupervisor/environmentMessages';
 import { registerUserDataGrep } from '../../providers/userDataSearch';
 import {
   BASE_URL,
@@ -175,6 +176,120 @@ export async function testGrep_fanOutPaginationMetadataAligns(prisma: PrismaClie
   }
 }
 
+/**
+ * Regression: one inbound SMS must never fan out into a wall of texts.
+ *
+ * Prod repro (user +1972…7432, 2026-07-27 20:52 UTC): a run that never called
+ * attempt_completion sent EIGHT "Acknowledged. I am monitoring active agents…"
+ * texts for one inbound, one per tool round, until MAX_TOOL_ROUNDS. The fixture
+ * below is that exact shape — a model that keeps choosing send_user_message and
+ * never stops. MAX_USER_MESSAGES_PER_RUN is what bounds the blast radius.
+ */
+export async function testSendBudget_runawaySendLoopIsCappedPerInbound(prisma: PrismaClient) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  if (probe.status !== 200) return;
+  const cursor = (probe.data as { nextId: number }).nextId - 1;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const token = captureToken('sms-supervisor-send-budget');
+  const spam = Array.from(
+    { length: 6 },
+    (_, index) => `Acknowledged. I am monitoring active agents (${String(index)}).`
+  );
+
+  try {
+    await setFixtureOverride(
+      userId,
+      JSON.stringify(
+        spam.map((message) => ({
+          reasoning: 'keep acknowledging without ever completing',
+          tool_calls: [{ tool: 'send_user_message', arguments: { message } }],
+        }))
+      )
+    );
+    const response = await request(`${BASE_URL}/api/sms/inbound`, {
+      method: 'POST',
+      headers: { 'X-Capture-Token': token },
+      body: JSON.stringify({
+        data: {
+          body: 'Let the agent work',
+          conversation: {
+            contact: { phone_number: phone },
+            phone_number: { number: '+14154498072' },
+          },
+        },
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+
+    // The budget is spent by the second send, so the run stops there. Wait for
+    // that steady state, then prove the third message never went out.
+    const delivered = await waitFor(async () => {
+      const session = await prisma.smsSession.findUnique({ where: { userId } });
+      if (session === null) return null;
+      const stored = parseSmsSessionMessages(session.messages);
+      const assistants = stored.filter((message) => message.role === 'assistant');
+      return assistants.length >= MAX_USER_MESSAGES_PER_RUN ? assistants : null;
+    });
+
+    if (delivered.length !== MAX_USER_MESSAGES_PER_RUN) {
+      throw new Error(
+        `One inbound must produce at most ${String(MAX_USER_MESSAGES_PER_RUN)} outbound SMS, ` +
+          `got ${String(delivered.length)}: ${JSON.stringify(delivered.map((m) => m.content))}`
+      );
+    }
+    const overflow = await findSurgeCallForReply(token, cursor, phone, spam[2]);
+    if (overflow !== null) {
+      throw new Error('Third send_user_message escaped the per-run budget and reached Surge');
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
+/**
+ * Regression: a lifecycle SMS a spawned agent sent must show up on the
+ * supervisor's own transcript, otherwise the supervisor re-narrates progress the
+ * user was already told about by the agent itself.
+ */
+export async function testLifecycleSms_landsOnSupervisorTranscript(prisma: PrismaClient) {
+  const probe = await request(`${BASE_URL}/api/test/captures`);
+  if (probe.status !== 200) return;
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+
+  try {
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'Order Lok Lak to-go from the Ferry Building', status: 'ACTIVE' },
+    });
+    const response = await request(`${BASE_URL}/api/send-sms/notify`, {
+      method: 'POST',
+      headers: { 'X-API-Key': process.env.BACKEND_API_KEY ?? '' },
+      body: JSON.stringify({
+        user_id: userId,
+        event_type: 'agent_started',
+        agent_id: agent.id,
+      }),
+    });
+    assertStatus(response.status, 200, response.data);
+
+    const lifecycleTurn = await waitFor(async () => {
+      const session = await prisma.smsSession.findUnique({ where: { userId } });
+      if (session === null) return null;
+      const stored = parseSmsSessionMessages(session.messages);
+      return stored.find((message) => message.origin === 'agent-lifecycle') ?? null;
+    });
+
+    if (lifecycleTurn.role !== 'assistant' || !lifecycleTurn.content.includes(agent.goal)) {
+      throw new Error(
+        `Expected the agent_started SMS on the supervisor transcript, got ${JSON.stringify(lifecycleTurn)}`
+      );
+    }
+  } finally {
+    await cleanupAgentScopedUser(prisma, userId);
+  }
+}
+
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
     {
@@ -188,6 +303,14 @@ export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
     {
       name: 'send -- progress SMS continues to a later substantive result',
       fn: () => testSendUserMessage_continuesUntilSubstantiveResult(prisma),
+    },
+    {
+      name: 'send -- runaway send loop is capped at the per-inbound budget',
+      fn: () => testSendBudget_runawaySendLoopIsCappedPerInbound(prisma),
+    },
+    {
+      name: 'lifecycle -- agent-sent SMS lands on the supervisor transcript',
+      fn: () => testLifecycleSms_landsOnSupervisorTranscript(prisma),
     },
   ];
 }

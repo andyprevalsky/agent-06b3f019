@@ -20,7 +20,6 @@ import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../database';
 import { startAgentWorkflow, getTemporalClient } from '../temporal';
-import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
@@ -30,6 +29,7 @@ import {
   smsIntendsAgentReply,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
+import { executeWebSearchTool } from './supervisorTools.webSearch';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -84,10 +84,6 @@ interface IncreaseBudgetArgs {
 interface StartNewAgentArgs {
   goal: string;
   budget_dollars?: number;
-}
-
-interface WebSearchArgs {
-  query: string;
 }
 
 // ============================================
@@ -166,7 +162,7 @@ export async function dispatchToolCall(
         result = validateStartNewAgent(args as unknown as StartNewAgentArgs, pendingWrites);
         break;
       case 'web_search':
-        result = await executeWebSearchTool(args as unknown as WebSearchArgs);
+        result = await executeWebSearchTool(args as unknown as { query: string });
         break;
       case 'grep':
         result = await executeGrepTool(args as unknown as GrepArgs, userId);
@@ -733,29 +729,6 @@ async function commitStartNewAgent(
     tool: 'start_new_agent',
     success: true,
     result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
-  };
-}
-
-async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
-  const { query } = args;
-
-  log.info('Executing web search', { phase: 'search', query });
-  const startTime = Date.now();
-
-  const searchResult = await executeWebSearch(query);
-
-  log.info('Search complete', {
-    phase: 'search',
-    query,
-    answerLength: searchResult.answer.length,
-    sourceCount: searchResult.sources.length,
-    durationMs: Date.now() - startTime,
-  });
-
-  return {
-    tool: 'web_search',
-    success: true,
-    result: searchResult.answer,
   };
 }
 

@@ -4359,5 +4359,168 @@
       ".context/blue-bottle-bench-findings.md",
       "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
     ]
+  },
+  {
+    "name": "sms-supervisor-open-spawns-agent",
+    "title": "SMS Supervisor: Open → Spawn Then Stop",
+    "description": "The restaurant is open. One text must produce one reply, one spawned agent, and then silence -- the agent reports its own lifecycle from there.",
+    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "sms",
+      "regression"
+    ],
+    "group": "daily",
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "status": "ready",
+    "runner": "sms",
+    "bench": "pipeline-e2e",
+    "sms_script": {
+      "seed_agents": [],
+      "settle_seconds": 20,
+      "turn_timeout_seconds": 120,
+      "turns": [
+        {
+          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "min_outbound": 1,
+          "max_outbound": 1,
+          "allow_spend": true
+        }
+      ],
+      "web_search_fixture": {
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. Hours: Tue-Sun 11:00 AM - 8:00 PM. Open now. Order pickup online for ASAP pickup. Menu: Lok Lak $18.50, Kuy Teav $16.00, Num Pang $14.00.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. Open Tuesday through Sunday, 11am to 8pm; closed Mondays.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
+    },
+    "evaluators": [
+      {
+        "id": "sms-open-spawn-contract",
+        "method": "static_check",
+        "criteria": [
+          "The request produces exactly one outbound SMS from the supervisor",
+          "Exactly one agent is started to do the work",
+          "The run ends by calling attempt_completion"
+        ],
+        "checks": [
+          {
+            "type": "sms_outbound_budget"
+          },
+          {
+            "type": "sms_agents_started",
+            "count": 1
+          },
+          {
+            "type": "sms_completion_accepted"
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "prod SMS thread +19729777432 2026-07-27T20:50-20:51Z (SmsSession transcript [100]-[104])"
+    ]
+  },
+  {
+    "name": "sms-supervisor-closed-no-spawn",
+    "title": "SMS Supervisor: Closed → Answer, Spawn Nothing",
+    "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop — no agent started, no budget raised.",
+    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "sms",
+      "regression"
+    ],
+    "group": "daily",
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "status": "ready",
+    "runner": "sms",
+    "bench": "pipeline-e2e",
+    "sms_script": {
+      "seed_agents": [],
+      "settle_seconds": 20,
+      "turn_timeout_seconds": 120,
+      "turns": [
+        {
+          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "min_outbound": 1,
+          "max_outbound": 1,
+          "allow_spend": false
+        }
+      ],
+      "web_search_fixture": {
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED — closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
+    },
+    "evaluators": [
+      {
+        "id": "sms-closed-no-spawn-contract",
+        "method": "static_check",
+        "criteria": [
+          "The request produces exactly one outbound SMS from the supervisor",
+          "No agent is started and no budget is raised, because the store is closed",
+          "The run ends by calling attempt_completion"
+        ],
+        "checks": [
+          {
+            "type": "sms_outbound_budget"
+          },
+          {
+            "type": "sms_no_unrequested_spend"
+          },
+          {
+            "type": "sms_completion_accepted"
+          }
+        ]
+      },
+      {
+        "id": "sms-closed-states-closure",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The reply tells the user the store is closed"
+        ],
+        "judge_prompt": "Search told the assistant the restaurant is closed. Score 1.0 if the reply conveys to the user that it is closed or unavailable right now, in any wording. Score 0.0 only if a reader would NOT learn the place is closed. Judge the fact conveyed, not the phrasing, tone, length, or whether it promises anything."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
+    ]
   }
 ]

@@ -9,6 +9,13 @@ export interface SmsSessionMessage {
   timestamp: string;
   inboundSeq?: number;
   providerMessageId?: string;
+  /**
+   * Set on turns the supervisor did NOT author — lifecycle SMS emitted directly
+   * by a spawned agent (`agent_started`, `completion`, `cost_limit`, …). They are
+   * `assistant` turns because the user experiences them as Rose talking, but the
+   * marker lets callers tell "I said this" from "an agent said this for me".
+   */
+  origin?: 'agent-lifecycle';
 }
 
 function storedMessagesArray(column: Prisma.Sql = Prisma.sql`messages`): Prisma.Sql {
@@ -110,6 +117,42 @@ export async function appendOutboundSms(
   `;
 }
 
+/**
+ * Append a lifecycle SMS a spawned agent sent straight to the user's phone.
+ *
+ * Without this the supervisor's transcript held only its own sends, so on the
+ * next inbound it had no idea the user had already been told "Started: …" or
+ * "Done: …" — and narrated the same progress again itself. Best-effort by
+ * design: the SMS is already delivered by the time we get here, so a failed
+ * append must never fail the caller.
+ */
+export async function appendLifecycleSms(
+  userId: string,
+  content: string,
+  providerMessageId?: string
+): Promise<void> {
+  await ensureSession(userId);
+  await prisma.$executeRaw`
+    UPDATE "SmsSession"
+    SET
+      messages = to_jsonb((
+        ${storedMessagesArray()} || jsonb_build_array(
+          jsonb_strip_nulls(
+            jsonb_build_object(
+              'role', 'assistant',
+              'content', ${content},
+              'timestamp', NOW()::text,
+              'providerMessageId', ${providerMessageId ?? null},
+              'origin', 'agent-lifecycle'
+            )
+          )
+        )
+      )::text),
+      "updatedAt" = NOW()
+    WHERE "userId" = ${userId}
+  `;
+}
+
 export function parseSmsSessionMessages(raw: unknown): SmsSessionMessage[] {
   try {
     const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -126,4 +169,31 @@ export function parseSmsSessionMessages(raw: unknown): SmsSessionMessage[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Everything added to the user's SMS thread since `sinceIso`.
+ *
+ * A supervisor run composes its context once, at wake-up. Anything that reaches
+ * the phone *during* the run — an agent it just spawned announcing itself, a
+ * sibling agent finishing, an approval request — is invisible until the next
+ * inbound SMS. That blind spot is what produces duplicate traffic: the
+ * supervisor has no evidence the user was told anything, so it says it again.
+ *
+ * Polled at the top of every LLM round, and returned verbatim, whatever the
+ * role or origin. The goal is simply that the model's view of the conversation
+ * matches the thread on the user's phone.
+ */
+export async function fetchSessionMessagesSince(
+  userId: string,
+  sinceIso: string
+): Promise<SmsSessionMessage[]> {
+  const session = await prisma.smsSession.findUnique({
+    where: { userId },
+    select: { messages: true },
+  });
+  if (session === null) return [];
+  return parseSmsSessionMessages(session.messages).filter(
+    (message) => message.timestamp > sinceIso
+  );
 }

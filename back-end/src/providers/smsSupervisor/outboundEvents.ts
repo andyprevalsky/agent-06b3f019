@@ -13,6 +13,7 @@ import { createLogger } from '../logger';
 import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
+import { appendLifecycleSms } from './sessionStore';
 import {
   formatPaymentApprovalBody,
   getPaymentCardMediaUrl,
@@ -24,6 +25,58 @@ import {
 } from './writeLockBody';
 
 const log = createLogger('OutboundEvents');
+
+type SmsArchiveOptions = Parameters<typeof sendSms>[2];
+type SmsSendResult = Awaited<ReturnType<typeof sendSms>>;
+
+/**
+ * Record a delivered lifecycle SMS on the user's supervisor transcript.
+ *
+ * These messages arrive on the same thread the SMS supervisor talks on, so the
+ * supervisor must see them — otherwise it re-narrates progress the user was
+ * already told about by the agent itself. Best-effort: the SMS is already out,
+ * so a transcript failure is logged, never thrown.
+ */
+async function recordLifecycleTurn(
+  userId: string,
+  message: string,
+  result: SmsSendResult
+): Promise<void> {
+  if (!result.success) return;
+  try {
+    await appendLifecycleSms(userId, message, result.messageSid);
+  } catch (error) {
+    log.error('Lifecycle SMS delivered but transcript append failed', {
+      userId,
+      messageSid: result.messageSid,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function sendLifecycleSms(
+  userId: string,
+  phone: string,
+  message: string,
+  options?: SmsArchiveOptions
+): Promise<SmsSendResult> {
+  const result = await sendSms(phone, message, options);
+  await recordLifecycleTurn(userId, message, result);
+  return result;
+}
+
+async function sendLifecycleMms(
+  userId: string,
+  phone: string,
+  message: string,
+  mediaUrl: string,
+  options?: SmsArchiveOptions
+): Promise<SmsSendResult> {
+  const result = await sendMms(phone, message, mediaUrl, options);
+  await recordLifecycleTurn(userId, message, result);
+  return result;
+}
+
 const MAX_MMS_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MMS_ATTACHMENT_SIGNED_URL_TTL_SECONDS = 24 * 60 * 60;
 const MAX_COMPLETION_OUTPUT_LINES = 6;
@@ -161,7 +214,7 @@ export async function notifyAgentStarted(
   const url = getAgentUrl(agent.id);
   const message = SMS_TEMPLATES.agentStarted(prefix, agent.goal, url);
 
-  const result = await sendSms(phone, message, {
+  const result = await sendLifecycleSms(userId, phone, message, {
     archiveRootAgentId: agent.id,
     archiveContext: { event_type: 'agent_started', user_id: userId },
   });
@@ -205,7 +258,7 @@ export async function notifyPlannerMessage(
     ? SMS_TEMPLATES.plannerQuestion(prefix, messageText)
     : SMS_TEMPLATES.plannerFyi(prefix, messageText);
 
-  const result = await sendSms(phone, message, {
+  const result = await sendLifecycleSms(userId, phone, message, {
     archiveRootAgentId: agent.id,
     archiveContext: { event_type: 'planner_message', user_id: userId, is_question: isQuestion },
   });
@@ -258,7 +311,7 @@ export async function notifyWriteLock(
   const rehostedMediaUrl = mediaUrl ? await rehostMmsAttachmentUrl(userId, mediaUrl) : null;
 
   const result = rehostedMediaUrl
-    ? await sendMms(phone, message, rehostedMediaUrl, {
+    ? await sendLifecycleMms(userId, phone, message, rehostedMediaUrl, {
         archiveRootAgentId: agent.id,
         archiveContext: {
           event_type: 'write_lock',
@@ -266,7 +319,7 @@ export async function notifyWriteLock(
           attention_request_id: attentionRequestId,
         },
       })
-    : await sendSms(phone, message, {
+    : await sendLifecycleSms(userId, phone, message, {
         archiveRootAgentId: agent.id,
         archiveContext: {
           event_type: 'write_lock',
@@ -319,7 +372,7 @@ export async function notifyAuthAssistance(
   const url = getAgentUrl(agent.id, browserSessionId);
   const message = SMS_TEMPLATES.authAssistance(prefix, authRealm, url);
 
-  const result = await sendSms(phone, message, {
+  const result = await sendLifecycleSms(userId, phone, message, {
     archiveRootAgentId: agent.id,
     archiveContext: {
       event_type: 'auth_assistance',
@@ -362,7 +415,7 @@ export async function notifyAgentCardSetup(
 
   const prefix = agent.id.substring(0, 6);
   const message = SMS_TEMPLATES.agentCardSetup(prefix, setupUrl);
-  const result = await sendSms(phone, message);
+  const result = await sendLifecycleSms(userId, phone, message);
 
   log.info('agentCardSetup SMS sent', {
     userId,
@@ -405,7 +458,7 @@ export async function notifyCompletion(
   const prefix = agent.id.substring(0, 6);
   const message = buildCompletionSmsBody(agent.id, summary, outputs);
 
-  const result = await sendSms(phone, message, {
+  const result = await sendLifecycleSms(userId, phone, message, {
     archiveRootAgentId: agent.id,
     archiveContext: { event_type: 'completion', user_id: userId },
   });
@@ -451,7 +504,7 @@ export async function notifyCostLimit(
     agent.priceLimitCents
   );
 
-  const result = await sendSms(phone, message, {
+  const result = await sendLifecycleSms(userId, phone, message, {
     archiveRootAgentId: agent.id,
     archiveContext: { event_type: 'cost_limit', user_id: userId },
   });
