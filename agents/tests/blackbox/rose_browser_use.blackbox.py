@@ -537,11 +537,54 @@ def test_write_lock_purchase_schema_rejects_missing_product_context():
 
 
 def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_link():
-    from pydantic import ValidationError
+    """The current-page rule needs a trajectory; with none, we do NOT guess.
 
+    This used to reject `product_url == service.url` unless the path contained a
+    word from a product-route list (`/dp/`, `/item/`, `/p/` ...). That list is a
+    guess about a page's purpose from its spelling, and the same class of guess
+    made purchases impossible on whole ordering platforms (agents 53feac08,
+    90ac106a) — a real product page at `https://shop.example/lok-lak` carries no
+    such word and would be refused. On this fallback path `service.url` is the
+    ONLY URL we know, so there is genuinely no evidence separating "the agent is
+    standing on the product page" from "the agent echoed the session URL", and
+    guessing is what caused the outages.
+
+    The rule is therefore enforced where the evidence exists: the
+    request_payment_card action path, which knows the real current page and
+    the full visited list. See
+    test_execute_action_request_payment_card_rejects_current_session_product_link
+    in spawn_browser_agent_v3.blackbox.py.
+    """
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
-    current_url = "https://shop.example/session/abc"
+    def validate(current_url, product_url):
+        return GenerateWriteLockNotificationTool.model_validate(
+            {
+                "tool": "generate_write_lock_notification",
+                "trigger_type": "purchase",
+                "action": "buy item",
+                "service": {"name": "Example Shop", "domain": "shop.example", "url": current_url},
+                "purchase": {
+                    "items": [
+                        {
+                            "title": "Beanie",
+                            "rating": "4.8 stars",
+                            "review_count": "312 reviews",
+                            "product_url": product_url,
+                        }
+                    ]
+                },
+            }
+        )
+
+    # Accepted without a trajectory — including a product page whose slug has no
+    # product-ish word in it, which the old list would have wrongly refused.
+    for url in ("https://shop.example/session/abc", "https://shop.example/lok-lak"):
+        assert validate(url, url).purchase.items[0].product_url == url
+
+    # With a trajectory, the evidence-based host rule still bites.
+    from pydantic import ValidationError
+
     try:
         GenerateWriteLockNotificationTool.model_validate(
             {
@@ -551,7 +594,7 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
                 "service": {
                     "name": "Example Shop",
                     "domain": "shop.example",
-                    "url": current_url,
+                    "url": "https://shop.example/session/abc",
                 },
                 "purchase": {
                     "items": [
@@ -559,16 +602,17 @@ def test_write_lock_purchase_schema_rejects_current_non_product_page_as_product_
                             "title": "Beanie",
                             "rating": "4.8 stars",
                             "review_count": "312 reviews",
-                            "product_url": current_url,
+                            "product_url": "https://phishing.example/session/abc",
                         }
                     ]
                 },
-            }
+            },
+            context={"trusted_page_urls": ["https://shop.example/session/abc"]},
         )
     except ValidationError as error:
-        assert "current checkout or session page" in str(error)
+        assert "was not observed in the browser trajectory" in str(error)
     else:
-        raise AssertionError("purchase approval accepted the current session URL as a product link")
+        raise AssertionError("purchase approval accepted an unobserved product host")
 
 
 def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
@@ -603,7 +647,10 @@ def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser
             context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
         )
     except ValidationError as error:
-        assert "host was not observed" in str(error)
+        # The message names the offending host so the model can self-correct in
+        # one turn instead of permuting a URL it cannot diagnose.
+        assert "was not observed in the browser trajectory" in str(error)
+        assert "phishing.example" in str(error)
     else:
         raise AssertionError("purchase approval accepted an unobserved product host")
 
