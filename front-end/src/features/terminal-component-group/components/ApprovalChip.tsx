@@ -27,12 +27,27 @@
  *     v (success/error)
  * [IDLE]
  *
+ * OVERFLOW STATES (useHasMoreBelow):
+ * The card is height-capped (55dvh mobile / 70dvh desktop) so it can never
+ * clip itself or bury the trajectory behind it. Its body is the only scroll
+ * region; header, context input and Accept/Reject are pinned outside it.
+ *
+ * [FITS] <-- scrollHeight <= clientHeight; no affordance
+ *     |
+ *     | (content grows / user scrolls up)
+ *     v
+ * [MORE_BELOW] <-- hasMoreBelow: true; bottom fade rendered
+ *     |
+ *     v (user scrolls to end)
+ * [FITS]
+ * Re-measured on scroll and on ResizeObserver resize.
+ *
  * Props:
  * - pendingApproval: { attentionRequestId, question } | null
  * - onApprovalHandled: () => void
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -230,9 +245,62 @@ function PaymentReceipt({
   );
 }
 
+/**
+ * Tracks whether a scroll container still has content below the fold, so the
+ * card can show a "more below" affordance. Without it the capped body slices
+ * whatever line it lands on and reads as a rendering bug rather than a scroll
+ * region — which is exactly how the original cutoff was reported.
+ */
+function useHasMoreBelow(resetKey?: string) {
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  const measure = useCallback(() => {
+    const node = scrollerRef.current;
+    if (!node) return;
+    setHasMoreBelow(node.scrollHeight - node.scrollTop - node.clientHeight > 1);
+  }, []);
+
+  // Observe BOTH boxes. The scroller's own border box never changes when its
+  // content grows, so watching only it leaves the affordance permanently off
+  // for exactly the long receipts that need it; the content box is what grows.
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') {
+      measure();
+      return;
+    }
+    const observer = new ResizeObserver(measure);
+    for (const node of [scrollerRef.current, contentRef.current]) {
+      if (node) observer.observe(node);
+    }
+    measure();
+    return () => observer.disconnect();
+  }, [measure]);
+
+  // AgentChatArea keeps this component mounted for as long as SOME approval is
+  // pending, so a second request reuses the first one's scroll position and
+  // opens already scrolled past its own title — the exact cutoff this card
+  // exists to prevent. Rewind and remeasure whenever the request identity
+  // changes.
+  // useLayoutEffect, not useEffect: a passive effect runs AFTER paint, so the
+  // browser can present one frame of new content at the old scrollTop —
+  // briefly recreating the very cutoff this hook prevents. Rewinding before
+  // paint makes that frame unreachable.
+  useLayoutEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
+    measure();
+  }, [resetKey, measure]);
+
+  return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
+}
+
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
+  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = useHasMoreBelow(
+    pendingApproval?.attentionRequestId,
+  );
   const { handleAccept, handleReject } = useApprovalHandlers({
     pendingApproval,
     contextInput,
@@ -246,29 +314,83 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
   return (
     <div className="w-full mb-3">
       <div className="max-w-4xl mx-auto">
-        <div className="rounded-xl border border-border bg-background/80 backdrop-blur-sm p-4 shadow-md">
-          <div className="flex items-start justify-between gap-3 mb-3">
+        {/*
+         * The card owns a fixed height budget and scrolls its body internally.
+         * Without that cap it is a shrinkable flex child of an `overflow-hidden`
+         * column, so on a phone a receipt with several line items pushed the
+         * title under the header and the Approve/Reject buttons off-screen —
+         * an approval you could neither read nor action.
+         *
+         * The mobile cap is deliberately under half the viewport so the agent
+         * trajectory behind the card stays readable while you decide; a purchase
+         * approval you cannot cross-check against what the agent just did is
+         * not a real approval. Desktop has room for more.
+         */}
+        <div className="flex max-h-[55dvh] flex-col rounded-xl border border-border bg-background/80 backdrop-blur-sm p-4 shadow-md md:max-h-[70dvh]">
+          <div className="flex shrink-0 items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
           </div>
-          {pendingApproval.imageUrl && (
-            <div className="mb-3 flex justify-center">
-              <img
-                src={pendingApproval.imageUrl}
-                alt="Request context"
-                className="max-w-[200px] max-h-[150px] rounded-md object-contain"
-              />
+          {/*
+           * One scroll region for the whole body. A nested scroller on the
+           * question alone (the old max-h-[300px]) let the browser park its
+           * scrollTop past the first line, hiding "Approve a $X purchase from …"
+           * — the single most important sentence on the card.
+           */}
+          {/*
+           * The scroller must stay IN FLOW: the card is max-h-capped rather
+           * than fixed-height, so it takes its height from its children. An
+           * absolutely-positioned body contributes none and collapsed the card
+           * to header+footer; an `h-full` body never resolved a percentage
+           * against a flex item and so never scrolled at all. In-flow flex-1
+           * with min-h-0 is the one arrangement that both fills and shrinks.
+           * The wrapper exists purely to anchor the fade, which must not live
+           * inside the scroller or it would scroll away with the content.
+           */}
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {/*
+             * tabIndex + role/label: the purchase details can overflow with no
+             * focusable child inside, and a scroll container that cannot take
+             * focus cannot be scrolled by keyboard at all. A user approving a
+             * real charge would be unable to read the items they are paying for.
+             */}
+            <div
+              ref={scrollerRef}
+              onScroll={onScroll}
+              tabIndex={0}
+              role="region"
+              aria-label="Approval details"
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
+              <div ref={contentRef}>
+                {pendingApproval.imageUrl && (
+                  <div className="mb-3 flex justify-center">
+                    <img
+                      src={pendingApproval.imageUrl}
+                      alt="Request context"
+                      className="max-w-[200px] max-h-[150px] rounded-md object-contain"
+                    />
+                  </div>
+                )}
+                <div className="mb-3 text-sm text-foreground">
+                  <MarkdownText text={pendingApproval.question} breaks />
+                </div>
+                {pendingApproval.requestPaymentCard && (
+                  <PaymentReceipt receipt={pendingApproval.requestPaymentCard} />
+                )}
+              </div>
             </div>
-          )}
-          <div className="mb-3 text-sm text-foreground max-h-[300px] overflow-y-auto">
-            <MarkdownText text={pendingApproval.question} breaks />
+            {hasMoreBelow && (
+              <div
+                data-testid="approval-scroll-more"
+                aria-hidden
+                className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent"
+              />
+            )}
           </div>
-          {pendingApproval.requestPaymentCard && (
-            <PaymentReceipt receipt={pendingApproval.requestPaymentCard} />
-          )}
-          <div className="mb-3">
+          <div className="mb-3 shrink-0 pt-3">
             <Input
               placeholder="Add context (optional)..."
               value={contextInput}
@@ -277,11 +399,13 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
               disabled={actionState !== null}
             />
           </div>
-          <ApprovalActions
-            actionState={actionState}
-            onAccept={() => void handleAccept()}
-            onReject={() => void handleReject()}
-          />
+          <div className="shrink-0">
+            <ApprovalActions
+              actionState={actionState}
+              onAccept={() => void handleAccept()}
+              onReject={() => void handleReject()}
+            />
+          </div>
         </div>
       </div>
     </div>

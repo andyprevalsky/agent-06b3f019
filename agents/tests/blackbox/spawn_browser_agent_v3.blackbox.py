@@ -2449,6 +2449,78 @@ async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates
     assert set(fake_mouse.moves[1:-1]) != {(360, 240)}
 
 
+async def test_click_press_holds_no_remote_round_trip_between_down_and_up():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.183 > ratchet 0.163).
+
+    Every mouse call is a round trip to a REMOTE browser. The release-drift move
+    used to sit BETWEEN mousedown and mouseup, so that latency landed inside the
+    press: we sampled an ~85ms human dwell but the page observed 621.5ms. A
+    submit whose mousedown is older than FCaptcha's 500ms RECENT_GESTURE_MS is
+    scored as `programmatic_click` (bot 0.8x0.85 -> +0.0884), which was the
+    entire gap over the ratchet.
+
+    Assert the ORDER: no move may be dispatched while the button is held. This
+    is latency-independent, so it holds no matter how slow the transport is.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    events = []
+
+    class OrderTrackingMouse:
+        def __init__(self):
+            self._pos = (0, 0)
+
+        async def move(self, x, y):
+            self._pos = (x, y)
+            events.append("move")
+
+        async def down(self, **kwargs):
+            events.append("down")
+
+        async def up(self, **kwargs):
+            events.append("up")
+
+    class FakeKeyboard:
+        async def press(self, *args, **kwargs):
+            return None
+
+    page = SimpleNamespace(
+        mouse=OrderTrackingMouse(),
+        keyboard=FakeKeyboard(),
+        viewport_size={"width": 1280, "height": 800},
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+                "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS": "1",
+            },
+            clear=False,
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        await humanizer.initialize_cursor((100, 100))
+        await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
+
+    assert "down" in events and "up" in events, events
+    held = events[events.index("down") + 1 : events.index("up")]
+    assert held == [], f"no remote call may sit inside the press; found {held}"
+    # This page exposes no CDP session, so this is the Playwright FALLBACK path.
+    # It releases in place: keeping the press inside the sampled dwell matters
+    # more than the sub-pixel offset, because an over-long press is scored as a
+    # programmatic click. Nothing may follow the release either — a post-click
+    # move races navigation the click itself triggers and can raise "Target
+    # closed", turning a successful click into a failure.
+    assert events[events.index("up") + 1 :] == [], (
+        f"nothing may follow the release; found {events[events.index('up') + 1 :]}"
+    )
+    # The drifted release (motor noise without a longer press) is the CDP path's
+    # job and is asserted by test_humanized_click_presses_and_releases_via_cdp_*.
+
+
 async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -2601,11 +2673,24 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
 
         await asyncio.wait_for(task, timeout=1)
 
-    assert page.mouse.downs and page.mouse.ups, "expected a synthesized press and release"
-    assert abs(page.mouse.downs[-1][0] - 360) <= 5 and abs(page.mouse.downs[-1][1] - 240) <= 5
+    # When CDP is available the press AND release ride it, so the release can
+    # carry motor noise without a Playwright move between down and up inflating
+    # the hold the page observes (the programmatic_click RCA). Playwright's
+    # mouse must stay untouched on this path.
+    assert not page.mouse.downs and not page.mouse.ups, "press/release must use CDP when available"
     assert cdp.calls[0][0] == "Input.dispatchMouseEvent"
-    assert cdp.calls[-1][1]["x"] == 360
-    assert cdp.calls[-1][1]["y"] == 240
+    presses = [payload for method, payload in cdp.calls if payload.get("type") == "mousePressed"]
+    releases = [payload for method, payload in cdp.calls if payload.get("type") == "mouseReleased"]
+    assert len(presses) == 1 and len(releases) == 1, (len(presses), len(releases))
+    press_index = next(i for i, (_, p) in enumerate(cdp.calls) if p.get("type") == "mousePressed")
+    release_index = next(i for i, (_, p) in enumerate(cdp.calls) if p.get("type") == "mouseReleased")
+    assert press_index < release_index, "release must follow the press"
+    # No further input may be dispatched after the release: a post-click move
+    # races navigation the click itself triggers.
+    assert release_index == len(cdp.calls) - 1, "release must be the final dispatched input"
+    # Press lands on target; release drifts within motor-noise range of it.
+    assert abs(presses[0]["x"] - 360) <= 5 and abs(presses[0]["y"] - 240) <= 5
+    assert abs(releases[0]["x"] - presses[0]["x"]) <= 3 and abs(releases[0]["y"] - presses[0]["y"]) <= 3
     assert observed[-1] == (360, 240)
 
 
@@ -6873,6 +6958,111 @@ def test_read_network_requests_tool_is_advertised():
     assert any("read_network_requests" in str(s) for s in build_browser_use_tools(sorted(BROWSER_USE_TOOLS)))
 
 
+def test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged():
+    """Retained request bodies must never leak secrets, must respect a BYTE budget,
+    and must distinguish a policy omission from a size truncation.
+
+    The allowlist scopes WHICH endpoints are retained; it cannot promise those
+    payloads are secret-free. Byte-vs-character truncation matters because
+    _max_body_bytes is a byte budget and a character slice both overshoots it and
+    can split a multi-byte code point. Marking an allowlist omission as
+    'truncated' sends the next reader hunting for a limit to raise.
+    """
+    import time as _time
+
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _redact_request_body,
+    )
+
+    # Secrets are stripped even though the host is allowlisted.
+    redacted = _redact_request_body('{"score":0.09,"sessionToken":"tok_live_abc","nested":{"api_key":"sk-1"}}')
+    assert "tok_live_abc" not in redacted, redacted
+    assert "sk-1" not in redacted, redacted
+    assert '"score":0.09' in redacted, redacted
+
+    form = _redact_request_body(
+        "action=form_submit&csrf_token=abc123&width=1280",
+        "application/x-www-form-urlencoded",
+    )
+    assert "abc123" not in form, form
+    assert "action=form_submit" in form and "width=1280" in form, form
+
+    # A payload that parses as neither JSON nor form-encoded cannot be shown to be
+    # secret-free, so it is dropped rather than persisted verbatim.
+    assert _redact_request_body("\x00\x01binary-blob") == BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+    # A lone "=" must NOT be inferred as form encoding: binary payloads contain
+    # "=" too, and splitting one would persist opaque fragments verbatim.
+    assert _redact_request_body("\x00blob=value") == BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+
+    def capture(post_data, *, url, has_post_data=True, max_bytes=64):
+        recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+        recorder._max_entries = 10
+        recorder._ignored_request_ids = set()
+        recorder._active_request_ids = set()
+        recorder._patterns = []
+        recorder._max_body_bytes = max_bytes
+        recorder._started_at = _time.monotonic()
+        recorder.entries = {}
+        recorder._on_request_will_be_sent(
+            {
+                "requestId": "r1",
+                "request": {
+                    "url": url,
+                    "method": "POST",
+                    "postData": post_data,
+                    "hasPostData": has_post_data,
+                },
+                "type": "XHR",
+            },
+            generation=1,
+            session_id="s1",
+        )
+        return recorder.entries.get("1:s1:r1") or next(iter(recorder.entries.values()))
+
+    # Multi-byte truncation stays inside the byte budget and never splits a char.
+    multibyte = '{"pad":"' + ("é" * 200) + '"}'
+    entry = capture(multibyte, url="https://fcaptcha.webdecoy.com/api/score")
+    body = entry["request_body"]
+    assert entry["request_body_truncated"] is True
+    assert len(body.encode("utf-8")) <= 64, len(body.encode("utf-8"))
+    body.encode("utf-8").decode("utf-8")  # must not raise: no split code point
+
+    # A first-party merchant body stays AVAILABLE (read_network_requests exists to
+    # debug real traffic) but its secrets are stripped.
+    merchant = capture('{"password":"hunter2","sku":"desk-lamp"}', url="https://merchant.example.com/checkout")
+    assert "hunter2" not in merchant["request_body"], merchant
+    assert "desk-lamp" in merchant["request_body"], merchant
+
+
+def test_humanized_click_presses_and_releases_via_cdp_without_post_click_move():
+    """The press must stay inside the sampled dwell AND the release must land off it.
+
+    RCA (agent 8724eb5a): a Playwright move between down and up is a REMOTE round
+    trip that inflated an ~85ms sampled dwell to 621.5ms emitted, so the submit's
+    mousedown aged past the 500ms recent-gesture window and scored as a
+    programmatic click (0.18296 -> 0.09456 once fixed). Releasing in place instead
+    would trade that for a pixel-perfect down==up precision tell, and a post-click
+    move races navigation the click itself triggers. CDP carries coordinates on the
+    event, satisfying both with no trailing move.
+    """
+    import inspect
+
+    from browser_tools.humanizer import BrowserHumanizer
+
+    source = inspect.getsource(BrowserHumanizer.click_at_coords)
+    press = source.index("_dispatch_mouse_button(down_x, down_y, pressed=True)")
+    release = source.index("_dispatch_mouse_button(up_x, up_y, pressed=False)")
+    sleep_at = source.index("asyncio.sleep(dwell_seconds)")
+    assert press < sleep_at < release, "dwell must sit between the CDP press and release"
+
+    # No move may follow the release: it would race click-triggered navigation.
+    assert "mouse.move(up_x, up_y)" not in source, "post-click move reintroduces the navigation race"
+
+    # A lost CDP session must still release, or the button wedges every later click.
+    assert "await mouse.up()" in source, "fallback release missing"
+
+
 def test_network_recorder_query_requests_filters_and_shapes():
     """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
     url/method/status/resource_type, url_pattern filter, query-string redaction, and
@@ -9460,8 +9650,8 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
     assert session.get_or_create_cdp_session.await_count == 4
-    for call in session.get_or_create_cdp_session.await_args_list:
-        assert call.kwargs == {"focus": True}
+    for cdp_call in session.get_or_create_cdp_session.await_args_list:
+        assert cdp_call.kwargs == {"focus": True}
     assert cdp_client.send.Runtime.evaluate.await_count == 4
     evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
     assert evaluate_kwargs["session_id"] == "cdp-1"
@@ -13053,9 +13243,16 @@ _TOAST_PAYMENT_CARD_ARGS = {
             "quantity": 1,
             "unit_price_cents": 2500,
             "line_total_cents": 2500,
-            # Toast is a single-URL food-ordering SPA: no product-detail page,
-            # no star rating, no reviews. This is the exact class of args prod
-            # agent 847adea5 produced and got rejected 5x on.
+            # Toast is a single-URL food-ordering SPA: no star rating, no
+            # reviews. This is the exact class of args prod agent 847adea5
+            # produced and got rejected 5x on.
+            #
+            # The product_url is NO LONGER rejected at schema level. Word-list
+            # URL filtering was removed after it made purchases impossible on
+            # whole ordering platforms (agents 53feac08, 90ac106a); a checkout
+            # URL is now caught by the current-page gate in service_actions,
+            # which has the trajectory to prove it. See
+            # test_execute_action_request_payment_card_rejects_current_session_product_link.
             "product_url": "https://order.toasttab.com/online/nopafish/checkout/12345678-1234-4fab-8043-436e74cc34a9",
             "rating": "No rating displayed on Toast ordering page",
             "review_count": "No reviews displayed on Toast ordering page",
@@ -13081,8 +13278,7 @@ def test_payment_card_tool_args_raise_typed_validation_error():
     except BrowserToolArgsValidationError as err:
         assert err.tool_name == "request_payment_card"
         assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
-        # The feedback the model receives must name all three unsatisfiable fields.
-        assert "product_url" in err.detail
+        # The feedback the model receives must name every unsatisfiable field.
         assert "rating" in err.detail
         assert "review_count" in err.detail
         # It must be a distinct type, not a bare pydantic ValidationError.
@@ -13128,7 +13324,7 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
     assert tool_msgs, "validation error was not appended to browser_turn_messages"
     tool_blob = json.dumps(tool_msgs[-1])
-    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    assert "rating" in tool_blob and "review_count" in tool_blob
     # 2) Recorded in action history as a failed attempt the model can see.
     entries = action_history.get_entries()
     assert entries and entries[-1]["action"] == "request_payment_card"
@@ -13691,6 +13887,8 @@ async def run_all_tests():
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
+    r.record("captured_request_body_redaction", test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged)
+    r.record("humanized_click_cdp_press_release", test_humanized_click_presses_and_releases_via_cdp_without_post_click_move)
     r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
     r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
     r.record("network_recorder_full_detail", test_network_recorder_captures_every_resource_and_full_detail)
@@ -14113,6 +14311,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_click_synthesis",
         test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates,
+    )
+    await r.record_async(
+        "click_press_has_no_round_trip_inside_hold",
+        test_click_press_holds_no_remote_round_trip_between_down_and_up,
     )
     await r.record_async(
         "browser_humanizer_cursor_observer_after_overlay",
