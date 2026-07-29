@@ -16,13 +16,17 @@ import {
 } from '../../providers/transactionalEmail';
 import { sendSms } from '../../providers/smsQueue';
 
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
+
 config();
 
 async function testStartedFinalOutcomeResumesSafely() {
-  const marker = `blackbox-started-final-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-started-final-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const idempotencyKey = `${marker}-attempt`;
   const waitlist = await prisma.waitlist.create({
-    data: { name: marker, phone: `+1999${String(Date.now()).slice(-7)}001` },
+    data: { name: marker, phone: `+1206555${String(Date.now()).slice(-4)}` },
   });
   const invitedAt = '2026-07-18T20:04:00.000Z';
   const storedResult = {
@@ -75,8 +79,8 @@ async function testFailedGateRecordIsReclaimedNotStuck409() {
   // mutation so the operation stays retryable.
   const { resolveInviteGate, waitlistInviteGateOperationKey } =
     await import('../../domains/admin-health/service.waitlist-gate');
-  const marker = `blackbox-gate-reclaim-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = `+1999${String(Date.now()).slice(-7)}002`;
+  const marker = `wlcase-gate-reclaim-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const phone = `+1207555${String(Date.now()).slice(-4)}`;
   const idempotencyKey = `${marker}-attempt`;
   const waitlistId = marker;
   const user = await prisma.user.create({

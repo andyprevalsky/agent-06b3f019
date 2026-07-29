@@ -25,11 +25,8 @@ import {
   SIDEBAR_WIDTH_COLLAPSED,
 } from '@/features/terminal-component-group';
 import { useAppData } from '@/hooks/appDataContext';
-import {
-  ADMIN_PHONE_DIGITS,
-  ADMIN_USER_IDS,
-  IS_DEV_MODE,
-} from '@/features/terminal-component-group/config';
+import { IS_DEV_MODE } from '@/features/terminal-component-group/config';
+import { isAdminOperator } from '@/lib/adminAccounts';
 
 import { useTerminalAgents } from '../hooks/useTerminalAgents';
 import { useDrippiness } from '../hooks/useDrippiness';
@@ -56,13 +53,6 @@ const BrowserStatusBarCarousel = lazy(() =>
     default: m.default,
   })),
 );
-
-function isAdminHealthUser(user: { id?: string; phone?: string } | null): boolean {
-  if (!user) return false;
-  if (user.id && ADMIN_USER_IDS.includes(user.id)) return true;
-  const phoneDigits = (user.phone ?? '').replace(/\D/g, '');
-  return ADMIN_PHONE_DIGITS.includes(phoneDigits);
-}
 
 export function TerminalContent() {
   const tileAnimation = useTileAnimation();
@@ -114,7 +104,7 @@ function useTerminalDerivedState(agents: ReturnType<typeof useTerminalAgents>) {
     hasActiveAttention,
     browserStatusProps,
     systemMessages: agents.messages.filter((message) => message.role === 'SYSTEM'),
-    showAdminHealth: isAdminHealthUser(agents.user),
+    showAdminHealth: isAdminOperator(agents.user),
   };
 }
 
@@ -182,9 +172,7 @@ function TerminalLayout(props: TerminalLayoutProps) {
           currentView={currentView}
           setCurrentView={setCurrentView}
           showBrowse={currentView === 'browse' || agents.user?.phone === BROWSER_REVIEW_TEST_PHONE}
-          showBenchmarks={
-            IS_DEV_MODE || (agents.user?.id != null && ADMIN_USER_IDS.includes(agents.user.id))
-          }
+          showBenchmarks={IS_DEV_MODE || isAdminOperator(agents.user)}
           showAdminHealth={derived.showAdminHealth}
         />
 

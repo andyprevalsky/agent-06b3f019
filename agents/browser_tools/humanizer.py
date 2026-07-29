@@ -520,8 +520,13 @@ class BrowserHumanizer:
                 "Input.dispatchMouseEvent",
                 {
                     "type": "mousePressed" if pressed else "mouseReleased",
-                    "x": int(x),
-                    "y": int(y),
+                    # Float coordinates, NOT int: the press/release offsets are
+                    # sub-pixel gaussian motor noise, and truncating them to int
+                    # collapses press and release onto the same pixel -- exactly
+                    # the "unnaturally accurate click precision" tell the offsets
+                    # exist to defeat. CDP accepts fractional coordinates.
+                    "x": x,
+                    "y": y,
                     "button": "left",
                     "buttons": 1 if pressed else 0,
                     "clickCount": 1,

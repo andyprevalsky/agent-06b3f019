@@ -4,6 +4,8 @@
  * Handles credit allocation, usage tracking, and balance calculations
  */
 
+import { Prisma } from '@prisma/client';
+
 import { prisma } from './database';
 import { createLogger } from './logger';
 
@@ -34,6 +36,88 @@ export async function createInitialCredit(userId: string) {
 
   log.info('Created initial $1 credit', { userId });
   return credit;
+}
+
+/**
+ * Monthly allowance granted to anyone who joined via an invite code — the
+ * "free pro" grant. $30/month, expiring at the end of the calendar month.
+ */
+export const INVITE_MONTHLY_CREDIT_CENTS = 3000;
+
+/** Start of the next UTC calendar month — the allowance's expiry AND its idempotency key. */
+function startOfNextUtcMonth(now = new Date()): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+}
+
+/**
+ * Top up an invite-code user's monthly allowance.
+ *
+ * Invited users get a recurring $30/month instead of hitting the subscribe
+ * gate: with a positive balance `remaining > 0`, so every existing credit check
+ * (worker `has_credits`, agent resume) passes untouched. That is why this grants
+ * CREDIT rather than faking a Subscription row — no Stripe identifiers are
+ * invented and no downstream billing path changes behaviour.
+ *
+ * Deliberately lazy: it runs on the usage read the front-end and worker already
+ * perform, so there is no scheduler to own. The grant expires at the month
+ * boundary and that same boundary is the idempotency key, so repeated reads
+ * inside a month are a no-op and each new month grants exactly once.
+ *
+ * No-ops for users without `usedInviteCode`.
+ */
+export async function ensureInviteMonthlyCredit(userId: string): Promise<void> {
+  const user = await prisma.user.findUnique({
+    where: { userId },
+    select: { usedInviteCode: true },
+  });
+  if (user === null || user.usedInviteCode === null) return;
+
+  const periodEnd = startOfNextUtcMonth();
+
+  // check-then-insert must be ATOMIC: this runs on a hot read that the front-end
+  // and every worker credit check hit, so concurrent requests can otherwise all
+  // observe "not granted" and each insert their own $30. Serializable isolation
+  // makes the losers abort with a serialization failure (P2034 / 40001) instead
+  // of duplicating the grant — no schema change or unique index required.
+  try {
+    await prisma.$transaction(
+      async (tx) => {
+        const alreadyGranted = await tx.credit.findFirst({
+          where: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+          select: { id: true },
+        });
+        if (alreadyGranted !== null) return;
+
+        await tx.credit.create({
+          data: { userId, amountCents: INVITE_MONTHLY_CREDIT_CENTS, expirationDate: periodEnd },
+        });
+        log.info('Granted invite-code monthly credit', {
+          userId,
+          amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+          expiresAt: periodEnd.toISOString(),
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+    );
+  } catch (error) {
+    // A serialization failure means a concurrent request granted this period
+    // first — the desired end state, so it is a no-op rather than an error. The
+    // allowance is also self-healing: the next usage read retries.
+    const code = (error as { code?: string }).code;
+    if (code === 'P2034' || code === 'P2002') return;
+    log.error('Failed to grant invite-code monthly credit', {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    // Any OTHER failure must not be swallowed. Returning here would let
+    // getUsageSummary report a balance MISSING this user's allowance, which can
+    // send an eligible invited user through the credit gate — the exact outcome
+    // the allowance exists to prevent. Failing loudly is the safer mode: the
+    // worker's usage check treats a non-200 as "don't override cache" (returns
+    // None) rather than as zero credits, so a transient DB fault degrades to the
+    // previous known state instead of a wrong out-of-credits verdict.
+    throw error;
+  }
 }
 
 /**
