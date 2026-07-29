@@ -194,10 +194,14 @@ test('passkeys-only seed mode never enters browser state or password sync', asyn
 test('seed-local rejects conflicting exclusive sync modes before creating database clients', async () => {
   const source = readSeedLocalSource();
   const validation = source.indexOf('if (requestedSeedModes.length > 1)');
-  const clients = source.indexOf('const remote = new PrismaClient');
+  const localClient = source.indexOf('const local = new PrismaClient');
+  const remoteClient = source.indexOf('remote = await createSeedRemoteClient');
 
   assert(validation > 0, 'expected mutually exclusive seed-mode validation');
-  assert(clients > validation, 'expected seed-mode validation before database client creation');
+  assert(
+    localClient > validation && remoteClient > validation,
+    'expected seed-mode validation before database client creation'
+  );
   assert(
     source.includes('Seed modes are mutually exclusive; received'),
     'expected conflicting flags to be named in the failure'
@@ -212,12 +216,16 @@ test('compute-token-only sync fails closed without an explicit source database',
     'if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL)'
   );
   const envRead = source.indexOf('dotenv.parse(readFileSync(envPath))');
-  const clients = source.indexOf('const remote = new PrismaClient');
+  const localClient = source.indexOf('const local = new PrismaClient');
+  const remoteClient = source.indexOf('remote = await createSeedRemoteClient');
 
   assert(sourceVariable > modeFlag, 'expected the explicit compute-token source variable');
   assert(failClosed > sourceVariable, 'expected compute-token mode to reject a missing source');
   assert(failClosed < envRead, 'expected rejection before any .env fallback can be read');
-  assert(failClosed < clients, 'expected rejection before database clients are created');
+  assert(
+    failClosed < localClient && failClosed < remoteClient,
+    'expected rejection before database clients are created'
+  );
   assert(
     source.includes('refusing to fall back to .env'),
     'expected the failure to explain the protected boundary'

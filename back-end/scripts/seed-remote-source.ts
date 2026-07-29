@@ -1,0 +1,494 @@
+import { Prisma, PrismaClient } from '@prisma/client';
+import { parse } from 'csv-parse/sync';
+
+type SeedTransport = 'auto' | 'postgres' | 'https';
+type SortDirection = 'asc' | 'desc';
+type SeedWhere = Record<string, unknown>;
+
+interface SeedFindArgs {
+  where?: SeedWhere;
+  select?: Record<string, boolean>;
+  orderBy?: Record<string, SortDirection>;
+  skip?: number;
+  take?: number;
+}
+
+interface ConnectableSeedClient {
+  $queryRawUnsafe(query: string): Promise<unknown>;
+  $disconnect(): Promise<void>;
+}
+
+interface SeedRemoteClientOptions {
+  databaseUrl: string;
+  supabaseUrl?: string;
+  serviceRoleKey?: string;
+  transport?: SeedTransport;
+  createPostgresClient?: (databaseUrl: string) => ConnectableSeedClient;
+  fetchImpl?: typeof fetch;
+}
+
+interface PostgrestSeedClientOptions {
+  supabaseUrl: string;
+  serviceRoleKey: string;
+  fetchImpl?: typeof fetch;
+  requestTimeoutMs?: number;
+}
+
+type SeedRow = Record<string, unknown>;
+type ModelMetadata = (typeof Prisma.dmmf.datamodel.models)[number];
+type FieldMetadata = ModelMetadata['fields'][number];
+
+const HTTP_PAGE_SIZE = 1000;
+const HTTP_IN_FILTER_SIZE = 100;
+const HTTP_IN_FILTER_CONCURRENCY = 4;
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+
+function lowerFirst(value: string): string {
+  return value.slice(0, 1).toLowerCase() + value.slice(1);
+}
+
+const MODEL_BY_DELEGATE = new Map(
+  Prisma.dmmf.datamodel.models.map((model) => [lowerFirst(model.name), model])
+);
+
+function isDatabaseUnreachable(error: unknown): boolean {
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as { code?: unknown }).code === 'P1001'
+  ) {
+    return true;
+  }
+  return (
+    error instanceof Prisma.PrismaClientInitializationError &&
+    error.errorCode === undefined &&
+    /can(?:not|'t|’t) reach database server at `[^`]+`/i.test(error.message)
+  );
+}
+
+function requireHttpsUrl(value: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('SUPABASE_URL must be a valid HTTPS URL');
+  }
+  if (url.protocol !== 'https:') {
+    throw new Error('SUPABASE_URL must use HTTPS for service-role seed reads');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
+
+function requireHttpsOptions(options: SeedRemoteClientOptions): PostgrestSeedClientOptions {
+  const supabaseUrl = options.supabaseUrl?.trim();
+  const serviceRoleKey = options.serviceRoleKey?.trim();
+  if (!supabaseUrl || !serviceRoleKey) {
+    throw new Error('HTTPS seed transport requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+  }
+  return {
+    supabaseUrl: requireHttpsUrl(supabaseUrl),
+    serviceRoleKey,
+    fetchImpl: options.fetchImpl,
+  };
+}
+
+export async function createSeedRemoteClient(
+  options: SeedRemoteClientOptions
+): Promise<PrismaClient> {
+  const transport = options.transport ?? 'auto';
+  if (transport === 'https') {
+    return createPostgrestSeedClient(requireHttpsOptions(options));
+  }
+
+  const postgres =
+    options.createPostgresClient?.(options.databaseUrl) ??
+    new PrismaClient({ datasources: { db: { url: options.databaseUrl } } });
+  try {
+    await postgres.$queryRawUnsafe('SELECT 1');
+    return postgres as PrismaClient;
+  } catch (error) {
+    await postgres.$disconnect();
+    if (transport === 'postgres' || !isDatabaseUnreachable(error)) throw error;
+    console.warn(
+      '  ⚠️  Production PostgreSQL port unreachable; syncing through Supabase HTTPS instead'
+    );
+    return createPostgrestSeedClient(requireHttpsOptions(options));
+  }
+}
+
+function quoteFilterValue(value: unknown): string {
+  const stringValue = String(value);
+  if (!/[\s,()"\\]/.test(stringValue)) return stringValue;
+  return `"${stringValue.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
+}
+
+function escapeLikeValue(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('*', '\\*').replaceAll('%', '\\%');
+}
+
+function operatorExpression(value: unknown): string {
+  if (value === null) return 'is.null';
+  if (typeof value !== 'object' || value instanceof Date || Array.isArray(value)) {
+    return `eq.${quoteFilterValue(value)}`;
+  }
+
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length !== 1) {
+    throw new Error(`Unsupported seed filter: ${JSON.stringify(value)}`);
+  }
+  const [operator, operand] = entries[0];
+  switch (operator) {
+    case 'not':
+      return operand === null ? 'not.is.null' : `not.${operatorExpression(operand)}`;
+    case 'in': {
+      if (!Array.isArray(operand)) throw new Error('Seed "in" filter must be an array');
+      return `in.(${operand.map(quoteFilterValue).join(',')})`;
+    }
+    case 'endsWith':
+      return `like.*${escapeLikeValue(String(operand))}`;
+    case 'contains':
+      return `like.*${escapeLikeValue(String(operand))}*`;
+    case 'lt':
+    case 'lte':
+    case 'gt':
+    case 'gte':
+      return `${operator}.${quoteFilterValue(operand)}`;
+    default:
+      throw new Error(`Unsupported seed filter operator: ${operator}`);
+  }
+}
+
+function databaseFieldName(model: ModelMetadata, fieldName: string): string {
+  const field = model.fields.find((candidate) => candidate.name === fieldName);
+  if (!field) throw new Error(`Unknown ${model.name} filter field: ${fieldName}`);
+  return field.dbName ?? field.name;
+}
+
+function orClauseExpression(clause: SeedWhere, model: ModelMetadata): string {
+  const entries = Object.entries(clause);
+  if (entries.length !== 1) {
+    const nested = entries
+      .map(([field, value]) => `${databaseFieldName(model, field)}.${operatorExpression(value)}`)
+      .join(',');
+    return `and(${nested})`;
+  }
+  const [field, value] = entries[0];
+  return `${databaseFieldName(model, field)}.${operatorExpression(value)}`;
+}
+
+function applyWhere(url: URL, where: SeedWhere | undefined, model: ModelMetadata): void {
+  if (!where) return;
+  for (const [field, value] of Object.entries(where)) {
+    if (field === 'OR') {
+      if (!Array.isArray(value)) throw new Error('Seed OR filter must be an array');
+      const clauses = value.map((clause) => {
+        if (!clause || typeof clause !== 'object' || Array.isArray(clause)) {
+          throw new Error('Seed OR clauses must be objects');
+        }
+        return orClauseExpression(clause as SeedWhere, model);
+      });
+      url.searchParams.set('or', `(${clauses.join(',')})`);
+      continue;
+    }
+    url.searchParams.set(databaseFieldName(model, field), operatorExpression(value));
+  }
+}
+
+function selectedFields(select: Record<string, boolean> | undefined, model: ModelMetadata): string {
+  if (!select) return '*';
+  const fields = Object.entries(select)
+    .filter(([, included]) => included)
+    .map(([field]) => databaseFieldName(model, field));
+  if (fields.length === 0) throw new Error('Seed select must include at least one field');
+  return fields.join(',');
+}
+
+function stableOrder(args: SeedFindArgs, model: ModelMetadata): string {
+  const explicit = Object.entries(args.orderBy ?? {}).map(
+    ([field, direction]) => `${databaseFieldName(model, field)}.${direction}`
+  );
+  const idField = databaseFieldName(model, 'id');
+  if (!explicit.some((entry) => entry.startsWith(`${idField}.`))) {
+    explicit.push(`${idField}.asc`);
+  }
+  return explicit.join(',');
+}
+
+function parseCsvRows(csv: string): SeedRow[] {
+  if (csv.trim() === '') return [];
+  return parse(csv, {
+    bom: true,
+    columns: true,
+    skip_empty_lines: true,
+    cast(value, context) {
+      if (context.header) return value;
+      return value === '' && !context.quoting ? null : value;
+    },
+  }) as SeedRow[];
+}
+
+function decodeBytes(value: string): Buffer {
+  if (value.startsWith('\\x')) return Buffer.from(value.slice(2), 'hex');
+  return Buffer.from(value, 'base64');
+}
+
+function normalizeField(value: unknown, field: FieldMetadata): unknown {
+  if (value === null || value === undefined) return value;
+  if (field.isList) {
+    if (!Array.isArray(value)) {
+      throw new Error(`Expected an array for ${field.name}, got ${typeof value}`);
+    }
+    return value.map((item) => normalizeField(item, { ...field, isList: false } as FieldMetadata));
+  }
+  const stringValue = String(value);
+  switch (field.type) {
+    case 'BigInt':
+      return BigInt(stringValue);
+    case 'Boolean':
+      return stringValue === 'true' || stringValue === 't';
+    case 'Bytes':
+      return decodeBytes(stringValue);
+    case 'DateTime': {
+      const date = new Date(stringValue);
+      if (Number.isNaN(date.getTime())) {
+        throw new Error(`Invalid DateTime for ${field.name}: ${stringValue}`);
+      }
+      return date;
+    }
+    case 'Decimal':
+      return new Prisma.Decimal(stringValue);
+    case 'Float':
+    case 'Int':
+      return Number(stringValue);
+    case 'Json':
+      // Non-BigInt models use PostgREST's JSON response, where a JSON column
+      // may itself legitimately contain a scalar string. Parsing that string
+      // again would turn valid values such as "STATUS: SUCCESS" into errors.
+      return value;
+    default:
+      return value;
+  }
+}
+
+function normalizeRows(rows: SeedRow[], model: ModelMetadata): SeedRow[] {
+  const fields = new Map(
+    model.fields.flatMap((field) => [
+      [field.name, field] as const,
+      [field.dbName ?? field.name, field] as const,
+    ])
+  );
+  return rows.map((row) =>
+    Object.fromEntries(
+      Object.entries(row).map(([name, value]) => {
+        const field = fields.get(name);
+        if (!field) throw new Error(`Unknown ${model.name} field from PostgREST: ${name}`);
+        return [field.name, normalizeField(value, field)];
+      })
+    )
+  );
+}
+
+async function responseRows(response: Response, model: ModelMetadata): Promise<SeedRow[]> {
+  const requiresLosslessNumbers = model.fields.some((field) => field.type === 'BigInt');
+  if (requiresLosslessNumbers) return parseCsvRows(await response.text());
+  const value = (await response.json()) as unknown;
+  if (!Array.isArray(value)) {
+    throw new Error(`Supabase HTTPS seed read returned non-array JSON for ${model.name}`);
+  }
+  return value as SeedRow[];
+}
+
+async function fetchUnchunkedModelRows(
+  model: ModelMetadata,
+  args: SeedFindArgs,
+  options: Required<
+    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
+  > &
+    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+): Promise<SeedRow[]> {
+  const rows: SeedRow[] = [];
+  const fetchImpl = options.fetchImpl ?? fetch;
+  let offset = args.skip ?? 0;
+  let remaining = args.take ?? Number.POSITIVE_INFINITY;
+
+  while (remaining > 0) {
+    const pageSize = Math.min(HTTP_PAGE_SIZE, remaining);
+    const tableName = model.dbName ?? model.name;
+    const url = new URL(
+      `/rest/v1/${encodeURIComponent(tableName)}`,
+      options.supabaseUrl.replace(/\/+$/, '')
+    );
+    url.searchParams.set('select', selectedFields(args.select, model));
+    url.searchParams.set('order', stableOrder(args, model));
+    applyWhere(url, args.where, model);
+
+    const response = await fetchImpl(url, {
+      headers: {
+        Accept: model.fields.some((field) => field.type === 'BigInt')
+          ? 'text/csv'
+          : 'application/json',
+        apikey: options.serviceRoleKey,
+        Authorization: `Bearer ${options.serviceRoleKey}`,
+        Range: `${offset}-${offset + pageSize - 1}`,
+        'Range-Unit': 'items',
+      },
+      signal: AbortSignal.timeout(options.requestTimeoutMs),
+    });
+    if (response.status === 416) break;
+    if (!response.ok) {
+      const body = (await response.text()).slice(0, 500);
+      throw new Error(
+        `Supabase HTTPS seed read failed for ${model.name} (HTTP ${response.status}): ${body}`
+      );
+    }
+
+    const page = normalizeRows(await responseRows(response, model), model);
+    rows.push(...page);
+    if (page.length < pageSize) break;
+    offset += page.length;
+    remaining -= page.length;
+  }
+  return rows;
+}
+
+function largeInFilter(where: SeedWhere | undefined): { field: string; values: unknown[] } | null {
+  if (!where) return null;
+  for (const [field, condition] of Object.entries(where)) {
+    if (
+      condition &&
+      typeof condition === 'object' &&
+      !Array.isArray(condition) &&
+      'in' in condition
+    ) {
+      const values = (condition as { in?: unknown }).in;
+      if (Array.isArray(values) && values.length > HTTP_IN_FILTER_SIZE) {
+        return { field, values };
+      }
+    }
+  }
+  return null;
+}
+
+function comparable(value: unknown): string | number | bigint {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number' || typeof value === 'bigint') return value;
+  return String(value ?? '');
+}
+
+function compareValues(left: unknown, right: unknown): number {
+  const a = comparable(left);
+  const b = comparable(right);
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  if (typeof a === 'bigint' && typeof b === 'bigint') return a < b ? -1 : a > b ? 1 : 0;
+  return String(a).localeCompare(String(b));
+}
+
+function sortRows(rows: SeedRow[], args: SeedFindArgs): SeedRow[] {
+  const order = Object.entries(args.orderBy ?? {}) as Array<[string, SortDirection]>;
+  if (!order.some(([field]) => field === 'id')) order.push(['id', 'asc']);
+  return rows.sort((left, right) => {
+    for (const [field, direction] of order) {
+      const compared = compareValues(left[field], right[field]);
+      if (compared !== 0) return direction === 'desc' ? -compared : compared;
+    }
+    return 0;
+  });
+}
+
+async function fetchModelRows(
+  model: ModelMetadata,
+  args: SeedFindArgs,
+  options: Required<
+    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
+  > &
+    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+): Promise<SeedRow[]> {
+  const chunked = largeInFilter(args.where);
+  if (!chunked) return fetchUnchunkedModelRows(model, args, options);
+
+  const chunks: unknown[][] = [];
+  for (let offset = 0; offset < chunked.values.length; offset += HTTP_IN_FILTER_SIZE) {
+    chunks.push(chunked.values.slice(offset, offset + HTTP_IN_FILTER_SIZE));
+  }
+  const rows: SeedRow[] = [];
+  const perChunkTake = args.take === undefined ? undefined : (args.skip ?? 0) + args.take;
+  for (let offset = 0; offset < chunks.length; offset += HTTP_IN_FILTER_CONCURRENCY) {
+    const batch = chunks.slice(offset, offset + HTTP_IN_FILTER_CONCURRENCY);
+    const results = await Promise.all(
+      batch.map((values) =>
+        fetchUnchunkedModelRows(
+          model,
+          {
+            ...args,
+            skip: 0,
+            take: perChunkTake,
+            where: {
+              ...args.where,
+              [chunked.field]: { in: values },
+            },
+          },
+          options
+        )
+      )
+    );
+    rows.push(...results.flat());
+  }
+
+  const uniqueRows = [
+    ...new Map(rows.map((row) => [String(row.id ?? JSON.stringify(row)), row])).values(),
+  ];
+  const sorted = sortRows(uniqueRows, args);
+  const start = args.skip ?? 0;
+  return sorted.slice(start, args.take === undefined ? undefined : start + args.take);
+}
+
+function createModelDelegate(
+  model: ModelMetadata,
+  options: Required<
+    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
+  > &
+    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+): {
+  findMany(args?: SeedFindArgs): Promise<SeedRow[]>;
+  findUnique(args: SeedFindArgs): Promise<SeedRow | null>;
+} {
+  return {
+    findMany: async (args = {}) => fetchModelRows(model, args, options),
+    findUnique: async (args) => {
+      const rows = await fetchModelRows(model, { ...args, take: 1 }, options);
+      return rows[0] ?? null;
+    },
+  };
+}
+
+export function createPostgrestSeedClient(input: PostgrestSeedClientOptions): PrismaClient {
+  const options = {
+    ...input,
+    supabaseUrl: requireHttpsUrl(input.supabaseUrl),
+    requestTimeoutMs: input.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  };
+  const delegates = new Map<string, ReturnType<typeof createModelDelegate>>();
+  const base = {
+    $connect: async () => {},
+    $disconnect: async () => {},
+  };
+
+  return new Proxy(base, {
+    get(target, property, receiver) {
+      if (typeof property !== 'string') return Reflect.get(target, property, receiver);
+      // Async factory resolution probes returned values for a `then` method.
+      // The Prisma-shaped proxy is not a promise.
+      if (property === 'then') return undefined;
+      if (property in target) return Reflect.get(target, property, receiver);
+      const model = MODEL_BY_DELEGATE.get(property);
+      if (!model) throw new Error(`Unknown Prisma seed delegate: ${property}`);
+      let delegate = delegates.get(property);
+      if (!delegate) {
+        delegate = createModelDelegate(model, options);
+        delegates.set(property, delegate);
+      }
+      return delegate;
+    },
+  }) as unknown as PrismaClient;
+}

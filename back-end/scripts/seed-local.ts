@@ -36,6 +36,7 @@ import {
   passkeySyncWhere,
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
+import { createSeedRemoteClient } from './seed-remote-source';
 
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const COMPUTE_TOKEN_SOURCE_DATABASE_URL =
@@ -57,6 +58,17 @@ const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
 const REMOTE_URL = COMPUTE_TOKENS_ONLY
   ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
   : selectRemoteDatabaseUrl(envVars);
+const requestedRemoteTransport = COMPUTE_TOKENS_ONLY
+  ? 'postgres'
+  : (process.env.SEED_REMOTE_TRANSPORT?.trim() ?? 'auto');
+if (!['auto', 'postgres', 'https'].includes(requestedRemoteTransport)) {
+  throw new Error(
+    `SEED_REMOTE_TRANSPORT must be auto, postgres, or https; received ${JSON.stringify(
+      requestedRemoteTransport
+    )}`
+  );
+}
+const REMOTE_TRANSPORT = requestedRemoteTransport as 'auto' | 'postgres' | 'https';
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
@@ -104,7 +116,7 @@ if (requestedSeedModes.length > 1) {
   );
 }
 
-const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
+let remote: PrismaClient;
 const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
@@ -121,12 +133,10 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) =>
-      remote.localStorageOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
     indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) =>
-      remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
@@ -704,9 +714,6 @@ async function sync() {
   console.log(`   Local:  ${process.env.DATABASE_URL?.replace(/:[^:@]+@/, ':***@') ?? 'default'}`);
   console.log(`   User:   ${DEV_USER_ID}\n`);
 
-  // Verify remote connectivity
-  await remote.$queryRaw`SELECT 1`;
-
   if (COMPUTE_TOKENS_ONLY) {
     await syncComputeTokensWithRetries();
     console.log('\n🔄 Compute token sync complete.');
@@ -915,12 +922,22 @@ async function sync() {
   console.log('\n🔄 Sync complete.');
 }
 
-sync()
-  .catch((err) => {
-    console.error('❌ Sync failed:', err);
-    process.exit(1);
-  })
-  .finally(async () => {
+async function main(): Promise<void> {
+  remote = await createSeedRemoteClient({
+    databaseUrl: REMOTE_URL,
+    supabaseUrl: envVars.SUPABASE_URL,
+    serviceRoleKey: envVars.SUPABASE_SERVICE_ROLE_KEY,
+    transport: REMOTE_TRANSPORT,
+  });
+  try {
+    await sync();
+  } finally {
     await remote.$disconnect();
     await local.$disconnect();
-  });
+  }
+}
+
+main().catch((err) => {
+  console.error('❌ Sync failed:', err);
+  process.exit(1);
+});
