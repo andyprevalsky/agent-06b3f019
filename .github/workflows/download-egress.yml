@@ -1,0 +1,100 @@
+name: Mac download egress health
+
+on:
+  schedule:
+    - cron: "7-59/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: mac-download-egress-health
+  cancel-in-progress: false
+
+jobs:
+  health:
+    name: Synthetic, edge, and real-user download health
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out monitor
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install monitor dependencies
+        working-directory: back-end
+        run: npm ci --ignore-scripts --workspaces=false
+
+      - name: Run bounded download health monitor
+        id: monitor
+        continue-on-error: true
+        working-directory: back-end
+        env:
+          DOWNLOAD_EGRESS_REPORT_PATH: ../.context/download-egress/report.json
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_OWNER_ID: tea-csppgi56l47c73djvpig
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: npx tsx scripts/download-egress-health.ts
+
+      - name: Upload deep diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-download-egress-${{ github.run_id }}
+          path: .context/download-egress/report.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Resolve previous monitor conclusion
+        id: previous
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous_conclusion="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs?status=completed&per_page=20" |
+              jq -r --arg current "$GITHUB_RUN_ID" \
+                '.workflow_runs[] | select((.id | tostring) != $current) | .conclusion' |
+              head -1
+          )"
+          echo "conclusion=${previous_conclusion:-none}" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack on incident transition or recovery
+        if: >-
+          always() &&
+          ((steps.monitor.outcome == 'failure' && steps.previous.outputs.conclusion != 'failure') ||
+           (steps.monitor.outcome == 'success' && steps.previous.outputs.conclusion == 'failure'))
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_ERROR_CHANNEL_ID }}
+          MONITOR_OUTCOME: ${{ steps.monitor.outcome }}
+          PREVIOUS_CONCLUSION: ${{ steps.previous.outputs.conclusion }}
+        run: |
+          summary="$(jq -r '.summary // "Diagnostic report unavailable"' .context/download-egress/report.json)"
+          if [ "$MONITOR_OUTCOME" = failure ]; then
+            heading=':rotating_light: Mac download egress incident'
+          else
+            heading=':white_check_mark: Mac download egress recovered'
+          fi
+          text="$heading
+          $summary
+          Deep report: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          payload="$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$text" \
+            '{channel: $channel, text: $text}')"
+          response="$(curl -fsS https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            --data "$payload")"
+          jq -e '.ok == true' <<< "$response" >/dev/null
+
+      - name: Enforce monitor result
+        if: steps.monitor.outcome == 'failure'
+        run: exit 1

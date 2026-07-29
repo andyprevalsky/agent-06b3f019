@@ -9,8 +9,21 @@
  */
 
 import { autoUpdater } from 'electron-updater';
-import { buildFeedUrl, FEED_PROVIDER } from './config';
-import type { UpdaterProgressInfo, UpdaterUpdateInfo } from './types';
+import { config } from '../../base/config';
+import { AuthService } from '../../services/auth';
+import {
+  buildFeedUrl,
+  DOWNLOAD_TELEMETRY_ENDPOINT,
+  DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS,
+  DOWNLOAD_TELEMETRY_TIMEOUT_MS,
+  FEED_PROVIDER,
+} from './config';
+import type {
+  DownloadTelemetryPayload,
+  DownloadTelemetryPostResult,
+  UpdaterProgressInfo,
+  UpdaterUpdateInfo,
+} from './types';
 
 /**
  * Configure the electron-updater feed against the Supabase Releases bucket
@@ -46,6 +59,48 @@ export async function checkForUpdatesRaw(): Promise<{ updateInfo?: UpdaterUpdate
 /** Proxy for `autoUpdater.downloadUpdate()`. */
 export async function downloadUpdateRaw(): Promise<void> {
   await autoUpdater.downloadUpdate();
+}
+
+const wait = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function isRetryableTelemetryStatus(status: number): boolean {
+  return status === 429 || status >= 500;
+}
+
+/**
+ * Send one idempotent updater telemetry event through the authenticated backend.
+ *
+ * The insert ID is stable across retries, so Amplitude deduplicates an accepted
+ * request whose response was lost. Missing auth is surfaced to the service as a
+ * local diagnostic instead of making update installation depend on telemetry.
+ */
+export async function postDownloadTelemetry(
+  payload: DownloadTelemetryPayload
+): Promise<DownloadTelemetryPostResult> {
+  const session = await AuthService.getSession();
+  if (session === null) return { delivered: false, reason: 'unauthenticated' };
+
+  const attempts = DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const response = await fetch(`${config.apiUrl}${DOWNLOAD_TELEMETRY_ENDPOINT}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(DOWNLOAD_TELEMETRY_TIMEOUT_MS),
+    });
+    if (response.status === 202) return { delivered: true };
+    const retryable = isRetryableTelemetryStatus(response.status);
+    if (!retryable || attempt === attempts - 1) {
+      const detail = (await response.text()).slice(0, 200);
+      throw new Error(`Download telemetry rejected (${response.status}): ${detail}`);
+    }
+    await wait(DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS[attempt] ?? 0);
+  }
+  throw new Error('Download telemetry retry loop exhausted');
 }
 
 /**

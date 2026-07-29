@@ -16,7 +16,8 @@
  * alive and did not crash" — we are catching server crashes and schema/migration
  * drift, not asserting business results.
  *
- * Runs read-only GETs plus OPTIONS preflights. Safe against prod.
+ * Runs read-only GETs, one deliberately unauthenticated no-op POST, and OPTIONS
+ * preflights. Safe against prod.
  *
  * Usage:
  *   npx tsx scripts/prod-endpoint-smoke.ts
@@ -50,6 +51,7 @@ const RETRY_DELAY_MS = 5000;
 interface Probe {
   path: string;
   domain: string;
+  method?: 'GET' | 'POST';
   // If set, the final status MUST be in this list (still never 5xx). Used to
   // pin the compute-token route to the codes that mean "the lineage/affinity
   // tables were queried successfully" (200 = token, 404 = no token available).
@@ -81,6 +83,14 @@ const PROBES: Probe[] = [
     path: '/api/integrations/compute-code/anthropic-key/cooldown',
     domain: 'integrations/compute-code cooldown',
   },
+  {
+    // Internal auth intentionally has no end-user identity, so this must stop
+    // at the route's 401 guard before validation or analytics side effects.
+    path: '/api/download-telemetry',
+    domain: 'download-telemetry (authenticated ingestion boundary)',
+    method: 'POST',
+    requireStatusIn: [401],
+  },
 ];
 
 function sleep(ms: number): Promise<void> {
@@ -102,7 +112,7 @@ async function runProbe(probe: Probe): Promise<ProbeResult> {
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
       const res = await fetch(`${BASE_URL}${probe.path}`, {
-        method: 'GET',
+        method: probe.method ?? 'GET',
         headers: { 'X-API-Key': API_KEY, 'X-User-Id': USER_ID },
         signal: controller.signal,
       });

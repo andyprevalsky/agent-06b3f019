@@ -74,6 +74,8 @@ const checkForUpdatesFn = vi.hoisted(() => vi.fn<() => Promise<unknown>>());
 const downloadUpdateFn = vi.hoisted(() => vi.fn<() => Promise<void>>());
 const setFeedURLFn = vi.hoisted(() => vi.fn());
 const quitAndInstallFn = vi.hoisted(() => vi.fn());
+const getSessionFn = vi.hoisted(() => vi.fn());
+const telemetryFetchFn = vi.hoisted(() => vi.fn());
 
 const ipcState = vi.hoisted(() => ({
   handlers: new Map<string, (...args: unknown[]) => unknown>(),
@@ -128,6 +130,12 @@ vi.mock('../../main/base/config', () => ({
   },
 }));
 
+vi.mock('../../main/services/auth', () => ({
+  AuthService: {
+    getSession: getSessionFn,
+  },
+}));
+
 // ── Test helpers ────────────────────────────────────────────────────────────
 
 type WebContentsSend = (channel: string, payload: unknown) => void;
@@ -175,6 +183,26 @@ function progressSends(win: FakeWindow): Array<{ percent: number }> {
     .map((c) => c[1] as { percent: number });
 }
 
+interface TelemetryBody {
+  event: string;
+  insertId: string;
+  sessionId: string;
+  version?: string;
+  milestonePercent?: number;
+  elapsedMs?: number;
+  bytesPerSecond?: number;
+  transferredBytes?: number;
+  totalBytes?: number;
+  errorMessage?: string;
+}
+
+function telemetryBodies(): TelemetryBody[] {
+  return telemetryFetchFn.mock.calls.map((call) => {
+    const init = call[1] as RequestInit;
+    return JSON.parse(String(init.body)) as TelemetryBody;
+  });
+}
+
 type AutoUpdaterModule = typeof import('../../main/services/autoUpdater');
 
 /**
@@ -204,6 +232,21 @@ describe('blackbox: auto-updater (main-service)', () => {
     downloadUpdateFn.mockReset();
     setFeedURLFn.mockReset();
     quitAndInstallFn.mockReset();
+    getSessionFn.mockReset();
+    getSessionFn.mockResolvedValue({
+      access_token: 'mac-telemetry-token',
+      refresh_token: 'refresh-token',
+      expires_at: Date.now() + 60_000,
+      user: { id: 'user-download-telemetry' },
+    });
+    telemetryFetchFn.mockReset();
+    telemetryFetchFn.mockResolvedValue(
+      new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+    vi.stubGlobal('fetch', telemetryFetchFn);
   });
 
   // ── initAutoUpdater ───────────────────────────────────────────────────────
@@ -326,6 +369,110 @@ describe('blackbox: auto-updater (main-service)', () => {
       expect(statusSends(win)).toEqual([
         { state: 'downloading', percent: 42.7, version: undefined },
       ]);
+    });
+
+    it('reports a bounded updater transfer trace with milestone throughput and completion', async () => {
+      const mod = await loadAutoUpdater();
+      mod.initAutoUpdater(win as unknown as Electron.BrowserWindow);
+      downloadUpdateFn.mockResolvedValue();
+      fireUpdaterEvent('update-available', { version: '2.4.6' });
+
+      await mod.downloadUpdate();
+      fireUpdaterEvent('download-progress', {
+        percent: 10,
+        bytesPerSecond: 1_500_000,
+        transferred: 10_000_000,
+        total: 100_000_000,
+        delta: 10_000_000,
+      });
+      fireUpdaterEvent('download-progress', {
+        percent: 28,
+        bytesPerSecond: 1_600_000,
+        transferred: 28_000_000,
+        total: 100_000_000,
+        delta: 18_000_000,
+      });
+      fireUpdaterEvent('download-progress', {
+        percent: 57,
+        bytesPerSecond: 1_700_000,
+        transferred: 57_000_000,
+        total: 100_000_000,
+        delta: 29_000_000,
+      });
+      fireUpdaterEvent('download-progress', {
+        percent: 81,
+        bytesPerSecond: 1_800_000,
+        transferred: 81_000_000,
+        total: 100_000_000,
+        delta: 24_000_000,
+      });
+      fireUpdaterEvent('update-downloaded', { version: '2.4.6' });
+
+      await vi.waitFor(() => {
+        expect(telemetryFetchFn).toHaveBeenCalledTimes(5);
+      });
+
+      const bodies = telemetryBodies();
+      expect(bodies.map((body) => body.event)).toEqual([
+        'mac_update_download_started',
+        'mac_update_download_progress',
+        'mac_update_download_progress',
+        'mac_update_download_progress',
+        'mac_update_download_completed',
+      ]);
+      expect(bodies.slice(1, 4).map((body) => body.milestonePercent)).toEqual([25, 50, 75]);
+      expect(bodies.slice(1, 4).map((body) => body.bytesPerSecond)).toEqual([
+        1_600_000, 1_700_000, 1_800_000,
+      ]);
+      expect(new Set(bodies.map((body) => body.sessionId)).size).toBe(1);
+      expect(new Set(bodies.map((body) => body.insertId)).size).toBe(5);
+      expect(bodies.at(-1)).toMatchObject({
+        event: 'mac_update_download_completed',
+        version: '2.4.6',
+        transferredBytes: 81_000_000,
+        totalBytes: 100_000_000,
+      });
+
+      for (const call of telemetryFetchFn.mock.calls) {
+        expect(call[0]).toBe('http://localhost:3001/api/download-telemetry');
+        expect(call[1]).toMatchObject({
+          method: 'POST',
+          headers: {
+            Authorization: 'Bearer mac-telemetry-token',
+            'Content-Type': 'application/json',
+          },
+        });
+      }
+    });
+
+    it('reports updater download failures with the last observed transfer state', async () => {
+      const mod = await loadAutoUpdater();
+      mod.initAutoUpdater(win as unknown as Electron.BrowserWindow);
+      downloadUpdateFn.mockResolvedValue();
+      fireUpdaterEvent('update-available', { version: '3.0.0' });
+
+      await mod.downloadUpdate();
+      fireUpdaterEvent('download-progress', {
+        percent: 12,
+        bytesPerSecond: 320_000,
+        transferred: 12_000_000,
+        total: 100_000_000,
+        delta: 12_000_000,
+      });
+      fireUpdaterEvent('error', new Error('socket reset by peer'));
+
+      await vi.waitFor(() => {
+        expect(telemetryFetchFn).toHaveBeenCalledTimes(2);
+      });
+
+      expect(telemetryBodies().at(-1)).toMatchObject({
+        event: 'mac_update_download_failed',
+        version: '3.0.0',
+        bytesPerSecond: 320_000,
+        transferredBytes: 12_000_000,
+        totalBytes: 100_000_000,
+        errorMessage: 'socket reset by peer',
+      });
     });
 
     it('translates update-downloaded into state=downloaded and latches isUpdateDownloaded', async () => {
