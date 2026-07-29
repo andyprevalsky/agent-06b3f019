@@ -5217,12 +5217,26 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+    # claude_code is a COMPUTE TOKEN, not a capability: it routes inference to
+    # Anthropic at $0 via the user's subscription instead of the paid waterfall.
+    # Nothing in a browser/payment task needs Claude specifically -- the Rose
+    # pools race OpenRouter models perfectly well without it. Gating the whole
+    # run on it is the same FALSE infra failure already documented for gpt_code
+    # above: it drops every live task before an agent is ever created, so the
+    # slice cannot produce a verdict at all. Tasks that genuinely require
+    # claudeAuth keep their own strict gates downstream.
+    tolerate_missing_claude = True
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
+    if not await _has_usable_anthropic_api_key_fallback(base_url):
+        print(
+            "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
+            "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
+            "to a token-backed run."
+        )
     database_url = _local_victoria_database_url()
     if database_url:
         _refresh_local_claude_token_from_keychain(database_url)
@@ -5486,7 +5500,9 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
     raw_domains = (task.environment or {}).get("live_cookie_domains") or []
     cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
-    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+    # Same reasoning as the blanket pre-flight above: a missing Claude compute
+    # token degrades cost, it does not remove a capability the task needs.
+    tolerate_missing_claude = True
     ctx = LiveFixtureContext(
         base_url=base_url,
         user_id=USER_ID,

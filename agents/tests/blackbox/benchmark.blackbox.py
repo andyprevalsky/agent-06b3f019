@@ -3646,6 +3646,35 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     assert raised, "live fixture must fail closed when credential refresh fails"
 
 
+def test_live_fixture_tolerates_missing_claude_compute_token():
+    """A missing Claude compute token must degrade cost, never abort the run.
+
+    Regression for epoch 4 of the ecommerce descent: the dev claude_code
+    integration flipped to EXPIRED and the only other eligible rows were
+    rate-limited, so `_sync_compute_tokens` was called with
+    tolerate_claude_code_unavailable=False and three tasks died on "No usable
+    claude_code integrations after sync" -- at $0.00, before an agent existed.
+    claude_code only routes inference to Anthropic at $0 instead of the paid
+    waterfall; the Rose pools race OpenRouter models without it, so no
+    browser/payment task NEEDS it. Both call sites must therefore tolerate its
+    absence, exactly as they already tolerate a quota-blocked gpt_code.
+    """
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+
+    for func in (bench._refresh_local_compute_tokens_for_run, bench._apply_live_fixtures):
+        source = inspect.getsource(func)
+        assert "tolerate_missing_claude = True" in source, func.__name__
+        # The old fail-closed form gated tolerance on a funded Anthropic key.
+        assert "tolerate_missing_claude = await" not in source, func.__name__
+
+    # The degraded path must announce itself so cost figures are not misread as
+    # comparable to a token-backed run.
+    preflight = inspect.getsource(bench._refresh_local_compute_tokens_for_run)
+    assert "bills the paid waterfall" in preflight
+
+
 def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle():
     """A green sync that produced nothing injectable is an INFRA failure, not a task result.
 
@@ -11559,6 +11588,10 @@ async def run_all_tests():
     r.record(
         "live_fixture_auth_failure_is_fatal",
         test_live_fixture_fails_when_live_auth_refresh_fails,
+    )
+    r.record(
+        "live_fixture_tolerates_missing_claude_token",
+        test_live_fixture_tolerates_missing_claude_compute_token,
     )
     r.record(
         "live_cookie_domain_requires_injectable_bundle",
