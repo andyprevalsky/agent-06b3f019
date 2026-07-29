@@ -86,7 +86,12 @@ def validate_product_detail_url(value: Any) -> str:
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
     path_has_detail = bool(parsed.path.strip("/"))
     query_has_product_id = any(key.lower() in _PRODUCT_QUERY_KEYS and value.strip() for key, value in query_pairs)
-    if not path_has_detail and not query_has_product_id:
+    # A hash-routed SPA storefront carries its whole route in the fragment, so
+    # `https://shop.example/#/product/123` has an EMPTY path and was rejected as
+    # a bare homepage -- a false reject on every client-side-routed merchant.
+    # The fragment identifies the item just as a path does.
+    fragment_has_detail = bool(parsed.fragment.strip("/"))
+    if not path_has_detail and not query_has_product_id and not fragment_has_detail:
         raise ValueError("product_url must identify a product, not the merchant homepage")
     return text
 

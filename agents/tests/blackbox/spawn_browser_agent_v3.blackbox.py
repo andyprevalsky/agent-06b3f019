@@ -7031,7 +7031,10 @@ def test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_ta
         "https://fcaptcha.webdecoy.com/api/score",
         "https://fcaptcha.webdecoy.com/api/verify",
         "https://hcaptcha.com/checkcaptcha",
-        "https://merchant.example.com/api/score",
+        # reCAPTCHA is pinned to its path prefix on google.com, which is not a
+        # dedicated vendor host.
+        "https://www.google.com/recaptcha/api/siteverify",
+        "https://recaptcha.net/recaptcha/api2/reload",
     )
     denied = (
         "https://merchant.example.com/api/scoreboard",
@@ -7040,6 +7043,13 @@ def test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_ta
         "https://hcaptcha.com.evil.com/api/x",
         "http://fcaptcha.webdecoy.com/api/score",  # plaintext must not be retained
         "https://merchant.example.com/checkout",
+        # A first-party endpoint that merely shares a vendor's path name must NOT
+        # opt itself into retention: a merchant's own /api/score is likelier to
+        # carry customer data than anti-bot telemetry.
+        "https://merchant.example.com/api/score",
+        # google.com is not a vendor host; only its reCAPTCHA path is in scope.
+        "https://www.google.com/search",
+        "https://www.google.com/recaptchafoo/api",
     )
     for url in allowed:
         assert recorder._should_capture_request_body(url) is True, url

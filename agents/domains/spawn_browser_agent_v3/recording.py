@@ -1939,23 +1939,28 @@ class BrowserNetworkRecorder:
     # Allowlisting those scoring endpoints preserves that answer and stores
     # nothing else. Add a marker only for a telemetry endpoint that is known
     # not to carry user credentials.
-    # Exact paths, not substrings: "/api/score" as a substring also matches
-    # "/api/scoreboard" and "/api/verify" matches "/api/verify-address", which
-    # would silently widen a default-deny allowlist to endpoints nobody vetted.
-    BODY_CAPTURE_PATHS = (
-        "/api/score",
-        "/api/verify",
-        "/recaptcha/api",
-    )
-    # Matched on host LABEL boundaries, so "fcaptcha.webdecoy.com" hits while
-    # "notfcaptcha.evil.com" and "hcaptcha.com.evil.com" do not.
-    BODY_CAPTURE_HOSTS = (
-        "fcaptcha.webdecoy.com",
-        "hcaptcha.com",
-        "challenges.cloudflare.com",
-        "arkoselabs.com",
-        "datadome.co",
-        "perimeterx.net",
+    # Anti-bot VENDOR hosts only, matched on host LABEL boundaries so
+    # "fcaptcha.webdecoy.com" hits while "notfcaptcha.evil.com" and
+    # "hcaptcha.com.evil.com" do not.
+    #
+    # There is deliberately no "any host serving /api/score" rule. Path-only
+    # matching let a first-party endpoint that merely shares a vendor's path
+    # name opt itself into body retention, which is how a default-deny list
+    # quietly becomes allow-most. A merchant's own /api/score is far likelier to
+    # carry customer data than anti-bot telemetry, so it stays denied.
+    # (host, allowed_path_prefixes | None). None means the whole host is a
+    # dedicated anti-bot vendor, so any path on it is in scope. google.com is
+    # NOT such a host -- it serves everything -- so reCAPTCHA is pinned to its
+    # own path prefix there instead of opening the domain.
+    BODY_CAPTURE_RULES = (
+        ("fcaptcha.webdecoy.com", None),
+        ("hcaptcha.com", None),
+        ("challenges.cloudflare.com", None),
+        ("arkoselabs.com", None),
+        ("datadome.co", None),
+        ("perimeterx.net", None),
+        ("google.com", ("/recaptcha",)),
+        ("recaptcha.net", ("/recaptcha",)),
     )
 
     def __init__(
@@ -2111,9 +2116,16 @@ class BrowserNetworkRecorder:
             return False
         host = parsed.hostname or ""
         path = re.sub(r"/+", "/", parsed.path).rstrip("/") or "/"
-        if not any(host == allowed or host.endswith(f".{allowed}") for allowed in self.BODY_CAPTURE_HOSTS):
-            return path in self.BODY_CAPTURE_PATHS and bool(host)
-        return True
+        for allowed_host, allowed_paths in self.BODY_CAPTURE_RULES:
+            if host != allowed_host and not host.endswith(f".{allowed_host}"):
+                continue
+            if allowed_paths is None:
+                return True
+            # Prefix match on a path SEGMENT boundary, so the whole /recaptcha
+            # namespace (api, api2, enterprise) is allowed while a sibling path
+            # like "/recaptchafoo" is not.
+            return any(path == prefix or path.startswith(f"{prefix}/") for prefix in allowed_paths)
+        return False
 
     # Secret-bearing keys are redacted even on allowlisted hosts. The allowlist
     # scopes WHICH endpoints may be retained; it cannot promise those payloads

@@ -191,6 +191,11 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         "https://checkout-supply-co.example.com/products/desk-lamp",
         # A path with no product-ish marker at all is still a product page.
         "https://lunettecambodia.com/lok-lak",
+        # Hash-routed SPA storefronts carry the whole route in the fragment, so
+        # the path is empty. Rejecting these as "bare homepage" was a false
+        # reject on every client-side-routed merchant.
+        "https://shop.example.com/#/product/123",
+        "https://shop.example.com/#/item/abc",
     )
     for product_url in urls_that_only_a_word_filter_would_reject:
         parsed_item = PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
