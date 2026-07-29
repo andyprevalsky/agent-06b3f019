@@ -215,6 +215,18 @@ export async function markGptPoolTokenRateLimited(
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {
+    // No match means EITHER an existing longer window (benign) OR a stale id the
+    // previous single-record `update` would have thrown on. Disambiguate.
+    const existing = await prisma.integration.findUnique({
+      where: { id: poolTokenId },
+      select: { id: true },
+    });
+    if (existing === null) {
+      log.warn(
+        `GPT pool token ${poolTokenId} not found; cannot rate-limit (stale integration id?)`
+      );
+      return;
+    }
     log.info(
       `GPT pool token ${poolTokenId} already backed off past ${until.toISOString()} — keeping the longer window`
     );
@@ -233,6 +245,14 @@ export async function markGptIntegrationRateLimited(
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {
+    const existing = await prisma.integration.findUnique({
+      where: { id: integrationId },
+      select: { id: true },
+    });
+    if (existing === null) {
+      log.warn(`GPT integration ${integrationId} not found; cannot rate-limit (stale id?)`);
+      return;
+    }
     log.info(
       `GPT integration ${integrationId} already backed off past ${until.toISOString()} — keeping the longer window`
     );
@@ -302,6 +322,13 @@ export async function markGptUserTokenRateLimited(
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {
+    const existing = await prisma.integration.count({
+      where: { userId, name: 'gpt_code', status: 'CONNECTED' },
+    });
+    if (existing === 0) {
+      log.warn(`No gpt_code integration for ${userId}; nothing to rate-limit`);
+      return;
+    }
     log.info(
       `GPT user token for ${userId} already backed off past ${until.toISOString()} — keeping the longer window`
     );

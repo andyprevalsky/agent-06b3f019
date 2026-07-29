@@ -941,6 +941,102 @@ async function testClaudeAuth_429CarriesProviderResetWindow() {
   }
 }
 
+/**
+ * Regression (CodeRabbit): a `retry-after` longer than the sleep cap must ROTATE,
+ * not sleep short and retry.
+ *
+ * `BACKOFF_CAP_MS` is 5s. Previously the retry decision used only
+ * `resetIsFarFuture` (60s threshold), so a `retry-after: 30` still took the
+ * in-place retry path — and then `backoffFor429` clipped the sleep to 5s. The
+ * retry fired 25s before the window closed, hit a guaranteed second 429, and
+ * burned an attempt. Now anything we cannot honor within the cap surfaces
+ * immediately so the caller rotates credentials.
+ */
+async function testClaudeAuth_retryAfterBeyondCapRotatesInsteadOfClipping() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  delete process.env.ANTHROPIC_API_KEY;
+  let anthropicCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      return new Response(JSON.stringify({ error: { message: 'slow down' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'retry-after': '30' },
+      });
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    let captured: unknown = null;
+    try {
+      await collect(
+        claudeAuthComplete({
+          poolSpec: getPool('rose-1-lite'),
+          messages: [{ role: 'user', content: 'hi' }],
+          auth: { mode: 'oauth', token: 'test-token' },
+          requestId: 'test-retry-after-cap',
+        })
+      );
+    } catch (err) {
+      captured = err;
+    }
+
+    assert(
+      captured instanceof RoseRateLimitError,
+      `expected RoseRateLimitError, got ${String(captured)}`
+    );
+    assertEqual(
+      anthropicCalls,
+      1,
+      'retry-after beyond the sleep cap must rotate immediately, not burn a clipped in-place retry'
+    );
+    const until = (captured as RoseRateLimitError).rateLimitedUntil;
+    assert(until !== undefined, 'retry-after must still be surfaced as rateLimitedUntil');
+    const deltaMs = new Date(until!).getTime() - Date.now();
+    assert(
+      deltaMs > 25_000 && deltaMs <= 31_000,
+      `rateLimitedUntil should reflect the 30s retry-after, got ${deltaMs}ms`
+    );
+  } finally {
+    restoreFetch();
+  }
+}
+
+/** A short retry-after (inside the cap) must still retry in place. */
+async function testClaudeAuth_retryAfterWithinCapStillRetriesInPlace() {
+  process.env.OPENROUTER_API_KEY = 'or-test-key';
+  let anthropicCalls = 0;
+  installFetchStub((url) => {
+    if (url === ANTHROPIC_API_URL) {
+      anthropicCalls++;
+      if (anthropicCalls === 1) {
+        return new Response(JSON.stringify({ error: { message: 'burst' } }), {
+          status: 429,
+          headers: { 'Content-Type': 'application/json', 'retry-after': '1' },
+        });
+      }
+      return sseResponse(ANTHROPIC_OK_SSE);
+    }
+    throw new Error(`Unexpected URL: ${url}`);
+  });
+
+  try {
+    const chunks = await collect(
+      claudeAuthComplete({
+        poolSpec: getPool('rose-1-lite'),
+        messages: [{ role: 'user', content: 'hi' }],
+        auth: { mode: 'oauth', token: 'test-token' },
+        requestId: 'test-retry-after-within-cap',
+      })
+    );
+    assertEqual(anthropicCalls, 2, 'a 1s retry-after fits the cap and must retry in place');
+    assert(chunks.length > 0, 'chunks emitted after in-place retry');
+  } finally {
+    restoreFetch();
+  }
+}
+
 /** Unit coverage for every extraction branch, mirroring claude_auth.py. */
 async function testRateLimitReset_extractionBranches() {
   const iso = '2026-07-30T22:00:00.000Z';
@@ -3045,6 +3141,14 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / 429 carries provider reset window',
       fn: testClaudeAuth_429CarriesProviderResetWindow,
+    },
+    {
+      name: 'claudeAuth / retry-after beyond cap rotates',
+      fn: testClaudeAuth_retryAfterBeyondCapRotatesInsteadOfClipping,
+    },
+    {
+      name: 'claudeAuth / retry-after within cap retries in place',
+      fn: testClaudeAuth_retryAfterWithinCapStillRetriesInPlace,
     },
     {
       name: 'rateLimitReset / extraction branches',

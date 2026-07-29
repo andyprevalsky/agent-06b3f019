@@ -25,7 +25,7 @@ import {
   RoseStallError,
 } from './errors';
 import type { PoolSpec } from './pools';
-import { extractRateLimitedUntil, resetIsFarFuture } from './rateLimitReset';
+import { extractRateLimitedUntil, providerRequiredWaitMs } from './rateLimitReset';
 import { parseAnthropicSSE } from './streaming';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
@@ -281,11 +281,16 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
       // the caller invents a 5-minute default that can clobber a real 5h/7d
       // usage window written by the Python agent path.
       const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
-      // A far-future reset is a usage-window limit, not a burst limit — retrying
-      // in place cannot clear it, so surface it immediately and let the caller
-      // rotate credentials. Mirrors _should_rotate_429_without_retry in
+      // Retry in place ONLY when we can honor the provider's wait inside our
+      // sleep cap. Sleeping less than it asked for is a guaranteed second 429
+      // that burns an attempt (a `retry-after: 30` clipped to the 5s cap did
+      // exactly that), and sleeping the full window would stall the activity.
+      // Anything longer — including a far-future 5h/7d usage window — rotates
+      // credentials instead. Mirrors _should_rotate_429_without_retry in
       // agents/providers/rose/claude_auth.py.
-      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }

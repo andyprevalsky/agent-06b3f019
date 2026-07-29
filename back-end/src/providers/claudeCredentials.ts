@@ -457,8 +457,21 @@ export async function markPoolTokenRateLimited(
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {
+    // `updateMany` matched nothing, which has TWO causes: the row already has a
+    // longer window (expected, benign), or the id does not exist (a stale-ID bug
+    // the previous single-record `update` would have thrown on). Disambiguate so
+    // the guard cannot silently swallow the second case.
+    const existing = await prisma.integration.findUnique({
+      where: { id: poolTokenId },
+      select: { rateLimitedUntil: true },
+    });
+    if (existing === null) {
+      log.warn(`Pool token ${poolTokenId} not found; cannot rate-limit (stale integration id?)`);
+      return;
+    }
     log.info(
-      `Pool token ${poolTokenId} already backed off past ${until.toISOString()} — keeping the longer window`
+      `Pool token ${poolTokenId} already backed off past ${until.toISOString()} ` +
+        `(until ${existing.rateLimitedUntil?.toISOString() ?? 'null'}) — keeping the longer window`
     );
     return;
   }
@@ -508,6 +521,15 @@ export async function markUserTokenRateLimited(
     data: { rateLimitedUntil: until },
   });
   if (count === 0) {
+    // Same disambiguation as the pool path: no match means either an existing
+    // longer window (benign) or no claude_code row at all for this user.
+    const existing = await prisma.integration.count({
+      where: { userId, name: 'claude_code', status: { in: ['CONNECTED', 'EXPIRED'] } },
+    });
+    if (existing === 0) {
+      log.warn(`No claude_code integration for ${userId}; nothing to rate-limit`);
+      return;
+    }
     log.info(
       `User token for ${userId} already backed off past ${until.toISOString()} — keeping the longer window`
     );

@@ -24,6 +24,7 @@ const RESET_HEADER_NAMES = [
   'anthropic-ratelimit-unified-7d-reset',
   'anthropic-ratelimit-input-tokens-reset',
   'anthropic-ratelimit-output-tokens-reset',
+  'anthropic-ratelimit-tokens-reset',
   'anthropic-ratelimit-requests-reset',
   'x-ratelimit-reset',
   'x-rate-limit-reset',
@@ -166,4 +167,35 @@ export function resetIsFarFuture(rateLimitedUntil: string | null | undefined): b
   const ms = Date.parse(rateLimitedUntil);
   if (Number.isNaN(ms)) return false;
   return ms - Date.now() > USAGE_WINDOW_RESET_THRESHOLD_MS;
+}
+
+/**
+ * How long the provider actually wants us to wait before retrying, in ms —
+ * `retry-after` first, else the distance to the parsed reset. Returns null when
+ * the provider gave no guidance, meaning the caller is free to use its own
+ * exponential backoff.
+ *
+ * Callers must compare this against their sleep cap and ROTATE rather than
+ * sleep short: retrying before the window closes is a guaranteed second 429
+ * that burns an attempt, and sleeping the full window would stall the activity.
+ * (A `retry-after: 30` clipped to a 5s cap did exactly that.)
+ */
+export function providerRequiredWaitMs(
+  headers: Pick<Headers, 'get'> | null | undefined,
+  errorBody: string,
+  rateLimitedUntil?: string | null
+): number | null {
+  const retryAfter = headers?.get('retry-after');
+  if (retryAfter !== null && retryAfter !== undefined) {
+    const stripped = retryAfter.trim();
+    if (/^\d+(\.\d+)?$/.test(stripped)) {
+      return Math.max(0, Number.parseFloat(stripped) * 1000);
+    }
+  }
+  const reset = rateLimitedUntil ?? extractRateLimitedUntil(headers, errorBody);
+  if (reset) {
+    const ms = Date.parse(reset);
+    if (!Number.isNaN(ms)) return Math.max(0, ms - Date.now());
+  }
+  return null;
 }

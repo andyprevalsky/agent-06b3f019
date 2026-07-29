@@ -26,7 +26,7 @@ import {
   RoseServerError,
 } from './errors';
 import type { PoolSpec } from './pools';
-import { extractRateLimitedUntil, resetIsFarFuture } from './rateLimitReset';
+import { extractRateLimitedUntil, providerRequiredWaitMs } from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
@@ -398,7 +398,11 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
       // Carry the provider's own reset through to the credential cooldown —
       // see the identical capture in claudeAuth.ts and rateLimitReset.ts.
       const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
-      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
+      // Retry in place only when the provider's wait fits inside our sleep cap;
+      // otherwise rotate. See the matching comment in claudeAuth.ts.
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
@@ -506,7 +510,11 @@ export async function* openAiApiKeyComplete(
 
     if (status === 429) {
       const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
-      if (attempt < MAX_ATTEMPTS - 1 && !resetIsFarFuture(rateLimitedUntil)) {
+      // Retry in place only when the provider's wait fits inside our sleep cap;
+      // otherwise rotate. See the matching comment in claudeAuth.ts.
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
         await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
         continue;
       }
