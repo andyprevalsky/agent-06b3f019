@@ -63,8 +63,25 @@ is_self_ancestor() {
     done
 }
 
+# Benchmark controllers are NEVER ours to kill (CLAUDE.md rule 27). They own Fly
+# machines, volumes, and isolated stacks, and they reap those resources through
+# their own signal traps — killing one from outside leaks paid infrastructure and
+# has repeatedly murdered healthy fleets belonging to other worktrees/sessions.
+#
+# This matters here specifically because `run-predeploy-local` starts an ISOLATED
+# `scripts/run.sh` stack as a child. That child matches the `scripts/run\.sh`
+# root pattern below, and `add_pid_with_tree_and_ancestors` then walks UPWARD to
+# same-worktree ancestors — escalating from "stop a stray service" to "SIGTERM the
+# benchmark controller that owns it". Observed during /deploy: a Step 5 `run.sh`
+# startup sweep killed an in-flight `run-predeploy-local` smoke run (exit 143).
+is_benchmark_controller() {
+    local cmd
+    cmd=$(cmd_of "$1")
+    echo "$cmd" | grep -Eq 'run-predeploy-(local|cloud)|run-bench(-fleet|-cloud|-hub-poller)?( |$)|benchmarks/(local|run_benchmark|run_eval_suite)\.py'
+}
+
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_benchmark_controller "$1"
 }
 
 service_like_process() {
@@ -231,6 +248,23 @@ while read -r pid; do
 done < "$ROOTS_FILE"
 
 PIDS=$(sort -un "$ALL_FILE" | grep -v "^$SELF$" | grep -v "^$SELF_PPID$" || true)
+
+# Final backstop: drop any benchmark controller that entered the set as a
+# DESCENDANT (pid_tree walks down and does not consult is_protected_process, so
+# the ancestor guard alone cannot catch this direction). Rule 27 is absolute —
+# a benchmark controller must never be signalled by this script.
+if [[ -n "$PIDS" ]]; then
+    KEPT=""
+    while read -r pid; do
+        [[ -z "$pid" ]] && continue
+        if is_benchmark_controller "$pid"; then
+            echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+            continue
+        fi
+        KEPT+="$pid"$'\n'
+    done <<< "$PIDS"
+    PIDS=$(printf '%s' "$KEPT" | grep -v '^$' || true)
+fi
 
 if [[ -z "$PIDS" ]]; then
     if [[ $DRY -eq 0 ]]; then
