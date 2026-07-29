@@ -718,9 +718,54 @@ async def test_generate_completion_summary_uses_complete_fallback_after_two_trun
     assert out["usage"]["total_tokens"] == 20
 
 
+async def test_summarize_and_filter_links_actually_summarizes():
+    """RCA: every web_fetch silently skipped summarization for its whole life.
+
+    `summarize_and_filter_links` passed `cache_sequence_id=cache_sequence_id` to
+    call_llm but never declared the parameter, so the call raised NameError on
+    EVERY invocation. The blanket `except Exception` caught it, logged a warning,
+    and returned raw truncated markdown with `summarized=False` — so the feature
+    looked alive (no errors surfaced, agents kept running) while the agent was
+    fed unfiltered page dumps instead of objective-focused summaries.
+
+    Asserting `summarized is True` with a healthy LLM is what makes the silent
+    fallback impossible to reintroduce: any exception inside the try block —
+    NameError, TypeError, bad kwarg — flips this red.
+    """
+    from unittest.mock import MagicMock
+
+    import helpers.summarize as summarize_module
+
+    llm = AsyncMock(
+        return_value={
+            "content": '{"summary": "Lok Lak costs $21.00.", "files_to_download": []}',
+            "usage": {"total_tokens": 42},
+        }
+    )
+    with patch.object(summarize_module, "activity", MagicMock()), patch(
+        "helpers.llm.call_llm", new=llm
+    ):
+        result = await summarize_module.summarize_and_filter_links(
+            url="https://order.toasttab.com/online/lunette-cambodia",
+            objective="find the price of Lok Lak",
+            markdown="# Lunette Cambodia\nLok Lak $21.00",
+            links=["https://order.toasttab.com/online/lunette-cambodia/item-lok-lak"],
+            cache_sequence_id="seq-1",
+        )
+
+    assert result["summarized"] is True, result
+    assert result["summary"] == "Lok Lak costs $21.00."
+    assert llm.await_count == 1
+    assert llm.await_args.kwargs["cache_sequence_id"] == "seq-1"
+
+
 async def run_all_tests():
     print("summarize blackbox tests:")
     r = BlackboxResult()
+    await r.record_async(
+        "summarize_and_filter_links_actually_summarizes",
+        test_summarize_and_filter_links_actually_summarizes,
+    )
     await r.record_async("count_tool_usage", test_count_tool_usage)
     await r.record_async("count_tool_usage_empty", test_count_tool_usage_empty)
     await r.record_async("merge_tool_counts", test_merge_tool_counts)
