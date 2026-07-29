@@ -7022,6 +7022,30 @@ def test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_ta
     assert len(body.encode("utf-8")) <= 64, len(body.encode("utf-8"))
     body.encode("utf-8").decode("utf-8")  # must not raise: no split code point
 
+    # Default-deny must survive lookalikes. Substring matching over the whole URL
+    # let "/api/scoreboard" satisfy the "/api/score" marker and
+    # "notfcaptcha.evil.com" satisfy "fcaptcha.", silently widening retention to
+    # endpoints nobody vetted.
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    allowed = (
+        "https://fcaptcha.webdecoy.com/api/score",
+        "https://fcaptcha.webdecoy.com/api/verify",
+        "https://hcaptcha.com/checkcaptcha",
+        "https://merchant.example.com/api/score",
+    )
+    denied = (
+        "https://merchant.example.com/api/scoreboard",
+        "https://merchant.example.com/api/verify-address",
+        "https://notfcaptcha.evil.com/api/x",
+        "https://hcaptcha.com.evil.com/api/x",
+        "http://fcaptcha.webdecoy.com/api/score",  # plaintext must not be retained
+        "https://merchant.example.com/checkout",
+    )
+    for url in allowed:
+        assert recorder._should_capture_request_body(url) is True, url
+    for url in denied:
+        assert recorder._should_capture_request_body(url) is False, url
+
     # A non-allowlisted body is OMITTED by policy, not truncated.
     omitted = capture('{"password":"hunter2"}', url="https://merchant.example.com/checkout")
     assert "request_body" not in omitted, omitted

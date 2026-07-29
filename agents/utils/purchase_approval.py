@@ -70,6 +70,14 @@ def validate_product_detail_url(value: Any) -> str:
     if any(character.isspace() for character in text) or "<" in text or ">" in text:
         raise ValueError("product_url must not contain whitespace or markup")
     parsed = urlparse(text)
+    try:
+        # urlparse defers port validation until the attribute is read, so a
+        # malformed authority (":99999", ":abc") parses clean and only explodes
+        # later at the HTTP layer. Force it here so a bad URL is rejected at the
+        # boundary that owns URL shape.
+        parsed.port
+    except ValueError as error:
+        raise ValueError("product_url must be an absolute http(s) product-detail URL") from error
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("product_url must be an absolute http(s) product-detail URL")
 

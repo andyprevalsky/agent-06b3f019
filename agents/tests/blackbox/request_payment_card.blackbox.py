@@ -150,6 +150,10 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         "ftp://example.com/products/desk-lamp",
         "https://example.com/products/desk lamp",
         "https://example.com/products/<script>",
+        # urlparse defers port validation until the attribute is read, so these
+        # parsed clean and only exploded later at the HTTP layer.
+        "https://example.com:99999/products/desk-lamp",
+        "https://example.com:abc/products/desk-lamp",
     )
     for product_url in invalid_product_urls:
         try:

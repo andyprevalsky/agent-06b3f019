@@ -1939,11 +1939,18 @@ class BrowserNetworkRecorder:
     # Allowlisting those scoring endpoints preserves that answer and stores
     # nothing else. Add a marker only for a telemetry endpoint that is known
     # not to carry user credentials.
-    BODY_CAPTURE_URL_MARKERS = (
+    # Exact paths, not substrings: "/api/score" as a substring also matches
+    # "/api/scoreboard" and "/api/verify" matches "/api/verify-address", which
+    # would silently widen a default-deny allowlist to endpoints nobody vetted.
+    BODY_CAPTURE_PATHS = (
         "/api/score",
         "/api/verify",
-        "fcaptcha.",
-        "recaptcha/api",
+        "/recaptcha/api",
+    )
+    # Matched on host LABEL boundaries, so "fcaptcha.webdecoy.com" hits while
+    # "notfcaptcha.evil.com" and "hcaptcha.com.evil.com" do not.
+    BODY_CAPTURE_HOSTS = (
+        "fcaptcha.webdecoy.com",
         "hcaptcha.com",
         "challenges.cloudflare.com",
         "arkoselabs.com",
@@ -2093,9 +2100,20 @@ class BrowserNetworkRecorder:
         await self.start()
 
     def _should_capture_request_body(self, url: str) -> bool:
-        """Whether this URL's raw request body may be retained (default deny)."""
-        host_and_path = url.lower().split("?", 1)[0]
-        return any(marker in host_and_path for marker in self.BODY_CAPTURE_URL_MARKERS)
+        """Whether this URL's raw request body may be retained (default deny).
+
+        Parsed host/path matching, HTTPS-only. Substring matching over the whole
+        URL let a lookalike path (/api/scoreboard) or host (notfcaptcha.evil.com)
+        opt itself into body retention.
+        """
+        parsed = urlparse(url.lower())
+        if parsed.scheme != "https":
+            return False
+        host = parsed.hostname or ""
+        path = re.sub(r"/+", "/", parsed.path).rstrip("/") or "/"
+        if not any(host == allowed or host.endswith(f".{allowed}") for allowed in self.BODY_CAPTURE_HOSTS):
+            return path in self.BODY_CAPTURE_PATHS and bool(host)
+        return True
 
     # Secret-bearing keys are redacted even on allowlisted hosts. The allowlist
     # scopes WHICH endpoints may be retained; it cannot promise those payloads
