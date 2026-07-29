@@ -29,6 +29,7 @@ import {
   IMPERSONATION_KEY,
   notifyImpersonationChanged,
   storeSession,
+  normalizeSessionExpiry,
 } from './supabase';
 
 /** Fired whenever the impersonation state changes, so every mount re-reads it. */
@@ -56,11 +57,12 @@ function readJson<T>(key: string): T | null {
 
 /** Whether a stashed session can no longer be restored. */
 function isSessionExpired(session: Session | null): boolean {
-  return (
-    session !== null &&
-    typeof session.expires_at === 'number' &&
-    session.expires_at * 1000 < Date.now()
-  );
+  if (session === null || typeof session.expires_at !== 'number') return false;
+  // Normalize first: the Electron bridge persists expires_at in MILLISECONDS, and
+  // an unnormalized ms value multiplied by 1000 lands ~57,000 years out, so a
+  // dead stash would look permanently valid and the admin could never be unwound.
+  const { expires_at: expiresAt } = normalizeSessionExpiry(session);
+  return typeof expiresAt === 'number' && expiresAt * 1000 < Date.now();
 }
 
 /** The account currently being impersonated, or null when on the admin's own account. */

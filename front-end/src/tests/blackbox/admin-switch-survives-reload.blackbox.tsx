@@ -348,3 +348,77 @@ describe('a stale invite check cannot re-trap an impersonating admin', () => {
     });
   });
 });
+
+/**
+ * The stuck-forever state actually reported.
+ *
+ * The Electron main process normalizes `expires_at` to MILLISECONDS and its auth
+ * bridge writes that straight into localStorage. Every expiry check here then
+ * multiplies by 1000 AGAIN, yielding dates ~57,000 years out — so an expired
+ * session looks permanently valid to the client. The server still 401s, so the
+ * app sits authenticated-looking, 401-ing on every call, never refreshing, never
+ * unwinding the impersonation, and never routing to sign-in. No pill, no escape.
+ */
+describe('millisecond expires_at from the Electron bridge', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    stubReload();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  const msSession = (token: string, userId: string, secondsFromNow: number) => ({
+    access_token: token,
+    refresh_token: `${token}-refresh`,
+    expires_in: 3600,
+    // MILLISECONDS, exactly as the Electron bridge persists it.
+    expires_at: Date.now() + secondsFromNow * 1000,
+    token_type: 'bearer',
+    user: { id: userId },
+  });
+
+  it('treats an EXPIRED millisecond session as expired instead of valid-for-57000-years', async () => {
+    const { getSession } = await import('@/lib/supabase');
+
+    // Expired an hour ago, but written in ms.
+    localStorage.setItem('rose-session', JSON.stringify(msSession('dead', TARGET_ID, -3600)));
+
+    // Without normalization this returns the session (ms * 1000 ≈ year 58542).
+    expect(getSession()).toBeNull();
+  });
+
+  it('repairs a millisecond expires_at in place so the session stops being immortal', async () => {
+    const { getSession } = await import('@/lib/supabase');
+
+    localStorage.setItem('rose-session', JSON.stringify(msSession('live', ANDY_ID, 3600)));
+    const s = getSession();
+
+    expect(s).not.toBeNull();
+    // Persisted back in SECONDS, so later reads and every other expiry check agree.
+    const stored = JSON.parse(localStorage.getItem('rose-session') ?? '{}');
+    expect(stored.expires_at).toBeLessThan(1e11);
+    expect(new Date(stored.expires_at * 1000).getUTCFullYear()).toBe(new Date().getUTCFullYear());
+  });
+
+  it('unwinds to the admin when an expired ms impersonated session is detected', async () => {
+    const { getSession } = await import('@/lib/supabase');
+
+    localStorage.setItem('rose-session', JSON.stringify(msSession('dead-target', TARGET_ID, -60)));
+    localStorage.setItem(
+      'rose-admin-session',
+      JSON.stringify(msSession('admin-token', ANDY_ID, 7776000)),
+    );
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: TARGET_ID, name: null, email: null, phone: null, isAdmin: false }),
+    );
+
+    const restored = getSession();
+
+    expect(restored?.access_token).toBe('admin-token');
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+  });
+});
