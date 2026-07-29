@@ -32,6 +32,9 @@ import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 
 import { prisma } from '../../providers/database';
+
+// Refuse to seed fixtures into prod when this file is run directly.
+import './assertLocalDatabase';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -142,8 +145,14 @@ function uniquePhone(): string {
   return `+1999${String(randomInt(0, 100_000_000_000)).padStart(11, '0')}`;
 }
 
+/**
+ * Names must not begin with a reserved fixture word (test/blackbox/benchmark/
+ * smoke/coverage): the real-person filter classifies those as our own fixtures
+ * and drops them from the waitlist half of the directory, so a "blackbox-*"
+ * waitlist row could never merge with its account.
+ */
 function marker(prefix: string): string {
-  return `blackbox-${prefix}-${Date.now()}-${randomInt(0, 1_000_000)}`;
+  return `dircase-${prefix}-${Date.now()}-${randomInt(0, 1_000_000)}`;
 }
 
 async function searchDirectory(term: string): Promise<z.infer<typeof DirectoryResponseSchema>> {
@@ -274,7 +283,7 @@ async function testUsers_mergesAccountAndWaitlistIntoOneRow() {
 async function testUsers_searchMatchesEmailAndReformattedPhone() {
   const name = marker('dir-search');
   const digits = String(randomInt(0, 10_000_000_000)).padStart(10, '0');
-  const email = `${name}@example.com`;
+  const email = `${name}@waitlist-case.dev`;
   const userId = `${name}-uid`;
   try {
     await prisma.user.create({

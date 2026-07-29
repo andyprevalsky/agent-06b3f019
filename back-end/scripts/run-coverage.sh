@@ -66,8 +66,6 @@ codex_funded_fallback_configured() {
 
 # Coverage data directory (NODE_V8_COVERAGE tells Node to dump raw coverage here)
 COV_TMP="$BACKEND_DIR/coverage/tmp"
-rm -rf "$COV_TMP"
-mkdir -p "$COV_TMP"
 
 # Pick an isolated port
 BASE_PORT="${CONDUCTOR_PORT:-55000}"
@@ -76,10 +74,23 @@ COV_PORT=$((BASE_PORT + 200))
 # Check whether a server is already listening on the coverage port. Restricting
 # the lookup to LISTEN avoids false positives from unrelated outbound sockets
 # that happen to use the same ephemeral local port.
+#
+# This check MUST stay ahead of the COV_TMP wipe below. A port that is already
+# listening usually means another coverage run is mid-flight in this worktree,
+# and COV_TMP is shared: wiping first would delete that run's accumulated V8
+# data and then abort, leaving the surviving run to report a large bogus
+# coverage shortfall (its tests still pass, so it reads as a threshold
+# regression rather than the collision it is). Fail before mutating shared
+# state, never after.
 if lsof -tiTCP:"$COV_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "❌ Port $COV_PORT is in use. Free it or set a different CONDUCTOR_PORT."
+  echo "   (Another coverage run may be in flight; this one stopped before"
+  echo "    touching its shared coverage data.)"
   exit 1
 fi
+
+rm -rf "$COV_TMP"
+mkdir -p "$COV_TMP"
 
 export TEST_BASE_URL="http://localhost:$COV_PORT"
 COV_LOG="$BACKEND_DIR/coverage/server.log"

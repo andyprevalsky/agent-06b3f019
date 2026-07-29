@@ -10416,6 +10416,64 @@ def test_retired_tasks_hidden_from_suite_and_listing():
     assert "load-test-sias" not in buf.getvalue(), "retired task leaked into --list output"
 
 
+def test_agent_latency_reads_isolated_benchmark_stack_logs():
+    """agent_latency.py must see isolated-stack logs, not just the shared ones.
+
+    Every /deploy smoke failure runs on an isolated stack, which writes to
+    .context/benchmarks/<run-id>/logs/{worker.N,backend}.log instead of
+    agents/navi-worker-log.txt. Reading only the shared paths made the primary
+    latency tool print "No log lines found" for exactly the failures it exists
+    to explain, so all three 2026-07-28 smoke failures had to be diagnosed by
+    hand.
+    """
+    import importlib
+    import tempfile
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_dir = os.path.join(tmp, "1785261402-99080-80974", "logs")
+        os.makedirs(log_dir)
+        # An isolated stack runs many worker processes, one file each.
+        with open(os.path.join(log_dir, "worker.4.log"), "w") as handle:
+            handle.write(
+                json.dumps(
+                    {
+                        "timestamp": "2026-07-28T17:58:34.644000Z",
+                        "event": "span.end",
+                        "agent_id": "053a9066-28d1-4f34-a558-cc7cd402520d",
+                        "span_name": "llm.attempt",
+                    }
+                )
+                + "\n"
+            )
+        with open(os.path.join(log_dir, "backend.log"), "w") as handle:
+            handle.write("[2026-07-28T17:58:34.647Z] WARN [ComputeCredentials] backed off reason=x\n")
+
+        original_root = latency.ISOLATED_STACK_ROOT
+        original_worker = latency.WORKER_LOG
+        original_backend = latency.BACKEND_LOG
+        try:
+            latency.ISOLATED_STACK_ROOT = tmp
+            # Point the shared paths at nonexistent files so the ONLY way these
+            # events can be found is via isolated-stack discovery.
+            latency.WORKER_LOG = os.path.join(tmp, "absent-worker.txt")
+            latency.BACKEND_LOG = os.path.join(tmp, "absent-backend.log")
+
+            assert latency.isolated_stack_log_dirs() == [log_dir]
+            worker_events = latency._read_worker_raw()
+            backend_events = latency._read_backend_raw()
+        finally:
+            latency.ISOLATED_STACK_ROOT = original_root
+            latency.WORKER_LOG = original_worker
+            latency.BACKEND_LOG = original_backend
+
+    assert len(worker_events) == 1, "isolated-stack worker.N.log must be read"
+    assert worker_events[0].data["agent_id"] == "053a9066-28d1-4f34-a558-cc7cd402520d"
+    assert len(backend_events) == 1, "isolated-stack backend.log must be read"
+    assert backend_events[0].source == "backend"
+
+
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
     """Raw idea kernels have a home before they become runnable evals."""
     from benchmarks.long_horizon import load_idea_bank
@@ -11606,4 +11664,5 @@ async def run_all_tests():
         test_multi_task_run_record_survives_a_long_task_name_list,
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
+    r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
     return r.all_passed
