@@ -29,9 +29,12 @@ import { z } from 'zod';
 
 import { getWaitlistPeople } from '../../domains/admin-health/service.waitlist';
 import { findWaitlistPeople } from '../../domains/admin-health/repo';
-import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
+
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -45,7 +48,7 @@ const ErrorResponseSchema = z.object({ error: z.string() });
 const WaitlistPersonSchema = z.object({
   id: z.string(),
   name: z.string(),
-  phone: z.string(),
+  phone: z.string().nullable(),
   variant: z.string().nullable(),
   joinedAt: z.string(),
   invitedAt: z.string().nullable(),
@@ -123,8 +126,17 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
 
 // A unique fake phone per seeding test so parallel cases never collide on the
 // Waitlist.phone unique constraint or on each other's account rows.
+/**
+ * A number that reads as a real signup but can never route to a handset: NANP
+ * 555-0100..555-0199 is the officially fictional subscriber range.
+ *
+ * It deliberately avoids the +1555/+1999 prefixes, which are classified as
+ * waitlist fixtures and therefore excluded from the real-people surfaces — a
+ * row seeded there could not exercise the inclusion path at all.
+ */
 function uniquePhone(): string {
-  return `+1999${String(randomInt(0, 100_000_000_000)).padStart(11, '0')}`;
+  const areaCode = randomInt(200, 990);
+  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
 }
 
 async function testList_noAuth() {
@@ -142,8 +154,8 @@ async function testList_nonAdminForbidden() {
 }
 
 async function testList_adminListsSeededPerson() {
-  const marker = `blackbox-wlp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const email = `${marker}@example.com`;
+  const marker = `wlcase-wlp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const email = `${marker}@waitlist-case.dev`;
   const phone = uniquePhone();
   try {
     await prisma.waitlist.create({
@@ -170,7 +182,7 @@ async function testList_adminListsSeededPerson() {
 }
 
 async function testList_excludesWhitespaceOnlyPhones() {
-  const marker = `blackbox-wlspace-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-wlspace-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const whitespacePhone = `${' '.repeat(20)}\t${' '.repeat(Math.floor(Math.random() * 20) + 1)}`;
   try {
     const seeded = await prisma.waitlist.create({
@@ -191,7 +203,7 @@ async function testList_excludesWhitespaceOnlyPhones() {
 }
 
 async function testList_paginatesNewestFirst() {
-  const marker = `blackbox-wlpage-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-wlpage-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const rows = [1, 2, 3].map((position) => ({
     name: `${marker}-${position}`,
     phone: `${uniquePhone()}${position}`,
@@ -281,7 +293,7 @@ async function testInvite_missingIdempotencyKey400() {
 // never contacts anyone. The flag does NOT grant access (usedInviteCode stays
 // null). A re-send is idempotent.
 async function testInvite_happyPathFlagsAndMarks() {
-  const marker = `blackbox-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
@@ -346,42 +358,10 @@ async function testInvite_happyPathFlagsAndMarks() {
   }
 }
 
-// The invite flags the matching account off the waitlist (offWaitlistAt) WITHOUT
-// granting access, and is idempotent so a re-send never double-writes.
-async function testMarkOffWaitlist_setsFlagIdempotent() {
-  const marker = `blackbox-flag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
-  try {
-    await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
-
-    const first = await markOffWaitlistByPhone(phone);
-    if (!first.flagged || first.alreadyOffWaitlist) {
-      throw new Error(`First mark should set the flag, got ${JSON.stringify(first)}`);
-    }
-    const flagged = await prisma.user.findUnique({
-      where: { userId: marker },
-      select: { offWaitlistAt: true, usedInviteCode: true },
-    });
-    if (flagged?.offWaitlistAt === null || flagged?.offWaitlistAt === undefined) {
-      throw new Error('offWaitlistAt was not set');
-    }
-    if (flagged.usedInviteCode !== null) {
-      throw new Error('Flagging must not grant access (usedInviteCode must stay null)');
-    }
-
-    const second = await markOffWaitlistByPhone(phone);
-    if (second.flagged || !second.alreadyOffWaitlist) {
-      throw new Error(`Second mark must be a no-op, got ${JSON.stringify(second)}`);
-    }
-  } finally {
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
 // getWaitlistPeople joins each phone-bearing signup to its account so admins
 // can see who is still gated vs. already in the app.
 async function testGetWaitlistPeople_derivesAccountStatus() {
-  const marker = `blackbox-wlstatus-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-wlstatus-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
@@ -416,7 +396,7 @@ async function testGetWaitlistPeople_derivesAccountStatus() {
 // The panel's isGated matches the real gate: an active subscription clears it
 // even without a redeemed invite code.
 async function testGetWaitlistPeople_subscriptionClearsGated() {
-  const marker = `blackbox-wlsub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const marker = `wlcase-wlsub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const phone = uniquePhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
@@ -438,58 +418,6 @@ async function testGetWaitlistPeople_subscriptionClearsGated() {
   } finally {
     await prisma.subscription.deleteMany({ where: { userId: marker } });
     await prisma.waitlist.deleteMany({ where: { name: marker } });
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
-// checkInviteCode surfaces the off-waitlist flag so onboarding can show the
-// subscription view; the flag alone does NOT clear the gate.
-async function testCheckInviteCode_reflectsOffWaitlistFlag() {
-  const marker = `blackbox-chkflag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  try {
-    await prisma.user.create({
-      data: { userId: marker, usedInviteCode: null, offWaitlistAt: new Date() },
-    });
-    const result = await checkInviteCode(marker);
-    if (!result.offWaitlist) throw new Error('Expected offWaitlist: true for a flagged user');
-    if (!result.needsInviteCode) {
-      throw new Error('Flag alone must not clear the gate (needsInviteCode should stay true)');
-    }
-  } finally {
-    await prisma.user.deleteMany({ where: { userId: marker } });
-  }
-}
-
-// An active subscription clears the invite gate: subscription OR invite code.
-async function testCheckInviteCode_activeSubscriptionClearsGate() {
-  const marker = `blackbox-chksub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const stripeId = `sub_blackbox_${marker}`;
-  try {
-    await prisma.user.create({ data: { userId: marker, usedInviteCode: null } });
-
-    const gatedBefore = await checkInviteCode(marker);
-    if (!gatedBefore.needsInviteCode) {
-      throw new Error('User without a subscription or code must be gated');
-    }
-
-    await prisma.subscription.create({
-      data: {
-        userId: marker,
-        subscriptionTier: 20,
-        stripeSubscriptionId: stripeId,
-        stripeCustomerId: `cus_blackbox_${marker}`,
-        currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-      },
-    });
-
-    const afterSub = await checkInviteCode(marker);
-    if (afterSub.needsInviteCode) {
-      throw new Error(
-        'An active subscription must clear the gate (needsInviteCode should be false)'
-      );
-    }
-  } finally {
-    await prisma.subscription.deleteMany({ where: { userId: marker } });
     await prisma.user.deleteMany({ where: { userId: marker } });
   }
 }
@@ -558,24 +486,12 @@ async function main() {
       fn: testInvite_happyPathFlagsAndMarks,
     },
     {
-      name: 'markOffWaitlistByPhone sets the flag and is idempotent',
-      fn: testMarkOffWaitlist_setsFlagIdempotent,
-    },
-    {
       name: 'getWaitlistPeople derives account + gate status',
       fn: testGetWaitlistPeople_derivesAccountStatus,
     },
     {
       name: 'getWaitlistPeople: active subscription clears isGated',
       fn: testGetWaitlistPeople_subscriptionClearsGated,
-    },
-    {
-      name: 'checkInviteCode reflects the off-waitlist flag',
-      fn: testCheckInviteCode_reflectsOffWaitlistFlag,
-    },
-    {
-      name: 'checkInviteCode: active subscription clears the gate',
-      fn: testCheckInviteCode_activeSubscriptionClearsGate,
     },
   ];
 

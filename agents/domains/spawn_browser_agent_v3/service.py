@@ -753,6 +753,14 @@ def build_action_titles(  # noqa: C901
     elif action_name == "screenshot":
         title_progress = "Taking screenshot..."
         title_done = "Screenshot captured"
+    elif action_name == "read_network_requests":
+        url_pattern = str(unified_action.get("params", {}).get("url_pattern") or "").strip()
+        scope = f" matching '{url_pattern[:40]}'" if url_pattern else ""
+        title_progress = f"Reading network requests{scope}..."
+        title_done = f"Read network requests{scope}"
+    elif action_name == "recover_from_challenge":
+        title_progress = "Recovering from bot challenge..."
+        title_done = "Recovered from bot challenge"
     elif action_name == "request_user_assistance_for_authentication":
         title_progress = "Requesting authentication assistance..."
         title_done = "Requested authentication assistance"

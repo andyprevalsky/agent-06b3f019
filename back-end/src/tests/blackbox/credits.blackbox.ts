@@ -284,6 +284,101 @@ async function testUsage_adminUnlimited() {
   }
 }
 
+/**
+ * Invite-code users get a recurring monthly allowance instead of the subscribe
+ * gate. Pins the three properties that make it "free pro":
+ *   - the grant lands on the ordinary usage read (no scheduler to own),
+ *   - it is worth INVITE_MONTHLY_CREDIT_CENTS and expires at the month boundary,
+ *   - re-reading inside the same month does NOT stack another grant.
+ */
+async function testUsage_inviteCodeMonthlyAllowance() {
+  const { prisma } = await import('../../providers/database');
+  const { INVITE_MONTHLY_CREDIT_CENTS } = await import('../../providers/credits');
+  const invitedUserId = `credits-invite-${Date.now()}`;
+
+  await prisma.user.create({
+    data: { userId: invitedUserId, phone: `+1999${Date.now() % 10000000}`, usedInviteCode: 181818 },
+  });
+
+  try {
+    const first = await request(`${BASE_URL}/api/credits/usage?userId=${invitedUserId}`, {
+      headers: apiKeyHeaders(),
+    });
+    assertStatus(first.status, 200, first.data);
+    const firstBody = assertSchema(UsageResponse, first.data, 'GET /usage (invited)');
+
+    const expectedDollars = INVITE_MONTHLY_CREDIT_CENTS / 100;
+    if (firstBody.total < expectedDollars) {
+      throw new Error(
+        `Invited user should hold at least $${expectedDollars} of credit, got $${firstBody.total}`
+      );
+    }
+    // The whole point: a positive balance means every existing credit gate passes.
+    if (firstBody.remaining <= 0) {
+      throw new Error(`Invited user must not be credit-gated, remaining=${firstBody.remaining}`);
+    }
+
+    const now = new Date();
+    const periodEnd = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+    const grants = await prisma.credit.count({
+      where: {
+        userId: invitedUserId,
+        amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+        expirationDate: periodEnd,
+      },
+    });
+    if (grants !== 1) {
+      throw new Error(`Expected exactly 1 monthly grant, found ${grants}`);
+    }
+
+    // Idempotent within the period — a second read must not stack a second grant.
+    const second = await request(`${BASE_URL}/api/credits/usage?userId=${invitedUserId}`, {
+      headers: apiKeyHeaders(),
+    });
+    assertStatus(second.status, 200, second.data);
+    const regrants = await prisma.credit.count({
+      where: {
+        userId: invitedUserId,
+        amountCents: INVITE_MONTHLY_CREDIT_CENTS,
+        expirationDate: periodEnd,
+      },
+    });
+    if (regrants !== 1) {
+      throw new Error(`Monthly grant must not stack within a period, found ${regrants}`);
+    }
+  } finally {
+    await prisma.credit.deleteMany({ where: { userId: invitedUserId } });
+    await prisma.user.deleteMany({ where: { userId: invitedUserId } });
+  }
+}
+
+/** A user who never redeemed an invite code must NOT receive the allowance. */
+async function testUsage_noAllowanceWithoutInviteCode() {
+  const { prisma } = await import('../../providers/database');
+  const { INVITE_MONTHLY_CREDIT_CENTS } = await import('../../providers/credits');
+  const plainUserId = `credits-noinvite-${Date.now()}`;
+
+  await prisma.user.create({
+    data: { userId: plainUserId, phone: `+1998${Date.now() % 10000000}`, usedInviteCode: null },
+  });
+
+  try {
+    const res = await request(`${BASE_URL}/api/credits/usage?userId=${plainUserId}`, {
+      headers: apiKeyHeaders(),
+    });
+    assertStatus(res.status, 200, res.data);
+    const granted = await prisma.credit.count({
+      where: { userId: plainUserId, amountCents: INVITE_MONTHLY_CREDIT_CENTS },
+    });
+    if (granted !== 0) {
+      throw new Error(`Non-invited user must not receive the allowance, found ${granted}`);
+    }
+  } finally {
+    await prisma.credit.deleteMany({ where: { userId: plainUserId } });
+    await prisma.user.deleteMany({ where: { userId: plainUserId } });
+  }
+}
+
 // ==================== POST /api/credits/initialize ====================
 
 async function testInitialize_noAuth() {
@@ -483,6 +578,14 @@ async function runAll() {
     {
       name: 'GET /credits/usage -- admin is unlimited, non-admin is not',
       fn: testUsage_adminUnlimited,
+    },
+    {
+      name: 'GET /credits/usage -- invite-code user gets a recurring monthly allowance',
+      fn: testUsage_inviteCodeMonthlyAllowance,
+    },
+    {
+      name: 'GET /credits/usage -- no allowance without an invite code',
+      fn: testUsage_noAllowanceWithoutInviteCode,
     },
     { name: 'GET /credits/subscription -- happy path', fn: testSubscription_happy },
     {

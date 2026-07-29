@@ -35,6 +35,10 @@
 
 import { config } from 'dotenv';
 import { z } from 'zod';
+
+// Refuse to seed fixtures into prod when this file is run directly (bypassing
+// the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
+import './assertLocalDatabase';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';

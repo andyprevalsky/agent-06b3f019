@@ -190,6 +190,95 @@ def _redact_url_query(url: str) -> str:
     return f"{parsed.scheme}://{host}{parsed.path}"
 
 
+# Headers whose values are bearer credentials for the live browser session.
+# Everything else is returned verbatim: the agent needs content-type, csrf
+# tokens, pagination cursors, and rate-limit headers to reason about an API.
+# These four are masked because they buy the agent nothing (an in-page
+# `evaluate` fetch replays them automatically) while pinning a live session
+# token into turn history, LLM provider logs, and the trace archive.
+_SENSITIVE_HEADERS = frozenset({"cookie", "set-cookie", "authorization", "proxy-authorization"})
+
+
+def _coerce_header_map(headers: Any) -> Dict[str, str]:
+    """Normalize a CDP header bag to a flat lowercase-keyed str->str map."""
+    if not isinstance(headers, dict):
+        return {}
+    return {str(name).lower(): str(value) for name, value in headers.items()}
+
+
+def _mask_sensitive_headers(headers: Any) -> Dict[str, str]:
+    if not isinstance(headers, dict):
+        return {}
+    masked: Dict[str, str] = {}
+    for name, value in headers.items():
+        key = str(name).lower()
+        text = str(value)
+        masked[key] = f"<redacted {len(text)} chars>" if key in _SENSITIVE_HEADERS else text
+    return masked
+
+
+def _encoded_len(text: Any) -> int:
+    """UTF-8 byte length — the unit every *_BYTES budget is denominated in."""
+    if text is None:
+        return 0
+    value = text if isinstance(text, str) else str(text)
+    return len(value.encode("utf-8"))
+
+
+def _truncate_text_to_bytes(text: Any, max_bytes: int) -> Optional[str]:
+    """Truncate on ENCODED bytes, not characters.
+
+    `_max_body_bytes` (BROWSER_AGENT_NETWORK_MAX_BODY_BYTES) is a byte budget
+    bounding worker heap. Slicing by character count lets a non-ASCII payload
+    (unicode form fields, CJK JSON) retain up to ~4x the intended bytes, and at
+    `_max_entries` retained requests that multiplies. errors="ignore" drops a
+    trailing partial code point rather than raising.
+    """
+    if text is None:
+        return None
+    value = text if isinstance(text, str) else str(text)
+    if max_bytes <= 0:
+        return ""
+    encoded = value.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return value
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _truncate_text(text: Any, max_chars: int) -> Optional[str]:
+    if text is None:
+        return None
+    value = text if isinstance(text, str) else str(text)
+    if max_chars <= 0:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars]
+
+
+def _duration_ms(entry: Dict[str, Any]) -> Optional[int]:
+    start = entry.get("request_ts_ms")
+    end = entry.get("response_ts_ms")
+    if start is None or end is None:
+        return None
+    return max(0, int(end) - int(start))
+
+
+def _status_matches(status: Any, failed: Any, status_filter: str) -> bool:
+    """Match a status filter: exact ('403'), class ('4xx'), or 'error'/'ok'."""
+    if status_filter == "error":
+        return bool(failed) or (isinstance(status, int) and status >= 400)
+    if status_filter == "ok":
+        return not failed and isinstance(status, int) and 200 <= status < 400
+    if not isinstance(status, int):
+        return False
+    if status_filter.endswith("xx") and status_filter[:-2].isdigit():
+        return status // 100 == int(status_filter[:-2])
+    if status_filter.isdigit():
+        return status == int(status_filter)
+    return False
+
+
 def _media_extension(url: str, default: str) -> str:
     suffix = Path(urlparse(url).path).suffix
     if suffix and len(suffix) <= 8:
@@ -1862,9 +1951,19 @@ def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
 
 
 class BrowserNetworkRecorder:
-    """CDP network observer with optional local body-log persistence."""
+    """CDP network observer with optional local body-log persistence.
 
-    STATIC_EXTENSIONS = (
+    Metadata (url, method, status, headers, timing, redirect chain) is captured
+    for EVERY http(s) request the page makes, regardless of resource type, so the
+    agent's ``read_network_requests`` tool can answer "what did this page
+    actually call" the way DevTools' Network panel does. Response *bodies* are a
+    separate, narrower capture: only text-ish payloads are downloaded, each is
+    capped at ``_max_body_bytes``, and the in-memory body cache is bounded by
+    ``_max_total_body_bytes`` with oldest-first eviction so a long-lived page
+    cannot grow the worker's heap without bound.
+    """
+
+    BODY_SKIP_EXTENSIONS = (
         ".css",
         ".js",
         ".mjs",
@@ -1884,7 +1983,11 @@ class BrowserNetworkRecorder:
         ".mp3",
         ".wav",
     )
-    CAPTURE_RESOURCE_TYPES = {"XHR", "Fetch", "Document"}
+    # Bodies worth one getResponseBody round trip. Scripts/stylesheets/fonts are
+    # deliberately absent: their metadata is captured like everything else, but
+    # an agent that wants a bundle can `evaluate` or web_fetch it, and pulling
+    # them for every page would cost CDP round trips on every browser session.
+    BODY_RESOURCE_TYPES = {"XHR", "Fetch", "Document", "EventSource", "Other"}
 
     def __init__(
         self,
@@ -1924,10 +2027,28 @@ class BrowserNetworkRecorder:
         # late events from the outgoing browser cannot corrupt the winner's log.
         self._network_generation = 0
         self._body_index = 0
-        self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "300")))
+        self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "600")))
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
         if not self.persists_network_log:
             self._max_body_bytes = min(self._max_body_bytes, 65_536)
+        # Response bodies the agent can read back via read_network_requests.
+        # Kept separate from `entries` so the byte budget is enforced on the only
+        # unbounded axis: one browser session must not hold tens of MB of page
+        # payloads while thousands of agents share a worker.
+        self._bodies: Dict[str, str] = {}
+        # Encoded size per cached body, so the budget is charged in real bytes
+        # and eviction is O(1) instead of re-encoding each candidate.
+        self._body_byte_sizes: Dict[str, int] = {}
+        self._body_bytes = 0
+        self._max_total_body_bytes = max(
+            self._max_body_bytes,
+            int(
+                os.getenv(
+                    "BROWSER_AGENT_NETWORK_MAX_TOTAL_BODY_BYTES",
+                    "8388608" if self.persists_network_log else "2097152",
+                )
+            ),
+        )
         self._patterns = [
             item.strip().lower()
             for item in os.getenv("BROWSER_AGENT_NETWORK_CAPTURE_URL_PATTERNS", "").split(",")
@@ -2028,19 +2149,72 @@ class BrowserNetworkRecorder:
         await self.start()
 
     def _should_capture(self, url: str, resource_type: str, mime_type: str = "") -> bool:
+        """Metadata capture predicate: every http(s) request the page issues.
+
+        The agent asks read_network_requests questions like "did anything 403?"
+        and "what endpoint backs this page?" — both are unanswerable if whole
+        resource classes are invisible, so nothing is filtered out here beyond
+        non-http schemes (data:, blob:, chrome-extension:). Body download is
+        gated separately by `_should_capture_body`.
+        """
+        _ = (resource_type, mime_type)
         if not url.startswith(("http://", "https://")):
             return False
+        if self._patterns:
+            lower_url = url.lower()
+            return any(pattern in lower_url for pattern in self._patterns)
+        return True
+
+    def _should_capture_body(self, url: str, resource_type: str, mime_type: str = "") -> bool:
+        """Body-download predicate: text-ish payloads worth reading back."""
         lower_url = url.lower()
-        if any(lower_url.split("?", 1)[0].endswith(ext) for ext in self.STATIC_EXTENSIONS):
+        if any(lower_url.split("?", 1)[0].endswith(ext) for ext in self.BODY_SKIP_EXTENSIONS):
             return False
         if self._patterns:
             return any(pattern in lower_url for pattern in self._patterns)
-        if resource_type not in self.CAPTURE_RESOURCE_TYPES:
+        if resource_type and resource_type not in self.BODY_RESOURCE_TYPES:
             return False
         lower_mime = (mime_type or "").lower()
         return not lower_mime or any(
             marker in lower_mime for marker in ("json", "text/", "html", "xml", "x-www-form-urlencoded", "javascript")
         )
+
+    def _evict_overflow_entries(self) -> None:
+        """Drop oldest entries once the buffer is full (dict preserves order).
+
+        The tool reads newest-first, so overflow must evict the OLDEST request —
+        the previous behaviour refused to record NEW requests once full, which
+        made every API call after a heavy page load invisible to the agent.
+        """
+        while len(self.entries) > self._max_entries:
+            oldest_key = next(iter(self.entries))
+            self.entries.pop(oldest_key, None)
+            self._discard_body(oldest_key)
+
+    def _discard_body(self, request_key: str) -> None:
+        self._bodies.pop(request_key, None)
+        self._body_bytes = max(0, self._body_bytes - self._body_byte_sizes.pop(request_key, 0))
+
+    def _store_body(self, request_key: str, body_text: str) -> None:
+        """Cache a decoded response body under the shared byte budget.
+
+        The budget is accounted in ENCODED bytes, not characters: a JSON API
+        returning non-ASCII text costs up to 4 bytes per character, so charging
+        len(str) would let the cache grow several times past
+        _max_total_body_bytes — defeating the heap bound it exists to enforce.
+        The size is measured once here and remembered, so eviction never has to
+        re-encode a payload it is about to drop.
+        """
+        self._discard_body(request_key)
+        body_bytes = len(body_text.encode("utf-8", errors="replace"))
+        self._bodies[request_key] = body_text
+        self._body_byte_sizes[request_key] = body_bytes
+        self._body_bytes += body_bytes
+        while self._body_bytes > self._max_total_body_bytes and self._bodies:
+            oldest_key = next(iter(self._bodies))
+            if oldest_key == request_key and len(self._bodies) == 1:
+                break
+            self._discard_body(oldest_key)
 
     def _request_key(self, request_id: str, generation: int | None = None) -> str:
         effective_generation = (
@@ -2069,10 +2243,27 @@ class BrowserNetworkRecorder:
             self._active_request_ids.add(request_key)
             if request_key in self._ignored_request_ids:
                 return
-            if len(self.entries) >= self._max_entries:
-                return
             if not self._should_capture(url, resource_type):
                 return
+            post_data = request.get("postData")
+            existing = self.entries.get(request_key)
+            # CDP reuses one requestId across a redirect chain and re-fires
+            # requestWillBeSent with the previous hop in `redirectResponse`.
+            # Keep the chain so the agent can see "POST /login -> 302 -> /2fa"
+            # instead of only the final hop.
+            redirects = list(existing.get("redirects") or []) if existing else []
+            redirect_response = event.get("redirectResponse") or {}
+            if redirect_response:
+                redirects.append(
+                    {
+                        "url": (existing or {}).get("url") or redirect_response.get("url") or "",
+                        "status": redirect_response.get("status"),
+                        # CDP preserves the server's header casing, and real
+                        # servers send "Location". Coerce to lowercase keys
+                        # first or this silently reads None on every redirect.
+                        "location": _coerce_header_map(redirect_response.get("headers")).get("location"),
+                    }
+                )
             self.entries[request_key] = {
                 "request_id": request_id,
                 "browser_generation": generation,
@@ -2080,8 +2271,15 @@ class BrowserNetworkRecorder:
                 "method": request.get("method"),
                 "url": url,
                 "resource_type": resource_type,
+                "request_headers": _coerce_header_map(request.get("headers")),
+                "request_body": _truncate_text_to_bytes(post_data, self._max_body_bytes),
+                "request_body_truncated": bool(post_data and _encoded_len(post_data) > self._max_body_bytes),
+                "has_post_data": bool(request.get("hasPostData") or post_data),
+                "initiator": (event.get("initiator") or {}).get("type"),
+                "redirects": redirects,
                 "request_ts_ms": int((time.monotonic() - self._started_at) * 1000),
             }
+            self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
 
@@ -2103,23 +2301,10 @@ class BrowserNetworkRecorder:
             self._active_request_ids.add(request_key)
             if request_key in self._ignored_request_ids:
                 return
-            # The always-on reputation monitor needs only small JSON detector
-            # responses. Drop all other content before loading its body; full
-            # text/HTML capture remains available when local recording is on.
-            if not getattr(self, "persists_network_log", True) and "json" not in mime_type.lower():
-                self.entries.pop(request_key, None)
-                return
-            # Capacity only blocks NEW requests; an already-tracked request must
-            # still receive its status/response update (otherwise a page that
-            # fills the buffer before responses land leaves every status None and
-            # defeats 403/challenge detection).
-            if request_key not in self.entries and len(self.entries) >= self._max_entries:
-                return
-            # Only gate NEW requests on the MIME predicate. An already-tracked
+            # Only gate NEW requests on the capture predicate. An already-tracked
             # request must still receive its status/response update even when the
-            # response MIME is non-capturable (e.g. application/octet-stream,
-            # protobuf); otherwise it keeps status=None and 403/challenge
-            # detection via read_network_requests fails.
+            # response is non-capturable, otherwise it keeps status=None and
+            # 403/challenge detection via read_network_requests fails.
             if request_key not in self.entries and not self._should_capture(url, resource_type, mime_type):
                 return
             entry = self.entries.setdefault(
@@ -2136,12 +2321,18 @@ class BrowserNetworkRecorder:
                 {
                     "session_id": session_id,
                     "url": url,
-                    "resource_type": resource_type,
+                    "resource_type": resource_type or entry.get("resource_type"),
                     "status": response.get("status"),
+                    "status_text": response.get("statusText") or None,
                     "mime_type": mime_type,
+                    "response_headers": _coerce_header_map(response.get("headers")),
+                    "protocol": response.get("protocol"),
+                    "remote_address": response.get("remoteIPAddress"),
+                    "from_cache": bool(response.get("fromDiskCache") or response.get("fromPrefetchCache")),
                     "response_ts_ms": int((time.monotonic() - self._started_at) * 1000),
                 }
             )
+            self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
 
@@ -2159,8 +2350,17 @@ class BrowserNetworkRecorder:
             self._active_request_ids.discard(request_key)
         if not request_id or request_key not in self.entries:
             return
-        self.entries[request_key]["encoded_data_length"] = event.get("encodedDataLength")
-        self.entries[request_key]["terminal"] = True
+        entry = self.entries[request_key]
+        entry["encoded_data_length"] = event.get("encodedDataLength")
+        entry["terminal"] = True
+        # Metadata is captured for every resource, but downloading every image
+        # and font body would be pure waste — only text-ish payloads are pulled.
+        if not self._should_capture_body(
+            str(entry.get("url") or ""),
+            str(entry.get("resource_type") or ""),
+            str(entry.get("mime_type") or ""),
+        ):
+            return
         # Bind the client at event time. A provider handoff can replace
         # self._cdp_client while an outgoing response body is still in flight.
         task = asyncio.create_task(
@@ -2244,21 +2444,28 @@ class BrowserNetworkRecorder:
                             browser_generation=generation,
                         )
 
+            entry.update(
+                {
+                    "body_size": original_size,
+                    "body_truncated": truncated,
+                    "body_base64_encoded": bool(response.get("base64Encoded")),
+                    "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
+                }
+            )
+            # Keep the decoded body in memory so read_network_requests can hand
+            # it to the agent. Local persistence is a separate dev-only concern:
+            # gating in-memory retention on it is what made the tool return
+            # metadata-only rows and forced agents to re-fetch APIs by hand.
+            if not response.get("base64Encoded"):
+                self._store_body(request_key, body_bytes.decode("utf-8", errors="replace"))
+
             if getattr(self, "persists_network_log", True):
                 self._body_index += 1
                 index = self._body_index
                 extension = ".json" if "json" in str(entry.get("mime_type", "")).lower() else ".txt"
                 body_path = self.network_dir / f"{index:04d}_{request_id.replace('.', '_')}{extension}"
                 body_path.write_bytes(body_bytes)
-                entry.update(
-                    {
-                        "body_file": body_path.name,
-                        "body_size": original_size,
-                        "body_truncated": truncated,
-                        "body_base64_encoded": bool(response.get("base64Encoded")),
-                        "body_captured_at_ms": int((time.monotonic() - self._started_at) * 1000),
-                    }
-                )
+                entry["body_file"] = body_path.name
                 logger.info(
                     "Browser network response body captured",
                     agent_id=self.agent_id,
@@ -2279,12 +2486,6 @@ class BrowserNetworkRecorder:
                 url=entry.get("url"),
                 error=str(exc),
             )
-        finally:
-            # Monitoring-only sessions must stay bounded during long-lived apps.
-            # The rejection queue retains the only signal the runtime needs;
-            # request metadata and parsed response bodies are not exposed or kept.
-            if not getattr(self, "persists_network_log", True):
-                self.entries.pop(request_key, None)
 
     def pop_provider_exit_rejection(self) -> Optional[Dict[str, Any]]:
         """Consume one explicit rejection verdict for the active browser exit."""
@@ -2293,38 +2494,108 @@ class BrowserNetworkRecorder:
             return None
         return rejections.pop(0)
 
-    def query_requests(
+    def query_requests(  # noqa: C901
         self,
         *,
         url_pattern: str = "",
+        method: str = "",
+        status: str = "",
+        resource_type: str = "",
         limit: int = 100,
         clear: bool = False,
+        include_query: bool = False,
+        include_headers: bool = False,
+        include_bodies: bool = False,
+        max_body_chars: int = 4000,
     ) -> List[Dict[str, Any]]:
-        """Return captured network requests for the agent's `read_network_requests`
-        tool. Mirrors Claude Code's tool: newest-first list of
-        url/method/status/resource_type (cross-origin included), optionally filtered
-        by a URL substring. When ``clear`` is set the buffer is emptied after the
-        read so a follow-up call only surfaces new traffic.
+        """Return captured network requests for the agent's `read_network_requests` tool.
+
+        Newest-first, filterable by URL substring / method / status / resource
+        type. Every row carries the DevTools-grade summary (url, method, status,
+        mime, timing, size, redirect chain, failure). The three opt-in flags
+        widen a row to the full record:
+
+        - ``include_query``  -> unredacted URL (query string + fragment)
+        - ``include_headers``-> request + response headers (credential headers masked)
+        - ``include_bodies`` -> request post data + response body, capped at
+          ``max_body_chars`` characters each
+
+        They are opt-in because a bare listing goes into the agent's turn history
+        every step; bodies and query strings are only worth that context when the
+        agent actually asked for them.
         """
         pattern = (url_pattern or "").lower().strip()
+        method_filter = (method or "").upper().strip()
+        status_filter = (status or "").lower().strip()
+        resource_filter = (resource_type or "").lower().strip()
         capped_limit = max(1, min(int(limit or 100), self._max_entries))
+        body_chars = max(0, min(int(max_body_chars or 0), self._max_body_bytes))
         scored: List[tuple[int, Dict[str, Any]]] = []
-        for entry in self.entries.values():
+        for key, entry in self.entries.items():
             url = entry.get("url") or ""
             if pattern and pattern not in url.lower():
                 continue
-            # Never return raw query strings/fragments to the agent turn history:
-            # they can carry signed URLs, auth tokens, and PII. Path is enough for
-            # challenge detection (status) and endpoint discovery.
+            if method_filter and str(entry.get("method") or "").upper() != method_filter:
+                continue
+            if resource_filter and str(entry.get("resource_type") or "").lower() != resource_filter:
+                continue
+            if status_filter and not _status_matches(entry.get("status"), entry.get("failed"), status_filter):
+                continue
+            # Query strings can carry signed URLs, auth tokens, and PII, so the
+            # default row exposes only the locator. include_query is the agent's
+            # explicit opt-in when it needs the real request URL.
             row: Dict[str, Any] = {
-                "url": _redact_url_query(url),
+                "id": entry.get("request_id"),
+                "url": url if include_query else _redact_url_query(url),
                 "method": entry.get("method"),
                 "status": entry.get("status"),
                 "resource_type": entry.get("resource_type"),
             }
+            if entry.get("status_text"):
+                row["status_text"] = entry.get("status_text")
+            if entry.get("mime_type"):
+                row["mime_type"] = entry.get("mime_type")
+            duration_ms = _duration_ms(entry)
+            if duration_ms is not None:
+                row["duration_ms"] = duration_ms
+            if entry.get("encoded_data_length") is not None:
+                row["size_bytes"] = entry.get("encoded_data_length")
+            if entry.get("redirects"):
+                row["redirects"] = [
+                    {
+                        "url": hop.get("url") if include_query else _redact_url_query(str(hop.get("url") or "")),
+                        "status": hop.get("status"),
+                        "location": hop.get("location") if include_query else None,
+                    }
+                    for hop in entry.get("redirects") or []
+                ]
             if entry.get("failed"):
                 row["failed"] = True
                 row["failure"] = entry.get("failure")
+            body_text = self._bodies.get(key)
+            row["body_available"] = body_text is not None
+            if include_headers:
+                row["request_headers"] = _mask_sensitive_headers(entry.get("request_headers"))
+                row["response_headers"] = _mask_sensitive_headers(entry.get("response_headers"))
+            if include_bodies:
+                request_body = entry.get("request_body")
+                if request_body:
+                    capped_request_body = len(request_body) > body_chars
+                    row["request_body"] = _truncate_text(request_body, body_chars)
+                    row["request_body_truncated"] = bool(entry.get("request_body_truncated")) or capped_request_body
+                elif entry.get("has_post_data"):
+                    row["request_body"] = None
+                    row["request_body_note"] = "post data not exposed by CDP for this request"
+                if body_text is not None:
+                    row["response_body"] = _truncate_text(body_text, body_chars)
+                    row["response_body_truncated"] = bool(entry.get("body_truncated")) or len(body_text) > body_chars
+                    row["response_body_size"] = entry.get("body_size")
+                elif entry.get("body_error"):
+                    row["response_body_error"] = entry.get("body_error")
+                elif not entry.get("terminal"):
+                    row["response_body_note"] = "request still in flight"
+                else:
+                    row["response_body_note"] = "body not captured (binary or non-text resource)"
             ts = entry.get("response_ts_ms") or entry.get("request_ts_ms") or 0
             scored.append((int(ts), row))
         scored.sort(key=lambda item: item[0], reverse=True)
@@ -2335,6 +2606,9 @@ class BrowserNetworkRecorder:
             # pre-clear traffic. Terminal events remove IDs from both sets.
             self._ignored_request_ids.update(self._active_request_ids)
             self.entries.clear()
+            self._bodies.clear()
+            self._body_byte_sizes.clear()
+            self._body_bytes = 0
         return rows
 
     async def close(self) -> Optional[Path]:
@@ -2365,7 +2639,16 @@ class BrowserNetworkRecorder:
                     "task_id": self.task_id,
                     "session_id": self.session_id,
                     "entry_count": len(self.entries),
-                    "entries": list(self.entries.values()),
+                    # The index is archived alongside the recording, so the same
+                    # credential-header masking the agent sees applies here.
+                    "entries": [
+                        {
+                            **entry,
+                            "request_headers": _mask_sensitive_headers(entry.get("request_headers")),
+                            "response_headers": _mask_sensitive_headers(entry.get("response_headers")),
+                        }
+                        for entry in self.entries.values()
+                    ],
                 },
                 indent=2,
             ),
