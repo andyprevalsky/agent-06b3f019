@@ -27,6 +27,7 @@ import {
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { workDirForGithubRepo } from './e2bWorkDir';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -60,17 +61,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace';
-
-function workDirForGithubRepo(githubRepoUrl?: string): string {
-  if (!githubRepoUrl) return '/home/user';
-  try {
-    new URL(githubRepoUrl);
-    return CODE_AGENT_REPO_WORKDIR;
-  } catch {
-    return '/home/user';
-  }
-}
 
 function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
