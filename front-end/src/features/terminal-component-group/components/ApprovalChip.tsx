@@ -350,7 +350,20 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
            * inside the scroller or it would scroll away with the content.
            */}
           <div className="relative flex min-h-0 flex-1 flex-col">
-            <div ref={scrollerRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto">
+            {/*
+             * tabIndex + role/label: the purchase details can overflow with no
+             * focusable child inside, and a scroll container that cannot take
+             * focus cannot be scrolled by keyboard at all. A user approving a
+             * real charge would be unable to read the items they are paying for.
+             */}
+            <div
+              ref={scrollerRef}
+              onScroll={onScroll}
+              tabIndex={0}
+              role="region"
+              aria-label="Approval details"
+              className="min-h-0 flex-1 overflow-y-auto"
+            >
               <div ref={contentRef}>
                 {pendingApproval.imageUrl && (
                   <div className="mb-3 flex justify-center">

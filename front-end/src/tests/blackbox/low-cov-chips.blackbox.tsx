@@ -381,6 +381,14 @@ describe('ApprovalChip', () => {
     for (const label of [/accept/i, /reject/i]) {
       expect(scrollers[0].contains(screen.getByRole('button', { name: label }))).toBe(false);
     }
+
+    // The scroller must be keyboard-reachable. Purchase details can overflow
+    // with no focusable child inside, and a scroll container that cannot take
+    // focus cannot be scrolled by keyboard — leaving someone approving a real
+    // charge unable to read the items they are paying for.
+    expect(scrollers[0].getAttribute('tabindex')).toBe('0');
+    expect(scrollers[0].getAttribute('role')).toBe('region');
+    expect(scrollers[0].getAttribute('aria-label')).toBeTruthy();
   });
 
   // CodeRabbit finding on PR #912: AgentChatArea keeps ApprovalChip mounted for
@@ -423,9 +431,7 @@ describe('ApprovalChip', () => {
     rerender(<ApprovalChip pendingApproval={approval('req-second', 'Second Merchant')} />);
 
     expect(scroller.scrollTop).toBe(0);
-    expect(
-      screen.getByText('Approve a $22.81 purchase from Second Merchant?'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Approve a $22.81 purchase from Second Merchant?')).toBeInTheDocument();
   });
 
   it('renders historical payment metadata without undefined values or broken links', () => {

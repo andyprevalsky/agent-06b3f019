@@ -42,11 +42,20 @@ def _decode_url_component(value: str) -> str:
     return decoded
 
 
-def _normalized_page_route(value: str) -> tuple[str, str]:
+def _normalized_page_route(value: str) -> tuple[str, str, str]:
+    """Host, path, and query — query included so routes stay distinguishable.
+
+    Dropping the query collapsed `/catalog?id=123` and `/catalog?view=cart` to
+    the same route, so a query-addressed product page was rejected as "the
+    current checkout page" it merely shared a path with. Storefronts that
+    address items purely by query string are common, and that false reject is
+    the failure class this module exists to avoid.
+    """
     parsed = urlparse(value)
     hostname = (parsed.hostname or "").lower().removeprefix("www.")
     path = re.sub(r"/+", "/", _decode_url_component(parsed.path).lower()).rstrip("/") or "/"
-    return hostname, path
+    query = "&".join(sorted(f"{k.lower()}={v}" for k, v in parse_qsl(parsed.query, keep_blank_values=True)))
+    return hostname, path, query
 
 
 def _product_host_is_covered(product_host: str, observed_host: str) -> bool:
