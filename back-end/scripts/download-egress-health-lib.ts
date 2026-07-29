@@ -51,6 +51,7 @@ interface ParsedTelemetryLog {
   component?: unknown;
   message?: unknown;
   event?: unknown;
+  insert_id?: unknown;
   bytes_per_second?: unknown;
 }
 
@@ -76,6 +77,7 @@ export interface DownloadEgressReport {
     failed: number;
     slowCompleted: number;
     medianBytesPerSecond: number | null;
+    duplicateEventsDropped: number;
     events: ParsedTelemetryLog[];
   };
   failures: string[];
@@ -95,9 +97,7 @@ function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 function probeArtifact(
@@ -171,7 +171,9 @@ async function fetchJson(url: URL, authorization: string): Promise<unknown> {
     signal: AbortSignal.timeout(20_000),
   });
   if (!response.ok) {
-    throw new Error(`${url.origin}${url.pathname} returned ${response.status}: ${(await response.text()).slice(0, 300)}`);
+    throw new Error(
+      `${url.origin}${url.pathname} returned ${response.status}: ${(await response.text()).slice(0, 300)}`
+    );
   }
   return (await response.json()) as unknown;
 }
@@ -202,10 +204,10 @@ async function fetchEdgeRows(
   url.searchParams.set('sql', edgeSql());
   url.searchParams.set('iso_timestamp_start', start.toISOString());
   url.searchParams.set('iso_timestamp_end', end.toISOString());
-  const body = (await fetchJson(
-    url,
-    `Bearer ${config.supabaseAccessToken}`
-  )) as { result?: unknown; error?: unknown };
+  const body = (await fetchJson(url, `Bearer ${config.supabaseAccessToken}`)) as {
+    result?: unknown;
+    error?: unknown;
+  };
   if (body.error !== null && body.error !== undefined && body.error !== '') {
     throw new Error(`Supabase logs query failed: ${String(body.error)}`);
   }
@@ -226,10 +228,9 @@ async function fetchTelemetryLogs(
   url.searchParams.set('limit', '100');
   url.searchParams.set('type', 'app');
   url.searchParams.set('text', 'DownloadTelemetry');
-  const body = (await fetchJson(
-    url,
-    `Bearer ${config.renderApiKey}`
-  )) as { logs?: Array<{ message?: unknown }> };
+  const body = (await fetchJson(url, `Bearer ${config.renderApiKey}`)) as {
+    logs?: Array<{ message?: unknown }>;
+  };
   const events: ParsedTelemetryLog[] = [];
   for (const log of body.logs ?? []) {
     if (typeof log.message !== 'string') continue;
@@ -289,7 +290,16 @@ function aggregateTelemetry(
     failed: 0,
   };
   const completedSpeeds: number[] = [];
+  const observedInsertIds = new Set<string>();
+  let duplicateEventsDropped = 0;
   for (const event of events) {
+    if (typeof event.insert_id === 'string' && event.insert_id !== '') {
+      if (observedInsertIds.has(event.insert_id)) {
+        duplicateEventsDropped += 1;
+        continue;
+      }
+      observedInsertIds.add(event.insert_id);
+    }
     if (event.event === 'mac_update_download_started') counts.started += 1;
     if (event.event === 'mac_update_download_progress') counts.progress += 1;
     if (event.event === 'mac_update_download_completed') {
@@ -303,6 +313,7 @@ function aggregateTelemetry(
     ...counts,
     slowCompleted: completedSpeeds.filter((speed) => speed < minimumBytesPerSecond).length,
     medianBytesPerSecond: median(completedSpeeds),
+    duplicateEventsDropped,
     events,
   };
 }
@@ -368,10 +379,7 @@ export async function runDownloadEgressHealth(
   if (edge.serverErrors > 0) {
     failures.push(`Supabase edge logs contain ${edge.serverErrors} server error request(s)`);
   }
-  const realUserTelemetry = aggregateTelemetry(
-    telemetryEvents,
-    config.minimumBytesPerSecond
-  );
+  const realUserTelemetry = aggregateTelemetry(telemetryEvents, config.minimumBytesPerSecond);
   const incidentCount = config.realUserIncidentCount ?? 2;
   if (realUserTelemetry.failed >= incidentCount) {
     failures.push(`${realUserTelemetry.failed} real updater downloads failed`);

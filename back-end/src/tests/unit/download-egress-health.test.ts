@@ -66,6 +66,22 @@ const server = createServer((request, response) => {
               component: 'DownloadTelemetry',
               message: 'Mac updater download telemetry',
               event: 'mac_update_download_completed',
+              insert_id: 'download-complete-123',
+              version: '2.4.6',
+              session_id: 'download-session-123',
+              elapsed_ms: 92_000,
+              bytes_per_second: 1_660_000,
+              transferred_bytes: 152_852_260,
+              total_bytes: 152_852_260,
+            }),
+          },
+          {
+            timestamp: '2026-07-29T22:30:02.000Z',
+            message: JSON.stringify({
+              component: 'DownloadTelemetry',
+              message: 'Mac updater download telemetry',
+              event: 'mac_update_download_completed',
+              insert_id: 'download-complete-123',
               version: '2.4.6',
               session_id: 'download-session-123',
               elapsed_ms: 92_000,
@@ -114,6 +130,7 @@ async function main(): Promise<void> {
   assert.equal(healthy.edge.serverErrors, 0);
   assert.equal(healthy.realUserTelemetry.completed, 1);
   assert.equal(healthy.realUserTelemetry.failed, 0);
+  assert.equal(healthy.realUserTelemetry.duplicateEventsDropped, 1);
   assert.equal(healthy.realUserTelemetry.medianBytesPerSecond, 1_660_000);
   assert.equal(observedRange, 'bytes=0-1023');
   assert.equal(observedSupabaseAuth, 'Bearer supabase-test-token');
