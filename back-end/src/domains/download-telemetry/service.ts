@@ -21,11 +21,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function requiredString(
-  body: Record<string, unknown>,
-  key: string,
-  maximumLength: number
-): string {
+function requiredString(body: Record<string, unknown>, key: string, maximumLength: number): string {
   const value = body[key];
   if (typeof value !== 'string' || value.trim() === '' || value.length > maximumLength) {
     throw new DownloadTelemetryValidationError(`${key} must be a non-empty bounded string`);
@@ -56,7 +52,10 @@ function optionalNumber(body: Record<string, unknown>, key: string): number | un
 }
 
 function parseEvent(value: unknown): DownloadTelemetryEvent {
-  if (typeof value !== 'string' || !DOWNLOAD_TELEMETRY_EVENTS.has(value as DownloadTelemetryEvent)) {
+  if (
+    typeof value !== 'string' ||
+    !DOWNLOAD_TELEMETRY_EVENTS.has(value as DownloadTelemetryEvent)
+  ) {
     throw new DownloadTelemetryValidationError('event is not an accepted download event');
   }
   return value as DownloadTelemetryEvent;
@@ -71,10 +70,7 @@ export function parseDownloadTelemetry(value: unknown): DownloadTelemetryPayload
     throw new DownloadTelemetryValidationError('occurredAt must be an ISO timestamp');
   }
   const milestonePercent = optionalNumber(value, 'milestonePercent');
-  if (
-    milestonePercent !== undefined &&
-    !DOWNLOAD_TELEMETRY_MILESTONES.has(milestonePercent)
-  ) {
+  if (milestonePercent !== undefined && !DOWNLOAD_TELEMETRY_MILESTONES.has(milestonePercent)) {
     throw new DownloadTelemetryValidationError('milestonePercent must be 25, 50, or 75');
   }
   return {

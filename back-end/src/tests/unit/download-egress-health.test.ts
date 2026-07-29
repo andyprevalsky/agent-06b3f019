@@ -106,7 +106,10 @@ async function main(): Promise<void> {
   const healthy = await runDownloadEgressHealth(commonConfig);
   assert.equal(healthy.status, 'healthy');
   assert.equal(healthy.probes.length, 3);
-  assert.equal(healthy.probes.every((probe) => probe.httpStatus === 206), true);
+  assert.equal(
+    healthy.probes.every((probe) => probe.httpStatus === 206),
+    true
+  );
   assert.equal(healthy.edge.requests, 8);
   assert.equal(healthy.edge.serverErrors, 0);
   assert.equal(healthy.realUserTelemetry.completed, 1);

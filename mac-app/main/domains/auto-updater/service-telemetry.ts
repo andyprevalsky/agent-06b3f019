@@ -45,8 +45,7 @@ function insertId(
   event: DownloadTelemetryEvent,
   milestonePercent?: number
 ): string {
-  const suffix =
-    event === 'mac_update_download_progress' ? `progress-${milestonePercent}` : event;
+  const suffix = event === 'mac_update_download_progress' ? `progress-${milestonePercent}` : event;
   return `${transfer.sessionId}:${suffix}`;
 }
 
