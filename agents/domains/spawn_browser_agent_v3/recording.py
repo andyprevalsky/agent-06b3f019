@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote_to_bytes, urljoin, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
@@ -1861,6 +1861,48 @@ def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
     return False
 
 
+def _redact_request_body(post_data: str) -> str:
+    """Strip secret-bearing values from a captured request body.
+
+    Structured payloads (JSON, form-encoded) are walked and their sensitive
+    values replaced. Anything that parses as neither is dropped entirely rather
+    than persisted verbatim: an unknown format cannot be inspected, so it cannot
+    be shown to be secret-free, and retaining it is the risk this guard exists
+    to remove.
+    """
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+                    if any(marker in str(key).lower() for marker in BrowserNetworkRecorder.REDACT_KEY_MARKERS)
+                    else scrub(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    stripped = post_data.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return json.dumps(scrub(json.loads(stripped)), separators=(",", ":"))
+        except (ValueError, TypeError):
+            return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+    if "=" in stripped and "\n" not in stripped:
+        pairs = []
+        for pair in stripped.split("&"):
+            key, sep, raw = pair.partition("=")
+            if not sep:
+                return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+            sensitive = any(marker in unquote(key).lower() for marker in BrowserNetworkRecorder.REDACT_KEY_MARKERS)
+            pairs.append(f"{key}={BrowserNetworkRecorder.REDACTED_PLACEHOLDER if sensitive else raw}")
+        return "&".join(pairs)
+    return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+
+
 class BrowserNetworkRecorder:
     """CDP network observer with optional local body-log persistence."""
 
@@ -2055,6 +2097,34 @@ class BrowserNetworkRecorder:
         host_and_path = url.lower().split("?", 1)[0]
         return any(marker in host_and_path for marker in self.BODY_CAPTURE_URL_MARKERS)
 
+    # Secret-bearing keys are redacted even on allowlisted hosts. The allowlist
+    # scopes WHICH endpoints may be retained; it cannot promise those payloads
+    # are secret-free, and a recording that leaks a bearer token is worse than a
+    # missing signal. Substring match so `sessionToken`/`api_key`/`x-csrf` all hit.
+    REDACT_KEY_MARKERS = (
+        "auth",
+        "card",
+        "cookie",
+        "credential",
+        "cvv",
+        "email",
+        "iban",
+        # Substring match, so this also covers api_key / apiKey / access_key /
+        # private_key. Over-redaction is the safe direction: losing a diagnostic
+        # field costs a rerun; leaking a credential into a retained recording
+        # cannot be undone.
+        "key",
+        "otp",
+        "passw",
+        "phone",
+        "secret",
+        "session",
+        "signature",
+        "ssn",
+        "token",
+    )
+    REDACTED_PLACEHOLDER = "[REDACTED]"
+
     def _should_capture(self, url: str, resource_type: str, mime_type: str = "") -> bool:
         if not url.startswith(("http://", "https://")):
             return False
@@ -2119,12 +2189,22 @@ class BrowserNetworkRecorder:
             # no extra CDP round-trip.
             post_data = request.get("postData")
             if isinstance(post_data, str) and post_data and self._should_capture_request_body(url):
-                entry["request_body"] = post_data[: self._max_body_bytes]
-                entry["request_body_truncated"] = len(post_data) > self._max_body_bytes
+                redacted = _redact_request_body(post_data)
+                # Truncate on ENCODED BYTES, not characters: _max_body_bytes is a
+                # byte budget, and a multi-byte character sliced by a character
+                # index both overshoots the budget and can split a code point.
+                encoded = redacted.encode("utf-8")
+                if len(encoded) > self._max_body_bytes:
+                    entry["request_body"] = encoded[: self._max_body_bytes].decode("utf-8", "ignore")
+                    entry["request_body_truncated"] = True
+                else:
+                    entry["request_body"] = redacted
+                    entry["request_body_truncated"] = False
             elif request.get("hasPostData"):
-                # Body too large to inline. Record that it existed so the gap is
-                # visible instead of looking like a body-less request.
-                entry["request_body_truncated"] = True
+                # Withheld by the allowlist — NOT truncated. Conflating the two
+                # makes a deliberate policy omission read as a size problem and
+                # sends the next reader hunting for a limit to raise.
+                entry["request_body_omitted"] = True
             self.entries[request_key] = entry
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))

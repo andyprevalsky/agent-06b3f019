@@ -500,6 +500,40 @@ class BrowserHumanizer:
             await self.input_page.mouse.move(int(x), int(y))
         await self._publish_cursor(int(x), int(y))
 
+    async def _dispatch_mouse_button(self, x: float, y: float, *, pressed: bool) -> bool:
+        """Press or release the left button at exact coordinates via CDP.
+
+        Playwright's ``mouse.down``/``mouse.up`` always act at its own tracked
+        cursor, so giving the release a different position requires a ``move``
+        between press and release -- and every Playwright call is a round trip
+        to a REMOTE browser, so that move lands inside the press and inflates
+        the dwell the page observes. CDP carries the coordinates on the event
+        itself, so the release can drift without extending the press at all.
+
+        Returns False when CDP is unavailable so the caller can fall back.
+        """
+        cdp_session = await self._get_cdp_session() if self._cdp_mouse_transport_enabled else None
+        if cdp_session is None:
+            return False
+        try:
+            await cdp_session.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mousePressed" if pressed else "mouseReleased",
+                    "x": int(x),
+                    "y": int(y),
+                    "button": "left",
+                    "buttons": 1 if pressed else 0,
+                    "clickCount": 1,
+                    "timestamp": time.time(),
+                },
+            )
+            return True
+        except Exception as exc:
+            await self._invalidate_cdp_session(cdp_session)
+            logger.debug("CDP mouse button dispatch failed", error=str(exc), pressed=pressed)
+            return False
+
     async def _idle_mouse_step(self) -> Optional[float]:
         if not self._idle_mouse_enabled or self._closed:
             return None
@@ -590,22 +624,28 @@ class BrowserHumanizer:
             up_x = down_x + random.gauss(0, 0.4)
             up_y = down_y + random.gauss(0, 0.4)
             await mouse.move(down_x, down_y)
-            await mouse.down()
-            await asyncio.sleep(synthesize_click_delay_ms() / 1000)
-            await mouse.up()
-            # Release drift lands AFTER mouseup, not between down and up.
-            #
-            # Every mouse call is a round trip to a REMOTE browser, so a move
-            # inside the press adds that latency to the hold duration the PAGE
-            # observes: we sampled an ~85ms human dwell but emitted 621.5ms
-            # (measured). Anti-bot scorers read the emitted press, and a submit
-            # whose mousedown is older than 500ms is classified as a
-            # programmatic click rather than a real gesture -- which is exactly
-            # what FCaptcha's `programmatic_click` bot rule fired on. Drifting
-            # after release keeps the motor noise (last-move != down, so the
-            # click is not pixel-perfect) while the press itself stays inside
-            # the sampled human distribution.
-            await mouse.move(up_x, up_y)
+
+            # The press must stay inside the sampled human dwell AND the release
+            # must land a hair off the press. Doing both through Playwright is
+            # impossible: it releases at its own tracked cursor, so offsetting
+            # the release needs a move between down and up, and that remote
+            # round trip inflates the observed hold (we sampled ~85ms and
+            # emitted 621.5ms, measured). A submit whose mousedown is older than
+            # 500ms is scored as a programmatic click rather than a real
+            # gesture; a pixel-perfect down==up is scored as unnaturally
+            # accurate precision. CDP carries coordinates on the event, so it
+            # satisfies both at once -- and needs no post-click move, which
+            # would otherwise race navigation triggered by the click itself.
+            dwell_seconds = synthesize_click_delay_ms() / 1000
+            pressed_via_cdp = await self._dispatch_mouse_button(down_x, down_y, pressed=True)
+            if not pressed_via_cdp:
+                await mouse.down()
+            await asyncio.sleep(dwell_seconds)
+            if not pressed_via_cdp or not await self._dispatch_mouse_button(up_x, up_y, pressed=False):
+                # Fallback (or a CDP session lost mid-click): release in place.
+                # Keeping the press short matters more than the sub-pixel offset,
+                # and an unreleased button would wedge every later interaction.
+                await mouse.up()
 
             self._last_pos = (x, y)
             self._idle_anchor = (x, y)
