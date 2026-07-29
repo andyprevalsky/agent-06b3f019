@@ -5,15 +5,35 @@
  * Stripe blocks live-mode raw-PAN tokenization, so a LIVE Rose-minted card can only be proven by an
  * actual acquirer authorization. Stripe collects the PAN on its own hosted page, which keeps this
  * backend out of PCI scope entirely.
+ *
+ * KEY SPLIT: every Stripe call in this file is the shop ACQUIRING a card, so it runs on the
+ * dedicated merchant client (`TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY`), never on the `stripe`
+ * billing singleton. The acquirer must be LIVE for a live Rose card to authorize; billing
+ * (subscriptions, customers, the personal purchase hold) stays test-mode until production customers
+ * are migrated. Two roles, two keys — see providers/stripe.ts.
  */
 
 import { randomUUID } from 'node:crypto';
 import { settleRoseCardStripeCheckout } from '../../providers/agentcard/checkout-settlement';
-import { stripe } from '../../providers/stripe';
+import { getTestPaymentMerchantStripeClient, type Stripe } from '../../providers/stripe';
 import { calculateTotals, normalizeLineItems } from './catalog';
 import { TEST_PAYMENT_CHECKOUT_RETURN_URL } from './config';
 import { TestPaymentError } from './errors';
 import type { TestPaymentConfirmation, TestPaymentLineItem } from './types';
+
+/**
+ * Resolve the merchant (acquirer) client, surfacing a misconfiguration as an actionable
+ * TestPaymentError instead of a generic 500. The provider throws in production when the merchant
+ * key is missing — falling back to the test-mode billing key there would silently make this shop
+ * incapable of authorizing the live card it exists to prove.
+ */
+function merchantStripe(): Stripe {
+  try {
+    return getTestPaymentMerchantStripeClient();
+  } catch (error) {
+    throw new TestPaymentError(error instanceof Error ? error.message : String(error), 503);
+  }
+}
 
 /**
  * Create a REAL Stripe Checkout session for the selected test-shop items.
@@ -29,7 +49,8 @@ export async function createTestPaymentCheckoutSession(input: {
 }): Promise<{ sessionId: string; url: string; totalCents: number }> {
   const lineItems = normalizeLineItems(input.items);
   const totals = calculateTotals(lineItems);
-  const session = await stripe.checkout.sessions.create({
+  // Acquirer side: the shop's own key, NOT the billing key.
+  const session = await merchantStripe().checkout.sessions.create({
     mode: 'payment',
     line_items: lineItems.map((item) => ({
       price_data: {
@@ -54,6 +75,10 @@ export async function createTestPaymentCheckoutSession(input: {
  *
  * Stripe has already captured by the time this runs. This only proves the session really is paid
  * and then marks the matching HELD purchase CLEARED — it must never move money itself.
+ *
+ * The session read is MERCHANT-side; the purchase's `stripePaymentIntentId` it carries through is
+ * the BILLING-side hold on the user. They live on different Stripe accounts and different keys, and
+ * this function must never try to act on the hold with the merchant client.
  */
 export async function settleTestPaymentCheckoutSession(
   sessionId: string
@@ -61,7 +86,9 @@ export async function settleTestPaymentCheckoutSession(
   const trimmed = sessionId.trim();
   if (trimmed === '') throw new TestPaymentError('checkout_session_id is required');
 
-  const session = await stripe.checkout.sessions.retrieve(trimmed, {
+  // The session was created on the merchant account, so it can only be read back with the merchant
+  // key — the billing key would 404 on it.
+  const session = await merchantStripe().checkout.sessions.retrieve(trimmed, {
     expand: ['payment_intent.payment_method'],
   });
   if (session.payment_status !== 'paid') {

@@ -13,6 +13,12 @@
  * Matching is by (amount, last4) rather than PAN because Stripe Checkout collects the card on
  * Stripe's page: our backend never sees the number, which is the entire point of using a hosted
  * merchant (no PCI scope, and live-mode raw-PAN tokenization is blocked anyway).
+ *
+ * KEY SPLIT: this file makes NO Stripe call and must never acquire one. The merchant (acquirer) key
+ * belongs to the checkout domain; the only Stripe object referenced here is
+ * `stripePaymentIntentId`, which is the BILLING-side hold on the user and is read/captured/refunded
+ * exclusively through the `stripe` billing singleton. Reaching for the merchant client here would
+ * point billing operations at the wrong Stripe account. See providers/stripe.ts.
  */
 
 import { isAdminUser } from '../../utils/adminAccess';

@@ -1,6 +1,7 @@
 """Blackbox tests for benchmark helpers."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import importlib.util
@@ -15,6 +16,31 @@ from unittest.mock import patch
 import time
 
 from _test_utils import BlackboxResult
+
+
+@contextlib.contextmanager
+def anthropic_family(*, excluded: bool):
+    """Pin ROSE_EXCLUDE_ANTHROPIC_FAMILY for the duration of a test.
+
+    Several compute-credential helpers branch on this flag, and operators export it
+    in their shell whenever Anthropic credits/OAuth are unavailable. Left unpinned,
+    the ambient value silently decides which branch a test samples, so the suite goes
+    red on an unrelated machine-state change instead of on a real regression. Any test
+    asserting an exact call list against those helpers must declare its mode.
+    """
+    key = "ROSE_EXCLUDE_ANTHROPIC_FAMILY"
+    previous = os.environ.get(key)
+    if excluded:
+        os.environ[key] = "1"
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 def test_every_benchmark_run_registers_in_app_hub_before_execution():
@@ -5120,7 +5146,11 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
 
-        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+        # Mode is pinned, not inherited: the helper narrows the token query when the
+        # Anthropic family is excluded, so an ambient operator flag would otherwise
+        # decide which branch this exact-call assertion is sampling.
+        with anthropic_family(excluded=False):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -5130,6 +5160,62 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
             None,
+            10.0,
+        )
+    ]
+
+
+async def test_code_agent_preflight_narrows_to_gpt_when_anthropic_family_excluded():
+    """With the Anthropic family excluded the preflight must ask ONLY for a gpt token.
+
+    Pairs with the non-excluded test above so both branches of the flag are pinned
+    instead of whichever one the ambient environment happens to select.
+    """
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"type": "gpt", "accessToken": "gpt-token"}
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, params=None, timeout):
+            calls.append((url, headers, params, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        with anthropic_family(excluded=True):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            {"tokenType": "gpt"},
             10.0,
         )
     ]
@@ -5217,7 +5303,10 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
 
-        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+        # The Anthropic API-key fallback only exists when the Anthropic family is in
+        # play, so this test must declare that mode rather than inherit it.
+        with anthropic_family(excluded=False):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -5372,9 +5461,12 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
         bench.httpx.AsyncClient = FakeClient
         bench._sync_compute_tokens = fake_sync
 
-        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
-        if asyncio.iscoroutine(refresh):
-            await refresh
+        # Excluding the Anthropic family takes a different refresh branch entirely
+        # (gpt-only, no cooldown probe), so pin the mode this test describes.
+        with anthropic_family(excluded=False):
+            refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+            if asyncio.iscoroutine(refresh):
+                await refresh
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -10602,6 +10694,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token
+    )
+    await r.record_async(
+        "code_agent_preflight_narrows_to_gpt_when_anthropic_excluded",
+        test_code_agent_preflight_narrows_to_gpt_when_anthropic_family_excluded,
     )
     await r.record_async(
         "code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token

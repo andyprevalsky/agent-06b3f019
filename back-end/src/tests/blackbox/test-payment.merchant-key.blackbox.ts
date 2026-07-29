@@ -1,0 +1,373 @@
+#!/usr/bin/env tsx
+/**
+ * Black-box tests for the /test_payment MERCHANT (acquirer) Stripe key.
+ *
+ * Rose sits on BOTH sides of a /test_payment purchase and the two sides must never share a key:
+ *
+ *   BILLING  `STRIPE_SECRET_KEY`  (the `stripe` singleton)
+ *     Subscriptions, customers, and the personal purchase hold/capture/refund. Stays TEST-mode:
+ *     every production `Subscription.stripeCustomerId` was created in test mode, so a live global
+ *     key orphans every real user's billing.
+ *
+ *   MERCHANT  `TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY`  (`getTestPaymentMerchantStripeClient()`)
+ *     The shop taking a card at hosted Checkout. Must be LIVE for a live Rose-minted AgentCard to
+ *     authorize on real card rails — AgentCard refuses `test_charge` on live cards and Stripe test
+ *     mode never touches the networks.
+ *
+ * These tests exist so the two can never be transposed. They are behavioural: both clients are
+ * stubbed and the REAL checkout functions are driven, so a swap makes the "wrong key" recorder fire
+ * and the test fails. No live network is touched and no money moves.
+ */
+
+import 'dotenv/config';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import {
+  createTestPaymentCheckoutSession,
+  settleTestPaymentCheckoutSession,
+} from '../../domains/test-payment/checkout';
+import {
+  TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV,
+  getTestPaymentMerchantStripeClient,
+  resolveTestPaymentMerchantSecretKey,
+  stripe,
+  type Stripe,
+} from '../../providers/stripe';
+
+interface TestResult {
+  name: string;
+  passed: boolean;
+  error?: string;
+  duration: number;
+}
+
+function assert(condition: boolean, message: string): void {
+  if (!condition) throw new Error(message);
+}
+
+async function runTest(name: string, fn: () => Promise<void>): Promise<TestResult> {
+  const start = Date.now();
+  try {
+    await fn();
+    return { name, passed: true, duration: Date.now() - start };
+  } catch (error) {
+    return {
+      name,
+      passed: false,
+      duration: Date.now() - start,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+/**
+ * A merchant key that is syntactically a Stripe key but belongs to no account: the SDK is never
+ * actually called over the wire in this suite (every method under test is stubbed), so this can
+ * never authorize anything.
+ */
+const FAKE_MERCHANT_KEY = 'sk_test_merchant_blackbox_never_dialed';
+
+function withMerchantKey<T>(key: string | undefined, fn: () => T): T {
+  const previous = process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
+  if (key === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
+  else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = key;
+  try {
+    return fn();
+  } finally {
+    if (previous === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
+    else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = previous;
+  }
+}
+
+interface CheckoutSessionsResource {
+  create: (params: unknown) => Promise<{ id: string; url: string | null }>;
+  retrieve: (id: string, params?: unknown) => Promise<unknown>;
+}
+
+function checkoutSessions(client: Stripe): CheckoutSessionsResource {
+  return client.checkout.sessions as unknown as CheckoutSessionsResource;
+}
+
+interface StubbedCall {
+  client: 'merchant' | 'billing';
+  op: 'create' | 'retrieve';
+}
+
+/**
+ * Stub `checkout.sessions.{create,retrieve}` on BOTH the merchant and billing clients and record
+ * which one the code under test reached for. The billing stubs are the inversion detector: if the
+ * checkout path ever regresses back to the `stripe` singleton, it lands in `calls` tagged
+ * `billing` and every assertion below fails.
+ */
+async function withBothCheckoutClientsStubbed<T>(
+  merchant: Stripe,
+  session: { id: string; url: string | null; retrieved: unknown },
+  fn: (calls: StubbedCall[]) => Promise<T>
+): Promise<T> {
+  const calls: StubbedCall[] = [];
+  const targets: Array<{ label: 'merchant' | 'billing'; resource: CheckoutSessionsResource }> = [
+    { label: 'merchant', resource: checkoutSessions(merchant) },
+    { label: 'billing', resource: checkoutSessions(stripe) },
+  ];
+  const originals = targets.map(({ resource }) => ({
+    create: resource.create,
+    retrieve: resource.retrieve,
+  }));
+
+  for (const { label, resource } of targets) {
+    resource.create = async () => {
+      calls.push({ client: label, op: 'create' });
+      return { id: session.id, url: session.url };
+    };
+    resource.retrieve = async () => {
+      calls.push({ client: label, op: 'retrieve' });
+      return session.retrieved;
+    };
+  }
+
+  try {
+    return await fn(calls);
+  } finally {
+    targets.forEach(({ resource }, index) => {
+      resource.create = originals[index].create;
+      resource.retrieve = originals[index].retrieve;
+    });
+  }
+}
+
+const CHECKOUT_ITEMS = [
+  { id: 'aurora-notebook', quantity: 1 },
+  { id: 'ceramic-mug', quantity: 1 },
+  { id: 'canvas-tote', quantity: 1 },
+];
+
+const SOURCE_ROOT = join(dirname(new URL(import.meta.url).pathname), '../..');
+
+function readSource(relativePath: string): string {
+  return readFileSync(join(SOURCE_ROOT, relativePath), 'utf-8');
+}
+
+const tests: Array<[string, () => Promise<void>]> = [
+  [
+    'a configured merchant key always wins over the billing key',
+    async () => {
+      assert(
+        resolveTestPaymentMerchantSecretKey('sk_live_merchant', 'sk_test_billing').secretKey ===
+          'sk_live_merchant',
+        'the merchant key must be preferred; picking the billing key acquires on the wrong account'
+      );
+      assert(
+        resolveTestPaymentMerchantSecretKey('sk_live_merchant', 'sk_test_billing')
+          .usedBillingFallback === false,
+        'a configured merchant key is not a fallback'
+      );
+      assert(
+        resolveTestPaymentMerchantSecretKey('  sk_live_padded  ', 'sk_test_billing').secretKey ===
+          'sk_live_padded',
+        'the merchant key is trimmed, not passed through with whitespace'
+      );
+    },
+  ],
+  [
+    'an absent or blank merchant key falls back to billing and says so',
+    async () => {
+      for (const absent of [undefined, '', '   ']) {
+        const resolved = resolveTestPaymentMerchantSecretKey(absent, 'sk_test_billing');
+        assert(
+          resolved.secretKey === 'sk_test_billing',
+          `expected the billing fallback for ${JSON.stringify(absent)}`
+        );
+        assert(
+          resolved.usedBillingFallback,
+          'the fallback must be reported so the caller can warn/fail rather than acquire silently'
+        );
+      }
+    },
+  ],
+  [
+    'the merchant client is a distinct client from the billing singleton',
+    async () => {
+      const merchant = withMerchantKey(FAKE_MERCHANT_KEY, getTestPaymentMerchantStripeClient);
+      assert(
+        merchant !== stripe,
+        'a configured merchant key must produce its own client, not the billing singleton'
+      );
+      assert(
+        withMerchantKey(FAKE_MERCHANT_KEY, getTestPaymentMerchantStripeClient) === merchant,
+        'the merchant client is memoized per key rather than rebuilt on every checkout'
+      );
+    },
+  ],
+  [
+    'a non-Stripe merchant key is rejected instead of being dialed',
+    async () => {
+      let threw = false;
+      try {
+        withMerchantKey('not-a-stripe-key', getTestPaymentMerchantStripeClient);
+      } catch {
+        threw = true;
+      }
+      assert(threw, 'a malformed merchant key must fail closed');
+    },
+  ],
+  [
+    'the dev fallback returns the billing singleton and warns loudly',
+    async () => {
+      const written: string[] = [];
+      const originalWrite = process.stdout.write.bind(process.stdout);
+      let client: Stripe;
+      try {
+        process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+          written.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8'));
+          return (originalWrite as (...args: unknown[]) => boolean)(chunk, ...rest);
+        }) as typeof process.stdout.write;
+        client = withMerchantKey(undefined, getTestPaymentMerchantStripeClient);
+      } finally {
+        process.stdout.write = originalWrite;
+      }
+      assert(
+        client === stripe,
+        'the fallback must be the billing singleton itself, never a second client masquerading ' +
+          'as a merchant account'
+      );
+      const logged = written.join('');
+      assert(
+        logged.includes(TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV),
+        `the fallback must name ${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV}; got: ${logged.slice(-400)}`
+      );
+      assert(
+        logged.includes('WARN') || logged.includes('"level":"warn"'),
+        'the fallback must be logged at warn level, not swallowed'
+      );
+    },
+  ],
+  [
+    'creating a checkout session acquires on the MERCHANT key, never billing',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_merchant',
+            url: 'https://checkout.stripe.com/c/pay/cs_test_merchant',
+            retrieved: {},
+          },
+          async (calls) => {
+            const created = await createTestPaymentCheckoutSession({ items: CHECKOUT_ITEMS });
+            assert(created.sessionId === 'cs_test_merchant', 'returned the created session');
+            assert(
+              calls.length === 1 && calls[0].client === 'merchant' && calls[0].op === 'create',
+              `checkout must be created on the merchant client, got ${JSON.stringify(calls)}`
+            );
+          }
+        );
+      });
+    },
+  ],
+  [
+    'settling a checkout session reads it back on the MERCHANT key, never billing',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_merchant',
+            url: null,
+            // Deliberately unpaid: settlement then short-circuits on the payment_status the
+            // MERCHANT client returned, which both proves the stubbed body was the one consumed and
+            // keeps this suite free of any database round-trip.
+            retrieved: { payment_status: 'unpaid', amount_total: 100 },
+          },
+          async (calls) => {
+            let failure: unknown;
+            try {
+              await settleTestPaymentCheckoutSession('cs_test_merchant');
+            } catch (error) {
+              failure = error;
+            }
+            assert(
+              failure instanceof Error && /unpaid/.test(failure.message),
+              `settlement must consume the session the merchant client returned, got ${String(failure)}`
+            );
+            assert(
+              calls.length === 1 && calls[0].client === 'merchant' && calls[0].op === 'retrieve',
+              `the session must be read back on the merchant client, got ${JSON.stringify(calls)}`
+            );
+          }
+        );
+      });
+    },
+  ],
+  [
+    'only the /test_payment checkout path may reach for the merchant client',
+    async () => {
+      // Structural half of the guarantee: the behavioural tests above prove checkout uses the
+      // merchant key; this proves nothing ELSE can start using it. Billing, purchase holds, and
+      // settlement must stay on the billing singleton.
+      const checkoutSource = readSource('domains/test-payment/checkout.ts');
+      assert(
+        checkoutSource.includes('getTestPaymentMerchantStripeClient'),
+        'checkout.ts must acquire through the merchant client'
+      );
+      const stripeImport = /import \{([^}]*)\} from '\.\.\/\.\.\/providers\/stripe';/.exec(
+        checkoutSource
+      );
+      assert(stripeImport !== null, 'checkout.ts should import from providers/stripe');
+      const bindings = (stripeImport?.[1] ?? '')
+        .split(',')
+        .map((binding) => binding.replace(/^type\s+/, '').trim());
+      assert(
+        !bindings.includes('stripe'),
+        'checkout.ts must not bind the billing `stripe` singleton; every Stripe call in the ' +
+          'checkout path is an acquirer call and belongs on the merchant client'
+      );
+      for (const billingPath of [
+        'domains/billing/service.ts',
+        'domains/purchases/charge.ts',
+        'domains/test-payment/lifecycle.ts',
+        'domains/test-payment/service.ts',
+        'providers/agentcard/checkout-settlement.ts',
+        'domains/webhooks/service.ts',
+      ]) {
+        const source = readSource(billingPath);
+        assert(
+          !source.includes('getTestPaymentMerchantStripeClient('),
+          `${billingPath} is a BILLING-side call site and must never use the merchant client: ` +
+            'subscriptions, customers, and personal purchase holds live on STRIPE_SECRET_KEY'
+        );
+      }
+      assert(
+        readSource('domains/billing/service.ts').includes('stripe.checkout.sessions.create'),
+        'billing subscription checkout must stay on the billing singleton'
+      );
+    },
+  ],
+];
+
+async function main(): Promise<void> {
+  process.stdout.write(
+    `Running test-payment merchant-key black-box tests (${tests.length} tests)...\n`
+  );
+  const results: TestResult[] = [];
+  for (const [name, fn] of tests) results.push(await runTest(name, fn));
+  const passed = results.filter((result) => result.passed).length;
+  for (const result of results) {
+    process.stdout.write(
+      `${result.passed ? 'PASS' : 'FAIL'} ${result.name} (${result.duration}ms)\n`
+    );
+    if (!result.passed) process.stdout.write(`  ${result.error}\n`);
+  }
+  process.stdout.write(
+    `\nTest-payment merchant-key black-box tests: ${passed}/${results.length} passed\n`
+  );
+  if (passed !== results.length) process.exit(1);
+}
+
+main().catch((error) => {
+  process.stderr.write(
+    `${error instanceof Error ? error.stack || error.message : String(error)}\n`
+  );
+  process.exit(1);
+});

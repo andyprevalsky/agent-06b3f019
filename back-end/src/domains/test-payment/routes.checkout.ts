@@ -1,6 +1,11 @@
 /**
  * Hosted Stripe Checkout endpoints for /test_payment — the real-merchant path that lets a LIVE
  * Rose-minted AgentCard actually be authorized (AgentCard's `test_charge` is sandbox-only).
+ *
+ * Both routes acquire on the dedicated merchant key
+ * (`TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY`), never on the `stripe` billing singleton — see
+ * `./checkout.ts` and providers/stripe.ts. A missing merchant key surfaces here as a 503
+ * TestPaymentError naming the env var, rather than a generic 500.
  */
 
 import { Router } from 'express';
