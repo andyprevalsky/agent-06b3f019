@@ -63,6 +63,40 @@ def test_normalize_payload_builds_receipt_metadata_and_fingerprint():
     assert len(payload["fingerprint"]) == 64
 
 
+def test_product_url_does_not_match_browser_trajectory():
+    """Product links are structurally validated without trajectory matching."""
+    from utils.purchase_approval import validate_product_url_for_pages
+
+    visited = [
+        "https://order.toasttab.com/online/lunette-cambodia-ferry-building-1-ferry-building-suite-33-47",
+        "https://order.toasttab.com/online/lunette-cambodia-ferry-building-1-ferry-building-suite-33-47/checkout",
+    ]
+
+    # The real URL from agent 90ac106a, on a host the browser actually loaded.
+    product_url = (
+        "https://order.toasttab.com/online/lunette-cambodia-ferry-building-1-ferry-building"
+        "-suite-33-47/item-lok-lak_cc741e03-afbe-4713-9a47-488bfbe0036b"
+    )
+    assert validate_product_url_for_pages(product_url, visited) == product_url
+
+    # An observed product page whose path carries no "product"/"item"/"p" marker
+    # must pass: the old _looks_like_product_route word list rejected these.
+    assert (
+        validate_product_url_for_pages("https://order.toasttab.com/lok-lak", visited)
+        == "https://order.toasttab.com/lok-lak"
+    )
+
+    # Browser context is accepted for call-site compatibility but cannot reject
+    # a well-formed URL based on whether the host appeared in a trajectory.
+    assert validate_product_url_for_pages("https://menu.order.toasttab.com/lok-lak", visited)
+    for unobserved in (
+        "https://www.toasttab.com/local/lunette-cambodia/item-lok-lak",
+        "https://toasttab.com/local/lunette",
+        "https://evil.com/products/x",
+    ):
+        assert validate_product_url_for_pages(unobserved, visited) == unobserved
+
+
 def test_payment_line_item_requires_reviews_and_a_product_detail_url():
     from pydantic import ValidationError
 
@@ -115,6 +149,8 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         "example.com/products/desk-lamp",
         "ftp://example.com/products/desk-lamp",
         "https://example.com/p/1?a=<script>",
+        "https://example.com:99999/products/desk-lamp",
+        "https://example.com:abc/products/desk-lamp",
     ):
         try:
             PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
@@ -123,27 +159,41 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted non-URL {product_url}")
 
-    apple_item = {
-        **valid_item,
-        "product_url": "https://www.apple.com/shop/buy-mac/macbook-air",
-    }
-    assert PaymentLineItem.model_validate(apple_item).product_url == apple_item["product_url"]
-
-    tracked_item = {
-        **valid_item,
-        "product_url": "https://example.com/products/desk-lamp?utm_campaign=payment_reminder&route=checkout",
-    }
-    assert PaymentLineItem.model_validate(tracked_item).product_url == tracked_item["product_url"]
-
-    # RCA (agent 53feac08): request_payment_card was impossible on order.online
-    # (DoorDash's white-label storefront) because the registrable domain's
-    # "order" label tripped the checkout-route guard. A genuine product-detail
-    # URL on an ordering-platform domain must be accepted.
-    ordering_platform_items = (
+    # NO VOCABULARY FILTERING. The validator must never guess a page's purpose
+    # from the words in its URL. Two prod incidents came from exactly that:
+    #   - agent 53feac08: order.online (DoorDash white-label) blocked because the
+    #     registrable domain is the word "order".
+    #   - agent 90ac106a: order.toasttab.com blocked because the SUBDOMAIN is the
+    #     word "order" — making a purchase categorically impossible on Toast, the
+    #     largest US restaurant ordering platform, where every product page lives
+    #     on that host. The agent burned 5 rejected calls / ~4.7 min, then escaped
+    #     by inventing a www.toasttab.com URL it had never loaded, so a human was
+    #     shown a fabricated link for a real charge. The filter made the trust
+    #     surface worse than no filter.
+    # Merchant slugs legitimately contain every one of these words, so a
+    # blocklist can never be completed. These MUST all be accepted.
+    urls_that_only_a_word_filter_would_reject = (
+        "https://order.toasttab.com/online/lunette-cambodia-ferry-building-1-ferry-building-suite-33-47/item-lok-lak_cc741e03-afbe-4713-9a47-488bfbe0036b",
         "https://order.online/store/BlueBottleCoffee-218854/item/44409624976",
+        "https://order.doordash.com/store/blue-bottle-218854/item/44409624976",
+        "https://orders.grubhub.com/menu/item-42",
         "https://orders.co/products/latte",
+        "https://www.apple.com/shop/buy-mac/macbook-air",
+        "https://example.com/products/desk-lamp?utm_campaign=payment_reminder&route=checkout",
+        # Real merchant slugs that happen to contain checkout vocabulary.
+        "https://shop.example.com/p/cart-organizer-basket",
+        "https://example.com/products/payment-processing-for-dummies",
+        "https://example.com/menu/check-out-our-specials-combo",
+        "https://checkout-supply-co.example.com/products/desk-lamp",
+        # A path with no product-ish marker at all is still a product page.
+        "https://lunettecambodia.com/lok-lak",
+        # Hash-routed SPA storefronts carry the whole route in the fragment, so
+        # the path is empty. Rejecting these as "bare homepage" was a false
+        # reject on every client-side-routed merchant.
+        "https://shop.example.com/#/product/123",
+        "https://shop.example.com/#/item/abc",
     )
-    for product_url in ordering_platform_items:
+    for product_url in urls_that_only_a_word_filter_would_reject:
         parsed_item = PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
         assert parsed_item.product_url == product_url, product_url
 
@@ -695,6 +745,10 @@ async def run_all_tests():
     result.record("domain_package_exports", test_domain_package_eager_and_lazy_exports)
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
+    result.record(
+        "product_url_does_not_match_browser_trajectory",
+        test_product_url_does_not_match_browser_trajectory,
+    )
     result.record(
         "reviewless_bookings_pass_with_zero",
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,

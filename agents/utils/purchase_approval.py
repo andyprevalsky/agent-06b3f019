@@ -5,13 +5,15 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import urlparse
 
-_PLACEHOLDER_RE = re.compile(r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b", re.IGNORECASE)
+_PLACEHOLDER_RE = re.compile(
+    r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b",
+    re.IGNORECASE,
+)
 _RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
 _REVIEW_COUNT_RE = re.compile(
     r"\b\d[\d,]*(?:\.\d+)?\s*[kmb]?\+?\s+(?:customer\s+)?(?:reviews?|ratings?)\b",
     re.IGNORECASE,
 )
-
 
 
 def _validated_review_text(value: Any) -> str:
@@ -36,6 +38,11 @@ def validate_product_detail_url(value: Any) -> str:
     if any(character.isspace() for character in text) or "<" in text or ">" in text:
         raise ValueError("product_url must not contain whitespace or markup")
     parsed = urlparse(text)
+    try:
+        # urlparse defers malformed-port validation until this attribute is read.
+        parsed.port
+    except ValueError as error:
+        raise ValueError("product_url must be an absolute http(s) URL") from error
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("product_url must be an absolute http(s) URL")
     return text
