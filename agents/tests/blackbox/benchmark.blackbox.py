@@ -7094,7 +7094,9 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     original_prime = local_bench._prime_local_seed_dump_from_shared_stack
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
     prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
+    prior_cache_database_url = os.environ.get("FAST_MODE_CACHE_DATABASE_URL")
     os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+    os.environ["FAST_MODE_CACHE_DATABASE_URL"] = "postgresql://prod.example.test:6543/postgres"
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
@@ -7121,6 +7123,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
+            assert captured["env"]["FAST_MODE_CACHE_USE_LOCAL"] == "1"
+            assert "FAST_MODE_CACHE_DATABASE_URL" not in captured["env"]
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen
@@ -7132,6 +7136,10 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ.pop("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL", None)
         else:
             os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
+        if prior_cache_database_url is None:
+            os.environ.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+        else:
+            os.environ["FAST_MODE_CACHE_DATABASE_URL"] = prior_cache_database_url
 
 
 def test_local_shared_stack_preserves_public_tunnel_mode():

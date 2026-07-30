@@ -928,6 +928,14 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # Local benchmark agents run uncached (BENCHMARK_FAST_MODE_CACHE=false),
+        # so their stack must not depend on the shared production cache database
+        # merely to create an unused cache table. Route the boot-time schema
+        # ensure to this run's isolated local DB. Clear any ambient override so
+        # a caller cannot accidentally retain the prod pooler despite the local
+        # opt-in; run.sh binds the concrete local URL after it starts Postgres.
+        env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
+        env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # Isolated stacks can start in the same second and share a long
         # workspace-name prefix. Stable ngrok domains truncate that prefix,
         # which can collapse distinct runs onto one public endpoint. Give each
