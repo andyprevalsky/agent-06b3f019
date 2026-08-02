@@ -11,6 +11,11 @@ import { runDownloadEgressHealth } from '../../../scripts/download-egress-health
 
 const temporaryDirectory = mkdtempSync(join(tmpdir(), 'rose-download-egress-'));
 let artifactStatus = 206;
+let artifactBytes = 1024;
+let supabaseServerErrors = 0;
+let invalidSupabaseResult = false;
+let paginateRenderLogs = false;
+let renderLogRequests = 0;
 let observedRange = '';
 let observedSupabaseAuth = '';
 let observedRenderAuth = '';
@@ -22,14 +27,14 @@ const server = createServer((request, response) => {
     observedRange = request.headers.range ?? '';
     const headers: Record<string, string> = {
       'Content-Type': 'application/octet-stream',
-      'Content-Length': artifactStatus === 206 ? '1024' : '0',
+      'Content-Length': String(artifactBytes),
       'Cache-Control': 'public, max-age=60',
       'CF-Cache-Status': artifactStatus === 206 ? 'HIT' : 'MISS',
       'CF-Ray': 'blackbox-SJC',
     };
     if (artifactStatus === 206) headers['Content-Range'] = 'bytes 0-1023/152852260';
     response.writeHead(artifactStatus, headers);
-    response.end(artifactStatus === 206 ? Buffer.alloc(1024, 7) : undefined);
+    response.end(Buffer.alloc(artifactBytes, 7));
     return;
   }
   if (url.pathname === '/supabase-logs') {
@@ -37,25 +42,64 @@ const server = createServer((request, response) => {
     observedLogsSql = url.searchParams.get('sql') ?? '';
     response.writeHead(200, { 'Content-Type': 'application/json' });
     response.end(
-      JSON.stringify({
-        error: null,
-        result: [
-          {
-            path: '/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg',
-            status: 206,
-            cache_status: 'HIT',
-            requests: 8,
-            avg_origin_ms: 210,
-            p95_origin_ms: 420,
-          },
-        ],
-      })
+      JSON.stringify(
+        invalidSupabaseResult
+          ? { error: null }
+          : {
+              error: null,
+              result: [
+                {
+                  path: '/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg',
+                  status: 206,
+                  cache_status: 'HIT',
+                  requests: 8,
+                  avg_origin_ms: 210,
+                  p95_origin_ms: 420,
+                },
+                ...(supabaseServerErrors === 0
+                  ? []
+                  : [
+                      {
+                        path: '/storage/v1/object/public/Releases/mac/latest/Rose-mac.dmg',
+                        status: 503,
+                        cache_status: 'MISS',
+                        requests: supabaseServerErrors,
+                        avg_origin_ms: 500,
+                        p95_origin_ms: 500,
+                      },
+                    ]),
+              ],
+            }
+      )
     );
     return;
   }
   if (url.pathname === '/render-logs') {
+    renderLogRequests += 1;
     observedRenderAuth = request.headers.authorization ?? '';
     response.writeHead(200, { 'Content-Type': 'application/json' });
+    if (paginateRenderLogs) {
+      const firstPage = url.searchParams.get('endTime') === '2026-07-29T23:00:00.000Z';
+      response.end(
+        JSON.stringify({
+          hasMore: firstPage,
+          nextStartTime: firstPage ? '2026-07-29T22:00:00.000Z' : undefined,
+          nextEndTime: firstPage ? '2026-07-29T22:30:00.000Z' : undefined,
+          logs: [
+            {
+              message: JSON.stringify({
+                component: 'DownloadTelemetry',
+                message: 'Mac updater download telemetry',
+                event: firstPage ? 'mac_update_download_completed' : 'mac_update_download_failed',
+                insert_id: firstPage ? 'paginated-complete' : 'paginated-failed',
+                bytes_per_second: firstPage ? 2_000_000 : undefined,
+              }),
+            },
+          ],
+        })
+      );
+      return;
+    }
     response.end(
       JSON.stringify({
         hasMore: false,
@@ -136,6 +180,7 @@ async function main(): Promise<void> {
   assert.equal(observedSupabaseAuth, 'Bearer supabase-test-token');
   assert.equal(observedRenderAuth, 'Bearer render-test-token');
   assert.match(observedLogsSql, /FROM logs/i);
+  assert.doesNotMatch(observedLogsSql, /LIMIT\s+100/i);
   assert.match(observedLogsSql, /source = 'edge_logs'/i);
   assert.match(observedLogsSql, /Releases\/mac/);
   assert.equal(existsSync(outputPath), true);
@@ -147,7 +192,51 @@ async function main(): Promise<void> {
     outputPath: join(temporaryDirectory, 'failed-report.json'),
   });
   assert.equal(unhealthy.status, 'unhealthy');
-  assert.match(unhealthy.failures.join('\n'), /three successful range probes|HTTP 206/i);
+  assert.match(unhealthy.failures.join('\n'), /3 successful range probes|HTTP 206/i);
+
+  artifactStatus = 200;
+  artifactBytes = 4096;
+  const rangeIgnored = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'range-ignored-report.json'),
+  });
+  assert.equal(
+    rangeIgnored.probes.every((probe) => probe.bytesReceived === commonConfig.rangeBytes),
+    true,
+    'probe must stop reading when an origin ignores Range'
+  );
+
+  artifactStatus = 206;
+  artifactBytes = 1024;
+  supabaseServerErrors = 1;
+  const edgeFailure = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'edge-failure-report.json'),
+  });
+  assert.equal(edgeFailure.edge.serverErrors, 1);
+  assert.match(edgeFailure.failures.join('\n'), /server error request/);
+
+  supabaseServerErrors = 0;
+  paginateRenderLogs = true;
+  renderLogRequests = 0;
+  const paginated = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'paginated-report.json'),
+  });
+  assert.equal(renderLogRequests, 2);
+  assert.equal(paginated.realUserTelemetry.completed, 1);
+  assert.equal(paginated.realUserTelemetry.failed, 1);
+
+  paginateRenderLogs = false;
+  invalidSupabaseResult = true;
+  const degradedObservability = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'observability-report.json'),
+  });
+  assert.equal(degradedObservability.status, 'healthy');
+  assert.equal(degradedObservability.failures.length, 0);
+  assert.match(degradedObservability.observabilityFailures.join('\n'), /no result array/);
+  invalidSupabaseResult = false;
 
   const workflowPath = resolve(process.cwd(), '..', '.github', 'workflows', 'download-egress.yml');
   const workflow = readFileSync(workflowPath, 'utf8');

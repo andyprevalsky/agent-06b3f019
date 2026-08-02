@@ -16,9 +16,10 @@ class AmplitudeIngestError extends Error {
   }
 }
 
-function isRetryableAmplitudeError(error: unknown): boolean {
+export function isRetryableAmplitudeError(error: unknown): boolean {
   return (
     error instanceof TypeError ||
+    (error instanceof DOMException && error.name === 'TimeoutError') ||
     (error instanceof AmplitudeIngestError && (error.status === 429 || error.status >= 500))
   );
 }

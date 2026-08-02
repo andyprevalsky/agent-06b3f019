@@ -4,9 +4,11 @@ import { renderWithProviders } from './test-wrapper';
 import Download from '@/features/download';
 
 const trackMock = vi.hoisted(() => vi.fn());
+const flushMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@/lib/analytics', () => ({
   track: trackMock,
+  flush: flushMock,
 }));
 
 const DOWNLOAD_URL =
@@ -18,6 +20,7 @@ describe('Download page', () => {
 
   beforeEach(() => {
     trackMock.mockReset();
+    flushMock.mockReset();
     // Save the real location object and replace with a mock that captures href assignments
     originalLocation = window.location;
     hrefSetter = vi.fn();
@@ -85,6 +88,10 @@ describe('Download page', () => {
     expect(trackMock.mock.invocationCallOrder[0]).toBeLessThan(
       hrefSetter.mock.invocationCallOrder[0],
     );
+    expect(flushMock).toHaveBeenCalledTimes(1);
+    expect(flushMock.mock.invocationCallOrder[0]).toBeLessThan(
+      hrefSetter.mock.invocationCallOrder[0],
+    );
   });
 
   // --- Link attribute tests ---
@@ -104,6 +111,7 @@ describe('Download page', () => {
   it('records fallback-link downloads with a distinct trigger', () => {
     renderWithProviders(<Download />);
     trackMock.mockClear();
+    flushMock.mockClear();
 
     screen.getByRole('link', { name: /click here/i }).click();
 
@@ -112,5 +120,18 @@ describe('Download page', () => {
       channel: 'latest',
       trigger: 'fallback_link',
     });
+    expect(flushMock).toHaveBeenCalledTimes(1);
+    expect(trackMock.mock.invocationCallOrder[0]).toBeLessThan(
+      flushMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('flushes pending analytics when the download page is hidden', () => {
+    renderWithProviders(<Download />);
+    flushMock.mockClear();
+
+    window.dispatchEvent(new Event('pagehide'));
+
+    expect(flushMock).toHaveBeenCalledTimes(1);
   });
 });

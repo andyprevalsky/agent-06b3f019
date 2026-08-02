@@ -81,6 +81,7 @@ export interface DownloadEgressReport {
     events: ParsedTelemetryLog[];
   };
   failures: string[];
+  observabilityFailures: string[];
   summary: string;
 }
 
@@ -111,6 +112,12 @@ function probeArtifact(
     let dnsAt: number | undefined;
     let tcpAt: number | undefined;
     let tlsAt: number | undefined;
+    let settled = false;
+    const rejectOnce = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      rejectProbe(error);
+    };
     const request = (url.protocol === 'https:' ? httpsRequest : httpRequest)(
       url,
       {
@@ -124,10 +131,9 @@ function probeArtifact(
       (response) => {
         const responseAt = performance.now();
         let bytesReceived = 0;
-        response.on('data', (chunk: Buffer) => {
-          bytesReceived += chunk.length;
-        });
-        response.on('end', () => {
+        const finishProbe = (): void => {
+          if (settled) return;
+          settled = true;
           const end = performance.now();
           const transferSeconds = Math.max((end - responseAt) / 1000, 0.001);
           const age = Number(response.headers.age);
@@ -146,6 +152,25 @@ function probeArtifact(
             cfRay: response.headers['cf-ray'] as string | undefined,
             contentRange: response.headers['content-range'],
           });
+        };
+        response.on('data', (chunk: Buffer) => {
+          const remaining = Math.max(rangeBytes - bytesReceived, 0);
+          bytesReceived += Math.min(chunk.length, remaining);
+          if (bytesReceived >= rangeBytes) {
+            finishProbe();
+            response.destroy();
+          }
+        });
+        response.once('end', finishProbe);
+        response.once('error', rejectOnce);
+        response.once('aborted', () => {
+          rejectOnce(new Error(`Artifact response aborted after ${bytesReceived} bytes`));
+        });
+        response.once('close', () => {
+          if (!settled && response.complete) finishProbe();
+          else if (!settled) {
+            rejectOnce(new Error(`Artifact response closed after ${bytesReceived} bytes`));
+          }
         });
       }
     );
@@ -160,7 +185,7 @@ function probeArtifact(
         tlsAt = performance.now();
       });
     });
-    request.once('error', rejectProbe);
+    request.once('error', rejectOnce);
     request.end();
   });
 }
@@ -191,8 +216,7 @@ FROM logs
 WHERE source = 'edge_logs'
   AND log_attributes['request.path'] LIKE '%/storage/v1/object/public/Releases/mac/%'
 GROUP BY path, status, cache_status
-ORDER BY requests DESC
-LIMIT 100`.trim();
+ORDER BY requests DESC`.trim();
 }
 
 async function fetchEdgeRows(
@@ -211,7 +235,10 @@ async function fetchEdgeRows(
   if (body.error !== null && body.error !== undefined && body.error !== '') {
     throw new Error(`Supabase logs query failed: ${String(body.error)}`);
   }
-  return Array.isArray(body.result) ? (body.result as EdgeLogRow[]) : [];
+  if (!Array.isArray(body.result)) {
+    throw new Error('Supabase logs query returned no result array');
+  }
+  return body.result as EdgeLogRow[];
 }
 
 async function fetchTelemetryLogs(
@@ -219,34 +246,58 @@ async function fetchTelemetryLogs(
   start: Date,
   end: Date
 ): Promise<ParsedTelemetryLog[]> {
-  const url = new URL(config.renderLogsUrl);
-  url.searchParams.set('ownerId', config.renderOwnerId);
-  url.searchParams.set('resource', config.renderServiceId);
-  url.searchParams.set('startTime', start.toISOString());
-  url.searchParams.set('endTime', end.toISOString());
-  url.searchParams.set('direction', 'backward');
-  url.searchParams.set('limit', '100');
-  url.searchParams.set('type', 'app');
-  url.searchParams.set('text', 'DownloadTelemetry');
-  const body = (await fetchJson(url, `Bearer ${config.renderApiKey}`)) as {
-    logs?: Array<{ message?: unknown }>;
-  };
   const events: ParsedTelemetryLog[] = [];
-  for (const log of body.logs ?? []) {
-    if (typeof log.message !== 'string') continue;
-    try {
-      const parsed = JSON.parse(log.message) as ParsedTelemetryLog;
-      if (
-        parsed.component === 'DownloadTelemetry' &&
-        parsed.message === 'Mac updater download telemetry'
-      ) {
-        events.push(parsed);
-      }
-    } catch {
-      // Render may include unrelated non-JSON platform lines despite the text filter.
+  let pageStart = start.toISOString();
+  let pageEnd = end.toISOString();
+  const seenPages = new Set<string>();
+  const maximumPages = 30;
+
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const url = new URL(config.renderLogsUrl);
+    url.searchParams.set('ownerId', config.renderOwnerId);
+    url.searchParams.set('resource', config.renderServiceId);
+    url.searchParams.set('startTime', pageStart);
+    url.searchParams.set('endTime', pageEnd);
+    url.searchParams.set('direction', 'backward');
+    url.searchParams.set('limit', '100');
+    url.searchParams.set('type', 'app');
+    url.searchParams.set('text', 'DownloadTelemetry');
+    const body = (await fetchJson(url, `Bearer ${config.renderApiKey}`)) as {
+      hasMore?: unknown;
+      nextStartTime?: unknown;
+      nextEndTime?: unknown;
+      logs?: unknown;
+    };
+    if (body.logs !== null && !Array.isArray(body.logs)) {
+      throw new Error('Render logs query returned no logs array');
     }
+    for (const log of (body.logs ?? []) as Array<{ message?: unknown }>) {
+      if (typeof log.message !== 'string') continue;
+      try {
+        const parsed = JSON.parse(log.message) as ParsedTelemetryLog;
+        if (
+          parsed.component === 'DownloadTelemetry' &&
+          parsed.message === 'Mac updater download telemetry'
+        ) {
+          events.push(parsed);
+        }
+      } catch {
+        // Render may include unrelated non-JSON platform lines despite the text filter.
+      }
+    }
+    if (body.hasMore !== true) return events;
+    if (typeof body.nextStartTime !== 'string' || typeof body.nextEndTime !== 'string') {
+      throw new Error('Render logs query indicated more results without pagination timestamps');
+    }
+    const pageKey = `${body.nextStartTime}:${body.nextEndTime}`;
+    if (seenPages.has(pageKey)) {
+      throw new Error('Render logs pagination repeated a page cursor');
+    }
+    seenPages.add(pageKey);
+    pageStart = body.nextStartTime;
+    pageEnd = body.nextEndTime;
   }
-  return events;
+  throw new Error(`Render logs pagination exceeded ${maximumPages} pages`);
 }
 
 function aggregateEdge(rows: EdgeLogRow[]): DownloadEgressReport['edge'] {
@@ -331,6 +382,7 @@ export async function runDownloadEgressHealth(
   const end = config.now ?? new Date();
   const start = new Date(end.getTime() - config.windowMinutes * 60_000);
   const failures: string[] = [];
+  const observabilityFailures: string[] = [];
   const probes: ArtifactProbe[] = [];
 
   for (let index = 1; index <= config.probeCount; index += 1) {
@@ -350,25 +402,29 @@ export async function runDownloadEgressHealth(
     fetchTelemetryLogs(config, start, end),
   ]);
   if (edgeResult.status === 'fulfilled') edgeRows = edgeResult.value;
-  else failures.push(`Supabase edge logs unavailable: ${String(edgeResult.reason)}`);
+  else observabilityFailures.push(`Supabase edge logs unavailable: ${String(edgeResult.reason)}`);
   if (telemetryResult.status === 'fulfilled') telemetryEvents = telemetryResult.value;
-  else failures.push(`Render download telemetry unavailable: ${String(telemetryResult.reason)}`);
+  else {
+    observabilityFailures.push(
+      `Render download telemetry unavailable: ${String(telemetryResult.reason)}`
+    );
+  }
 
   const successfulProbes = probes.filter(
     (probe) => probe.httpStatus === 206 && probe.bytesReceived === config.rangeBytes
   );
   if (successfulProbes.length !== config.probeCount) {
     failures.push(
-      `Expected three successful HTTP 206 range probes; received ${successfulProbes.length}/${config.probeCount}`
+      `Expected ${config.probeCount} successful HTTP 206 range probes; received ${successfulProbes.length}/${config.probeCount}`
     );
   }
-  const slowTtfb = probes.filter((probe) => probe.ttfbMs > config.maximumTtfbMs);
+  const slowTtfb = successfulProbes.filter((probe) => probe.ttfbMs > config.maximumTtfbMs);
   if (slowTtfb.length > 0) {
     failures.push(
       `${slowTtfb.length} probe(s) exceeded ${config.maximumTtfbMs}ms time-to-first-byte`
     );
   }
-  const probeMedianSpeed = median(probes.map((probe) => probe.bytesPerSecond));
+  const probeMedianSpeed = median(successfulProbes.map((probe) => probe.bytesPerSecond));
   if (probeMedianSpeed !== null && probeMedianSpeed < config.minimumBytesPerSecond) {
     failures.push(
       `Median range throughput ${probeMedianSpeed} B/s is below ${config.minimumBytesPerSecond} B/s`
@@ -398,10 +454,12 @@ export async function runDownloadEgressHealth(
     edge,
     realUserTelemetry,
     failures,
+    observabilityFailures,
     summary:
       `${status.toUpperCase()}: ${successfulProbes.length}/${config.probeCount} range probes; ` +
       `median ${probeMedianSpeed ?? 0} B/s; edge ${edge.serverErrors}/${edge.requests} 5xx; ` +
-      `real downloads ${realUserTelemetry.completed} completed, ${realUserTelemetry.failed} failed`,
+      `real downloads ${realUserTelemetry.completed} completed, ${realUserTelemetry.failed} failed; ` +
+      `observability failures ${observabilityFailures.length}`,
   };
   writeReport(config.outputPath, report);
   return report;

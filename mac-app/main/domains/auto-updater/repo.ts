@@ -83,15 +83,22 @@ export async function postDownloadTelemetry(
 
   const attempts = DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS.length + 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const response = await fetch(`${config.apiUrl}${DOWNLOAD_TELEMETRY_ENDPOINT}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${session.access_token}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(DOWNLOAD_TELEMETRY_TIMEOUT_MS),
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${config.apiUrl}${DOWNLOAD_TELEMETRY_ENDPOINT}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${session.access_token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(DOWNLOAD_TELEMETRY_TIMEOUT_MS),
+      });
+    } catch (error) {
+      if (attempt === attempts - 1) throw error;
+      await wait(DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS[attempt] ?? 0);
+      continue;
+    }
     if (response.status === 202) return { delivered: true };
     const retryable = isRetryableTelemetryStatus(response.status);
     if (!retryable || attempt === attempts - 1) {

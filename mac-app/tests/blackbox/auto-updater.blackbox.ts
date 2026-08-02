@@ -475,6 +475,81 @@ describe('blackbox: auto-updater (main-service)', () => {
       });
     });
 
+    it('retries updater telemetry after a network rejection', async () => {
+      await loadAutoUpdater();
+      telemetryFetchFn
+        .mockRejectedValueOnce(new TypeError('socket closed'))
+        .mockResolvedValueOnce(new Response(null, { status: 202 }));
+      const { postDownloadTelemetry } = await import('../../main/domains/auto-updater/repo');
+
+      const result = await postDownloadTelemetry({
+        event: 'mac_update_download_started',
+        insertId: 'retry-session:started',
+        sessionId: 'retry-session',
+        occurredAt: '2026-08-02T21:00:00.000Z',
+      });
+
+      expect(result).toEqual({ delivered: true });
+      expect(telemetryFetchFn).toHaveBeenCalledTimes(2);
+    });
+
+    it('skips updater telemetry when no authenticated session is available', async () => {
+      await loadAutoUpdater();
+      getSessionFn.mockResolvedValueOnce(null);
+      const { postDownloadTelemetry } = await import('../../main/domains/auto-updater/repo');
+
+      const result = await postDownloadTelemetry({
+        event: 'mac_update_download_started',
+        insertId: 'signed-out-session:started',
+        sessionId: 'signed-out-session',
+        occurredAt: '2026-08-02T21:00:00.000Z',
+      });
+
+      expect(result).toEqual({ delivered: false, reason: 'unauthenticated' });
+      expect(telemetryFetchFn).not.toHaveBeenCalled();
+    });
+
+    it('retries retryable HTTP failures and rejects non-retryable responses with detail', async () => {
+      await loadAutoUpdater();
+      telemetryFetchFn
+        .mockResolvedValueOnce(new Response('temporarily unavailable', { status: 503 }))
+        .mockResolvedValueOnce(new Response(null, { status: 202 }));
+      const { postDownloadTelemetry } = await import('../../main/domains/auto-updater/repo');
+      const payload = {
+        event: 'mac_update_download_started' as const,
+        insertId: 'http-retry-session:started',
+        sessionId: 'http-retry-session',
+        occurredAt: '2026-08-02T21:00:00.000Z',
+      };
+
+      await expect(postDownloadTelemetry(payload)).resolves.toEqual({ delivered: true });
+      expect(telemetryFetchFn).toHaveBeenCalledTimes(2);
+
+      telemetryFetchFn.mockReset();
+      telemetryFetchFn.mockResolvedValueOnce(new Response('invalid telemetry', { status: 400 }));
+      await expect(postDownloadTelemetry(payload)).rejects.toThrow(
+        'Download telemetry rejected (400): invalid telemetry'
+      );
+      expect(telemetryFetchFn).toHaveBeenCalledTimes(1);
+    });
+
+    it('surfaces a network rejection after updater telemetry retries are exhausted', async () => {
+      await loadAutoUpdater();
+      const networkError = new TypeError('socket closed');
+      telemetryFetchFn.mockRejectedValue(networkError);
+      const { postDownloadTelemetry } = await import('../../main/domains/auto-updater/repo');
+
+      await expect(
+        postDownloadTelemetry({
+          event: 'mac_update_download_started',
+          insertId: 'failed-retry-session:started',
+          sessionId: 'failed-retry-session',
+          occurredAt: '2026-08-02T21:00:00.000Z',
+        })
+      ).rejects.toBe(networkError);
+      expect(telemetryFetchFn).toHaveBeenCalledTimes(3);
+    });
+
     it('translates update-downloaded into state=downloaded and latches isUpdateDownloaded', async () => {
       const mod = await loadAutoUpdater();
       mod.initAutoUpdater(win as unknown as Electron.BrowserWindow);

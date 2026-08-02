@@ -137,5 +137,11 @@ export async function recordDownloadTelemetry(
     total_bytes: payload.totalBytes,
     error_message: payload.errorMessage,
   });
-  await sendAmplitudeDownloadEvent(amplitudeEvent(userId, payload));
+  void sendAmplitudeDownloadEvent(amplitudeEvent(userId, payload)).catch((error: unknown) => {
+    log.error('Amplitude download telemetry delivery failed', {
+      event: payload.event,
+      insert_id: payload.insertId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
 }

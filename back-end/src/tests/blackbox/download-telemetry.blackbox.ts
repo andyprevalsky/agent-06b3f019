@@ -114,7 +114,7 @@ function amplitudeBody(userId: string, payload: Record<string, unknown>): string
   });
 }
 
-async function seedAmplitude(body: string): Promise<void> {
+async function seedAmplitude(body: string, status = 200): Promise<void> {
   const key = `call:${JSON.stringify([AMPLITUDE_INGEST_URL, 'POST', body])}`;
   const response = await request('/api/test/captures/cache', {
     method: 'PUT',
@@ -123,9 +123,11 @@ async function seedAmplitude(body: string): Promise<void> {
       value: {
         __ff_promise_result: true,
         value: {
-          status: 200,
-          statusText: 'OK',
-          body: JSON.stringify({ code: 200, events_ingested: 1 }),
+          status,
+          statusText: status === 200 ? 'OK' : 'Service Unavailable',
+          body: JSON.stringify(
+            status === 200 ? { code: 200, events_ingested: 1 } : { code: status }
+          ),
           headers: { 'content-type': 'application/json' },
         },
       },
@@ -140,6 +142,17 @@ async function captures(token: string): Promise<Capture[]> {
   return ((response.data as { captures?: Capture[] }).captures ?? []).filter(
     (capture) => capture.url === AMPLITUDE_INGEST_URL
   );
+}
+
+async function waitForCaptures(
+  token: string,
+  expected: number,
+  deadline = Date.now() + 3_000
+): Promise<Capture[]> {
+  const observed = await captures(token);
+  if (observed.length >= expected || Date.now() >= deadline) return observed;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return waitForCaptures(token, expected, deadline);
 }
 
 test('rejects unauthenticated telemetry', async () => {
@@ -185,7 +198,7 @@ test('logs and forwards a completed updater trace to Amplitude', async (context)
 
   assert(response.status === 202, `expected 202, got ${response.status}`);
   assert((response.data as { accepted?: unknown }).accepted === true, 'accepted=true missing');
-  const outbound = await captures(captureToken);
+  const outbound = await waitForCaptures(captureToken, 1);
   assert(outbound.length === 1, `expected one Amplitude call, got ${outbound.length}`);
   assert(outbound[0].method === 'POST', 'Amplitude ingestion must use POST');
   assert(outbound[0].requestBody === outboundBody, 'Amplitude payload lost transfer diagnostics');
@@ -214,9 +227,34 @@ test('forwards failure diagnostics without leaking unbounded messages', async (c
   });
 
   assert(response.status === 202, `expected 202, got ${response.status}`);
-  const outbound = await captures(captureToken);
+  const outbound = await waitForCaptures(captureToken, 1);
   assert(outbound.length === 1, `expected one Amplitude call, got ${outbound.length}`);
   assert(outbound[0].requestBody === outboundBody, 'failure diagnostics did not round-trip');
+});
+
+test('accepts telemetry before retryable Amplitude delivery finishes', async (context) => {
+  const payload = telemetryPayload({
+    insertId: 'download-session-retry:completed',
+    sessionId: 'download-session-retry',
+  });
+  const outboundBody = amplitudeBody(context.userId, payload);
+  await seedAmplitude(outboundBody, 503);
+  const captureToken = `download-retry-${Date.now()}`;
+  const startedAt = Date.now();
+
+  const response = await request('/api/download-telemetry', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${context.accessToken}`,
+      'X-Capture-Token': captureToken,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  assert(response.status === 202, `expected 202, got ${response.status}`);
+  assert(Date.now() - startedAt < 500, '202 response waited for Amplitude retry backoff');
+  const outbound = await waitForCaptures(captureToken, 3);
+  assert(outbound.length === 3, `expected three Amplitude attempts, got ${outbound.length}`);
 });
 
 async function main(): Promise<void> {

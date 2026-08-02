@@ -13,12 +13,16 @@ export function trackDownloadStarted(trigger: DownloadTrigger): void {
     channel: 'latest',
     trigger,
   });
+  analytics.flush();
 }
 
 /** Triggers an immediate redirect to the Mac download URL on mount. */
 export function useDownloadRedirect(): void {
   useEffect(() => {
+    const flushOnPageHide = () => analytics.flush();
+    window.addEventListener('pagehide', flushOnPageHide);
     trackDownloadStarted('automatic_redirect');
     window.location.href = DOWNLOAD_URL;
+    return () => window.removeEventListener('pagehide', flushOnPageHide);
   }, []);
 }

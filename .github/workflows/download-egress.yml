@@ -21,10 +21,12 @@ jobs:
 
     steps:
       - name: Check out monitor
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
 
@@ -46,11 +48,11 @@ jobs:
 
       - name: Upload deep diagnostic report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mac-download-egress-${{ github.run_id }}
           path: .context/download-egress/report.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 90
 
       - name: Resolve previous monitor conclusion
@@ -60,10 +62,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           previous_conclusion="$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs?status=completed&per_page=20" |
+            gh api --method GET \
+              "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs" \
+              -f status=completed \
+              -f branch="$GITHUB_REF_NAME" \
+              -f event="$GITHUB_EVENT_NAME" \
+              -f per_page=100 |
               jq -r --arg current "$GITHUB_RUN_ID" \
-                '.workflow_runs[] | select((.id | tostring) != $current) | .conclusion' |
-              head -1
+                '[.workflow_runs[] |
+                  select((.id | tostring) != $current) |
+                  select(.conclusion == "success" or .conclusion == "failure")] |
+                 sort_by(.updated_at) | reverse | .[0].conclusion // empty'
           )"
           echo "conclusion=${previous_conclusion:-none}" >> "$GITHUB_OUTPUT"
 
@@ -78,9 +87,20 @@ jobs:
           MONITOR_OUTCOME: ${{ steps.monitor.outcome }}
           PREVIOUS_CONCLUSION: ${{ steps.previous.outputs.conclusion }}
         run: |
-          summary="$(jq -r '.summary // "Diagnostic report unavailable"' .context/download-egress/report.json)"
+          report=.context/download-egress/report.json
+          if [ -f "$report" ]; then
+            summary="$(jq -r '.summary // "Diagnostic report unavailable"' "$report")"
+            report_available=true
+          else
+            summary='Monitor crashed before writing a diagnostic report'
+            report_available=false
+          fi
           if [ "$MONITOR_OUTCOME" = failure ]; then
-            heading=':rotating_light: Mac download egress incident'
+            if [ "$report_available" = true ]; then
+              heading=':rotating_light: Mac download egress incident'
+            else
+              heading=':rotating_light: Mac download monitor execution failure'
+            fi
           else
             heading=':white_check_mark: Mac download egress recovered'
           fi
@@ -89,7 +109,8 @@ jobs:
           Deep report: https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           payload="$(jq -n --arg channel "$SLACK_CHANNEL_ID" --arg text "$text" \
             '{channel: $channel, text: $text}')"
-          response="$(curl -fsS https://slack.com/api/chat.postMessage \
+          response="$(curl -fsS --retry 3 --retry-all-errors --max-time 30 \
+            https://slack.com/api/chat.postMessage \
             -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
             -H 'Content-Type: application/json; charset=utf-8' \
             --data "$payload")"
