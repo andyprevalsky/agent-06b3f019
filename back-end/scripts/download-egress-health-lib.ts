@@ -85,6 +85,13 @@ export interface DownloadEgressReport {
   summary: string;
 }
 
+/** Keep download incidents distinct from loss of the monitor's diagnostic sources. */
+export function downloadEgressExitCode(report: DownloadEgressReport): 0 | 1 | 2 {
+  if (report.failures.length > 0) return 1;
+  if (report.observabilityFailures.length > 0) return 2;
+  return 0;
+}
+
 function rounded(milliseconds: number): number {
   return Math.round(milliseconds * 100) / 100;
 }

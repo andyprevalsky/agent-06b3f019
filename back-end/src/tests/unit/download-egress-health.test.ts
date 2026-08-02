@@ -7,7 +7,10 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 
-import { runDownloadEgressHealth } from '../../../scripts/download-egress-health-lib';
+import {
+  downloadEgressExitCode,
+  runDownloadEgressHealth,
+} from '../../../scripts/download-egress-health-lib';
 
 const temporaryDirectory = mkdtempSync(join(tmpdir(), 'rose-download-egress-'));
 let artifactStatus = 206;
@@ -165,6 +168,7 @@ async function main(): Promise<void> {
 
   const healthy = await runDownloadEgressHealth(commonConfig);
   assert.equal(healthy.status, 'healthy');
+  assert.equal(downloadEgressExitCode(healthy), 0);
   assert.equal(healthy.probes.length, 3);
   assert.equal(
     healthy.probes.every((probe) => probe.httpStatus === 206),
@@ -192,6 +196,7 @@ async function main(): Promise<void> {
     outputPath: join(temporaryDirectory, 'failed-report.json'),
   });
   assert.equal(unhealthy.status, 'unhealthy');
+  assert.equal(downloadEgressExitCode(unhealthy), 1);
   assert.match(unhealthy.failures.join('\n'), /3 successful range probes|HTTP 206/i);
 
   artifactStatus = 200;
@@ -236,6 +241,7 @@ async function main(): Promise<void> {
   assert.equal(degradedObservability.status, 'healthy');
   assert.equal(degradedObservability.failures.length, 0);
   assert.match(degradedObservability.observabilityFailures.join('\n'), /no result array/);
+  assert.equal(downloadEgressExitCode(degradedObservability), 2);
   invalidSupabaseResult = false;
 
   const workflowPath = resolve(process.cwd(), '..', '.github', 'workflows', 'download-egress.yml');
@@ -245,6 +251,8 @@ async function main(): Promise<void> {
   assert.match(workflow, /RENDER_API_KEY/);
   assert.match(workflow, /upload-artifact/);
   assert.match(workflow, /SLACK_BOT_TOKEN/);
+  assert.match(workflow, /Mac download observability degraded/);
+  assert.match(workflow, /if ! previous_conclusion=/);
   assert.match(workflow, /previous.*conclusion|PREVIOUS_CONCLUSION/is);
   assert.match(workflow, /download-egress-health\.ts/);
 

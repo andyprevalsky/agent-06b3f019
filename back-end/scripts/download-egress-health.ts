@@ -2,7 +2,7 @@
 
 import { isAbsolute, resolve } from 'node:path';
 import { config as loadEnvironment } from 'dotenv';
-import { runDownloadEgressHealth } from './download-egress-health-lib';
+import { downloadEgressExitCode, runDownloadEgressHealth } from './download-egress-health-lib';
 
 loadEnvironment({ path: resolve(__dirname, '../.env') });
 loadEnvironment({ path: resolve(__dirname, '../../agents/.env') });
@@ -48,11 +48,11 @@ async function main(): Promise<void> {
   process.stdout.write(`${report.summary}\n`);
   if (report.failures.length > 0) {
     for (const failure of report.failures) process.stderr.write(`- ${failure}\n`);
-    process.exitCode = 1;
   }
   for (const failure of report.observabilityFailures) {
     process.stderr.write(`- OBSERVABILITY: ${failure}\n`);
   }
+  process.exitCode = downloadEgressExitCode(report);
 }
 
 main().catch((error) => {

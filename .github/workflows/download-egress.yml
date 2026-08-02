@@ -61,19 +61,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          previous_conclusion="$(
-            gh api --method GET \
-              "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs" \
-              -f status=completed \
-              -f branch="$GITHUB_REF_NAME" \
-              -f event="$GITHUB_EVENT_NAME" \
-              -f per_page=100 |
-              jq -r --arg current "$GITHUB_RUN_ID" \
-                '[.workflow_runs[] |
-                  select((.id | tostring) != $current) |
-                  select(.conclusion == "success" or .conclusion == "failure")] |
-                 sort_by(.updated_at) | reverse | .[0].conclusion // empty'
-          )"
+          if ! previous_conclusion="$(
+              gh api --method GET \
+                "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs" \
+                -f status=completed \
+                -f branch="$GITHUB_REF_NAME" \
+                -f event="$GITHUB_EVENT_NAME" \
+                -f per_page=100 |
+                jq -r --arg current "$GITHUB_RUN_ID" \
+                  '[.workflow_runs[] |
+                    select((.id | tostring) != $current) |
+                    select(.conclusion == "success" or .conclusion == "failure")] |
+                   sort_by(.updated_at) | reverse | .[0].conclusion // empty'
+            )"; then
+            previous_conclusion=""
+          fi
           echo "conclusion=${previous_conclusion:-none}" >> "$GITHUB_OUTPUT"
 
       - name: Notify Slack on incident transition or recovery
@@ -88,16 +90,24 @@ jobs:
           PREVIOUS_CONCLUSION: ${{ steps.previous.outputs.conclusion }}
         run: |
           report=.context/download-egress/report.json
-          if [ -f "$report" ]; then
+          if [ -f "$report" ] && jq -e 'type == "object"' "$report" >/dev/null; then
             summary="$(jq -r '.summary // "Diagnostic report unavailable"' "$report")"
+            report_status="$(jq -r '.status // "unknown"' "$report")"
+            observability_failure_count="$(jq -r '(.observabilityFailures // []) | length' "$report")"
             report_available=true
           else
             summary='Monitor crashed before writing a diagnostic report'
+            report_status=unknown
+            observability_failure_count=0
             report_available=false
           fi
           if [ "$MONITOR_OUTCOME" = failure ]; then
-            if [ "$report_available" = true ]; then
+            if [ "$report_available" != true ]; then
+              heading=':rotating_light: Mac download monitor execution failure'
+            elif [ "$report_status" = unhealthy ]; then
               heading=':rotating_light: Mac download egress incident'
+            elif [ "$observability_failure_count" -gt 0 ]; then
+              heading=':warning: Mac download observability degraded'
             else
               heading=':rotating_light: Mac download monitor execution failure'
             fi
