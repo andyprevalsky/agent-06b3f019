@@ -29,7 +29,17 @@ RESTORE_ARGS=(
     --single-transaction
 )
 
-if [ -n "$DB_CONTAINER" ]; then
+ARCHIVE_MAGIC="$(LC_ALL=C head -c 5 "$DUMP_PATH" || true)"
+if [ "$ARCHIVE_MAGIC" != "PGDMP" ]; then
+    if [ -n "$DB_CONTAINER" ]; then
+        docker exec -i "$DB_CONTAINER" psql \
+            -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$DUMP_PATH"
+    else
+        PGPASSWORD="${PGPASSWORD:-postgres}" psql \
+            -v ON_ERROR_STOP=1 -h "$DB_HOST" -p "$DB_PORT" \
+            -U "$DB_USER" -d "$DB_NAME" < "$DUMP_PATH"
+    fi
+elif [ -n "$DB_CONTAINER" ]; then
     # The database image owns the only client guaranteed to understand its
     # server startup parameters. In particular, pg_restore 18 emits
     # `SET transaction_timeout`, which PostgreSQL 16 rejects before restoring

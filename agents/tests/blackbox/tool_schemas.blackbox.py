@@ -144,6 +144,27 @@ def test_explore_agent_action_model_accepts_documents_grep():
     assert instance.tool_calls[0].filters == {"document_source": "obsidian"}
 
 
+def test_explore_agent_action_model_accepts_summary_grep():
+    """Explore agents can request aggregate local-data metadata before raw scans."""
+    from utils.tool_schemas import EXPLORE_AGENT_TOOLS, create_agent_action_model
+
+    Model = create_agent_action_model(EXPLORE_AGENT_TOOLS)
+    instance = Model(
+        response="Checking aggregate WhatsApp statistics",
+        tool_calls=[
+            {
+                "tool": "grep",
+                "pattern": "WhatsApp totals",
+                "sources": ["summary"],
+                "source": "summary",
+            }
+        ],
+    )
+
+    assert instance.tool_calls[0].tool == "grep"
+    assert instance.tool_calls[0].sources == ["summary"]
+
+
 def test_planner_assignable_tools():
     """PLANNER_ASSIGNABLE_TOOLS contains expected planner-specific tool names."""
     from utils.tool_schemas import PLANNER_ASSIGNABLE_TOOLS
@@ -202,6 +223,7 @@ def test_grep_tool_schema_exact_contract():
         "agent_network",
         "transactions",
         "documents",
+        "summary",
     }
 
     def _enum_values(prop_schema: dict) -> set:
@@ -816,6 +838,9 @@ async def run_all_tests():
     )
     r.record(
         "explore_agent_action_model_accepts_documents_grep", test_explore_agent_action_model_accepts_documents_grep
+    )
+    r.record(
+        "explore_agent_action_model_accepts_summary_grep", test_explore_agent_action_model_accepts_summary_grep
     )
     r.record("planner_assignable_tools", test_planner_assignable_tools)
     r.record("planner_response_schema_compact", test_planner_response_schema_is_compact)

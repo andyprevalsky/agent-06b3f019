@@ -34,6 +34,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.fixtures import BASE_IMAGES, DEFAULT_BASE_IMAGE, base_image_snapshot_path
 from benchmarks.seed_cache_path import seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
@@ -721,7 +722,34 @@ def validate_agentcard_org_credentials(
     )
 
 
+def selected_base_image(tasks: Sequence[str]) -> str:
+    """Resolve the one DB base image required by a shared local stack."""
+    task_by_name = {task.name: task for task in all_tasks()}
+    images: set[str] = set()
+    for task_name in tasks:
+        task = task_by_name.get(task_name)
+        if task is None:
+            raise ValueError(f"Unknown benchmark task: {task_name}")
+        environment = task.environment or {}
+        task_images = environment.get("base_images") or [DEFAULT_BASE_IMAGE]
+        if len(task_images) != 1:
+            raise ValueError(
+                f"Task '{task_name}' must declare exactly one base image; got {task_images}"
+            )
+        image = str(task_images[0])
+        if image not in BASE_IMAGES:
+            raise ValueError(f"Task '{task_name}' declares unknown base image '{image}'")
+        images.add(image)
+    if len(images) != 1:
+        raise ValueError(
+            "A local benchmark stack cannot mix base images; run these task groups "
+            f"separately: {sorted(images)}"
+        )
+    return next(iter(images))
+
+
 def configure_task_environment(tasks: Sequence[str]) -> None:
+    os.environ["BENCHMARK_BASE_IMAGE_NAME"] = selected_base_image(tasks)
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
@@ -938,9 +966,31 @@ def start_services(
         # run.sh's schema/day-keyed R2 seed cache so startup restores the same
         # prod snapshot in seconds instead of row-syncing tens of thousands of
         # records before services.json can be published.
-        seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
-        seed_dump.parent.mkdir(parents=True, exist_ok=True)
-        _prime_local_seed_dump_from_shared_stack(seed_dump)
+        base_image_name = env.get("BENCHMARK_BASE_IMAGE_NAME", DEFAULT_BASE_IMAGE)
+        if base_image_name == DEFAULT_BASE_IMAGE:
+            seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
+            seed_dump.parent.mkdir(parents=True, exist_ok=True)
+            _prime_local_seed_dump_from_shared_stack(seed_dump)
+        else:
+            source_dump = base_image_snapshot_path(base_image_name)
+            source_hash = Path(f"{source_dump}.schemahash")
+            expected_hash = hashlib.sha1(
+                (REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+            ).hexdigest()
+            if not source_dump.is_file() or source_dump.stat().st_size == 0:
+                raise RuntimeError(
+                    f"Base image '{base_image_name}' has no local snapshot: {source_dump}. "
+                    "Create it with ensure_base_image_snapshot() before running this task."
+                )
+            if not source_hash.is_file() or source_hash.read_text().strip() != expected_hash:
+                raise RuntimeError(
+                    f"Base image '{base_image_name}' snapshot does not match the current "
+                    f"Prisma schema: {source_dump}"
+                )
+            seed_dump = stack.context_dir / source_dump.name
+            shutil.copy2(source_dump, seed_dump)
+            shutil.copy2(source_hash, Path(f"{seed_dump}.schemahash"))
+            print(f"Selected benchmark base image: {base_image_name} ({source_dump})")
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
         # Default: require a schema-matched cached dump and refuse the slow prod
         # cold-sync. But the very first local run on a fresh schema/day has no

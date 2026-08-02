@@ -62,6 +62,7 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
+from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.local import manifest_database_url
@@ -4792,6 +4793,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     if _is_simulate_mode():
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
+    base_image_name = os.environ.get("BENCHMARK_BASE_IMAGE_NAME", DEFAULT_BASE_IMAGE)
+    if base_image_name != DEFAULT_BASE_IMAGE:
+        print(f"    🧊 {base_image_name} — using compute tokens from the frozen base image")
+        return
     if _anthropic_family_excluded():
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
@@ -6657,22 +6662,34 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         if not isinstance(text_value, str):
             text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence_metadata = {
+            key: metadata[key]
+            for key in (
+                "action_type",
+                "toolName",
+                "toolStatus",
+                "url",
+                "title",
+                "browser_session_metadata",
+            )
+            if key in metadata
+        }
+        completion_summary = metadata.get("completionSummary")
+        if isinstance(completion_summary, dict):
+            # The completion card is the root agent's user-facing final response.
+            # Preserve its verified values for semantic judges instead of exposing
+            # only the empty TOOL-row text that backs the rendered card.
+            summary = completion_summary.get("summary")
+            outputs = completion_summary.get("outputs")
+            evidence_metadata["completionSummary"] = {
+                "summary": str(summary or "")[:12000],
+                "outputs": outputs[:100] if isinstance(outputs, list) else [],
+            }
         evidence.append(
             {
                 "role": role or "UNKNOWN",
                 "text": text_value[:12000],
-                "metadata": {
-                    key: metadata[key]
-                    for key in (
-                        "action_type",
-                        "toolName",
-                        "toolStatus",
-                        "url",
-                        "title",
-                        "browser_session_metadata",
-                    )
-                    if key in metadata
-                },
+                "metadata": evidence_metadata,
             }
         )
     evidence.append({"benchmark_state": data.get("_benchmark", {})})
@@ -8510,9 +8527,10 @@ async def _terminate_stale_workflows():
     prevents cascading resource exhaustion.
     """
     try:
-        from temporalio.client import Client, TLSConfig
+        from temporalio.client import Client
 
         from config import load_config
+        from temporal_connection import temporal_connect_options
 
         workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
         if not workspace:
@@ -8541,12 +8559,11 @@ async def _terminate_stale_workflows():
 
         client = await Client.connect(
             config.temporal.address,
-            namespace=config.temporal.namespace,
-            tls=TLSConfig(client_cert=None, client_private_key=None),
-            rpc_metadata={
-                "temporal-namespace": config.temporal.namespace,
-                "Authorization": f"Bearer {config.temporal.api_key}",
-            },
+            **temporal_connect_options(
+                config.temporal.address,
+                config.temporal.namespace,
+                config.temporal.api_key,
+            ),
         )
 
         query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'

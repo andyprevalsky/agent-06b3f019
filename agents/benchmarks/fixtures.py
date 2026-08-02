@@ -16,6 +16,7 @@ applied on top of a base image.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -96,7 +97,16 @@ def ensure_base_image_snapshot(name: str = DEFAULT_BASE_IMAGE, *, refresh: bool 
     if name not in BASE_IMAGES:
         raise ValueError(f"Unknown base image '{name}'. Known: {sorted(BASE_IMAGES)}")
     path = base_image_snapshot_path(name)
-    if path.exists() and path.stat().st_size > 0 and not refresh:
+    schema_path = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    schema_hash = hashlib.sha1(schema_path.read_bytes()).hexdigest()
+    hash_path = Path(f"{path}.schemahash")
+    if (
+        path.exists()
+        and path.stat().st_size > 0
+        and hash_path.exists()
+        and hash_path.read_text().strip() == schema_hash
+        and not refresh
+    ):
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,6 +128,11 @@ def ensure_base_image_snapshot(name: str = DEFAULT_BASE_IMAGE, *, refresh: bool 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"Base image snapshot failed: {stderr}")
-    path.write_bytes(result.stdout)
+    path_tmp = Path(f"{path}.tmp-{os.getpid()}")
+    hash_tmp = Path(f"{hash_path}.tmp-{os.getpid()}")
+    path_tmp.write_bytes(result.stdout)
+    hash_tmp.write_text(schema_hash)
+    os.replace(path_tmp, path)
+    os.replace(hash_tmp, hash_path)
     print(f"    🧊 Base image snapshot written: {path}")
     return path

@@ -4381,7 +4381,7 @@
     "bench": "rose-bench",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["whatsapp_messages_v1"],
+      "db_fixtures": [],
       "base_images": ["base:victoria-whatsapp-v1"],
       "live_fixtures": [],
       "services": [],
@@ -4407,12 +4407,12 @@
         "method": "single_turn_llm_judge",
         "criteria": [
           "The agent searched the user's own WhatsApp data (grep against the whatsapp/messages source, or the local data summary) rather than answering from assumption",
-          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?', sent by the user on 2026-07-29",
-          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823, with approximately 2197 messages - far more than any other contact",
-          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages across roughly 561 contacts/threads, spanning about July 2022 to July 2026",
+          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?'; direction and timestamp are optional details",
+          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823; its approximately 2197-message subtotal is optional",
+          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages spanning about July 2022 to July 2026; the roughly 561 contacts/threads count is optional",
           "All three questions are answered in the final response"
         ],
-        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable: '2,197' equals '2197', a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Score 1.0 only when all three questions are answered and each matches the expected value. Score 0.0 if any answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
+        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation that the answer does include must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable, a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Do not require optional supporting statistics that the user did not ask for, such as the top contact's message subtotal or the number of contacts/threads. Score 1.0 only when all three requested answers are present and each matches the expected value. Score 0.0 if any requested answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
       }
     ],
     "enforce_declared_evaluators": true,

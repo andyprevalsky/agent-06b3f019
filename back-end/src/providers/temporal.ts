@@ -18,6 +18,15 @@ export const WORKER_DEPLOYMENT_ACTIVATION_TASK_QUEUE = 'navi-worker-deployment-m
 export const DESCENDANT_START_TOMBSTONE_TASK_QUEUE = 'navi-deployment-descendant-start-tombstones';
 const WORKER_DEPLOYMENT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 
+export function isLocalTemporalAddress(address: string): boolean {
+  const normalized = address.trim().toLowerCase();
+  if (normalized === '::1') return true;
+  const host = normalized.startsWith('[')
+    ? normalized.slice(1, normalized.indexOf(']'))
+    : normalized.split(':', 1)[0];
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
 export function withTemporalControlDeadline<T>(
   temporalClient: Pick<Client, 'withDeadline'>,
   operation: () => Promise<T>,
@@ -152,27 +161,32 @@ export async function getTemporalClient(): Promise<Client> {
     throw new Error('Missing TEMPORAL_NAMESPACE environment variable');
   }
 
-  if (!apiKey) {
+  const isLocal = isLocalTemporalAddress(address);
+  if (!apiKey && !isLocal) {
     throw new Error('Missing TEMPORAL_API_KEY environment variable');
   }
 
-  log.info('Connecting to Temporal Cloud...', {
+  log.info(isLocal ? 'Connecting to local Temporal...' : 'Connecting to Temporal Cloud...', {
     address,
     namespace,
   });
 
-  const connection = await Connection.connect({
-    address,
-    tls: true, // Required for Temporal Cloud
-    apiKey, // Use apiKey directly (simpler than metadata)
-  });
+  const connection = await Connection.connect(
+    isLocal
+      ? { address, tls: false }
+      : {
+          address,
+          tls: true, // Required for Temporal Cloud
+          apiKey, // Use apiKey directly (simpler than metadata)
+        }
+  );
 
   client = new Client({
     connection,
     namespace,
   });
 
-  log.info('Connected to Temporal Cloud');
+  log.info(isLocal ? 'Connected to local Temporal' : 'Connected to Temporal Cloud');
 
   return client;
 }

@@ -300,6 +300,15 @@ export async function getSummary(userId: string): Promise<SummaryResult> {
           from: oldestMessage?.timestamp?.toISOString() ?? null,
           to: newestMessage?.timestamp?.toISOString() ?? null,
         },
+        latest_message: newestMessage
+          ? {
+              timestamp: newestMessage.timestamp.toISOString(),
+              channel: newestMessage.channel,
+              from: newestMessage.from,
+              to: newestMessage.to,
+              text: newestMessage.message,
+            }
+          : null,
         threads: threadSummaries,
       },
     },

@@ -2077,6 +2077,42 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
+def test_declared_evaluator_evidence_includes_user_facing_completion_card():
+    """Semantic judges can see final values rendered by CompletionSummaryCard."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    outputs = [
+        {"key": "total_messages", "label": "Total Messages", "value": 3825},
+        {"key": "most_contacted", "label": "Most Contacted", "value": "+39900262981823"},
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "",
+                    "metadata": {
+                        "toolName": "completion_summary",
+                        "toolStatus": "FINISHED",
+                        "completionSummary": {
+                            "summary": "Answered all WhatsApp questions.",
+                            "outputs": outputs,
+                            "toolUsage": [{"name": "spawn_agent", "count": 1}],
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    completion = evidence[0]["metadata"]["completionSummary"]
+    assert completion == {
+        "summary": "Answered all WhatsApp questions.",
+        "outputs": outputs,
+    }
+    assert "toolUsage" not in completion
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -5306,6 +5342,27 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
     ]
 
 
+async def test_local_compute_refresh_preserves_frozen_base_image():
+    """A frozen base image must not be mutated by a live production sync."""
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    with (
+        patch.dict(
+            os.environ,
+            {"BENCHMARK_BASE_IMAGE_NAME": "base:victoria-whatsapp-v1"},
+            clear=False,
+        ),
+        patch.object(bench, "_sync_compute_tokens") as sync,
+        patch.object(bench, "_has_usable_anthropic_api_key_fallback") as fallback,
+    ):
+        await bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+
+    sync.assert_not_called()
+    fallback.assert_not_called()
+
+
 def test_compute_token_sync_reads_source_file_not_isolated_process_target():
     """The isolated target DSN must not shadow the explicit production source."""
     from unittest.mock import patch
@@ -6578,6 +6635,81 @@ def test_runner_fixtures_reject_manifest_without_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
+def test_local_runner_selects_declared_task_base_image():
+    """A task's declared base image must control its isolated DB snapshot."""
+    from benchmarks import local as local_bench
+
+    assert (
+        local_bench.selected_base_image(["whatsapp-history-recall"])
+        == "base:victoria-whatsapp-v1"
+    )
+
+    try:
+        local_bench.selected_base_image(["whatsapp-history-recall", "spawn-sub-agents"])
+    except ValueError as exc:
+        assert "cannot mix base images" in str(exc)
+    else:
+        raise AssertionError("mixed base images were silently run against one database")
+
+
+def test_local_custom_base_image_is_copied_into_run_context():
+    """A private base image is restored from a disposable per-run copy."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def fake_popen(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return FakeProcess()
+
+    prior_base_image = os.environ.get("BENCHMARK_BASE_IMAGE_NAME")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "private-whatsapp.sql"
+            source.write_text("-- private fixture\nSELECT 1;\n")
+            schema_hash = hashlib.sha1(
+                (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+            ).hexdigest()
+            Path(f"{source}.schemahash").write_text(schema_hash)
+            context_dir = root / "isolated-run"
+            stack = local_bench.ServiceStack(
+                run_id="isolated-run",
+                context_dir=context_dir,
+                manifest_path=context_dir / "services.json",
+                service_log=context_dir / "services.log",
+                isolated=True,
+                workspace_name="blackbox-bench-isolated-run",
+                base_port=55120,
+            )
+            os.environ["BENCHMARK_BASE_IMAGE_NAME"] = "base:victoria-whatsapp-v1"
+            with (
+                patch.object(local_bench, "base_image_snapshot_path", return_value=source),
+                patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
+                patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
+                patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack") as prime,
+            ):
+                local_bench.start_services(stack, clean_first=False)
+
+            copied = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
+            assert copied == context_dir / source.name
+            assert copied.read_bytes() == source.read_bytes()
+            assert Path(f"{copied}.schemahash").read_text() == schema_hash
+            assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
+            prime.assert_not_called()
+    finally:
+        if prior_base_image is None:
+            os.environ.pop("BENCHMARK_BASE_IMAGE_NAME", None)
+        else:
+            os.environ["BENCHMARK_BASE_IMAGE_NAME"] = prior_base_image
+
+
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
     from benchmarks import local as local_bench
@@ -7070,7 +7202,7 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         tmp_path = Path(tmp)
         command_log = tmp_path / "commands.log"
         dump = tmp_path / "seed.dump"
-        dump.write_bytes(b"custom-archive-fixture")
+        dump.write_bytes(b"PGDMPcustom-archive-fixture")
 
         host_restore = tmp_path / "pg_restore"
         host_restore.write_text(
@@ -7111,6 +7243,48 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         calls = command_log.read_text()
         assert "docker exec -i victoria-db-owned-run pg_restore" in calls
         assert "host pg_restore" not in calls
+
+
+def test_seed_dump_restore_supports_plain_sql_base_images():
+    """Task-specific pg_dump SQL snapshots restore with the target psql client."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "restore-seed-dump.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        dump = tmp_path / "base-image.sql"
+        dump.write_text("-- PostgreSQL database dump\nSELECT 1;\n")
+        docker = tmp_path / "docker"
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
+        docker.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(helper),
+                str(dump),
+                "localhost",
+                "55395",
+                "postgres",
+                "victoria",
+                "victoria-db-owned-run",
+            ],
+            cwd=repo_root,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = command_log.read_text()
+        assert "docker exec -i victoria-db-owned-run psql" in calls
+        assert "pg_restore" not in calls
 
 
 def test_workspace_dependency_preflight_respects_hoisted_installs():
@@ -10513,6 +10687,10 @@ async def run_all_tests():
         "local_compute_refresh_accepts_anthropic_api_key_fallback",
         test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
     )
+    await r.record_async(
+        "local_compute_refresh_preserves_frozen_base_image",
+        test_local_compute_refresh_preserves_frozen_base_image,
+    )
     r.record(
         "compute_token_source_ignores_isolated_process_target",
         test_compute_token_sync_reads_source_file_not_isolated_process_target,
@@ -10599,6 +10777,14 @@ async def run_all_tests():
         "runner_fixture_manifest_database_identity_required",
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
+    r.record(
+        "local_declared_base_image_selection",
+        test_local_runner_selects_declared_task_base_image,
+    )
+    r.record(
+        "local_private_base_image_run_copy",
+        test_local_custom_base_image_is_copied_into_run_context,
+    )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
         "local_shared_public_tunnel_mode",
@@ -10639,6 +10825,10 @@ async def run_all_tests():
     r.record(
         "seed_dump_restore_target_client",
         test_seed_dump_restore_uses_target_container_pg_restore,
+    )
+    r.record(
+        "seed_dump_restore_plain_sql",
+        test_seed_dump_restore_supports_plain_sql_base_images,
     )
     r.record(
         "workspace_dependency_preflight",
@@ -10900,6 +11090,10 @@ async def run_all_tests():
     await r.record_async(
         "required_declared_evaluator_controls_pass_fail",
         test_required_declared_evaluator_controls_pass_fail,
+    )
+    r.record(
+        "declared_evaluator_evidence_completion_card",
+        test_declared_evaluator_evidence_includes_user_facing_completion_card,
     )
     r.record(
         "opentable_static_runtime_contract",

@@ -89,6 +89,12 @@ class LLMStructuredOutputError(ValueError):
 # fresh call almost always parses.
 MAX_STRUCTURED_PARSE_RETRIES = 2
 
+# Some OpenAI-compatible providers serialize generated structured-output tool
+# names with the namespace used in their tool schema (for example,
+# ``default_api:grep``). That namespace is transport metadata, not part of the
+# agent's declared tool name.
+PROVIDER_TOOL_NAME_PREFIXES = ("default_api:",)
+
 
 class ResponseSchemaPersistenceError(RuntimeError):
     """A generated response schema could not be saved durably."""
@@ -99,6 +105,33 @@ TRAILING_MESSAGE_REFERENCE_RE = re.compile(
     r"(?P<ref>@ref:message:[a-f0-9-]{36}(?:\[start=\"[^\"]+\"\|end=\"[^\"]+\"\])?)"
     r"(?P<trailing>\s*)$"
 )
+
+
+def _normalize_provider_tool_names(parsed_content: Dict[str, Any]) -> int:
+    """Remove known provider namespaces before validating declared agent tools.
+
+    Only known transport prefixes are stripped. The response model still
+    validates the remaining tool name and rejects undeclared or malformed
+    tools.
+    """
+
+    tool_calls = parsed_content.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return 0
+
+    normalized_count = 0
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        tool_name = tool_call.get("tool")
+        if not isinstance(tool_name, str):
+            continue
+        for prefix in PROVIDER_TOOL_NAME_PREFIXES:
+            if tool_name.startswith(prefix) and len(tool_name) > len(prefix):
+                tool_call["tool"] = tool_name[len(prefix) :]
+                normalized_count += 1
+                break
+    return normalized_count
 
 
 def _split_trailing_message_reference(text: str) -> tuple[str, str]:
@@ -2793,6 +2826,13 @@ async def call_llm_structured_streaming(
                         logger.warning(
                             f"Recovered nested tool_calls from wrapped response text: {len(normalized_nested_tools)} call(s)"
                         )
+
+            normalized_provider_tools = _normalize_provider_tool_names(parsed_content)
+            if normalized_provider_tools:
+                logger.info(
+                    "Normalized provider-namespaced structured tool calls",
+                    normalized_count=normalized_provider_tools,
+                )
 
             # Prepend explanation/reasoning to response so it shows in the same section.
             # Direct GPT/Codex mirrors claudeAuth here: visible reasoning summaries
