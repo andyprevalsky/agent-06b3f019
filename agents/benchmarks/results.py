@@ -17,6 +17,24 @@ from typing import List, Optional
 MAX_RUN_RECORD_BASENAME_BYTES = 255
 
 
+def bounded_path_component(value: str, *, suffix: str = "", identity: str | None = None) -> str:
+    """Append a suffix without exceeding POSIX ``NAME_MAX``.
+
+    The digest preserves uniqueness when the readable prefix must be shortened.
+    ``identity`` lets callers hash the full logical value rather than a derived
+    filename while keeping the resulting component deterministic.
+    """
+    candidate = f"{value}{suffix}"
+    if len(candidate.encode()) <= MAX_RUN_RECORD_BASENAME_BYTES:
+        return candidate
+
+    digest = hashlib.sha256((identity or candidate).encode()).hexdigest()[:12]
+    stable_suffix = f"+{digest}{suffix}"
+    budget = MAX_RUN_RECORD_BASENAME_BYTES - len(stable_suffix.encode())
+    trimmed = value.encode()[:budget].decode("utf-8", errors="ignore")
+    return f"{trimmed}{stable_suffix}"
+
+
 def run_record_basename(timestamp: str, suite: str) -> str:
     """Name the run record without ever exceeding the filesystem's limit.
 
@@ -24,16 +42,7 @@ def run_record_basename(timestamp: str, suite: str) -> str:
     only thing shortened is the filename. A digest of the full suite is appended
     so two long slices that share a prefix cannot collapse onto one record.
     """
-    candidate = f"{timestamp}_{suite}.json"
-    if len(candidate.encode()) <= MAX_RUN_RECORD_BASENAME_BYTES:
-        return candidate
-
-    digest = hashlib.sha256(suite.encode()).hexdigest()[:12]
-    prefix = f"{timestamp}_"
-    suffix = f"+{digest}.json"
-    budget = MAX_RUN_RECORD_BASENAME_BYTES - len(prefix.encode()) - len(suffix.encode())
-    trimmed = suite.encode()[:budget].decode("utf-8", errors="ignore")
-    return f"{prefix}{trimmed}{suffix}"
+    return bounded_path_component(f"{timestamp}_{suite}", suffix=".json", identity=suite)
 
 
 @dataclass

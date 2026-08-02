@@ -7955,6 +7955,64 @@ def test_local_diagnostics_timeout_is_recorded():
         local.diagnostic_commands = original
 
 
+def test_local_diagnostics_directory_survives_a_max_length_run_record():
+    """Appending the diagnostics suffix must not cross the filesystem NAME_MAX boundary."""
+    import sys
+    import tempfile
+    from pathlib import Path
+
+    import benchmarks.local as local
+    from benchmarks.results import run_record_basename
+
+    suite = ",".join(
+        [
+            "browser-opentable-reservation",
+            "browser-instacart-grocery-order",
+            "browser-doordash-usb-c-cable",
+            "browser-alchemy-springs-sauna",
+            "browser-hotel-booking",
+            "browser-event-ticket",
+            "browser-imax-group-tickets",
+            "browser-amazon-return",
+            "minted-agent-accounts-uber",
+        ]
+    )
+    original = local.diagnostic_commands
+
+    def quick_command(_agent_id, *, task_name, port):
+        assert task_name == "browser-opentable-reservation"
+        assert port == 55270
+        return [[sys.executable, "-c", "print('diagnostic complete')"]]
+
+    try:
+        local.diagnostic_commands = quick_command
+        with tempfile.TemporaryDirectory() as tmp:
+            result_name = run_record_basename("20260802_220629", suite)
+            result_path = Path(tmp) / result_name
+            result_path.write_text("{}")
+
+            diag_dir = local.run_diagnostics(
+                [
+                    local.FailedTask(
+                        "browser-opentable-reservation",
+                        "agent-1234567890",
+                        "timeout",
+                    )
+                ],
+                port=55270,
+                result_path=result_path,
+            )
+
+            assert diag_dir is not None
+            assert len(diag_dir.name.encode()) <= 255
+            assert diag_dir.name.endswith("_diagnostics")
+            output_files = list(diag_dir.glob("browser-opentable-reservation_agent-123456/*.txt"))
+            assert len(output_files) == 1
+            assert "diagnostic complete" in output_files[0].read_text()
+    finally:
+        local.diagnostic_commands = original
+
+
 def test_build_smoke_memory_summary_flags_growth_and_playwright_driver():
     """Smoke memory gate fails on RSS growth and leaked Playwright drivers."""
     from benchmarks.run_benchmark import _build_smoke_memory_summary
@@ -11255,6 +11313,10 @@ async def run_all_tests():
     )
     r.record("checkpoint_validation_mass_sequence", test_checkpoint_validation_mass_agent_sequence_remains_strict)
     r.record("local_diagnostics_timeout_recorded", test_local_diagnostics_timeout_is_recorded)
+    r.record(
+        "local_diagnostics_directory_name_max",
+        test_local_diagnostics_directory_survives_a_max_length_run_record,
+    )
     r.record("smoke_memory_summary_flags_leak", test_build_smoke_memory_summary_flags_growth_and_playwright_driver)
     r.record("smoke_memory_summary_passes", test_build_smoke_memory_summary_passes_stable_worker)
     r.record(

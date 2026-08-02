@@ -34,6 +34,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
@@ -1310,7 +1311,11 @@ def run_diagnostics(
     if not runnable:
         return None
     out_root = result_path.with_suffix("")
-    diag_root = out_root.parent / f"{out_root.name}_diagnostics"
+    diag_root = out_root.parent / bounded_path_component(
+        out_root.name,
+        suffix="_diagnostics",
+        identity=result_path.name,
+    )
     diag_root.mkdir(parents=True, exist_ok=True)
     for failure in runnable:
         task_dir = diag_root / f"{failure.name}_{failure.agent_id[:12]}"
