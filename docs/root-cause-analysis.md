@@ -9,7 +9,7 @@ These guidelines define how to diagnose bugs in this codebase. Follow this metho
 > 1. **A local reproduction you actually ran and watched FAIL** on the buggy code (record the exact command + failure output).
 > 2. **A fix that makes that same reproduction PASS** (re-run the identical command; do not weaken the assertion).
 >
-> **Never come back with a theory.** "It's probably load / a race / a 404 / third-party state" is not a deliverable. If you cannot reproduce it, you have *preliminary findings + an observability gap* — say so and keep the RCA open; do not present code-reading or correlation as a finished RCA.
+> **Never come back with a theory.** "It's probably load / a race / a 404 / third-party state" is not a deliverable. If you cannot reproduce it, you have _preliminary findings + an observability gap_ — say so and keep the RCA open; do not present code-reading or correlation as a finished RCA.
 >
 > **Beware fake failures:** running a test the wrong way (wrong `DATABASE_URL`, missing env, stale/leftover services) produces failures that aren't the bug. Reproduce the harness's real conditions and confirm the repro is valid before diagnosing.
 >
@@ -45,6 +45,27 @@ Before forming ANY hypothesis, collect runtime evidence:
 - Count specifics: how many messages, which tools ran, how long each step took
 
 **Never reason about what "might" be wrong from code alone when runtime evidence exists.** The logs tell you what DID happen. The code tells you what SHOULD happen. Compare the two.
+
+## Step 0.5: Search the RCA archive
+
+`docs/rca/cases/` holds every RCA this repo has completed — problem, diagnosis, solution, and the human feedback given at the time. Search it once you have real symptom strings from Step 0, and before you form any hypothesis:
+
+```bash
+python3 scripts/rca_archive.py search "<exact error text> <route> <component> <symptom words>"
+python3 scripts/rca_archive.py show <case-id>
+grep -ri "<exact error string>" docs/rca/
+```
+
+Run at least two searches with different vocabulary: the literal error string, and the behavioral symptom ("agent hangs STARTING_UP", "0% cache hit", "works locally, fails in prod"). Read `docs/rca/process-feedback.md` as well — it is the distilled set of human rules for how RCA is done here, including fix shapes the user has explicitly rejected.
+
+A hit is a **lead, not a verdict**. It tells you where to point the flashlight and which fixes were already rejected; it never satisfies the hard gate. Rules:
+
+- Confirm the prior case's `first_bad_boundary` is where your own evidence points before adopting its diagnosis. The same symptom routinely has a different cause.
+- Read the prior `## Solution` and `## Human feedback` before proposing a fix. Re-proposing a rejected approach wastes an approval round and erodes trust.
+- If this is a genuine recurrence, the previous fix did not hold — **that** is the RCA. Diagnose why the earlier guardrail missed it and fix at that level, then append the new evidence to the existing case rather than creating a second one.
+- No hits is information: you are in new territory, so widen evidence gathering instead of pattern-matching.
+
+Record in the RCA which searches you ran and whether the incident is a recurrence, a relative, or novel.
 
 ## Step 1: Trace the critical path
 
@@ -149,6 +170,7 @@ An RCA is **incomplete** until all of the following are true:
 9. For a benchmark failure, the exact unchanged canonical local benchmark has
    been observed failing on the buggy revision and passing on the fixed revision;
    both artifacts and FE links are recorded.
+10. A case file exists in `docs/rca/cases/` and `python3 scripts/rca_archive.py validate` exits 0 (see Step 8).
 
 ### Fix approval and verification handoff
 
@@ -175,7 +197,7 @@ as the acceptance test.
 
 There is no “not feasible” exception that turns unreproduced findings into a completed RCA. If production-only or third-party state cannot be recreated directly, capture and replay that state at the owned boundary. If the required request, response, event stream, or state was not captured and therefore cannot be replayed, classify the result as **preliminary findings plus an observability gap**, add the missing capture, and keep the RCA open. Do not present a hypothesis, code inspection, production correlation, or external-state explanation as a completed RCA without an executed local reproduction.
 
-**Adding observability is never the stopping point — log, THEN keep going deeper in the same pass.** When you hit a missing log/capture, add it, but do NOT hand the RCA off with "I added logging, re-run and we'll see next time." That defers the diagnosis and burns another full failure cycle. In the same investigation you must keep pulling the thread with the evidence you already have: query the DB directly, decrypt/replay the stored artifact, diff the failing record against a passing one, audit the whole population for the same defect, and walk the write path that produced the bad state. The new log is insurance for the *next* occurrence and a permanent capture for the boundary — it is not a substitute for driving *this* occurrence to the deepest owned cause now. Stop only when you hit the genuine floor: a proven cause with a reproduction, or a rung that provably leaves what you own (Step 5a). "Logging added" with the root cause still unknown is an open RCA, not a finished one.
+**Adding observability is never the stopping point — log, THEN keep going deeper in the same pass.** When you hit a missing log/capture, add it, but do NOT hand the RCA off with "I added logging, re-run and we'll see next time." That defers the diagnosis and burns another full failure cycle. In the same investigation you must keep pulling the thread with the evidence you already have: query the DB directly, decrypt/replay the stored artifact, diff the failing record against a passing one, audit the whole population for the same defect, and walk the write path that produced the bad state. The new log is insurance for the _next_ occurrence and a permanent capture for the boundary — it is not a substitute for driving _this_ occurrence to the deepest owned cause now. Stop only when you hit the genuine floor: a proven cause with a reproduction, or a rung that provably leaves what you own (Step 5a). "Logging added" with the root cause still unknown is an open RCA, not a finished one.
 
 ### Step 3a: Reconstruct failing LLM calls
 
@@ -218,13 +240,13 @@ non-model variables are held constant.
 
 Not all errors are bugs in our code. Before writing a fix, classify:
 
-| Classification                                                      | Example                                                                  | Correct response                                                                                     |
-| ------------------------------------------------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| **Our bug** — our code produces wrong output given valid input      | JSON parse error on well-formed LLM response                             | Fix our code                                                                                         |
-| **Third-party failure** — external service returns an error         | 402 out of credits, 429 rate limited, provider outage                    | Surface the error clearly to the user; do NOT add fallbacks that mask it                             |
-| **Input error** — bad data entered the system                       | Malformed user goal, missing required field                              | Validate at the system boundary where the input enters; do NOT patch downstream handlers             |
-| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token                     | Report the specific missing config; do NOT add "works without it" fallbacks                          |
-| **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change                         | Fix the test, not the production code                                                                |
+| Classification                                                      | Example                                                                                    | Correct response                                                                                               |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| **Our bug** — our code produces wrong output given valid input      | JSON parse error on well-formed LLM response                                               | Fix our code                                                                                                   |
+| **Third-party failure** — external service returns an error         | 402 out of credits, 429 rate limited, provider outage                                      | Surface the error clearly to the user; do NOT add fallbacks that mask it                                       |
+| **Input error** — bad data entered the system                       | Malformed user goal, missing required field                                                | Validate at the system boundary where the input enters; do NOT patch downstream handlers                       |
+| **Configuration error** — missing env var, expired token, wrong URL | TEMPORAL_ADDRESS not set, expired Claude OAuth token                                       | Report the specific missing config; do NOT add "works without it" fallbacks                                    |
+| **Test bug** — the test itself asserts the wrong thing              | Test expects old API shape after a schema change                                           | Fix the test, not the production code                                                                          |
 | **Model intelligence limitation**                                   | The unchanged captured call fails on the original model and passes on a more capable model | Upgrade the minimum capable model or model-selection policy and preserve the controlled replay as a regression |
 
 **The critical rule:** Third-party failures and configuration errors are NOT bugs in our code. Never write code to "handle" a 402 by falling back to a different provider silently. Never write code to "handle" a missing env var by using a default. These mask real problems. Surface them to the user.
@@ -264,17 +286,17 @@ Example:
 
 For benchmark failures, attach the diagnosis to one of the problem buckets below. If more than one independent issue occurred in the same benchmark run, write one problem entry per issue.
 
-| Problem bucket                                         | Use this when                                                                                                                                                                                                                                                                              | Do NOT use this when                                                                                                                                                                                | Generalizable fix shape                                                                                                                                                                                             |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Timeout too aggressive**                             | The code path is making valid progress, but a benchmark deadline, idle watchdog, provider idle timer, or derived timeout expires before the path can reasonably finish. Evidence must include spans/logs showing continuing useful work or passing runs just beyond the current budget.    | The agent is looping, blocked on missing state, waiting on a never-fired event, stuck behind a resource bottleneck, or failing because data is malformed. "The runner timed out" is only a symptom. | Fix the timeout policy at the owner layer: derive from pass history/span baselines, split idle vs wall-clock budgets, emit better progress heartbeats, or tune the watchdog condition for the whole class of tasks. |
-| **Logical inconsistency in harness prompts/contracts** | The harness gives contradictory instructions, a prompt disagrees with the evaluator, a tool schema conflicts with tool-result formatting, or the runner expects state that another layer intentionally hides. Evidence must cite the conflicting prompt/schema/evaluator/runtime contract. | The prompt is clear but the agent chose poorly, the data fixture is wrong, or the desired behavior requires a capability that does not exist.                                                       | Move the contract to one source of truth and update every consumer: task prompt, tool schema, verifier prompt, context builder, evaluator, and UI/runtime metadata.                                                 |
-| **Uncaptured user preference/spec**                    | The user expected a stable product preference or benchmark convention that was not encoded in the task, fixture, evaluator, default prompt, or harness config, so multiple valid behaviors existed and the agent chose the wrong one.                                                      | The requirement was already explicit and the system ignored it, or the user preference requires a new tool/capability before it can be followed.                                                    | Encode the preference at the narrowest stable boundary that all future runs share: task definition, evaluator, harness default, reusable prompt fragment, or product config.                                        |
-| **New tool/capability required**                       | The task requires observing or changing state that current tools cannot access reliably or safely, such as a missing domain API, browser/phone/payment primitive, trace query, or data-source-specific operation.                                                                          | An existing tool can do the work but the prompt failed to select it, the tool result was formatted badly, or the fixture omitted required data.                                                     | Add the missing capability at the abstraction that owns it, with a typed schema, clear permissions, evaluator coverage, and representative benchmark coverage.                                                      |
-| **Concurrency inefficiency**                           | Correct work becomes slow or flaky because parallel execution amplifies CPU, memory, connection-pool, event-loop, worker-slot, provider-rate-limit, or shared-service contention. Evidence must compare per-unit work with concurrent-run behavior.                                        | A single agent/task is slow for reasons unrelated to load, a provider is down, or the benchmark prompt asks for unnecessary work.                                                                   | Fix scheduling/resource ownership: bounded concurrency, batching, coalescing, per-run isolation, shared expensive sampling, task partitioning, or explicit load-test isolation.                                     |
-| **Fixture/environment/data mismatch**                  | The benchmark run used the wrong seed data, stale local/prod DB state, missing env var, wrong public URL, wrong task queue, wrong user/account identity, or a fixture that does not match the task's assertions.                                                                           | The data is correct but the agent lacks instructions/capability, or an external service returned a legitimate error.                                                                                | Make the fixture declarative and validated before launch: base image, deltas, env checks, URL/task-queue injection, identity mapping, and preflight assertions.                                                     |
-| **Observability/trace capture gap**                    | The failure cannot be diagnosed or replayed because the benchmark did not preserve the raw request, spans, tool inputs/outputs, screenshots, active tab state, logs, or evaluator artifacts needed to compare source to sink.                                                              | Evidence exists but was not read, or the fix is only to make logs prettier after the root cause is already proven.                                                                                  | Capture the missing evidence at the source boundary and persist it with the run record so future RCAs can replay the same class of failure.                                                                         |
-| **Model intelligence limitation**                      | The exact captured LLM call reproducibly fails on the original model and passes on an upgraded model with all non-model variables held constant. For nondeterministic behavior, repeated trials must show a clear separation.                                                            | The prompt or contract is inconsistent, input/context is missing, a tool capability is absent, the provider errors or times out, any non-model input changed, or the evidence is a single lucky model flip. | Upgrade the minimum capable model or the owned model-selection policy for this class of calls, and preserve the controlled old-model/new-model replay as a permanent regression.                                      |
-| **Other**                                              | Only after proving none of the buckets above fits.                                                                                                                                                                                                                                         | Any case that can reasonably fit a specific bucket.                                                                                                                                                 | Name the missing bucket candidate in the RCA so this taxonomy can be tightened later.                                                                                                                               |
+| Problem bucket                                         | Use this when                                                                                                                                                                                                                                                                              | Do NOT use this when                                                                                                                                                                                        | Generalizable fix shape                                                                                                                                                                                             |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Timeout too aggressive**                             | The code path is making valid progress, but a benchmark deadline, idle watchdog, provider idle timer, or derived timeout expires before the path can reasonably finish. Evidence must include spans/logs showing continuing useful work or passing runs just beyond the current budget.    | The agent is looping, blocked on missing state, waiting on a never-fired event, stuck behind a resource bottleneck, or failing because data is malformed. "The runner timed out" is only a symptom.         | Fix the timeout policy at the owner layer: derive from pass history/span baselines, split idle vs wall-clock budgets, emit better progress heartbeats, or tune the watchdog condition for the whole class of tasks. |
+| **Logical inconsistency in harness prompts/contracts** | The harness gives contradictory instructions, a prompt disagrees with the evaluator, a tool schema conflicts with tool-result formatting, or the runner expects state that another layer intentionally hides. Evidence must cite the conflicting prompt/schema/evaluator/runtime contract. | The prompt is clear but the agent chose poorly, the data fixture is wrong, or the desired behavior requires a capability that does not exist.                                                               | Move the contract to one source of truth and update every consumer: task prompt, tool schema, verifier prompt, context builder, evaluator, and UI/runtime metadata.                                                 |
+| **Uncaptured user preference/spec**                    | The user expected a stable product preference or benchmark convention that was not encoded in the task, fixture, evaluator, default prompt, or harness config, so multiple valid behaviors existed and the agent chose the wrong one.                                                      | The requirement was already explicit and the system ignored it, or the user preference requires a new tool/capability before it can be followed.                                                            | Encode the preference at the narrowest stable boundary that all future runs share: task definition, evaluator, harness default, reusable prompt fragment, or product config.                                        |
+| **New tool/capability required**                       | The task requires observing or changing state that current tools cannot access reliably or safely, such as a missing domain API, browser/phone/payment primitive, trace query, or data-source-specific operation.                                                                          | An existing tool can do the work but the prompt failed to select it, the tool result was formatted badly, or the fixture omitted required data.                                                             | Add the missing capability at the abstraction that owns it, with a typed schema, clear permissions, evaluator coverage, and representative benchmark coverage.                                                      |
+| **Concurrency inefficiency**                           | Correct work becomes slow or flaky because parallel execution amplifies CPU, memory, connection-pool, event-loop, worker-slot, provider-rate-limit, or shared-service contention. Evidence must compare per-unit work with concurrent-run behavior.                                        | A single agent/task is slow for reasons unrelated to load, a provider is down, or the benchmark prompt asks for unnecessary work.                                                                           | Fix scheduling/resource ownership: bounded concurrency, batching, coalescing, per-run isolation, shared expensive sampling, task partitioning, or explicit load-test isolation.                                     |
+| **Fixture/environment/data mismatch**                  | The benchmark run used the wrong seed data, stale local/prod DB state, missing env var, wrong public URL, wrong task queue, wrong user/account identity, or a fixture that does not match the task's assertions.                                                                           | The data is correct but the agent lacks instructions/capability, or an external service returned a legitimate error.                                                                                        | Make the fixture declarative and validated before launch: base image, deltas, env checks, URL/task-queue injection, identity mapping, and preflight assertions.                                                     |
+| **Observability/trace capture gap**                    | The failure cannot be diagnosed or replayed because the benchmark did not preserve the raw request, spans, tool inputs/outputs, screenshots, active tab state, logs, or evaluator artifacts needed to compare source to sink.                                                              | Evidence exists but was not read, or the fix is only to make logs prettier after the root cause is already proven.                                                                                          | Capture the missing evidence at the source boundary and persist it with the run record so future RCAs can replay the same class of failure.                                                                         |
+| **Model intelligence limitation**                      | The exact captured LLM call reproducibly fails on the original model and passes on an upgraded model with all non-model variables held constant. For nondeterministic behavior, repeated trials must show a clear separation.                                                              | The prompt or contract is inconsistent, input/context is missing, a tool capability is absent, the provider errors or times out, any non-model input changed, or the evidence is a single lucky model flip. | Upgrade the minimum capable model or the owned model-selection policy for this class of calls, and preserve the controlled old-model/new-model replay as a permanent regression.                                    |
+| **Other**                                              | Only after proving none of the buckets above fits.                                                                                                                                                                                                                                         | Any case that can reasonably fit a specific bucket.                                                                                                                                                         | Name the missing bucket candidate in the RCA so this taxonomy can be tightened later.                                                                                                                               |
 
 The bucket is the **problem**, not the solution. Do not classify "add popup auto-dismiss" as the problem when the general failure is that screenshot/observation support omits active popups. The general fix is to improve the observation channel so every caller sees the popup state; auto-dismiss is a point workaround unless the product requirement is specifically to dismiss that class of popup.
 
@@ -317,7 +339,7 @@ Repeated RCAs are the primary way a codebase rots. Each one adds a targeted patc
 left unchecked, the subsystem accretes conditionals, dead branches, decoupled
 streams that must agree, and order-dependent merges until it is unmanageable and
 disorganized — which is itself the soil that grows the next class of bug. A bug is
-frequently *evidence that the subsystem is over-complex*, not just that one line is
+frequently _evidence that the subsystem is over-complex_, not just that one line is
 wrong. When many of your RCAs keep landing in the same subsystem, treat that as a
 signal the subsystem needs simplification, not more patches.
 
@@ -325,7 +347,7 @@ For every fix, evaluate in this order and prefer the earliest that fully kills t
 class of bug:
 
 1. **Delete** — is there redundant state, a duplicated code path, a decoupled second
-   source of truth, or an order-dependent step whose *removal* makes the bug
+   source of truth, or an order-dependent step whose _removal_ makes the bug
    impossible? (e.g. collapse two streams that must agree into one; derive a value
    instead of accumulating it; remove a cache/dedup pre-pass that fights a later
    pass.) Deleting the failure surface is strictly better than guarding it.
@@ -357,6 +379,47 @@ If the sub-agent finds gaps, fix the RCA or gather more evidence before
 returning it to the user. Do not present a diagnosis until the adversarial review
 has either passed it or its objections have been resolved.
 
+## Step 8: Write the case file
+
+Every RCA ends by writing itself into `docs/rca/cases/` so the next agent
+inherits the diagnosis instead of paying for it twice. This is required for every
+outcome, not just `fixed` — a blocked RCA with an open observability gap is
+exactly the record a future agent needs most.
+
+```bash
+python3 scripts/rca_archive.py new <slug-naming-the-cause>   # not the symptom
+# fill every section of the generated docs/rca/cases/<date>-<slug>.md
+python3 scripts/rca_archive.py reindex
+python3 scripts/rca_archive.py validate                      # must exit 0
+```
+
+`docs/rca/README.md` carries the full field reference. What determines whether
+the case is worth anything later:
+
+- **`symptoms` are the literal strings a future engineer will grep for** — exact
+  error text, HTTP status + route, the observed UI behavior. This is the primary
+  search surface. Vague symptoms make the case undiscoverable, which is the same
+  as not writing it.
+- **`first_bad_boundary` and `problem_class` carry the transferable lesson.**
+  `problem_class` is the Step 5a bucket — the class, never the instance.
+- **`## Human feedback` records what the user corrected, rejected, re-scoped, or
+  insisted on**, including approval-time pushback. Write `None recorded.` when
+  there was none, and never invent it. This is the section that stops the next
+  agent from re-proposing a fix the user already refused; git history records
+  what we did, this records what we were told to do differently.
+- **`## Reusable lesson` is one imperative sentence.** Search prints it, so it is
+  the single line most likely to be read by a future RCA.
+- **A recurrence appends to the existing case; it does not fork a new one.**
+  Recurrence is the signal that a guardrail failed, and splitting it across two
+  files hides that signal.
+
+Set `status` honestly. `open` when the repro gap was never closed, `mitigated`
+when the symptom was contained but the cause was not fixed. A dishonest `fixed`
+teaches the archive to lie, and a lying archive is worse than an empty one.
+
+`back-end/src/tests/structural/rca-archive.test.ts` enforces the schema, section
+completeness, and index freshness on every deploy.
+
 ## Anti-patterns (never do these)
 
 1. **"Pre-existing, I'll skip it"** — "Pre-existing" is NEVER an acceptable diagnosis. Just because an error exists in code you didn't touch doesn't mean you aren't responsible for fixing it. This codebase is maintained by multiple agents working in parallel, each of which will naturally produce some amount of uncaught errors. If nobody owns the errors they encounter, the codebase degrades with every commit. You are the immune system — every bug you encounter and walk past is a bug that compounds. If you find it, you fix it. No exceptions.
@@ -372,3 +435,7 @@ has either passed it or its objections have been resolved.
 6. **Wrong-layer fix** — Adding a workaround in service A for a bug that lives in service B. Even if service A's workaround "fixes" the symptom, the bug in service B will bite again from a different caller.
 
 7. **Correlation-as-causation** — Two things happened near each other in time, so one must have caused the other. Temporal proximity is not proof. Trace the actual data flow.
+
+8. **Archive-as-diagnosis** — Finding a prior case in `docs/rca/cases/` with matching symptoms and reporting its cause as yours. A prior case narrows the search; it is not evidence about _this_ incident. Adopt its boundary only after your own runtime evidence points there, and still produce the repro.
+
+9. **Silent recurrence** — Fixing a bug that a prior case already covered without recording that it came back. A recurrence means a guardrail failed, and that failure is the more valuable diagnosis. Append to the existing case and fix the guardrail.

@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import unquote_to_bytes, urljoin, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
 import structlog
@@ -1950,6 +1950,69 @@ def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
     return False
 
 
+def _captured_request_body(
+    post_data: Any,
+    *,
+    content_type: str,
+    max_bytes: int,
+    placeholder: str,
+) -> Dict[str, Any]:
+    """Build the request-body fields for one entry, redacting secrets first."""
+    if not isinstance(post_data, str) or not post_data:
+        return {}
+    # Cap before redacting: parsing and re-serializing a multi-megabyte payload
+    # just to throw most of it away is wasted work and an easy memory spike.
+    if _encoded_len(post_data) > max_bytes:
+        return {"request_body": placeholder, "request_body_truncated": True}
+    redacted = _redact_request_body(post_data, content_type)
+    return {
+        "request_body": _truncate_text_to_bytes(redacted, max_bytes),
+        "request_body_truncated": _encoded_len(redacted) > max_bytes,
+    }
+
+
+def _redact_request_body(post_data: str, content_type: str = "") -> str:
+    """Strip secret-bearing values from a captured request body.
+
+    JSON and explicitly form-encoded payloads are walked and their sensitive
+    values replaced. Anything else is dropped entirely rather than persisted:
+    an opaque format cannot be inspected, so it cannot be shown to be
+    secret-free, and retaining it is the risk this guard exists to remove. A
+    lone "=" is NOT treated as form encoding -- binary payloads contain "=" too.
+    """
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: (
+                    BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+                    if any(marker in str(key).lower() for marker in BrowserNetworkRecorder.REDACT_KEY_MARKERS)
+                    else scrub(item)
+                )
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    stripped = post_data.strip()
+    if stripped.startswith(("{", "[")):
+        try:
+            return json.dumps(scrub(json.loads(stripped)), separators=(",", ":"))
+        except (ValueError, TypeError):
+            return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+    if "x-www-form-urlencoded" in content_type.lower():
+        pairs = []
+        for pair in stripped.split("&"):
+            key, sep, raw = pair.partition("=")
+            if not sep:
+                return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+            sensitive = any(marker in unquote(key).lower() for marker in BrowserNetworkRecorder.REDACT_KEY_MARKERS)
+            pairs.append(f"{key}={BrowserNetworkRecorder.REDACTED_PLACEHOLDER if sensitive else raw}")
+        return "&".join(pairs)
+    return BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+
+
 class BrowserNetworkRecorder:
     """CDP network observer with optional local body-log persistence.
 
@@ -1988,6 +2051,34 @@ class BrowserNetworkRecorder:
     # an agent that wants a bundle can `evaluate` or web_fetch it, and pulling
     # them for every page would cost CDP round trips on every browser session.
     BODY_RESOURCE_TYPES = {"XHR", "Fetch", "Document", "EventSource", "Other"}
+
+    # Secret-bearing keys are redacted in EVERY retained request body. Bodies stay
+    # available because read_network_requests exists to let an agent debug real
+    # traffic; redaction removes the credential risk without removing the answer.
+    # Substring match, so this also covers api_key/sessionToken and
+    # the challenge-response credentials (g-recaptcha-response, WebAuthn
+    # assertion) that anti-bot endpoints legitimately carry.
+    REDACT_KEY_MARKERS = (
+        "assertion",
+        "auth",
+        "card",
+        "cookie",
+        "credential",
+        "cvv",
+        "email",
+        "iban",
+        "key",
+        "otp",
+        "passw",
+        "phone",
+        "response",
+        "secret",
+        "session",
+        "signature",
+        "ssn",
+        "token",
+    )
+    REDACTED_PLACEHOLDER = "[REDACTED]"
 
     def __init__(
         self,
@@ -2272,8 +2363,15 @@ class BrowserNetworkRecorder:
                 "url": url,
                 "resource_type": resource_type,
                 "request_headers": _coerce_header_map(request.get("headers")),
-                "request_body": _truncate_text_to_bytes(post_data, self._max_body_bytes),
-                "request_body_truncated": bool(post_data and _encoded_len(post_data) > self._max_body_bytes),
+                # Default-deny: only allowlisted anti-bot endpoints retain a body,
+                # and even those are redacted first. Oversized bodies are capped
+                # BEFORE redaction so a huge payload is never parsed/reserialized.
+                **_captured_request_body(
+                    post_data,
+                    content_type=_coerce_header_map(request.get("headers")).get("content-type", ""),
+                    max_bytes=self._max_body_bytes,
+                    placeholder=self.REDACTED_PLACEHOLDER,
+                ),
                 "has_post_data": bool(request.get("hasPostData") or post_data),
                 "initiator": (event.get("initiator") or {}).get("type"),
                 "redirects": redirects,

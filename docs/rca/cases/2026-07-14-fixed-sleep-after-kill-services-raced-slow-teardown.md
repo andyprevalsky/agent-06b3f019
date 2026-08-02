@@ -1,0 +1,67 @@
+---
+id: 2026-07-14-fixed-sleep-after-kill-services-raced-slow-teardown
+date: 2026-07-14
+title: A fixed `sleep 3` after kill-services was outrun by slow teardown, so the previous stack's cleanup SIGKILLed the new one
+surface: harness
+component: benchmark-runner
+classification: our-bug
+problem_class: concurrency-inefficiency
+first_bad_boundary: scripts/run-agentcard-lifecycle-task.sh — `sleep 3` between kill-services and stack start instead of waiting for ports to free
+symptoms:
+  - "run.sh SIGKILL'd with an empty log"
+  - "Killed: 9"
+  - "exit 144"
+  - new benchmark stack dies immediately with no output
+tags:
+  - benchmark-harness
+  - teardown
+  - process-lifecycle
+  - sigkill
+  - ports
+sources:
+  - memory:project_agentcard_lifecycle_test_infra
+repro: none-recorded
+status: fixed
+---
+
+## Problem
+
+Launching a fresh AgentCard-lifecycle benchmark stack produced a `run.sh` that
+was SIGKILLed with a completely empty log — surfacing as `Killed: 9` /
+`exit 144` and no diagnostic output at all. The same command worked when run
+after a longer manual pause.
+
+## Diagnosis
+
+The runner did `kill-services`, then `sleep 3`, then started the stack. The
+multi-process teardown of the _previous_ stack is slower than 3 seconds, so its
+cleanup was still running when the new `run.sh` came up on the same ports — and
+that in-flight teardown then killed the newly started processes. Empty log +
+SIGKILL is the signature: the new stack never got far enough to log anything
+before being reaped by the old stack's cleanup.
+
+Related footgun from the same family, recorded in the same session: launching
+`run.sh --benchmark` as a plain background Bash-tool command orphans it when the
+launcher task exits, and its messy teardown then SIGKILLs the _next_ stack the
+same way. The deeper owned cause is a time-based guess standing in for an actual
+readiness condition.
+
+## Solution
+
+Replaced the `sleep 3` with a wait-for-ports-free loop, so the new stack starts
+only once the previous one has genuinely released its ports. Long-running
+benchmark stacks are launched via `scripts/run-agentcard-lifecycle-task.sh`,
+which keeps its parent alive and self-manages startup and teardown rather than
+being orphaned as a detached background command. If a mess does happen, sweep
+the stack's port range (55050-55054 for this workspace) and `pkill`
+`run.sh`/`worker.py`, then wait before retrying.
+
+## Human feedback
+
+None recorded.
+
+## Reusable lesson
+
+Never gate stack startup on a fixed `sleep` after a teardown — poll for the
+actual release condition (ports free, PIDs gone), or the previous cleanup will
+kill your new process and leave an empty log.
