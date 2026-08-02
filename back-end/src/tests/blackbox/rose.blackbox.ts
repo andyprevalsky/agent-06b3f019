@@ -1039,7 +1039,9 @@ async function testClaudeAuth_retryAfterWithinCapStillRetriesInPlace() {
 
 /** Unit coverage for every extraction branch, mirroring claude_auth.py. */
 async function testRateLimitReset_extractionBranches() {
-  const iso = '2026-07-30T22:00:00.000Z';
+  const now = Date.now();
+  const futureResetMs = Math.floor(now / 1000) * 1000 + 7 * 24 * 60 * 60 * 1000;
+  const iso = new Date(futureResetMs).toISOString();
   const h = (init: Record<string, string>): Headers => new Headers(init);
 
   assertEqual(
