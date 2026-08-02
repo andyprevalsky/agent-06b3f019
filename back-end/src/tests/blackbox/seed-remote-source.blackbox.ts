@@ -408,6 +408,168 @@ test('PostgREST seed transport refuses to send a service-role key over plaintext
   assert(fetches === 0, `expected no plaintext requests, got ${fetches}`);
 });
 
+test('PostgREST seed reads retry a transient socket reset at the failed page boundary', async () => {
+  let fetches = 0;
+  const socketReset = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+  });
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      if (fetches === 1) throw socketReset;
+      return Response.json([
+        {
+          id: 'tool-1',
+          name: 'example',
+          description: 'Example',
+          createdAt: '2026-07-29T00:00:00.000Z',
+        },
+      ]);
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+
+  const tools = await client.tool.findMany({ take: 1 });
+
+  assert(fetches === 2, `expected one bounded socket retry, got ${fetches} fetches`);
+  assert(tools[0]?.id === 'tool-1', 'the retried page must return its rows exactly once');
+});
+
+test('PostgREST seed reads retry transient HTTP responses', async () => {
+  let fetches = 0;
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      if (fetches === 1) return new Response('rate limited', { status: 429 });
+      if (fetches === 2) return new Response('temporarily unavailable', { status: 503 });
+      return Response.json([
+        {
+          id: 'tool-1',
+          name: 'example',
+          description: 'Example',
+          createdAt: '2026-07-29T00:00:00.000Z',
+        },
+      ]);
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+
+  const tools = await client.tool.findMany({ take: 1 });
+
+  assert(fetches === 3, `expected two bounded HTTP retries, got ${fetches} fetches`);
+  assert(tools[0]?.id === 'tool-1', 'the retried HTTP page must return its rows');
+});
+
+test('PostgREST seed reads retry a non-TypeError timeout', async () => {
+  let fetches = 0;
+  const timeout = Object.assign(new Error('request timed out'), { name: 'TimeoutError' });
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      if (fetches === 1) throw timeout;
+      return Response.json([
+        {
+          id: 'tool-1',
+          name: 'example',
+          description: 'Example',
+          createdAt: '2026-07-29T00:00:00.000Z',
+        },
+      ]);
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+
+  const tools = await client.tool.findMany({ take: 1 });
+
+  assert(fetches === 2, `expected one bounded timeout retry, got ${fetches} fetches`);
+  assert(tools[0]?.id === 'tool-1', 'the retried timeout page must return its rows');
+});
+
+test('PostgREST seed reads bound persistent transport retries', async () => {
+  let fetches = 0;
+  const socketReset = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+  });
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestAttempts: 3,
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      throw socketReset;
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+  let failure: unknown;
+
+  try {
+    await client.tool.findMany({ take: 1 });
+  } catch (error) {
+    failure = error;
+  }
+
+  assert(fetches === 3, `expected exactly 3 transport attempts, got ${fetches}`);
+  assert(failure === socketReset, 'the final transport failure must remain the original error');
+});
+
+test('PostgREST seed reads preserve the final transient HTTP failure after bounded retries', async () => {
+  let fetches = 0;
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestAttempts: 3,
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      return new Response(`temporarily unavailable ${fetches}`, { status: 503 });
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+  let message = '';
+
+  try {
+    await client.tool.findMany({ take: 1 });
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+
+  assert(fetches === 3, `expected exactly 3 transient HTTP attempts, got ${fetches}`);
+  assert(message.includes('HTTP 503'), `expected the final HTTP status, got ${message}`);
+  assert(
+    message.includes('temporarily unavailable 3'),
+    `expected the readable final response body, got ${message}`
+  );
+});
+
+test('PostgREST seed reads fail fast on non-transient HTTP responses', async () => {
+  let fetches = 0;
+  const client = createPostgrestSeedClient({
+    supabaseUrl: 'https://project.supabase.co',
+    serviceRoleKey: 'service-secret',
+    requestAttempts: 3,
+    requestRetryDelayMs: 0,
+    fetchImpl: async () => {
+      fetches += 1;
+      return new Response('invalid service role', { status: 401 });
+    },
+  } as Parameters<typeof createPostgrestSeedClient>[0]);
+  let message = '';
+
+  try {
+    await client.tool.findMany({ take: 1 });
+  } catch (error) {
+    message = error instanceof Error ? error.message : String(error);
+  }
+
+  assert(fetches === 1, `expected an authentication failure to fail fast, got ${fetches} fetches`);
+  assert(message.includes('HTTP 401'), `expected the original HTTP status, got ${message}`);
+});
+
 async function main(): Promise<void> {
   let passed = 0;
   for (const { name, fn } of tests) {

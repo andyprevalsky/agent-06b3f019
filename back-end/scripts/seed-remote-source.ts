@@ -1,5 +1,6 @@
 import { Prisma, PrismaClient } from '@prisma/client';
 import { parse } from 'csv-parse/sync';
+import { retryWithBackoff } from '../src/providers/retry';
 
 type SeedTransport = 'auto' | 'postgres' | 'https';
 type SortDirection = 'asc' | 'desc';
@@ -32,7 +33,21 @@ interface PostgrestSeedClientOptions {
   serviceRoleKey: string;
   fetchImpl?: typeof fetch;
   requestTimeoutMs?: number;
+  requestAttempts?: number;
+  requestRetryDelayMs?: number;
 }
+
+type ResolvedPostgrestSeedClientOptions = Required<
+  Pick<
+    PostgrestSeedClientOptions,
+    | 'supabaseUrl'
+    | 'serviceRoleKey'
+    | 'requestTimeoutMs'
+    | 'requestAttempts'
+    | 'requestRetryDelayMs'
+  >
+> &
+  Pick<PostgrestSeedClientOptions, 'fetchImpl'>;
 
 type SeedRow = Record<string, unknown>;
 type ModelMetadata = (typeof Prisma.dmmf.datamodel.models)[number];
@@ -42,6 +57,8 @@ const HTTP_PAGE_SIZE = 1000;
 const HTTP_IN_FILTER_SIZE = 100;
 const HTTP_IN_FILTER_CONCURRENCY = 4;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_REQUEST_ATTEMPTS = 3;
+const DEFAULT_REQUEST_RETRY_DELAY_MS = 250;
 
 function lowerFirst(value: string): string {
   return value.slice(0, 1).toLowerCase() + value.slice(1);
@@ -299,16 +316,66 @@ async function responseRows(response: Response, model: ModelMetadata): Promise<S
   return value as SeedRow[];
 }
 
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  if ('code' in error && typeof (error as { code?: unknown }).code === 'string') {
+    return (error as { code: string }).code;
+  }
+  if ('cause' in error) return errorCode((error as { cause?: unknown }).cause);
+  return undefined;
+}
+
+function isTransientFetchError(error: unknown): boolean {
+  const name =
+    typeof error === 'object' && error !== null && 'name' in error
+      ? String((error as { name?: unknown }).name)
+      : '';
+  const code = errorCode(error);
+  return (
+    error instanceof TypeError ||
+    name === 'AbortError' ||
+    name === 'TimeoutError' ||
+    code?.startsWith('UND_ERR_') === true ||
+    ['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'ETIMEDOUT'].includes(code ?? '')
+  );
+}
+
+async function fetchSeedPage(
+  url: URL,
+  init: Omit<RequestInit, 'signal'>,
+  options: ResolvedPostgrestSeedClientOptions
+): Promise<Response> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  return retryWithBackoff(
+    () =>
+      fetchImpl(url, {
+        ...init,
+        signal: AbortSignal.timeout(options.requestTimeoutMs),
+      }),
+    {
+      maxRetries: options.requestAttempts,
+      initialBackoffMs: options.requestRetryDelayMs,
+      isRetryable: isTransientFetchError,
+      shouldRetryResult: (response) => isTransientHttpStatus(response.status),
+      beforeRetryResult: async (response) => {
+        // Release the failed response before opening the replacement connection.
+        await response.arrayBuffer().catch(() => undefined);
+      },
+      component: 'Supabase HTTPS seed read',
+    }
+  );
+}
+
 async function fetchUnchunkedModelRows(
   model: ModelMetadata,
   args: SeedFindArgs,
-  options: Required<
-    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
-  > &
-    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+  options: ResolvedPostgrestSeedClientOptions
 ): Promise<SeedRow[]> {
   const rows: SeedRow[] = [];
-  const fetchImpl = options.fetchImpl ?? fetch;
   let offset = args.skip ?? 0;
   let remaining = args.take ?? Number.POSITIVE_INFINITY;
 
@@ -323,18 +390,21 @@ async function fetchUnchunkedModelRows(
     url.searchParams.set('order', stableOrder(args, model));
     applyWhere(url, args.where, model);
 
-    const response = await fetchImpl(url, {
-      headers: {
-        Accept: model.fields.some((field) => field.type === 'BigInt')
-          ? 'text/csv'
-          : 'application/json',
-        apikey: options.serviceRoleKey,
-        Authorization: `Bearer ${options.serviceRoleKey}`,
-        Range: `${offset}-${offset + pageSize - 1}`,
-        'Range-Unit': 'items',
+    const response = await fetchSeedPage(
+      url,
+      {
+        headers: {
+          Accept: model.fields.some((field) => field.type === 'BigInt')
+            ? 'text/csv'
+            : 'application/json',
+          apikey: options.serviceRoleKey,
+          Authorization: `Bearer ${options.serviceRoleKey}`,
+          Range: `${offset}-${offset + pageSize - 1}`,
+          'Range-Unit': 'items',
+        },
       },
-      signal: AbortSignal.timeout(options.requestTimeoutMs),
-    });
+      options
+    );
     if (response.status === 416) break;
     if (!response.ok) {
       const body = (await response.text()).slice(0, 500);
@@ -399,10 +469,7 @@ function sortRows(rows: SeedRow[], args: SeedFindArgs): SeedRow[] {
 async function fetchModelRows(
   model: ModelMetadata,
   args: SeedFindArgs,
-  options: Required<
-    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
-  > &
-    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+  options: ResolvedPostgrestSeedClientOptions
 ): Promise<SeedRow[]> {
   const chunked = largeInFilter(args.where);
   if (!chunked) return fetchUnchunkedModelRows(model, args, options);
@@ -445,10 +512,7 @@ async function fetchModelRows(
 
 function createModelDelegate(
   model: ModelMetadata,
-  options: Required<
-    Pick<PostgrestSeedClientOptions, 'supabaseUrl' | 'serviceRoleKey' | 'requestTimeoutMs'>
-  > &
-    Pick<PostgrestSeedClientOptions, 'fetchImpl'>
+  options: ResolvedPostgrestSeedClientOptions
 ): {
   findMany(args?: SeedFindArgs): Promise<SeedRow[]>;
   findUnique(args: SeedFindArgs): Promise<SeedRow | null>;
@@ -467,6 +531,8 @@ export function createPostgrestSeedClient(input: PostgrestSeedClientOptions): Pr
     ...input,
     supabaseUrl: requireHttpsUrl(input.supabaseUrl),
     requestTimeoutMs: input.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+    requestAttempts: input.requestAttempts ?? DEFAULT_REQUEST_ATTEMPTS,
+    requestRetryDelayMs: input.requestRetryDelayMs ?? DEFAULT_REQUEST_RETRY_DELAY_MS,
   };
   const delegates = new Map<string, ReturnType<typeof createModelDelegate>>();
   const base = {

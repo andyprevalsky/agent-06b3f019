@@ -16,7 +16,7 @@ const log = createLogger('Retry');
 
 // ── Types ──
 
-export interface RetryOptions {
+export interface RetryOptions<T = unknown> {
   /** Maximum number of attempts (default: 3) */
   maxRetries?: number;
   /** Initial backoff delay in ms (default: 1000). Doubles each attempt. */
@@ -27,6 +27,10 @@ export interface RetryOptions {
   retryableStatusCodes?: Set<number>;
   /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
   isRetryable?: (error: unknown) => boolean;
+  /** Predicate to retry a resolved result, such as a transient HTTP response. */
+  shouldRetryResult?: (result: T) => boolean | Promise<boolean>;
+  /** Cleanup performed before retrying a resolved result, such as draining a response body. */
+  beforeRetryResult?: (result: T) => void | Promise<void>;
   /** Component name for log messages (default: 'Retry') */
   component?: string;
 }
@@ -52,7 +56,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getBackoffDelay(attempt: number, opts: RetryOptions): number {
+function getBackoffDelay<T>(attempt: number, opts: RetryOptions<T>): number {
   if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
     return opts.fixedDelays[attempt - 1];
   }
@@ -83,7 +87,7 @@ function defaultIsRetryable(error: unknown): boolean {
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  opts: RetryOptions = {}
+  opts: RetryOptions<T> = {}
 ): Promise<T> {
   const maxRetries = opts.maxRetries ?? 3;
   const component = opts.component ?? 'Retry';
@@ -94,8 +98,20 @@ export async function retryWithBackoff<T>(
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const result = await fn();
+      const retryableResult =
+        opts.shouldRetryResult && (await opts.shouldRetryResult(result));
 
-      if (attempt > 1) {
+      if (retryableResult && attempt < maxRetries) {
+        await opts.beforeRetryResult?.(result);
+        const delay = getBackoffDelay(attempt, opts);
+        log.warn(
+          `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
+        );
+        await sleep(delay);
+        continue;
+      }
+
+      if (!retryableResult && attempt > 1) {
         log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
       }
 
