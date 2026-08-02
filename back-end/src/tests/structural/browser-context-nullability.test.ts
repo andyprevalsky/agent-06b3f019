@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
@@ -123,7 +122,7 @@ function main() {
   testBrowserContextContextIdIsNullable();
   testBaselineCreatesNullableContextId();
   testSteelDoesNotCreateEmptyContextId();
-  console.log('browser context nullability structural tests passed');
+  process.stdout.write('browser context nullability structural tests passed\n');
 }
 
 main();
