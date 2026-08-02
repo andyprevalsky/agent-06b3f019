@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
@@ -46,6 +45,7 @@ function testBaselineCreatesNullableContextId() {
 
 function testSteelDoesNotCreateEmptyContextId() {
   const source = read('src/providers/steel/session.ts');
+  const profileBindingSource = read('src/providers/steel/profileBinding.ts');
   const resumeSource = read('src/providers/steel/sessionResume.ts');
   assert(
     !source.includes("contextId: ''"),
@@ -60,15 +60,16 @@ function testSteelDoesNotCreateEmptyContextId() {
     'Steel session creation must omit profileId while the DB context is pending'
   );
   assert(
-    source.includes('BENCHMARK_ANON_STEEL_PROFILE'),
+    profileBindingSource.includes('BENCHMARK_ANON_STEEL_PROFILE'),
     'Steel provider must support benchmark anon mode for fresh per-agent profiles'
   );
   assert(
-    source.includes('benchmarkAnonProfilesByAgent'),
+    profileBindingSource.includes('benchmarkAnonProfilesByAgent'),
     'Benchmark anon Steel profiles must be keyed outside BrowserContext so user profile IDs are not overwritten'
   );
   assert(
-    source.includes('Benchmark anon profile mode active; not writing Steel profileId'),
+    profileBindingSource.includes("!profile.profileSource.startsWith('benchmark_anon')") &&
+      source.includes('if (!shouldWriteSteelProfileToBrowserContext(profile))'),
     'Benchmark anon Steel sessions must not overwrite BrowserContext.contextId'
   );
   assert(
@@ -97,7 +98,7 @@ function main() {
   testBrowserContextContextIdIsNullable();
   testBaselineCreatesNullableContextId();
   testSteelDoesNotCreateEmptyContextId();
-  console.log('browser context nullability structural tests passed');
+  process.stdout.write('browser context nullability structural tests passed\n');
 }
 
 main();
