@@ -61,12 +61,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -o pipefail
           if ! previous_conclusion="$(
               gh api --method GET \
                 "repos/$GITHUB_REPOSITORY/actions/workflows/download-egress.yml/runs" \
                 -f status=completed \
                 -f branch="$GITHUB_REF_NAME" \
-                -f event="$GITHUB_EVENT_NAME" \
                 -f per_page=100 |
                 jq -r --arg current "$GITHUB_RUN_ID" \
                   '[.workflow_runs[] |

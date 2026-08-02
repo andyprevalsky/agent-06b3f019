@@ -17,6 +17,7 @@ let artifactStatus = 206;
 let artifactBytes = 1024;
 let supabaseServerErrors = 0;
 let invalidSupabaseResult = false;
+let invalidRenderLogs = false;
 let paginateRenderLogs = false;
 let renderLogRequests = 0;
 let observedRange = '';
@@ -81,6 +82,10 @@ const server = createServer((request, response) => {
     renderLogRequests += 1;
     observedRenderAuth = request.headers.authorization ?? '';
     response.writeHead(200, { 'Content-Type': 'application/json' });
+    if (invalidRenderLogs) {
+      response.end(JSON.stringify({ hasMore: false, logs: null }));
+      return;
+    }
     if (paginateRenderLogs) {
       const firstPage = url.searchParams.get('endTime') === '2026-07-29T23:00:00.000Z';
       response.end(
@@ -244,6 +249,15 @@ async function main(): Promise<void> {
   assert.equal(downloadEgressExitCode(degradedObservability), 2);
   invalidSupabaseResult = false;
 
+  invalidRenderLogs = true;
+  const degradedRenderObservability = await runDownloadEgressHealth({
+    ...commonConfig,
+    outputPath: join(temporaryDirectory, 'render-observability-report.json'),
+  });
+  assert.equal(downloadEgressExitCode(degradedRenderObservability), 2);
+  assert.match(degradedRenderObservability.observabilityFailures.join('\n'), /no logs array/);
+  invalidRenderLogs = false;
+
   const workflowPath = resolve(process.cwd(), '..', '.github', 'workflows', 'download-egress.yml');
   const workflow = readFileSync(workflowPath, 'utf8');
   assert.match(workflow, /cron:\s*['"]?[^'"\n]*\/15/);
@@ -253,6 +267,8 @@ async function main(): Promise<void> {
   assert.match(workflow, /SLACK_BOT_TOKEN/);
   assert.match(workflow, /Mac download observability degraded/);
   assert.match(workflow, /if ! previous_conclusion=/);
+  assert.match(workflow, /set -o pipefail/);
+  assert.doesNotMatch(workflow, /-f event=/);
   assert.match(workflow, /previous.*conclusion|PREVIOUS_CONCLUSION/is);
   assert.match(workflow, /download-egress-health\.ts/);
 

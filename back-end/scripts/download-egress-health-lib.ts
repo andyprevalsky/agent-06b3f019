@@ -275,10 +275,10 @@ async function fetchTelemetryLogs(
       nextEndTime?: unknown;
       logs?: unknown;
     };
-    if (body.logs !== null && !Array.isArray(body.logs)) {
+    if (!Array.isArray(body.logs)) {
       throw new Error('Render logs query returned no logs array');
     }
-    for (const log of (body.logs ?? []) as Array<{ message?: unknown }>) {
+    for (const log of body.logs as Array<{ message?: unknown }>) {
       if (typeof log.message !== 'string') continue;
       try {
         const parsed = JSON.parse(log.message) as ParsedTelemetryLog;
