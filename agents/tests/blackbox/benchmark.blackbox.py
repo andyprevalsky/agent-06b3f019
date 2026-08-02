@@ -2803,6 +2803,8 @@ def test_doordash_catalog_requires_single_clean_completed_browser_run():
     assert task.prompt.endswith("Complete checkout.")
     assert task.approval_handling == "auto_approve"
     assert task.expected_approval_count == 1
+    assert task.expected_attention_kinds == []
+    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
     assert [evaluator["method"] for evaluator in task.evaluators] == [
@@ -3296,6 +3298,32 @@ async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_r
     assert data["_benchmark"]["attention_kinds_observed"] == ["auth_assistance"]
     assert (triggered, resolved) == (0, 0)
     assert responses == []
+
+
+async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
+    """DoorDash accepts either supported checkout gate without requiring a second request."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    write_lock = {
+        "id": "doordash-write-lock",
+        "agentId": "agent-doordash",
+        "question": "Approve the $17.42 DoorDash order?",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        get_task_by_name("browser-doordash-usb-c-cable"),
+        [write_lock],
+    )
+
+    assert failure is None
+    assert (triggered, resolved) == (1, 1)
+    assert responses == [("doordash-write-lock", "approved")]
+    assert data["_benchmark"]["attention_request_kind_seen"] == "write_lock"
+    assert data["_benchmark"]["expected_attention_kind_any_of"] == [
+        "payment_approval",
+        "write_lock",
+    ]
 
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
@@ -11626,6 +11654,10 @@ async def run_all_tests():
     await r.record_async(
         "amazon_beanie_poll_rejects_second_or_unrelated_approval",
         test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it,
+    )
+    await r.record_async(
+        "doordash_single_write_lock_checkout_approval",
+        test_doordash_poll_accepts_single_write_lock_as_checkout_approval,
     )
     await r.record_async(
         "invalid_payment_receipt_records_attention",

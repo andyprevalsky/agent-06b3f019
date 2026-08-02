@@ -1703,7 +1703,7 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
+    "expected_attention_kind_any_of": [
       "payment_approval",
       "write_lock"
     ],
