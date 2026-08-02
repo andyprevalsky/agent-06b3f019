@@ -752,6 +752,7 @@ async def summarize_and_filter_links(
     gpt_token_pool_id: Optional[str] = None,
     gpt_token_user_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    cache_sequence_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one Haiku call that summarizes a fetched web page and curates which
     of the page's links are worth downloading.

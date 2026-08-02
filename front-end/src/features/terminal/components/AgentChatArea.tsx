@@ -164,11 +164,15 @@ function InputArea({
   tickerOffset,
   tickerRef,
 }: InputAreaProps) {
+  // shrink-0: this row is a flex sibling of the flex-1 chat scroll area inside
+  // an `overflow-hidden` column. Without it, a tall child (an approval card
+  // with a multi-item receipt) is the one that gets squeezed and clipped
+  // instead of the scrollable transcript above it.
   return (
     <div
       data-testid="terminal-input-area"
       data-chat-mode={a.isChatMode ? 'true' : 'false'}
-      className="relative pb-[calc(0.25rem+var(--safe-area-inset-bottom))] transition-opacity duration-300 ease-in-out md:pb-6"
+      className="relative shrink-0 pb-[calc(0.25rem+var(--safe-area-inset-bottom))] transition-opacity duration-300 ease-in-out md:pb-6"
       style={{
         // A pending gate is actionable (the agent is waiting on the user), so
         // keep it crisp even if the agent row shows FAILED — only dim a truly
