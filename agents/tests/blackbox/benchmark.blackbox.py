@@ -1333,6 +1333,31 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
     )
 
 
+async def test_payment_cleanup_reuses_an_already_valid_terminal_snapshot():
+    """Finalization must not re-abandon a lifecycle the task already reconciled."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import ensure_payment_lifecycle_cleanup
+
+    task = get_task_by_name("agent-payment-abandonment")
+    abandon_calls = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        raise AssertionError("an already-valid lifecycle was abandoned twice")
+
+    lifecycle = await ensure_payment_lifecycle_cleanup(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        current_lifecycle=task.expected_payment_lifecycle,
+        abandon_payment=abandon_payment,
+    )
+
+    assert lifecycle == task.expected_payment_lifecycle
+    assert abandon_calls == 0
+
+
 async def test_abandonment_waits_for_cron_reconciliation():
     """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -10907,6 +10932,10 @@ async def run_all_tests():
     r.record(
         "payment_lifecycle_cross_provider_state",
         test_payment_lifecycle_validation_cross_checks_nested_provider_state,
+    )
+    await r.record_async(
+        "payment_cleanup_reuses_terminal_snapshot",
+        test_payment_cleanup_reuses_an_already_valid_terminal_snapshot,
     )
     await r.record_async(
         "abandonment_waits_for_cron_reconciliation",

@@ -1821,12 +1821,24 @@ async def ensure_payment_lifecycle_cleanup(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
+    *,
+    current_lifecycle: Optional[dict] = None,
+    abandon_payment: Callable[[str, str], Awaitable[dict]] = abandon_test_payment,
 ) -> Optional[dict]:
     """Idempotently compensate issued benchmark cards before agent deletion."""
     if not agent_id or task.payment_card_request_action != "abandon":
         return None
     try:
-        lifecycle = await abandon_test_payment(base_url, agent_id)
+        if current_lifecycle is not None:
+            lifecycle_error = _validate_payment_lifecycle(
+                task,
+                {"_benchmark": {"payment_lifecycle": current_lifecycle}},
+            )
+            if lifecycle_error is None:
+                print("    🧹 Reused already-reconciled payment lifecycle")
+                return current_lifecycle
+
+        lifecycle = await abandon_payment(base_url, agent_id)
         lifecycle = await _wait_for_expected_payment_lifecycle(
             base_url,
             agent_id,
@@ -7732,7 +7744,13 @@ async def run_single_task(
                 passed = False
                 failure_reason = f"Agent payment confirmation contract check failed: {e}"
 
-        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+        current_lifecycle = data.get("_benchmark", {}).get("payment_lifecycle")
+        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(
+            base_url,
+            agent_id,
+            task,
+            current_lifecycle=current_lifecycle if isinstance(current_lifecycle, dict) else None,
+        )
         if cleanup_lifecycle is not None:
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),
