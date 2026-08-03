@@ -206,7 +206,9 @@ def test_agent_payment_output_blob_is_key_agnostic():
     # The regression: agent emitted `order_id`, not `order_confirmation_id`.
     assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
     # Legacy/alternate key names surface too.
-    assert "tp_c5053b1b" in blob_for({"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96})
+    assert "tp_c5053b1b" in blob_for(
+        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
+    )
     # No populated browser output → empty blob (the semantic gate fails closed on empty).
     assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
@@ -262,9 +264,13 @@ def test_cloud_fleet_controller_detaches_by_default():
     """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
     repo_root = Path(__file__).resolve().parents[3]
     fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
-    detach_default = next(line.strip() for line in fleet.splitlines() if line.startswith("DETACH="))
+    detach_default = next(
+        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
+    )
 
-    assert detach_default == 'DETACH="1"', f"fleet launch mode was {detach_default}; paid runs must detach by default"
+    assert detach_default == 'DETACH="1"', (
+        f"fleet launch mode was {detach_default}; paid runs must detach by default"
+    )
     assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
     assert '--foreground)     DETACH="0"' in fleet
     assert "--recover-stale-owner)" in fleet
@@ -272,7 +278,9 @@ def test_cloud_fleet_controller_detaches_by_default():
     assert "volume_id=%s" in fleet
     assert "Never sweep app-global unattached" in fleet
     assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
-    assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire")
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
+        "cloudbench_controller_lock_acquire"
+    )
 
 
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
@@ -554,9 +562,7 @@ async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles()
     with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
-    assert max_active_browser_tasks == 2, (
-        f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
-    )
+    assert max_active_browser_tasks == 2, f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
 
 
 async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles():
@@ -586,7 +592,8 @@ async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles()
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
     assert max_active_browser_tasks == 1, (
-        f"shared browser profiles lost one-writer protection; observed concurrency={max_active_browser_tasks}"
+        "shared browser profiles lost one-writer protection; "
+        f"observed concurrency={max_active_browser_tasks}"
     )
 
 
@@ -893,14 +900,11 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
     wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
         merchant="Nopa Fish (Toast - order.doordash.com)"
     )
-    assert (
-        _validate_payment_receipt(
-            task,
-            wrong_structured_request,
-            messages=wrong_structured_messages,
-        )
-        is not None
-    )
+    assert _validate_payment_receipt(
+        task,
+        wrong_structured_request,
+        messages=wrong_structured_messages,
+    ) is not None
 
     current_request, toast_messages = _captured_toast_payment_approval()
     _, doordash_messages = _captured_toast_payment_approval()
@@ -908,14 +912,11 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
         message["metadata"]["subAgentId"] = "doordash-browser-task"
         message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
     doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert (
-        _validate_payment_receipt(
-            task,
-            current_request,
-            messages=[*toast_messages, *doordash_messages],
-        )
-        is not None
-    )
+    assert _validate_payment_receipt(
+        task,
+        current_request,
+        messages=[*toast_messages, *doordash_messages],
+    ) is not None
 
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
@@ -1027,7 +1028,10 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
     from benchmarks import local
 
     env_path = tmp_path / ".env"
-    env_path.write_text('AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\nAGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n')
+    env_path.write_text(
+        'AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\n'
+        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n'
+    )
     local.validate_agentcard_org_credentials(
         ["agent-payment-test-shop"],
         env={},
@@ -1128,7 +1132,8 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding "
+            "path can produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
@@ -1156,7 +1161,9 @@ def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts)
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts
+    )
     assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
         "production payment identity drifted between the harness and the back-end: "
@@ -2626,7 +2633,9 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
                 "skipped": True,
                 "reason": "benchmark_agent",
                 "messagePreview": (
-                    f"Done: {summary}\nPickup Time: 7:41 AM\nView agent: https://roselabs.ai/?agent-id=root-blue-bottle"
+                    f"Done: {summary}\n"
+                    "Pickup Time: 7:41 AM\n"
+                    "View agent: https://roselabs.ai/?agent-id=root-blue-bottle"
                 ),
             },
         }
@@ -3542,7 +3551,8 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
         assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prisma_source
 
         same_database_source = (
-            "postgres://source-user:one@DB.EXAMPLE.COM/victoria?sslmode=require&application_name=seed&schema=public"
+            "postgres://source-user:one@DB.EXAMPLE.COM/victoria"
+            "?sslmode=require&application_name=seed&schema=public"
         )
         env_path.write_text(f"DATABASE_URL={same_database_source}\n")
         seed_called = False
@@ -3558,7 +3568,8 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
                 bench,
                 "_local_victoria_database_url",
                 return_value=(
-                    "postgresql://target-user:two@db.example.com:5432/victoria?connection_limit=50&pool_timeout=30"
+                    "postgresql://target-user:two@db.example.com:5432/victoria"
+                    "?connection_limit=50&pool_timeout=30"
                 ),
             ),
             patch.object(bench, "_shared_workspace_database_url", return_value=None),
@@ -6932,8 +6943,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
-        local_bench._prime_local_seed_dump_from_shared_stack = lambda path: (
-            captured.setdefault("primed_seed_dump", path) is path
+        local_bench._prime_local_seed_dump_from_shared_stack = (
+            lambda path: captured.setdefault("primed_seed_dump", path) is path
         )
         with tempfile.TemporaryDirectory() as tmp:
             context_dir = Path(tmp) / "isolated-run"
@@ -7313,7 +7324,6 @@ def test_local_port_range_allocation_is_reserved_across_processes():
         child_base_text = child.stdout.readline().strip()
         assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
         child_base = int(child_base_text)
-
         def occupied(base):
             return {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
 
@@ -8670,7 +8680,9 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
-        result = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
+        result = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
+        )
     assert result is None
 
     # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
@@ -8684,11 +8696,15 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
             }
         ),
     ):
-        failure = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
+        failure = asyncio.run(
+            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
+        )
     assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
 
     # No populated output → judged as missing without an LLM call.
-    empty = asyncio.run(_judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep"))
+    empty = asyncio.run(
+        _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
+    )
     assert empty is not None and "no populated output schema" in empty
 
     # REUSABLE / not overfitted: the same judge works for a totally different task's schema
@@ -8735,11 +8751,20 @@ def test_admin_bypass_card_mint_variant_wiring():
     from benchmarks.benchmark_tasks import get_task_by_name
 
     # Both variants share the depleted purchase-subscription fixture...
-    assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == "purchase-subscription"
+    assert (
+        GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == "purchase-subscription"
+    )
     assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == "purchase-subscription"
     # ...but run as different users: a synthetic admin vs a plain non-admin.
-    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
-    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == PURCHASE_SUBSCRIPTION_GATE_USER_ID
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
+        == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    )
+    assert (
+        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME]
+        == PURCHASE_SUBSCRIPTION_GATE_USER_ID
+    )
     assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID != PURCHASE_SUBSCRIPTION_GATE_USER_ID
 
     non_admin = get_task_by_name(PURCHASE_SUBSCRIPTION_GATE_TASK_NAME)
