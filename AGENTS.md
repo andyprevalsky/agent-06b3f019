@@ -75,6 +75,19 @@ e.g. `export TEMPORAL_TASK_QUEUE=navi-agent-tasks-<something-unique>` (this is
 exactly what `run.sh` does via `CONDUCTOR_WORKSPACE_NAME`). Never run a local
 worker on the injected shared queue or the bare `navi-agent-tasks` prod queue.
 
+### ⚠️ Injected env vars override `.env` (general)
+Same root cause, broader class: any variable already present in the VM
+environment wins over `.env` (Node `dotenv.config()` and Python
+`load_dotenv(override=False)` never override an existing value). Known stray
+injection: `BROWSER_PROVIDER` arrives set to an unsupported provider value (not
+`kernel` or `steel`), so the backend rejects it (`Unsupported BROWSER_PROVIDER`;
+browser ops 500 and the `browser-provider` blackbox fails its live-Kernel parity
+check). It must be `kernel` (the repo default) or `steel`. Fix it at the source —
+correct/remove `BROWSER_PROVIDER` in the Cursor environment/Secrets config — and
+until then `export BROWSER_PROVIDER=kernel` in the backend and worker shells. When something is
+misconfigured despite a correct `.env`, check for an injected env var of the
+same name first.
+
 ### Full agent stack with real secrets
 With real secrets in the environment, the dev `.env` writer picks them up.
 Verified end-to-end here:
