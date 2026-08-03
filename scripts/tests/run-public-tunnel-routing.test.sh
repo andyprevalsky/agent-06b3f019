@@ -94,7 +94,10 @@ elapsed=$(( SECONDS - started ))
 echo "PASS: persistent 000 is reported as dead, bounded by the timeout (${elapsed}s)"
 
 # --- case 5: a slow-but-alive edge is accepted ------------------------------
-run_routing_check 20 000 000 502 || fail "case 5: edge that starts routing within the window must pass"
+# Remove the production backoff so host scheduling cannot consume this focused
+# fixture's entire wall-clock budget before its deterministic third response.
+CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS=0 \
+  run_routing_check 20 000 000 502 || fail "case 5: edge that starts routing within the window must pass"
 echo "PASS: edge that becomes reachable within the window counts as routing"
 
 # --- case 6: run.sh recycles dead tunnels instead of dying ------------------
@@ -105,6 +108,8 @@ grep -q 'recycling the quick tunnel' "$RUN_SH" \
   || fail "case 6: run.sh no longer recycles a non-routing quick tunnel"
 grep -q 'CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS' "$RUN_SH" \
   || fail "case 6: run.sh no longer backs off between quick-tunnel attempts"
+grep -q 'CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS' "$RUN_SH" \
+  || fail "case 6: tunnel routing probes no longer expose deterministic retry cadence"
 # A recycled tunnel must be removed from the service arrays, otherwise cleanup
 # reports a dead pid as a live service.
 awk '/^start_cloudflare_quick_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/start.sh"

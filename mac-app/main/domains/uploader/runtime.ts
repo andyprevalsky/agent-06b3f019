@@ -18,6 +18,10 @@ import {
   UPLOAD_PROGRESS_DONE_PERCENT,
   UPLOAD_PROGRESS_START_PERCENT,
 } from './config';
+import {
+  accessTokenIsImpersonated,
+  IMPERSONATED_MACHINE_DATA_MESSAGE,
+} from '../auth/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
 import type { UploadResult } from './types';
@@ -42,6 +46,12 @@ export class Uploader {
     accessToken: string,
     window: BrowserWindow | null
   ): Promise<UploadResult> {
+    // Final owning boundary for every BatchUploader payload. Orchestration and
+    // IPC guards avoid reading local data unnecessarily, but this check makes a
+    // missed caller unable to write this Mac's data into an impersonated user.
+    if (accessTokenIsImpersonated(accessToken)) {
+      return { success: false, message: IMPERSONATED_MACHINE_DATA_MESSAGE };
+    }
     try {
       emitProgress(window, integrationType, UPLOAD_PROGRESS_START_PERCENT);
 

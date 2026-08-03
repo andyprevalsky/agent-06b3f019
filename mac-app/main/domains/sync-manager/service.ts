@@ -14,6 +14,7 @@ import { basename, dirname } from 'path';
 import { existsSync, watch, type FSWatcher } from 'fs';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
+import { accessTokenIsImpersonated } from '../auth/impersonation';
 import { IMessageSync } from '../../services/iMessageSync';
 import { BrowserStateSync } from '../../services/browserStateSync';
 import { ClaudeCredentialSync } from '../../services/claudeCredentialSync';
@@ -138,6 +139,13 @@ export class IntegrationCache {
  * already verified the platform is connected.
  */
 async function syncComputeCredentials(connected?: Set<string>): Promise<void> {
+  // Reachable directly (not only via syncPlatformCore), so it repeats the guard:
+  // uploading the operator's Claude/Codex credentials into an impersonated
+  // account would hand that account the operator's provider access.
+  if (await syncingWouldWriteToAnotherUser()) {
+    logConsole('SyncManager', 'Skipping compute credential sync: impersonating another account');
+    return;
+  }
   const synced: Promise<unknown>[] = [];
   if (connected === undefined || connected.has('claude_code')) {
     synced.push(ClaudeCredentialSync.syncExistingCredentialsIfChanged());
@@ -149,7 +157,28 @@ async function syncComputeCredentials(connected?: Set<string>): Promise<void> {
   await Promise.allSettled(synced);
 }
 
+/**
+ * Whether outbound syncing must be suppressed because an admin is viewing another
+ * user's account. Reads the CURRENT session token, so it re-evaluates on every
+ * sync rather than caching a stale answer across a switch.
+ */
+export async function syncingWouldWriteToAnotherUser(): Promise<boolean> {
+  const session = await AuthService.getSession();
+  return accessTokenIsImpersonated(session?.access_token);
+}
+
 export async function syncPlatformCore(platform: Platform, connected?: Set<string>): Promise<void> {
+  // HARD STOP. Every branch below uploads data harvested from THIS machine —
+  // the operator's iMessage, WhatsApp, browser cookies/passwords, and compute
+  // credentials — authenticated as the current session. While impersonating,
+  // that session is the target user, so syncing here would write the admin's
+  // personal data into someone else's account. Unlike a UI bug this is not
+  // recoverable after the fact, so it is refused rather than reconciled.
+  if (await syncingWouldWriteToAnotherUser()) {
+    logConsole('SyncManager', `Skipping ${platform} sync: impersonating another account`);
+    return;
+  }
+
   switch (platform) {
     case 'imessage':
       await IMessageSync.sync();
@@ -349,6 +378,13 @@ function startComputeRealTime(): void {
  * Start real-time watchers for every platform that supports them.
  */
 export async function startRealTimeWatchers(): Promise<void> {
+  // Real-time watchers stream this machine's messages/credentials outward as they
+  // change, so arming them while impersonating leaks the operator's data into the
+  // target account continuously rather than once.
+  if (await syncingWouldWriteToAnotherUser()) {
+    logConsole('SyncManager', 'Not starting real-time watchers: impersonating another account');
+    return;
+  }
   if (PLATFORM_CONFIG.imessage.enableRealTime) {
     IMessageSync.startRealTimeSync();
     logConsole('SyncManager', 'Started iMessage real-time watcher');

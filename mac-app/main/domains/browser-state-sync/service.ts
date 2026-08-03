@@ -13,6 +13,10 @@ import { IndexedDBReader } from '../../services/indexedDBReader';
 import { LocalStorageReader } from '../../services/localStorageReader';
 import { PermissionReader } from '../../services/permissionReader';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import {
+  IMPERSONATED_MACHINE_DATA_MESSAGE,
+  sessionForLocalMachineData,
+} from '../auth/impersonation';
 import { INDEXED_DB_FILTERS, SUPPORTED_PASSWORD_BROWSERS, VALID_BROWSERS } from './config';
 import { uploadIndexedDBInBatches } from './service-indexedDB';
 import { uploadLocalStorageInBatches } from './service-localStorage';
@@ -115,9 +119,9 @@ async function queueChromeBrowserStateUploads(
  * backend. Non-authenticated or no-connected-browsers are no-ops.
  */
 export async function sync(): Promise<void> {
-  const session = await AuthService.getSession();
+  const session = sessionForLocalMachineData(await AuthService.getSession());
   if (!session) {
-    console.log('[BrowserStateSync] Skipping sync - not authenticated');
+    console.log('[BrowserStateSync] Skipping sync - no eligible operator session');
     return;
   }
 
@@ -207,9 +211,13 @@ export async function syncBrowser(
   browserType: string,
   options?: SyncBrowserOptions
 ): Promise<UploadResult> {
-  const session = await AuthService.getSession();
+  const currentSession = await AuthService.getSession();
+  const session = sessionForLocalMachineData(currentSession);
   if (!session) {
-    return { success: false, message: 'Not authenticated' };
+    return {
+      success: false,
+      message: currentSession === null ? 'Not authenticated' : IMPERSONATED_MACHINE_DATA_MESSAGE,
+    };
   }
 
   console.log(`[BrowserStateSync] Starting full sync for ${browserType}`);
@@ -277,9 +285,13 @@ export async function syncBrowserPasswordsOnly(
   browserType: string,
   options?: SyncBrowserOptions
 ): Promise<UploadResult> {
-  const session = await AuthService.getSession();
+  const currentSession = await AuthService.getSession();
+  const session = sessionForLocalMachineData(currentSession);
   if (!session) {
-    return { success: false, message: 'Not authenticated' };
+    return {
+      success: false,
+      message: currentSession === null ? 'Not authenticated' : IMPERSONATED_MACHINE_DATA_MESSAGE,
+    };
   }
 
   if (!isPasswordSyncSupported(browserType)) {

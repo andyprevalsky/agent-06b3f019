@@ -39,6 +39,17 @@ const SESSION = {
   user: { id: 'user-1' },
 } as unknown as Awaited<ReturnType<typeof AuthService.getSession>>;
 
+const encodeJwtPart = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value)).toString('base64url');
+const IMPERSONATED_SESSION = {
+  ...SESSION,
+  access_token: `${encodeJwtPart({ alg: 'HS256' })}.${encodeJwtPart({
+    sub: 'target-user',
+    act: { sub: 'operator-user' },
+  })}.sig`,
+  user: { id: 'target-user' },
+} as unknown as Awaited<ReturnType<typeof AuthService.getSession>>;
+
 describe('user-data-sync blackbox', () => {
   const originalEnv = { ...process.env };
 
@@ -313,6 +324,16 @@ describe('user-data-sync blackbox', () => {
     const result = await UserDataSync.syncSource('apple_notes');
 
     expect(result[0]).toMatchObject({ source: 'apple_notes', skipped: true });
+    expect(repo.uploadDocuments).not.toHaveBeenCalled();
+  });
+
+  it('skips local documents while impersonating another user', async () => {
+    vi.mocked(AuthService.getSession).mockResolvedValue(IMPERSONATED_SESSION);
+
+    const result = await UserDataSync.syncSource('apple_notes');
+
+    expect(result[0]).toMatchObject({ source: 'apple_notes', skipped: true });
+    expect(repo.exportAppleNotes).not.toHaveBeenCalled();
     expect(repo.uploadDocuments).not.toHaveBeenCalled();
   });
 

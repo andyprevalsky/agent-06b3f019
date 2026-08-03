@@ -14,6 +14,7 @@ import { AuthService } from '../../services/auth';
 import { BatchUploader } from '../../services/batchUploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 import { FLUSH_INTERVAL_MS, INTEGRATION_KEY, MAX_BUFFER_SIZE } from './config';
 import { TelegramAuth } from './repo';
 import { TelegramClient } from './service';
@@ -160,7 +161,7 @@ export class TelegramSync {
    * Upload messages to backend via BatchUploader.
    */
   private static async uploadMessages(messages: NormalizedMessage[]): Promise<boolean> {
-    const session = await AuthService.getSession();
+    const session = sessionForLocalMachineData(await AuthService.getSession());
     if (session === null || session === undefined) return false;
 
     const contacts = MessageTransformer.toContactWithMessages(messages);

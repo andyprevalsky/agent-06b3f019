@@ -296,6 +296,35 @@ test('compute-token sync can require GPT without requiring Claude OAuth', async 
   );
 });
 
+test('synthetic benchmark compute access uses the isolated pool without changing ownership', async () => {
+  const source = readSeedLocalSource();
+  const optIn = source.indexOf('SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS');
+  const helper = source.indexOf('async function poolRequiredDevComputeTokensForSyntheticUsers');
+  const isolationGuard = source.indexOf('if (!ISOLATED_BENCHMARK_RUN)', helper);
+  const ownerBoundary = source.indexOf('userId: DEV_USER_ID', helper);
+  const requiredNames = source.indexOf('COMPUTE_TOKEN_REQUIRED_TYPES', helper);
+  const poolUpdate = source.indexOf('data: { poolingEnabled: true }', helper);
+  const syncCall = source.indexOf('const count = await syncIntegrations()', helper);
+  const poolCall = source.indexOf(
+    'await poolRequiredDevComputeTokensForSyntheticUsers()',
+    syncCall
+  );
+
+  assert(optIn > 0, 'expected an explicit synthetic-user pool opt-in');
+  assert(helper > optIn, 'expected a narrowly named pooling helper');
+  assert(isolationGuard > helper, 'expected pooling to fail closed outside isolated benchmarks');
+  assert(ownerBoundary > helper, 'expected the integration to retain the dev-user owner');
+  assert(requiredNames > helper, 'expected pooling to be limited to required provider types');
+  assert(poolUpdate > isolationGuard, 'expected the isolated-stack guard before the pool update');
+  assert(poolUpdate > ownerBoundary, 'expected only the local pooling flag to change');
+  assert(syncCall > helper, 'expected production-owned integrations to sync first');
+  assert(poolCall > syncCall, 'expected isolated pooling only after credential sync');
+  assert(
+    !source.slice(helper, poolCall).includes('userId: process.env'),
+    'synthetic benchmark users must never receive copied integration rows'
+  );
+});
+
 test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks', async () => {
   const source = readSeedLocalSource();
   const launcher = readRepoFile('scripts/run-agentcard-lifecycle-task.sh');
@@ -321,6 +350,10 @@ test('AgentCard launcher scopes the missing-Claude opt-out to non-Claude tasks',
   assert(
     launcher.includes('export SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK=1'),
     'expected the AgentCard launcher to opt into the non-Claude task path'
+  );
+  assert(
+    launcher.includes('export SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS=1'),
+    'expected the AgentCard launcher to expose dev compute through the isolated pool'
   );
   for (const taskName of acceptedTasks) {
     const task = tasks.find((candidate) => candidate.name === taskName);

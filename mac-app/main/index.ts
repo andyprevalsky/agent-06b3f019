@@ -7,6 +7,10 @@ import {
 } from './domains/passkey-import/activity-bridge';
 import { importPasskeysFromToken } from './domains/passkey-import/service';
 import { AuthService } from './domains/auth/runtime';
+import {
+  IMPERSONATED_MACHINE_DATA_MESSAGE,
+  sessionForLocalMachineData,
+} from './domains/auth/impersonation';
 import { initLogger, logConsole, logConsoleError } from './base/logger';
 import { getOnboardingComplete } from './handlers/registry';
 import {
@@ -235,10 +239,15 @@ async function runPasskeyImport(token: string): Promise<void> {
 
   try {
     logConsole('PasskeyImport', `starting import token=${token}`);
-    const session = await AuthService.getSession();
+    const currentSession = await AuthService.getSession();
+    const session = sessionForLocalMachineData(currentSession);
     if (!session) {
-      logConsole('PasskeyImport', 'import blocked: no signed-in session');
-      new Notification({ title: 'Rose', body: 'Sign in to import Apple Passwords.' }).show();
+      const body =
+        currentSession === null
+          ? 'Sign in to import Apple Passwords.'
+          : IMPERSONATED_MACHINE_DATA_MESSAGE;
+      logConsole('PasskeyImport', `import blocked: ${body}`);
+      new Notification({ title: 'Rose', body }).show();
       return;
     }
     const result = await importPasskeysFromToken(token, session.access_token);

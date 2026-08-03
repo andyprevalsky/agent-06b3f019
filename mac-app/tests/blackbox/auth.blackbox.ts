@@ -335,6 +335,30 @@ describe('auth blackbox', () => {
   // -------------------------------------------------------------------------
 
   describe('auth boundary — refresh on expiry', () => {
+    it('never refreshes an impersonated session and preserves its actor claim', async () => {
+      restoreFetch = installFetchCapture({
+        '/auth/v1/token': refreshResponderOk({
+          access_token: 'would-strip-actor',
+        }),
+      });
+      const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+      const impersonatedAccessToken = `${encode({ alg: 'HS256' })}.${encode({
+        sub: 'target-user',
+        act: { sub: 'admin-user' },
+      })}.signature`;
+      AuthService.setSession(
+        freshSession({
+          access_token: impersonatedAccessToken,
+          expires_at: Date.now() + 30_000,
+        })
+      );
+
+      const result = await AuthService.getSession();
+
+      expect(result?.access_token).toBe(impersonatedAccessToken);
+      expect(refreshCalls()).toHaveLength(0);
+    });
+
     it('refreshes and returns a new session when the stored token is already expired', async () => {
       restoreFetch = installFetchCapture({
         '/auth/v1/token': refreshResponderOk({

@@ -6334,7 +6334,7 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
 
 def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Cloudbench's executable task-env resolution must export the worker gate flag."""
+    """Cloudbench's task-env resolution exports gates and fails closed on resolver errors."""
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -6367,6 +6367,25 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     ]
     assert disabled.returncode == 0, disabled.stderr
     assert disabled.stdout == ""
+
+    with tempfile.TemporaryDirectory() as fake_bin_dir:
+        fake_python = Path(fake_bin_dir) / "python3"
+        fake_python.write_text("#!/bin/sh\nexit 42\n")
+        fake_python.chmod(0o755)
+        resolver_failure = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **base_env,
+                "BENCH_TASKS": "gate-source-connect-gmail",
+                "CLOUDBENCH_TASK_GATE_PYTHON": str(fake_python),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert resolver_failure.returncode == 42
+    assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
 
 
 def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():

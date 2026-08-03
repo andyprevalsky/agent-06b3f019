@@ -27,6 +27,26 @@ ensure_fast_mode_cache_schema() {
         fi
     done
 
+    # Distinguish "the pooler is busy" from "this machine cannot reach the pooler
+    # at all". Retrying is only meaningful for the former; blaming saturation when
+    # the DB port is firewalled sends the operator chasing a phantom load problem
+    # (which cost two full stack restarts before this was added). A guest/hotspot
+    # network that permits 443 but blocks 5432/6543 is the common cause.
+    local host="${FAST_MODE_CACHE_SCHEMA_PROBE_HOST:-}" port="${FAST_MODE_CACHE_SCHEMA_PROBE_PORT:-}"
+    if [ -z "$host" ] && [ -n "${DATABASE_URL:-}" ]; then
+        host="$(printf '%s' "$DATABASE_URL" | sed -n 's|.*@\([^:/?]*\).*|\1|p')"
+        port="$(printf '%s' "$DATABASE_URL" | sed -n 's|.*@[^:]*:\([0-9]*\).*|\1|p')"
+    fi
+    if [ -n "$host" ] && [ -n "$port" ] && command -v nc >/dev/null 2>&1; then
+        if ! nc -z -G 6 "$host" "$port" >/dev/null 2>&1; then
+            echo "❌ Fast Mode cache schema ensure failed: cannot reach ${host}:${port} from this machine." >&2
+            echo "   This is NETWORK reachability, not pooler load — retrying will not help." >&2
+            echo "   Check whether the current network blocks Postgres ports (guest/hotspot Wi-Fi commonly does);" >&2
+            echo "   ${host}:443 being reachable while ${port} is not confirms it." >&2
+            return "$rc"
+        fi
+    fi
+
     echo "❌ Fast Mode cache schema ensure failed after ${max_attempts} attempts (shared prod pooler saturated)" >&2
     return "$rc"
 }
