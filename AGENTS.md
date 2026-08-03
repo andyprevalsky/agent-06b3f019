@@ -55,10 +55,42 @@ creds for its prod-data seed — not available here).
     does not reload `.env`).
 - Agents worker: `cd agents && source venv/bin/activate && ./scripts/run_local_worker.sh`
   — needs a real `TEMPORAL_API_KEY`; it will not connect with the placeholder.
+  Worker logs go to `agents/navi-worker-log.txt` (not the shell), per
+  `run_local_worker.sh`.
 
 You can exercise the core API without a browser using the dev API key from
 `CLAUDE.md` (X-API-Key path), e.g. `GET /health`, `GET /api/agents`, and
 `POST /api/agents` all work against local Postgres.
+
+### ⚠️ Temporal task-queue isolation (critical)
+The VM environment injects a `TEMPORAL_TASK_QUEUE` value that points at a
+**shared** queue on the shared Temporal Cloud namespace (a `navi-agent-tasks`
+variant used by CI/test runs). Node's `dotenv.config()` and Python's
+`load_dotenv(override=False)` both keep a pre-existing env var over `.env`, so
+the backend AND worker will silently inherit that shared queue and start
+consuming OTHER runs' workflows (observed: a local worker picked up dozens of
+foreign test `AgentWorkflow`s and failed their activities). Before starting the
+backend or worker for real agent runs, **export a unique queue in both shells**,
+e.g. `export TEMPORAL_TASK_QUEUE=navi-agent-tasks-<something-unique>` (this is
+exactly what `run.sh` does via `CONDUCTOR_WORKSPACE_NAME`). Never run a local
+worker on the injected shared queue or the bare `navi-agent-tasks` prod queue.
+
+### Full agent stack with real secrets
+With real secrets in the environment, the dev `.env` writer picks them up.
+Verified end-to-end here:
+- Full OTP login works: test phone `+19729777432`, OTP `181818`; the waitlist
+  gate is bypassed with invite code `181818` (`WAITLIST_BYPASS_INVITE_CODE`).
+- A chat-mode agent (`POST /api/agents` with NO `start_phase`) completes cleanly
+  via the backend Rose completion path and returns a real answer (its reply text
+  lands in message `metadata.attentionMessage` / `sendMessageToUser`).
+- Temporal agents run: `POST /api/agents` with `start_phase` (or the UI goal box)
+  starts a real workflow on the isolated queue and the worker executes it with
+  real LLM inference (Rose waterfall via OpenRouter/Cerebras). The autonomous
+  plan→execute loop currently tends to fail late (`rose-1-ultra` pool waterfall /
+  "Code session failed") in this local setup even though it produces the correct
+  reasoning; that is an agent-harness/model-pool robustness matter, not an
+  environment problem. The local DB has no `User` row for the test user, so
+  `get_user_context` logs a non-fatal error.
 
 ### Tests
 See `docs/testing.md` and `CLAUDE.md` for the full command list. Offline suites
