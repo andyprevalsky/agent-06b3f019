@@ -113,8 +113,8 @@ if ! $IS_MAC; then
         # Enable md5 auth so localhost TCP connections work with password
         PG_HBA=$(find /etc/postgresql -name pg_hba.conf 2>/dev/null | head -1)
         if [ -n "$PG_HBA" ]; then
-            sed -i 's/^local\s\+all\s\+all\s\+peer/local   all             all                                     md5/' "$PG_HBA"
-            sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
+            $SUDO sed -i 's/^local\s\+all\s\+all\s\+peer/local   all             all                                     md5/' "$PG_HBA"
+            $SUDO sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
             $SUDO pg_ctlcluster "$PG_VER" main reload 2>/dev/null || true
         fi
         if pg_isready -U postgres -q 2>/dev/null; then
