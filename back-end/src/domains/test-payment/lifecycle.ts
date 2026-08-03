@@ -3,9 +3,10 @@ import { getOrgManagedCardholderId } from '../../providers/agentcard/store';
 import { stripe } from '../../providers/stripe';
 import { TestPaymentError } from './errors';
 import {
+  agentCardSummaryFromMcpResult,
   asRecord,
   integerField,
-  mcpResultRecord,
+  mcpResultCode,
   mcpResultRows,
   providerIntegrity,
   stringField,
@@ -40,17 +41,7 @@ async function getOrgCardSummary(cardId: string): Promise<{
   balanceCents: number;
 }> {
   const result = await callOrgTool('get_card', { card_id: cardId });
-  const record = mcpResultRecord(result);
-  const card = asRecord(record.card) ?? record;
-  const status = card.status;
-  const balanceCents = card.balanceCents ?? card.balance_cents;
-  if (typeof status !== 'string' || status === '') {
-    throw new TestPaymentError('AgentCard card lifecycle missing status', 502);
-  }
-  if (typeof balanceCents !== 'number' || !Number.isInteger(balanceCents)) {
-    throw new TestPaymentError('AgentCard card lifecycle missing balanceCents', 502);
-  }
-  return { status, balanceCents };
+  return agentCardSummaryFromMcpResult(result);
 }
 
 function buildAttention(attentionRequests: LifecycleAttention): TestPaymentLifecycle['attention'] {
@@ -152,6 +143,7 @@ function mapAgentCard(
 }
 
 function isClosedCardDetailsError(error: unknown): boolean {
+  if (mcpResultCode(error)?.toLowerCase() === 'card_closed') return true;
   const message = error instanceof Error ? error.message : String(error);
   return /\bcard_closed\b/i.test(message);
 }

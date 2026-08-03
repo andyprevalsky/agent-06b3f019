@@ -726,7 +726,7 @@ def validate_agentcard_org_credentials(
     )
 
 
-def configure_task_environment(tasks: Sequence[str]) -> None:
+def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
@@ -741,9 +741,12 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
         # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
-        # token pool-eligible only inside the isolated benchmark DB; never copy its Integration row
-        # into the synthetic user's account.
-        os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"] = "1"
+        # token pool-eligible only after stack selection proves this run owns an isolated database;
+        # never let shared-stack/use-existing modes mutate credential-pool eligibility.
+        if isolated:
+            os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"] = "1"
+        else:
+            os.environ.pop("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", None)
         os.environ.setdefault(
             AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
             AGENT_PAYMENT_BENCHMARK_USER_ID,
@@ -1803,15 +1806,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
     validate_agentcard_org_credentials(selected_tasks)
-    configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    stack = build_service_stack(args)
+    configure_task_environment(selected_tasks, isolated=stack.isolated)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
-    stack = build_service_stack(args)
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     if stack.isolated:
         # Both the service stack and run_benchmark.py inherit this. Provider

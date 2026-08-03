@@ -86,6 +86,7 @@ const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
 );
 const POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS =
   process.env.SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS === '1';
+const ISOLATED_BENCHMARK_RUN = process.env.BENCHMARK_ISOLATED_RUN === 'true';
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -220,6 +221,13 @@ async function syncIntegrations(): Promise<number> {
  */
 async function poolRequiredDevComputeTokensForSyntheticUsers(): Promise<number> {
   if (!POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS) return 0;
+  if (!ISOLATED_BENCHMARK_RUN) {
+    console.warn(
+      '  ⚠️  Compute Tokens (integrations): refusing synthetic-user pool eligibility ' +
+        'outside an explicitly isolated benchmark database'
+    );
+    return 0;
+  }
 
   const requiredNames = [...COMPUTE_TOKEN_REQUIRED_TYPES].map((type) =>
     type === 'claude' ? 'claude_code' : 'gpt_code'

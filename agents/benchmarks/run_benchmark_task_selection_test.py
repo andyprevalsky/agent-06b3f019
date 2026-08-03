@@ -1,5 +1,6 @@
 from argparse import Namespace
 import asyncio
+import os
 from pathlib import Path
 
 import benchmarks.local as local_runner
@@ -51,7 +52,9 @@ def test_agent_payment_tasks_use_a_dedicated_non_admin_user():
 def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch):
     monkeypatch.delenv("BENCHMARK_AGENT_PAYMENT_USER_ID", raising=False)
     monkeypatch.delenv("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", raising=False)
-    local_runner.configure_task_environment(["agent-payment-test-shop"])
+    local_runner.configure_task_environment(
+        ["agent-payment-test-shop"], isolated=True
+    )
 
     assert (
         local_runner.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV
@@ -75,6 +78,16 @@ def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch)
         "--user-id",
         local_runner.AGENT_PAYMENT_BENCHMARK_USER_ID,
     ]
+
+
+def test_payment_compute_pool_requires_an_isolated_stack(monkeypatch):
+    monkeypatch.setenv("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", "1")
+
+    local_runner.configure_task_environment(
+        ["agent-payment-test-shop"], isolated=False
+    )
+
+    assert "SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS" not in os.environ
 
 
 def test_payment_fixture_guards_identity_and_funds_non_admin_credit():
