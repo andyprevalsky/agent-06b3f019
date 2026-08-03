@@ -1566,7 +1566,7 @@ registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to
     ttl="${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}"
     case "$ttl" in ''|*[!0-9]*) ttl=900 ;; esac
     now="$(date +%s)"
-    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    mt="$(stat -c %Y "$record" 2>/dev/null || stat -f %m "$record" 2>/dev/null || echo "$now")"
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
@@ -1583,7 +1583,7 @@ registry_record_is_stale_pre_volume_id() {  # <record-file>; 0 = old enough for 
     ttl="${CLOUDBENCH_LEGACY_VOLUME_RECORD_TTL_SECONDS:-${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}}"
     case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
     now="$(date +%s)"
-    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    mt="$(stat -c %Y "$record" 2>/dev/null || stat -f %m "$record" 2>/dev/null || echo "$now")"
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
@@ -2243,7 +2243,7 @@ worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
         if [ -n "$observed" ]; then
             read -r owner_pid owner_token owner_started < "$owner" 2>/dev/null || true
         else
-            owner_started="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || true)"
+            owner_started="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || true)"
         fi
         now="$(date +%s)"
         case "$owner_started" in ''|*[!0-9]*) owner_started="$now" ;; esac
