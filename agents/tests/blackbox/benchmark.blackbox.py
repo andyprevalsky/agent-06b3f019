@@ -6013,6 +6013,9 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
         "CLOUDBENCH_REPO_DIR": str(repo_root),
         "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
         "CLOUDBENCH_PRINT_TASK_ENV": "1",
+        # The production controller prefers this encoded transport over
+        # BENCH_TASKS. Clear any caller value so this test owns its task input.
+        "BENCH_TASKS_B64": "",
     }
     enabled = subprocess.run(
         ["bash", str(script)],
@@ -6033,7 +6036,7 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert enabled.stdout.splitlines() == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
-    ]
+    ], enabled.stdout
     assert disabled.returncode == 0, disabled.stderr
     assert disabled.stdout == ""
 
