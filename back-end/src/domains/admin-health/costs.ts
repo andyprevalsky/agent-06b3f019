@@ -9,6 +9,8 @@ interface ModelRates {
   outputDollarsPerMillion: number;
   cacheReadMultiplier: number;
   cacheWriteMultiplier: number;
+  /** OpenAI-compatible prompt totals include cache tokens; Anthropic input totals exclude them. */
+  inputIncludesCacheTokens: boolean;
 }
 
 const anthropic = (
@@ -19,6 +21,7 @@ const anthropic = (
   outputDollarsPerMillion,
   cacheReadMultiplier: 0.1,
   cacheWriteMultiplier: 1.25,
+  inputIncludesCacheTokens: false,
 });
 
 const openAi = (
@@ -30,6 +33,7 @@ const openAi = (
   outputDollarsPerMillion,
   cacheReadMultiplier: 0.1,
   cacheWriteMultiplier,
+  inputIncludesCacheTokens: true,
 });
 
 const openRouter = (
@@ -40,6 +44,7 @@ const openRouter = (
   outputDollarsPerMillion,
   cacheReadMultiplier: 0.25,
   cacheWriteMultiplier: 1,
+  inputIncludesCacheTokens: true,
 });
 
 const uncached = (inputDollarsPerMillion: number, outputDollarsPerMillion: number): ModelRates => ({
@@ -47,6 +52,7 @@ const uncached = (inputDollarsPerMillion: number, outputDollarsPerMillion: numbe
   outputDollarsPerMillion,
   cacheReadMultiplier: 1,
   cacheWriteMultiplier: 1,
+  inputIncludesCacheTokens: false,
 });
 
 const SONNET_5_PRICE_CHANGE_AT = Date.parse('2026-09-01T00:00:00.000Z');
@@ -108,8 +114,11 @@ function apiEquivalentLlmDollars(usage: RootAgentRunUsageRecord, pricedAt: numbe
   if (usage.fromFastCache) return 0;
   const rates = currentModelRates(normalizeModel(usage.model), pricedAt);
   if (rates === undefined) return usage.costCents / 100;
+  const uncachedInputTokens = rates.inputIncludesCacheTokens
+    ? Math.max(0, usage.tokensIn - usage.cacheReadInputTokens - usage.cacheCreationInputTokens)
+    : usage.tokensIn;
   const input =
-    usage.tokensIn +
+    uncachedInputTokens +
     usage.cacheReadInputTokens * rates.cacheReadMultiplier +
     usage.cacheCreationInputTokens * rates.cacheWriteMultiplier;
   return (

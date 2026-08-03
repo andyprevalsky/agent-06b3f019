@@ -63,8 +63,23 @@ is_self_ancestor() {
     done
 }
 
+# Benchmark controllers are NEVER ours to kill (CLAUDE.md rule 27). They own Fly
+# machines, volumes, and isolated stacks, and they reap those resources through
+# their own signal traps — killing one from outside leaks paid infrastructure and
+# can terminate healthy fleets belonging to other worktrees or sessions.
+#
+# `run-predeploy-local` starts an ISOLATED `scripts/run.sh` stack as a child. That
+# child matches the `scripts/run\.sh` root pattern below, and
+# `add_pid_with_tree_and_ancestors` then walks upward through same-worktree
+# ancestors. Protect the controller boundary before that escalation occurs.
+is_benchmark_controller() {
+    local cmd
+    cmd=$(cmd_of "$1")
+    echo "$cmd" | grep -Eq 'run-predeploy-(local|cloud)|run-bench(-fleet|-cloud|-hub-poller)?( |$)|benchmarks/(local|run_benchmark|run_eval_suite)\.py'
+}
+
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_benchmark_controller "$1"
 }
 
 service_like_process() {
@@ -231,6 +246,22 @@ while read -r pid; do
 done < "$ROOTS_FILE"
 
 PIDS=$(sort -un "$ALL_FILE" | grep -v "^$SELF$" | grep -v "^$SELF_PPID$" || true)
+
+# Final backstop: drop any benchmark controller that entered the set as a
+# descendant. `pid_tree` walks downward and does not consult
+# `is_protected_process`, so the ancestor guard alone cannot catch this path.
+if [[ -n "$PIDS" ]]; then
+    KEPT=""
+    while read -r pid; do
+        [[ -z "$pid" ]] && continue
+        if is_benchmark_controller "$pid"; then
+            echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+            continue
+        fi
+        KEPT+="$pid"$'\n'
+    done <<< "$PIDS"
+    PIDS=$(printf '%s' "$KEPT" | grep -v '^$' || true)
+fi
 
 if [[ -z "$PIDS" ]]; then
     if [[ $DRY -eq 0 ]]; then

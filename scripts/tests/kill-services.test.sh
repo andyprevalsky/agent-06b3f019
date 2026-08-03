@@ -156,4 +156,43 @@ if [ "$status" != "stopped" ]; then
     exit 1
 fi
 
+# ── Rule 27: a benchmark controller must survive, and must not drag its
+#    isolated stack's ancestors into the kill set ──────────────────────────────
+#
+# Regression: `run-predeploy-local` starts an ISOLATED `scripts/run.sh` as a
+# child. That child matches the run.sh root pattern, and the ancestor walk in
+# add_pid_with_tree_and_ancestors then climbed from it up to the controller and
+# SIGTERM'd an in-flight smoke run (observed in /deploy: stage exit 143).
+mkdir -p "$WORKTREE/scripts"
+cat > "$WORKTREE/scripts/run-predeploy-local" <<'CONTROLLER'
+#!/usr/bin/env bash
+# Stand-in benchmark controller: starts an isolated run.sh child, then waits.
+bash "$(dirname "$0")/run.sh" --benchmark &
+sleep 1000
+CONTROLLER
+chmod +x "$WORKTREE/scripts/run-predeploy-local"
+cat > "$WORKTREE/scripts/run.sh" <<'ISOLATED'
+#!/usr/bin/env bash
+sleep 1000
+ISOLATED
+chmod +x "$WORKTREE/scripts/run.sh"
+
+(cd "$WORKTREE" && bash scripts/run-predeploy-local > /dev/null 2>&1) &
+controller_pid=$!
+PIDS+=("$controller_pid")
+sleep 1
+
+isolated_runsh_pid="$(pgrep -P "$controller_pid" -f 'run\.sh' 2>/dev/null | head -1 || true)"
+[ -n "$isolated_runsh_pid" ] && PIDS+=("$isolated_runsh_pid")
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > /dev/null 2>&1) || true
+
+assert_alive "$controller_pid" "benchmark controller (run-predeploy-local)"
+if [ -n "$isolated_runsh_pid" ]; then
+    assert_alive "$isolated_runsh_pid" "benchmark controller's isolated run.sh child"
+fi
+
+kill "$controller_pid" 2>/dev/null || true
+[ -n "$isolated_runsh_pid" ] && kill "$isolated_runsh_pid" 2>/dev/null || true
+
 echo "All kill-services tests passed."

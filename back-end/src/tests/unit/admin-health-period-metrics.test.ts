@@ -150,6 +150,26 @@ const cacheAwareCost = calculateTaskCostPerTask(
     usage('spawned-child', { costCents: 1_000 }),
   ]
 );
+const providerCacheSemantics = calculateTaskCostPerTask(
+  [{ taskId: 'provider-cache-semantics' }],
+  [
+    usage('provider-cache-semantics', {
+      kind: 'llm',
+      model: 'gpt-5.4',
+      tokensIn: 1_000_000,
+      cacheReadInputTokens: 400_000,
+      cacheCreationInputTokens: 100_000,
+    }),
+    usage('provider-cache-semantics', {
+      kind: 'llm',
+      model: 'claude-sonnet-5',
+      tokensIn: 500_000,
+      cacheReadInputTokens: 400_000,
+      cacheCreationInputTokens: 100_000,
+    }),
+  ],
+  Date.parse('2026-08-03T00:00:00.000Z')
+);
 assert.strictEqual(
   buildStoredRootCostTelemetry([{ agentId: 'chat-only', toolName: 'chat_router', usageItems: [] }]),
   null,
@@ -243,6 +263,11 @@ assert.deepStrictEqual(
     sampleSize: 1,
   },
   'Cost scenarios must retain service spend, apply cache rates, price Fast Cache at zero, and exclude children'
+);
+assert.strictEqual(
+  providerCacheSemantics.apiRateDollars,
+  2.45,
+  'OpenAI prompt totals must subtract cache tokens while Anthropic input totals remain exclusive'
 );
 const sonnetFiveUsage = [
   usage('root-task', {
