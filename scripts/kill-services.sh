@@ -41,6 +41,16 @@ cmd_of() {
     ps -p "$1" -o command= 2>/dev/null | head -1
 }
 
+# Stable identity for the lifetime of one process. The start time rejects PID
+# reuse; the command rejects an exec-in-place transition between discovery and
+# signalling (especially a service wrapper becoming a benchmark controller).
+process_fingerprint() {
+    local identity
+    identity=$(ps -ww -p "$1" -o lstart= -o command= 2>/dev/null | head -1) || return 1
+    [[ -n "$identity" ]] || return 1
+    printf '%s' "$identity" | cksum | awk '{ print $1 ":" $2 }'
+}
+
 cwd_matches() {
     local cwd
     cwd=$(cwd_of "$1")
@@ -82,6 +92,23 @@ is_benchmark_controller() {
 
 is_protected_process() {
     is_self_or_parent "$1" || is_self_ancestor "$1" || is_benchmark_controller "$1"
+}
+
+safe_to_signal() {
+    local pid=$1
+    local expected_fingerprint=$2
+    local current_fingerprint
+
+    current_fingerprint=$(process_fingerprint "$pid") || return 1
+    if [[ "$current_fingerprint" != "$expected_fingerprint" ]]; then
+        echo "🛡️  Refusing to signal changed/reused PID $pid" >&2
+        return 1
+    fi
+    if is_benchmark_controller "$pid"; then
+        echo "🛡️  Refusing to signal benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        return 1
+    fi
+    return 0
 }
 
 service_like_process() {
@@ -197,8 +224,10 @@ add_pid_with_tree_and_ancestors() {
 }
 
 ROOTS_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE"' EXIT
 ALL_FILE=$(mktemp)
+TARGETS_FILE=$(mktemp)
+SURVIVORS_FILE=$(mktemp)
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$SURVIVORS_FILE"' EXIT
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory.
@@ -266,7 +295,23 @@ if [[ -n "$PIDS" ]]; then
     PIDS=$(printf '%s' "$KEPT" | grep -v '^$' || true)
 fi
 
-if [[ -z "$PIDS" ]]; then
+# Snapshot every target's start time + command after discovery. Every signal
+# revalidates this fingerprint and the controller boundary, closing the gap
+# between the earlier filters and the later TERM/KILL passes.
+: > "$TARGETS_FILE"
+if [[ -n "$PIDS" ]]; then
+    while read -r pid; do
+        [[ -z "$pid" ]] && continue
+        if is_benchmark_controller "$pid"; then
+            echo "🛡️  Refusing to target benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+            continue
+        fi
+        fingerprint=$(process_fingerprint "$pid") || continue
+        printf '%s\t%s\n' "$pid" "$fingerprint" >> "$TARGETS_FILE"
+    done <<< "$PIDS"
+fi
+
+if [[ ! -s "$TARGETS_FILE" ]]; then
     if [[ $DRY -eq 0 ]]; then
         mark_manifest_stopped
     fi
@@ -274,38 +319,56 @@ if [[ -z "$PIDS" ]]; then
     exit 0
 fi
 
-count=$(echo "$PIDS" | wc -l | tr -d ' ')
+count=$(wc -l < "$TARGETS_FILE" | tr -d ' ')
 echo "🧹 Targets in $WORKTREE_DIR ($count pid(s)):"
-for pid in $PIDS; do
+while IFS=$'\t' read -r pid _fingerprint; do
     cmd=$(ps -p "$pid" -o command= 2>/dev/null | head -1 | cut -c-100)
     if [[ -n "$cmd" ]]; then echo "   $pid  $cmd"; fi
-done
+done < "$TARGETS_FILE"
 
 if [[ $DRY -eq 1 ]]; then
     echo "(dry-run — no processes killed)"
     exit 0
 fi
 
+# Deterministic blackbox hook: lets the regression turn a discovered service
+# into a protected controller after snapshotting but before the signal pass.
+if [[ -n "${KILL_SERVICES_TEST_BEFORE_SIGNAL_MARKER:-}" ]]; then
+    : > "$KILL_SERVICES_TEST_BEFORE_SIGNAL_MARKER"
+fi
+if [[ -n "${KILL_SERVICES_TEST_BEFORE_SIGNAL_DELAY_SECONDS:-}" ]]; then
+    sleep "$KILL_SERVICES_TEST_BEFORE_SIGNAL_DELAY_SECONDS"
+fi
+
 # SIGTERM pass
-for pid in $PIDS; do kill -TERM "$pid" 2>/dev/null || true; done
+while IFS=$'\t' read -r pid fingerprint; do
+    safe_to_signal "$pid" "$fingerprint" && kill -TERM "$pid" 2>/dev/null || true
+done < "$TARGETS_FILE"
 sleep 2
 
 # SIGKILL any survivors
-SURVIVORS=""
-for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && SURVIVORS="$SURVIVORS $pid"
-done
-if [[ -n "$SURVIVORS" ]]; then
-    echo "   SIGTERM survivors → SIGKILL:$SURVIVORS"
-    for pid in $SURVIVORS; do kill -9 "$pid" 2>/dev/null || true; done
+: > "$SURVIVORS_FILE"
+while IFS=$'\t' read -r pid fingerprint; do
+    if kill -0 "$pid" 2>/dev/null && safe_to_signal "$pid" "$fingerprint"; then
+        printf '%s\t%s\n' "$pid" "$fingerprint" >> "$SURVIVORS_FILE"
+    fi
+done < "$TARGETS_FILE"
+if [[ -s "$SURVIVORS_FILE" ]]; then
+    survivor_pids=$(cut -f1 "$SURVIVORS_FILE" | tr '\n' ' ')
+    echo "   SIGTERM survivors → SIGKILL: $survivor_pids"
+    while IFS=$'\t' read -r pid fingerprint; do
+        safe_to_signal "$pid" "$fingerprint" && kill -9 "$pid" 2>/dev/null || true
+    done < "$SURVIVORS_FILE"
     sleep 1
 fi
 
 # Final verify
 STILL=""
-for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && STILL="$STILL $pid"
-done
+while IFS=$'\t' read -r pid fingerprint; do
+    if kill -0 "$pid" 2>/dev/null && safe_to_signal "$pid" "$fingerprint"; then
+        STILL="$STILL $pid"
+    fi
+done < "$TARGETS_FILE"
 if [[ -n "$STILL" ]]; then
     echo "⚠️  Survived TERM+KILL:$STILL"
     exit 1

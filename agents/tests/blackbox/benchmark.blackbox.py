@@ -1151,6 +1151,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
+    assert "await tx.$executeRaw" in fixture
+    assert "tx.$queryRaw" not in fixture
     assert "tx.credit.aggregate" in fixture
     assert "tx.toolUsage.aggregate" in fixture
     assert "if (deficitCents > 0)" in fixture

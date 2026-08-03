@@ -103,7 +103,7 @@ function assertDedicatedBenchmarkUser(userId: string): void {
 async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
   await prisma.$transaction(
     async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(
         hashtext(${`benchmark-payment-credit:${userId}`})::bigint
       )`;
       const now = new Date();

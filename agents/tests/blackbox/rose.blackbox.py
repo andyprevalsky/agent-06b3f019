@@ -2752,6 +2752,50 @@ def test_openrouter_body_without_tools_flattens_tool_history():
     assert "spawn_agent" in blob, "tool call name was lost"
 
 
+def test_openrouter_body_without_tools_preserves_structured_tool_result_blocks():
+    """Non-text content blocks remain meaningful after tool history is flattened."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_structured",
+                    "type": "function",
+                    "function": {"name": "inspect_page", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_structured",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": {"main_heading_text": "Structured Example Domain"},
+                },
+                {"type": "image", "source": {"url": "https://example.com/screenshot.png"}},
+            ],
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    blob = json.dumps(body["messages"])
+    assert "Structured Example Domain" in blob, "structured tool-result content was dropped"
+    assert "screenshot.png" in blob, "unsupported provider content block was dropped"
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert result["content"] != "[Result of inspect_page]", "tool result became an empty user message"
+
+
 def test_openrouter_body_with_tools_preserves_tool_history():
     """The flattening must apply ONLY when no tools are declared."""
     body = build_openrouter_body(
@@ -5474,6 +5518,10 @@ async def run_all_tests():
     r.record(
         "openrouter_body_no_tools_flattens_tool_history",
         test_openrouter_body_without_tools_flattens_tool_history,
+    )
+    r.record(
+        "openrouter_body_no_tools_preserves_structured_tool_results",
+        test_openrouter_body_without_tools_preserves_structured_tool_result_blocks,
     )
     r.record(
         "openrouter_body_with_tools_keeps_tool_history",

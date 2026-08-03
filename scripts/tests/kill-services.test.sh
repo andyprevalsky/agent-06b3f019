@@ -193,4 +193,40 @@ fi
 kill "$controller_pid" 2>/dev/null || true
 [ -n "$isolated_runsh_pid" ] && kill "$isolated_runsh_pid" 2>/dev/null || true
 
+# A service may exec in place after discovery and become a benchmark
+# controller before the signal pass. Its PID stays the same, so cleanup must
+# revalidate both identity and controller status at the signal boundary.
+transition_marker="$TMP_ROOT/before-signal.marker"
+cat > "$WORKTREE/agents/worker.py" <<'TRANSITION'
+#!/usr/bin/env bash
+while [ ! -f "$KILL_SERVICES_TRANSITION_MARKER" ]; do sleep 0.01; done
+exec bash "$(dirname "$0")/../scripts/run-predeploy-local"
+TRANSITION
+chmod +x "$WORKTREE/agents/worker.py"
+(
+    cd "$WORKTREE/agents"
+    export KILL_SERVICES_TRANSITION_MARKER="$transition_marker"
+    exec bash worker.py
+) > /dev/null 2>&1 &
+transition_pid=$!
+PIDS+=("$transition_pid")
+sleep 0.2
+
+(
+    cd "$WORKTREE"
+    KILL_SERVICES_TEST_BEFORE_SIGNAL_MARKER="$transition_marker" \
+        KILL_SERVICES_TEST_BEFORE_SIGNAL_DELAY_SECONDS=0.5 \
+        bash scripts/kill-services.sh > /dev/null 2>&1
+)
+
+assert_alive "$transition_pid" "service that exec'd into a benchmark controller"
+transition_cmd="$(ps -p "$transition_pid" -o command= 2>/dev/null || true)"
+if ! echo "$transition_cmd" | grep -q 'run-predeploy-local'; then
+    echo "FAIL: transition PID did not exec into the controller: $transition_cmd" >&2
+    exit 1
+fi
+transition_child="$(pgrep -P "$transition_pid" 2>/dev/null | head -1 || true)"
+kill "$transition_pid" 2>/dev/null || true
+[ -n "$transition_child" ] && kill "$transition_child" 2>/dev/null || true
+
 echo "All kill-services tests passed."

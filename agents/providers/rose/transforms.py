@@ -832,8 +832,16 @@ def _message_content_to_text(content: Any) -> str:
                 text = block.get("text")
                 if isinstance(text, str) and text:
                     parts.append(text)
+                else:
+                    # Structured tool results and provider-specific blocks are
+                    # still conversation history. Preserve their JSON instead
+                    # of silently turning the containing message into empty
+                    # text when no tools are declared on a waterfall retry.
+                    parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
             elif isinstance(block, str) and block:
                 parts.append(block)
+            elif not isinstance(block, str):
+                parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
         return "\n".join(parts)
     return json.dumps(content)
 
