@@ -3,11 +3,12 @@
  *
  * This component triggers an automatic download redirect on mount.
  *
- * [MOUNTED] --> redirect to Supabase Storage download URL
+ * [MOUNTED] --> track automatic start --> redirect to Supabase Storage URL
+ * [FALLBACK_CLICK] --> track fallback start --> browser follows download link
  */
 
 import { DOWNLOAD_URL } from '../config';
-import { useDownloadRedirect } from '../hooks';
+import { trackDownloadStarted, useDownloadRedirect } from '../hooks';
 
 export default function Download() {
   useDownloadRedirect();
@@ -18,7 +19,11 @@ export default function Download() {
         <h1 className="text-2xl font-semibold mb-2">Downloading Rose for Mac...</h1>
         <p className="text-neutral-400">
           If download doesn't start,{' '}
-          <a href={DOWNLOAD_URL} className="underline">
+          <a
+            href={DOWNLOAD_URL}
+            className="underline"
+            onClick={() => trackDownloadStarted('fallback_link')}
+          >
             click here
           </a>
           .

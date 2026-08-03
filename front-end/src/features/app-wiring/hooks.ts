@@ -55,7 +55,10 @@ export function initDevLogging(): void {
 /** Initializes Amplitude analytics with session replay. */
 export function initAmplitude(): void {
   analytics.addPlugin(sessionReplayPlugin({ sampleRate: SESSION_REPLAY_SAMPLE_RATE }));
-  analytics.init(AMPLITUDE_API_KEY, { autocapture: true });
+  analytics.init(AMPLITUDE_API_KEY, {
+    autocapture: true,
+    transport: { type: 'fetch', enableKeepalive: true },
+  });
 }
 
 /** Sets the `--vh` CSS custom property and installs resize/orientation listeners. */
