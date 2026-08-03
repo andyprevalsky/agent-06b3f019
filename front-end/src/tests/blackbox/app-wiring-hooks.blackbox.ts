@@ -19,6 +19,7 @@ vi.mock('@/lib/analytics', () => ({
   track: vi.fn(),
   setUserId: vi.fn(),
   reset: vi.fn(),
+  flush: vi.fn(),
 }));
 
 // Mock the session-replay plugin so no network / real plugin is built
@@ -151,7 +152,10 @@ describe('app-wiring/hooks', () => {
       initAmplitude();
       expect(sessionReplayPlugin).toHaveBeenCalledWith({ sampleRate: 1 });
       expect(analytics.addPlugin).toHaveBeenCalled();
-      expect(analytics.init).toHaveBeenCalledWith('test-amp-key', { autocapture: true });
+      expect(analytics.init).toHaveBeenCalledWith('test-amp-key', {
+        autocapture: true,
+        transport: { type: 'fetch', enableKeepalive: true },
+      });
     });
   });
 
