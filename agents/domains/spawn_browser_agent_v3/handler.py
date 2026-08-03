@@ -5529,6 +5529,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+        failed_credential_prep_realms: Dict[str, str] = {}
 
         async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
             """Atomically activate every saved credential type for a new realm."""
@@ -5553,16 +5554,29 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             target_realm = auth_realm_from_url(target_url)
             if not target_realm or auth_realm_matches_url(auth_realm, target_url):
                 return None
+            if target_realm in failed_credential_prep_realms:
+                logger.info(
+                    "Skipping a previously failed optional realm credential preparation",
+                    auth_realm=target_realm,
+                    error=failed_credential_prep_realms[target_realm],
+                )
+                return None
             if not session_id:
                 raise RuntimeError(f"Cannot prepare credentials for {target_realm} without a browser session")
 
             activity.heartbeat(f"Preparing saved credentials for {target_realm}")
-            payload = await prepare_browser_auth(
-                config,
-                user_id=user_id,
-                session_id=session_id,
-                target_url=target_url,
-            )
+            try:
+                payload = await prepare_browser_auth(
+                    config,
+                    user_id=user_id,
+                    session_id=session_id,
+                    target_url=target_url,
+                )
+            except Exception as prep_error:
+                failed_credential_prep_realms[target_realm] = (
+                    f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
+                )
+                raise
             realm_state = await build_realm_credential_state(
                 payload,
                 decryption_key=config.payment.decryption_key,
@@ -5825,7 +5839,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # injected cookies and origin state participate in the first page
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
-            if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
+            if (
+                observed_auth_realm
+                and observed_auth_realm not in failed_credential_prep_realms
+                and not auth_realm_matches_url(auth_realm, current_url)
+            ):
                 try:
                     await _prepare_credentials_for_url(current_url)
                     from browser_use.browser.events import NavigateToUrlEvent
@@ -5843,13 +5861,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     continue
                 except Exception as prep_error:
-                    recovered = await _recover_browser_step(
-                        f"credential_prep_error:{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
-                        reload_page=True,
+                    logger.warning(
+                        "Redirected realm credential preparation failed once; continuing without saved credentials",
+                        auth_realm=observed_auth_realm,
+                        current_url=current_url,
+                        error=f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
                     )
-                    if recovered:
-                        continue
-                    raise
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)

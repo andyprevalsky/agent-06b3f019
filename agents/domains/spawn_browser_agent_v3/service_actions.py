@@ -748,16 +748,23 @@ async def execute_action(  # noqa: C901
 
 
 def _element_write_lock_signal(element: Any) -> str:
-    """Collect local DOM-node text and action-bearing attributes."""
+    """Collect a DOM target's action signal, including its nearest bounded ancestor label."""
     if not element:
         return ""
 
-    parts = []
-    try:
-        if hasattr(element, "get_all_children_text"):
-            parts.append(element.get_all_children_text() or "")
-    except Exception:
-        pass
+    parts: list[str] = []
+
+    def node_text(node: Any) -> str:
+        try:
+            if hasattr(node, "get_all_children_text"):
+                return str(node.get_all_children_text() or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    local_text = node_text(element)
+    if local_text:
+        parts.append(local_text)
 
     attrs = getattr(element, "attributes", None) or {}
     if not isinstance(attrs, dict):
@@ -768,7 +775,30 @@ def _element_write_lock_signal(element: Any) -> str:
         if value:
             parts.append(str(value))
 
-    return "\n".join(part for part in parts if part)
+    # Browser controls implemented inside shadow DOM commonly expose a textless
+    # input while rendering the accessible action label as a sibling. The DOM
+    # tree preserves that relationship through parent_node, so take only the
+    # first short ancestor label instead of absorbing a whole checkout page.
+    has_local_label = bool(local_text) or any(
+        attrs.get(attr_name) for attr_name in ("value", "aria-label", "title", "alt")
+    )
+    if not has_local_label:
+        current = getattr(element, "parent_node", None)
+        depth = 1
+        while current is not None and depth < 4:
+            node_name = str(getattr(current, "node_name", "") or "").lower()
+            if node_name in {"html", "body", "main"}:
+                break
+
+            ancestor_text = node_text(current)
+            if ancestor_text and len(ancestor_text) <= 500:
+                parts.append(ancestor_text)
+                break
+
+            current = getattr(current, "parent_node", None)
+            depth += 1
+
+    return "\n".join(part for part in parts if part)[:20000]
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -1186,12 +1216,15 @@ async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[s
                         };
 
                         const addElement = (el, includeText) => {
-                            if (!el || seen.has(el)) return;
+                            if (!el || seen.has(el)) return false;
                             seen.add(el);
+                            let addedText = false;
 
                             if (includeText && !isPageContainer(el)) {
+                                const before = parts.length;
                                 addText(el.innerText);
                                 if (el.textContent !== el.innerText) addText(el.textContent);
+                                addedText = parts.length > before;
                             }
 
                             for (const attrName of attrNames) {
@@ -1200,17 +1233,22 @@ async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[s
 
                             if (el.labels) {
                                 for (const label of el.labels) {
+                                    const before = parts.length;
                                     add(label.innerText);
                                     add(label.textContent);
+                                    addedText = addedText || parts.length > before;
                                 }
                             }
+                            return addedText;
                         };
 
                         const walkAncestors = (start, includeStartText) => {
                             let current = start;
                             let depth = 0;
+                            let seekNearestText = includeStartText;
                             while (current && depth < maxDepth) {
-                                addElement(current, depth === 0 && includeStartText);
+                                const addedText = addElement(current, seekNearestText);
+                                if (addedText) seekNearestText = false;
                                 if (isPageContainer(current)) break;
                                 if (current.assignedSlot) {
                                     current = current.assignedSlot;

@@ -86,7 +86,7 @@ from benchmarks.logs import (
     load_env_var,
 )
 from benchmarks.span_history import make_observation, record_span_observations
-from benchmarks.span_history import summary as span_history_summary
+from benchmarks.span_history import summaries as span_history_summaries
 
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
@@ -167,12 +167,12 @@ def isolated_stack_log_dirs() -> List[str]:
     otherwise the most recent runs are scanned. Events are filtered by agent id
     downstream, so scanning extra runs costs parse time, never correctness.
     """
-    dirs: List[str] = []
-    explicit = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    explicit = _explicit_benchmark_context_dir()
     if explicit:
         pinned = os.path.join(explicit, "logs")
-        if os.path.isdir(pinned):
-            dirs.append(pinned)
+        return [pinned] if os.path.isdir(pinned) else []
+
+    dirs: List[str] = []
     if os.path.isdir(ISOLATED_STACK_ROOT):
         candidates = []
         for name in os.listdir(ISOLATED_STACK_ROOT):
@@ -185,20 +185,44 @@ def isolated_stack_log_dirs() -> List[str]:
 
 
 def _log_paths(shared: str, isolated_glob: str) -> List[str]:
-    paths = [shared] if os.path.exists(shared) else []
+    explicit = _explicit_benchmark_context_dir()
+    paths = [] if explicit else ([shared] if os.path.exists(shared) else [])
     for log_dir in isolated_stack_log_dirs():
         paths.extend(sorted(glob.glob(os.path.join(log_dir, isolated_glob))))
     return paths
 
 
-def _read_worker_raw() -> List[_RawEvent]:
+def _explicit_benchmark_context_dir() -> str:
+    raw = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return os.path.abspath(os.path.join(REPO_ROOT, raw))
+
+
+def _line_mentions_agent(line: str, agent_ids: Optional[Set[str]]) -> bool:
+    if agent_ids is None:
+        return True
+    if not agent_ids:
+        return False
+    if len(agent_ids) == 1:
+        return next(iter(agent_ids)) in line
+    return not agent_ids.isdisjoint(UUID_RE.findall(line))
+
+
+def _read_worker_raw(agent_ids: Optional[Set[str]] = None) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     # An isolated stack runs several worker processes, each with its own file.
     for path in _log_paths(WORKER_LOG, "worker*.log"):
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
-                if not line or not line.startswith("{"):
+                if (
+                    not line
+                    or not line.startswith("{")
+                    or not _line_mentions_agent(line, agent_ids)
+                ):
                     continue
                 try:
                     d = json.loads(line)
@@ -211,21 +235,42 @@ def _read_worker_raw() -> List[_RawEvent]:
     return out
 
 
-def _read_backend_raw() -> List[_RawEvent]:
+def _read_backend_raw(
+    agent_ids: Optional[Set[str]] = None,
+    *,
+    required_substring: str = "",
+) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     # [2026-04-17T21:07:35.352Z] INFO [HTTP] message key=value key=value
     head = re.compile(
         r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
     )
     for path in _log_paths(BACKEND_LOG, "backend*.log"):
-        out.extend(_parse_backend_lines(path, head))
+        out.extend(
+            _parse_backend_lines(
+                path,
+                head,
+                agent_ids=agent_ids,
+                required_substring=required_substring,
+            )
+        )
     return out
 
 
-def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
+def _parse_backend_lines(
+    path: str,
+    head: "re.Pattern[str]",
+    *,
+    agent_ids: Optional[Set[str]] = None,
+    required_substring: str = "",
+) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     with open(path, errors="replace") as f:
         for raw in f:
+            if required_substring and required_substring not in raw:
+                continue
+            if not _line_mentions_agent(raw, agent_ids):
+                continue
             line = ANSI_RE.sub("", raw).rstrip("\n")
             m = head.match(line)
             if not m:
@@ -253,13 +298,15 @@ def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
     return out
 
 
-def _read_research_raw() -> List[_RawEvent]:
+def _read_research_raw(agent_ids: Optional[Set[str]] = None) -> List[_RawEvent]:
     if not os.path.exists(RESEARCH_LOG):
         return []
     out: List[_RawEvent] = []
     tail = re.compile(r"(\{.*\})$")
     with open(RESEARCH_LOG, errors="replace") as f:
         for raw in f:
+            if not _line_mentions_agent(raw, agent_ids):
+                continue
             line = ANSI_RE.sub("", raw).strip()
             m = tail.search(line)
             if not m:
@@ -330,6 +377,19 @@ def _discover_sub_agent_ids(backend_raw: List[_RawEvent], root_id: str) -> Set[s
                     new_frontier.add(cid)
         frontier = new_frontier
     return discovered
+
+
+def _read_backend_tree_raw(root_id: str) -> Tuple[List[_RawEvent], Set[str]]:
+    """Read only backend lines that can belong to one transitive agent tree.
+
+    Child ids first appear on a line containing parent_agent_id. Build that
+    lightweight relationship index in one scan, then parse the complete known
+    tree in one more scan, independent of tree depth.
+    """
+    spawn_events = _read_backend_raw(required_substring="parent_agent_id")
+    sub_ids = _discover_sub_agent_ids(spawn_events, root_id)
+    events = _read_backend_raw({root_id, *sub_ids})
+    return events, sub_ids
 
 
 # ---------------------------------------------------------------------------
@@ -1121,15 +1181,20 @@ def _span_baseline_map(
     environment: str,
     min_samples: int,
 ) -> Dict[str, Dict[str, Any]]:
-    baselines: Dict[str, Dict[str, Any]] = {}
-    for observation in observations:
-        span_key = str(observation.get("span_key") or "")
-        if not span_key or span_key in baselines:
-            continue
-        stats = span_history_summary(span_key, benchmark=benchmark, environment=environment)
-        if stats and stats["count"] >= min_samples:
-            baselines[span_key] = stats
-    return baselines
+    span_keys = {
+        str(observation.get("span_key") or "")
+        for observation in observations
+        if observation.get("span_key")
+    }
+    return {
+        span_key: stats
+        for span_key, stats in span_history_summaries(
+            span_keys,
+            benchmark=benchmark,
+            environment=environment,
+        ).items()
+        if stats["count"] >= min_samples
+    }
 
 
 # Spans must be at least this slow (absolute) AND past p95 to be flagged
@@ -1976,12 +2041,11 @@ async def _build_trace_prod(
 
 
 def _build_trace_local(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
-    worker_raw_all = _read_worker_raw()
-    backend_raw_all = _read_backend_raw()
-    research_raw_all = _read_research_raw()
-
-    sub_ids = _discover_sub_agent_ids(backend_raw_all, agent_id)
+    backend_raw_all, sub_ids = _read_backend_tree_raw(agent_id)
     all_ids = {agent_id, *sub_ids}
+
+    worker_raw_all = _read_worker_raw(all_ids)
+    research_raw_all = _read_research_raw(all_ids)
 
     worker_raw = _filter_by_agents(worker_raw_all, all_ids)
     backend_raw = _filter_by_agents(backend_raw_all, all_ids)

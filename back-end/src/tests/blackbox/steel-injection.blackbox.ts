@@ -1,9 +1,11 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from 'node:crypto';
+import { createServer, type Socket } from 'node:net';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import {
+  injectUserData,
   resolveBrowserAuthCredentialSource,
   summarizeSteelCookiesForRealm,
 } from '../../providers/steel/injection';
@@ -266,6 +268,85 @@ test('Steel cookie summary is realm scoped and expiry aware without exposing val
   assert(summary.hasRealmCookies, 'expected live amazon cookies');
   assert(summary.cookieCount === 2, 'expected only live same-realm cookies');
   assert(!('value' in summary), 'expected no cookie values in summary');
+});
+
+test('JIT credential injection bounds a CDP endpoint that accepts transport but never upgrades', async () => {
+  const userId = await createUser();
+  const context = await prisma.browserContext.create({ data: { userId } });
+  const sessionId = `steel-cdp-stall-${randomUUID()}`;
+  const sockets = new Set<Socket>();
+  let markConnectionAccepted: (() => void) | undefined;
+  const connectionAccepted = new Promise<void>((resolve) => {
+    markConnectionAccepted = resolve;
+  });
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    markConnectionAccepted?.();
+    // Reproduce the provider symptom: TCP connects, but the CDP websocket
+    // upgrade never returns. The production call stayed here until its outer
+    // HTTP client abandoned the request after 180 seconds.
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  assert(address !== null && typeof address === 'object', 'stalled CDP fixture did not bind');
+  await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId,
+      wsUrl: `ws://127.0.0.1:${address.port}/devtools/browser/stalled`,
+      provider: 'kernel',
+      status: 'ACTIVE',
+      startUrl: 'https://www.google.com/search?q=movie+genre',
+    },
+  });
+
+  const previousTimeout = process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+  process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = '75';
+  let injectionSettled: Promise<{ rejected: boolean; message: string }> | undefined;
+  try {
+    injectionSettled = injectUserData(sessionId, userId, 'https://www.google.com/search?q=movie+genre').then(
+      () => ({ rejected: false, message: 'credential injection unexpectedly resolved' }),
+      (error: unknown) => ({
+        rejected: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
+    await Promise.race([
+      connectionAccepted,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('CDP fixture did not receive a connection within 5s')), 5_000)
+      ),
+    ]);
+    const outcome = await Promise.race([
+      injectionSettled,
+      new Promise<{ rejected: false; message: string }>((resolve) =>
+        setTimeout(
+          () => resolve({ rejected: false, message: 'CDP acquisition exceeded the 500ms test budget' }),
+          500
+        )
+      ),
+    ]);
+
+    assert(outcome.rejected, outcome.message);
+    assert(/timeout|timed out/i.test(outcome.message), `expected an explicit CDP timeout, got: ${outcome.message}`);
+  } finally {
+    if (previousTimeout === undefined) {
+      delete process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+    } else {
+      process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = previousTimeout;
+    }
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await injectionSettled?.catch(() => undefined);
+    await prisma.browserSession.deleteMany({ where: { sessionId } });
+    await prisma.browserContext.deleteMany({ where: { id: context.id } });
+    await cleanup(userId);
+  }
 });
 
 async function main() {

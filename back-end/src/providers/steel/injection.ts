@@ -15,6 +15,15 @@ import {
   injectScrollbarState,
 } from './injectionState';
 
+const DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = 15_000;
+
+function credentialCdpConnectTimeoutMs(): number {
+  const configured = Number(process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+}
+
 interface CookieBundleCandidate {
   id: string;
   browserSource: string;
@@ -440,8 +449,11 @@ export async function injectUserData(
       log.info(`  [3/9] Reusing validated CDP connection (${Date.now() - startTime}ms)`);
     } else {
       const { chromium } = await import('playwright');
-      log.info(`  [3/9] Connecting to CDP...`);
-      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl));
+      const connectTimeoutMs = credentialCdpConnectTimeoutMs();
+      log.info(`  [3/9] Connecting to CDP...`, { connectTimeoutMs });
+      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl), {
+        timeout: connectTimeoutMs,
+      });
       log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
     }
     const context = browser.contexts()[0];

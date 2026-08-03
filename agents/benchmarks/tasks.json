@@ -1093,6 +1093,9 @@
       "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie).",
       "live_cookie_domains": [
         "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
       ]
     },
     "evaluators": [
@@ -1220,6 +1223,9 @@
       ],
       "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase.",
       "live_cookie_domains": [
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
         "amazon.com"
       ]
     },
@@ -1475,13 +1481,11 @@
         "order.toasttab.com",
         "payment_approval"
       ],
-      "secrets": [
-        "live_browser_auth"
-      ],
+      "secrets": [],
       "live_targets": [
         "https://order.toasttab.com/online/nopafish"
       ],
-      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe.",
+      "context_notes": "Live Toast menu and guest-checkout flow. The live fixture scopes browser-state refresh to Toast before the payment-card approval probe, but no saved login is required.",
       "live_cookie_domains": [
         "toasttab.com"
       ]
@@ -1623,7 +1627,6 @@
     ],
     "tags": [
       "browser",
-      "auth",
       "ecommerce",
       "grocery"
     ],
@@ -1656,7 +1659,7 @@
       "live_targets": [
         "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
       ],
-      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock.",
+      "context_notes": "Live Instacart catalog, inventory, pricing, delivery details, and guest-checkout write-lock. The scoped browser-state refresh is retained for performance, but no saved login is required.",
       "live_cookie_domains": [
         "instacart.com"
       ]
@@ -1730,7 +1733,7 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary.",
+      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, delivery timing, and one auto-approved checkout boundary. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
       ]
@@ -2334,6 +2337,9 @@
       "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
       "live_cookie_domains": [
         "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
       ]
     },
     "evaluators": [
@@ -2442,6 +2448,9 @@
       ],
       "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay.",
       "live_cookie_domains": [
+        "uber.com"
+      ],
+      "required_injectable_cookie_domains": [
         "uber.com"
       ]
     },

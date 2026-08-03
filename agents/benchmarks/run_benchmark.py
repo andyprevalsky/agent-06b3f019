@@ -4960,6 +4960,10 @@ class LiveFixtureContext:
     # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
     # full cookie sync with a raised budget.
     cookie_domains: tuple[str, ...] = ()
+    # Only these scoped domains require an injectable CookieBundle at dispatch.
+    # Guest-checkout tasks still scope their sync via cookie_domains, but an
+    # absent CookieBundle must not prevent them from reaching the public flow.
+    required_injectable_cookie_domains: tuple[str, ...] = ()
     tolerate_claude_code_unavailable: bool = False
 
 
@@ -5190,11 +5194,11 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
-    # A green sync only proves the command exited 0. Assert the post-sync local DB
-    # actually holds a credential the injection path can select for every declared
-    # domain, so a stale/orphaned prod bundle fails here in seconds instead of
-    # burning a full agent run and being misreported as a capability failure.
-    _assert_live_cookie_domains_usable(ctx.user_id, ctx.cookie_domains)
+    # A green sync only proves the command exited 0. For domains whose task
+    # contract explicitly requires authentication, assert that the post-sync DB
+    # holds a credential the injection path can select. live_cookie_domains alone
+    # is a performance scope and may describe a valid guest-checkout task.
+    _assert_live_cookie_domains_usable(ctx.user_id, ctx.required_injectable_cookie_domains)
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
@@ -5500,6 +5504,8 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
     raw_domains = (task.environment or {}).get("live_cookie_domains") or []
     cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    raw_required_domains = (task.environment or {}).get("required_injectable_cookie_domains") or []
+    required_cookie_domains = tuple(str(d).strip() for d in raw_required_domains if str(d).strip())
     # Same reasoning as the blanket pre-flight above: a missing Claude compute
     # token degrades cost, it does not remove a capability the task needs.
     tolerate_missing_claude = True
@@ -5508,6 +5514,7 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         user_id=USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
+        required_injectable_cookie_domains=required_cookie_domains,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
     manifests: list[dict] = []

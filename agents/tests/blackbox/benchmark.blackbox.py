@@ -2562,6 +2562,46 @@ def test_instacart_catalog_uses_complete_weekly_grocery_basket():
         assert requirement in criteria
 
 
+def test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement():
+    """Guest checkout domains stay scoped without requiring an injectable CookieBundle."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    guest_checkout_tasks = (
+        "browser-toast-nopa-write-lock",
+        "browser-opentable-reservation",
+        "browser-alchemy-springs-sauna",
+        "browser-hotel-booking",
+        "browser-event-ticket",
+        "browser-imax-group-tickets",
+        "browser-instacart-grocery-order",
+    )
+    for task_name in guest_checkout_tasks:
+        env = get_task_by_name(task_name).environment
+        assert env["live_cookie_domains"]
+        assert env.get("required_injectable_cookie_domains", []) == []
+
+    authenticated_tasks = {
+        "browser-agent": "amazon.com",
+        "browser-agent-amazon-cookie-payment": "amazon.com",
+        "browser-amazon-return": "amazon.com",
+        "minted-agent-accounts-uber": "uber.com",
+    }
+    for task_name, domain in authenticated_tasks.items():
+        env = get_task_by_name(task_name).environment
+        assert env["required_injectable_cookie_domains"] == [domain]
+
+    # The passkey task deliberately starts signed out and must not require a
+    # CookieBundle merely because its passkey sync is scoped to amazon.com.
+    passkey_env = get_task_by_name("browser-agent-amazon-passkey").environment
+    assert passkey_env["live_cookie_domains"] == ["amazon.com"]
+    assert passkey_env.get("required_injectable_cookie_domains", []) == []
+
+    # The task contract permits the public DoorDash checkout path; a scoped
+    # browser-state refresh must not silently turn that into a login gate.
+    doordash_env = get_task_by_name("browser-doordash-usb-c-cable").environment
+    assert doordash_env.get("required_injectable_cookie_domains", []) == []
+
+
 def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
     """The reusable trajectory check fails closed on any grounded tool failure."""
     from benchmarks.run_benchmark import _run_declared_static_check
@@ -3703,8 +3743,8 @@ def test_live_fixture_tolerates_missing_claude_compute_token():
     assert "bills the paid waterfall" in preflight
 
 
-def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle():
-    """A green sync that produced nothing injectable is an INFRA failure, not a task result.
+def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle():
+    """A green sync that misses required auth is infra; guest-checkout scopes remain runnable.
 
     Regression for minted-agent-accounts-uber: prod held 47 uber.com cookies but
     ZERO CookieBundle rows (stale auth in an orphaned chrome/(none) profile).
@@ -3753,7 +3793,7 @@ def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
         sql_calls.append(sql)
         return json.dumps(summaries.pop(0))
 
-    def run(domains, rows):
+    def run(domains, rows, *, required_domains):
         summaries[:] = list(rows)
         sql_calls.clear()
         return bench._apply_live_fixture(
@@ -3762,6 +3802,7 @@ def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
                 user_id="1f85ff25-6e29-4c1b-8739-f917bd101a30",
                 auth_realm="uber.com",
                 cookie_domains=domains,
+                required_injectable_cookie_domains=required_domains,
             )
         )
 
@@ -3775,7 +3816,7 @@ def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
         # RED: declared domain with no injectable CookieBundle must abort the fixture.
         raised_message = None
         try:
-            run(("uber.com",), [unprovisioned])
+            run(("uber.com",), [unprovisioned], required_domains=("uber.com",))
         except RuntimeError as exc:
             raised_message = str(exc)
         assert raised_message is not None, (
@@ -3803,11 +3844,17 @@ def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
         assert "c.value" not in preflight_sql
 
         # GREEN: a properly provisioned domain must not fire.
-        manifest = run(("opentable.com",), [provisioned])
+        manifest = run(("opentable.com",), [provisioned], required_domains=("opentable.com",))
         assert manifest["browser_auth"] is True
 
-        # NO-OP: a task with no live_cookie_domains must not query the DB at all.
-        manifest = run((), [])
+        # Guest checkout still scopes the credential refresh for performance, but
+        # missing auth must not abort a task whose contract does not require login.
+        manifest = run(("booking.com",), [], required_domains=())
+        assert manifest["browser_auth"] is True
+        assert sql_calls == []
+
+        # NO-OP: a task with no scoped or required domains must not query the DB.
+        manifest = run((), [], required_domains=())
         assert manifest["browser_auth"] is True
         assert sql_calls == []
     finally:
@@ -3818,6 +3865,68 @@ def test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
         else:
             os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+
+async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requirements():
+    """An unchanged guest task syncs its domain without inheriting a login gate.
+
+    Regression for ecommerce-minus-antibot epoch 8. The original Booking task
+    declared ``live_cookie_domains=["booking.com"]`` solely to bound credential
+    sync, but commit e33af57b4 reinterpreted that existing scope as a mandatory
+    CookieBundle and failed before agent dispatch. The task-level path must keep
+    syncing Booking state without querying the injectable-bundle summary, while
+    the unchanged Uber task must still fail closed when its explicit bundle
+    prerequisite is absent.
+    """
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    synced_domains: list[tuple[str, ...]] = []
+    queried_domains: list[str] = []
+
+    def fake_sync_browser_credentials(domains: tuple[str, ...] = ()) -> bool:
+        synced_domains.append(domains)
+        return True
+
+    def fake_credential_summary(_user_id: str, domain: str) -> dict:
+        queried_domains.append(domain)
+        return {
+            "domain": domain,
+            "bundles_total": 0,
+            "bundles_enabled": 0,
+            "bundles_injectable": 0,
+            "steel_sessions_enabled": 0,
+            "cookies_total": 0,
+            "cookies_unexpired": 0,
+            "newest_cookie_synced_at": None,
+        }
+
+    with (
+        patch.object(bench, "_is_simulate_mode", return_value=False),
+        patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
+        patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
+    ):
+        booking = get_task_by_name("browser-hotel-booking")
+        manifests = await bench._apply_live_fixtures(booking, "http://localhost:54121")
+        assert manifests == [{"fixture": "live", "browser_auth": True, "source": "prod_sync"}]
+        assert synced_domains == [("booking.com",)]
+        assert queried_domains == []
+
+        uber = get_task_by_name("minted-agent-accounts-uber")
+        raised_message = None
+        try:
+            await bench._apply_live_fixtures(uber, "http://localhost:54121")
+        except RuntimeError as exc:
+            raised_message = str(exc)
+
+        assert raised_message is not None
+        assert raised_message.startswith(
+            "Live fixture preflight: no injectable browser credential for uber.com "
+            "after the scoped browser-credential sync."
+        )
+        assert synced_domains == [("booking.com",), ("uber.com",)]
+        assert queried_domains == ["uber.com"]
 
 
 def test_compute_token_sync_passes_explicit_prod_source_without_shared_workspace():
@@ -10441,6 +10550,20 @@ def test_live_fixture_validation_rejects_unknown_and_synthetic_declarations():
     ok = {**base_env, "live_fixtures": ["live"]}
     assert _validate_environment(ok, "t-ok")["live_fixtures"] == ["live"]
 
+    # Required auth domains must be a subset of the domains synchronized for the task.
+    bad_auth_scope = {
+        **base_env,
+        "live_fixtures": ["live"],
+        "live_cookie_domains": ["booking.com"],
+        "required_injectable_cookie_domains": ["uber.com"],
+    }
+    raised = False
+    try:
+        _validate_environment(bad_auth_scope, "t-bad-auth-scope")
+    except ValueError as e:
+        raised = "required_injectable_cookie_domains" in str(e) and "subset" in str(e)
+    assert raised, "required auth domains outside the synchronized scope must fail validation"
+
 
 def test_tag_slices_still_resolve():
     """Semantic tag slices (e.g. browser auth suite) survive catalog changes."""
@@ -10595,6 +10718,193 @@ def test_agent_latency_reads_isolated_benchmark_stack_logs():
     assert worker_events[0].data["agent_id"] == "053a9066-28d1-4f34-a558-cc7cd402520d"
     assert len(backend_events) == 1, "isolated-stack backend.log must be read"
     assert backend_events[0].source == "backend"
+
+
+def test_agent_latency_explicit_context_excludes_neighbor_stacks():
+    """A pinned benchmark context must not pull logs from neighboring runs."""
+    import importlib
+    import tempfile
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pinned_context = os.path.join(tmp, "pinned")
+        pinned_logs = os.path.join(pinned_context, "logs")
+        neighbor_logs = os.path.join(tmp, "newer-neighbor", "logs")
+        os.makedirs(pinned_logs)
+        os.makedirs(neighbor_logs)
+        os.utime(neighbor_logs, None)
+
+        original_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+        original_root = latency.ISOLATED_STACK_ROOT
+        original_max = latency.MAX_ISOLATED_STACKS
+        original_cwd = os.getcwd()
+        try:
+            # local.py exports a REPO_ROOT-relative value, then launches
+            # diagnostics from AGENTS_DIR. The pin must not depend on cwd.
+            os.environ["BENCHMARK_CONTEXT_DIR"] = os.path.relpath(
+                pinned_context,
+                latency.REPO_ROOT,
+            )
+            latency.ISOLATED_STACK_ROOT = tmp
+            latency.MAX_ISOLATED_STACKS = 3
+            os.chdir(latency.AGENTS_SRC)
+
+            assert latency.isolated_stack_log_dirs() == [pinned_logs]
+        finally:
+            os.chdir(original_cwd)
+            if original_context is None:
+                os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+            else:
+                os.environ["BENCHMARK_CONTEXT_DIR"] = original_context
+            latency.ISOLATED_STACK_ROOT = original_root
+            latency.MAX_ISOLATED_STACKS = original_max
+
+
+def test_agent_latency_filters_worker_lines_before_json_decode():
+    """A single-agent diagnostic must not decode unrelated worker events.
+
+    The 2026-08-03 ecommerce run produced 73 MB / 173,971 lines of isolated
+    logs. All six failed-task latency diagnostics exhausted their 180-second
+    budget because every JSON event was decoded before filtering by agent id.
+    """
+    import importlib
+    import tempfile
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+    target_id = "9c234058-7f6c-4274-b6d5-5110beaea31b"
+    unrelated_id = "00000000-0000-4000-8000-000000000001"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = os.path.join(tmp, "pinned")
+        log_dir = os.path.join(context_dir, "logs")
+        os.makedirs(log_dir)
+        worker_path = os.path.join(log_dir, "worker.log")
+        with open(worker_path, "w") as handle:
+            for index in range(128):
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": f"2026-08-03T22:00:{index % 60:02d}.000000Z",
+                            "event": "unrelated.event",
+                            "agent_id": unrelated_id,
+                        }
+                    )
+                    + "\n"
+                )
+            for event, timestamp in (
+                ("span.start", "2026-08-03T22:18:40.000000Z"),
+                ("span.end", "2026-08-03T22:18:41.000000Z"),
+            ):
+                handle.write(
+                    json.dumps(
+                        {
+                            "timestamp": timestamp,
+                            "event": event,
+                            "agent_id": target_id,
+                            "span_id": "target-span",
+                            "span_name": "run_agent",
+                        }
+                    )
+                    + "\n"
+                )
+
+        original_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+        original_root = latency.ISOLATED_STACK_ROOT
+        original_worker = latency.WORKER_LOG
+        original_backend = latency.BACKEND_LOG
+        original_research = latency.RESEARCH_LOG
+        original_loads = latency.json.loads
+        decode_count = 0
+
+        def counted_loads(value):
+            nonlocal decode_count
+            decode_count += 1
+            return original_loads(value)
+
+        try:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            latency.ISOLATED_STACK_ROOT = tmp
+            latency.WORKER_LOG = os.path.join(tmp, "absent-worker.log")
+            latency.BACKEND_LOG = os.path.join(tmp, "absent-backend.log")
+            latency.RESEARCH_LOG = os.path.join(tmp, "absent-research.log")
+            latency.json.loads = counted_loads
+
+            _roots, _t0, _t1, stats = latency._build_trace_local(target_id)
+        finally:
+            latency.json.loads = original_loads
+            if original_context is None:
+                os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+            else:
+                os.environ["BENCHMARK_CONTEXT_DIR"] = original_context
+            latency.ISOLATED_STACK_ROOT = original_root
+            latency.WORKER_LOG = original_worker
+            latency.BACKEND_LOG = original_backend
+            latency.RESEARCH_LOG = original_research
+
+    assert stats["worker_events"] == 2
+    assert decode_count == 2, "unrelated worker lines were JSON-decoded before agent filtering"
+
+
+def test_agent_latency_backend_tree_discovery_uses_fixed_log_scans():
+    """Transitive discovery must not rescan every backend log per tree depth."""
+    import importlib
+    import tempfile
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+    root_id = "10000000-0000-4000-8000-000000000001"
+    child_id = "20000000-0000-4000-8000-000000000002"
+    grandchild_id = "30000000-0000-4000-8000-000000000003"
+    unrelated_id = "40000000-0000-4000-8000-000000000004"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        context_dir = os.path.join(tmp, "pinned")
+        log_dir = os.path.join(context_dir, "logs")
+        os.makedirs(log_dir)
+        backend_path = os.path.join(log_dir, "backend.log")
+        with open(backend_path, "w") as handle:
+            handle.write(
+                f'[2026-08-03T22:00:00.000Z] INFO [HTTP] POST /api/agents -> 201 '
+                f'body={{"parent_agent_id":"{root_id}","id":"{child_id}"}} '
+                f"agent_id={root_id}\n"
+            )
+            handle.write(
+                f'[2026-08-03T22:00:01.000Z] INFO [HTTP] POST /api/agents -> 201 '
+                f'body={{"parent_agent_id":"{child_id}","id":"{grandchild_id}"}} '
+                f"agent_id={child_id}\n"
+            )
+            handle.write(
+                f"[2026-08-03T22:00:02.000Z] INFO [Tracing] span.start "
+                f"span_name=run_agent span_id=grandchild agent_id={grandchild_id}\n"
+            )
+            handle.write(
+                f"[2026-08-03T22:00:03.000Z] INFO [Tracing] span.start "
+                f"span_name=run_agent span_id=unrelated agent_id={unrelated_id}\n"
+            )
+
+        original_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+        original_read = latency._read_backend_raw
+        read_count = 0
+
+        def counted_read(*args, **kwargs):
+            nonlocal read_count
+            read_count += 1
+            return original_read(*args, **kwargs)
+
+        try:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            latency._read_backend_raw = counted_read
+            events, sub_ids = latency._read_backend_tree_raw(root_id)
+        finally:
+            latency._read_backend_raw = original_read
+            if original_context is None:
+                os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+            else:
+                os.environ["BENCHMARK_CONTEXT_DIR"] = original_context
+
+    assert sub_ids == {child_id, grandchild_id}
+    assert all(unrelated_id not in str(event.data) for event in events)
+    assert read_count == 2, "backend logs were rescanned once per transitive tree depth"
 
 
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
@@ -11604,6 +11914,10 @@ async def run_all_tests():
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
     )
     r.record(
+        "live_cookie_scope_separate_from_injectable_cookie_requirement",
+        test_live_cookie_catalog_separates_sync_scope_from_injectable_cookie_requirement,
+    )
+    r.record(
         "declared_static_no_tool_failures",
         test_no_tool_failures_static_check_rejects_any_failed_tool_event,
     )
@@ -11697,7 +12011,11 @@ async def run_all_tests():
     )
     r.record(
         "live_cookie_domain_requires_injectable_bundle",
-        test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle,
+        test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle,
+    )
+    await r.record_async(
+        "task_live_fixture_distinguishes_sync_scope_from_cookie_requirement",
+        test_task_live_fixture_only_preflights_explicit_injectable_cookie_requirements,
     )
     r.record(
         "compute_token_explicit_prod_source",
@@ -11800,4 +12118,16 @@ async def run_all_tests():
     )
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "agent_latency_explicit_context_excludes_neighbor_stacks",
+        test_agent_latency_explicit_context_excludes_neighbor_stacks,
+    )
+    r.record(
+        "agent_latency_filters_worker_lines_before_json_decode",
+        test_agent_latency_filters_worker_lines_before_json_decode,
+    )
+    r.record(
+        "agent_latency_backend_tree_discovery_uses_fixed_log_scans",
+        test_agent_latency_backend_tree_discovery_uses_fixed_log_scans,
+    )
     return r.all_passed

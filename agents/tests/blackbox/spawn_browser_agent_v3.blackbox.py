@@ -8948,8 +8948,8 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
 
-def test_redirect_realm_credential_prep_uses_browser_recovery():
-    """A realm-prep/reload error recovers and reloads the live document."""
+def test_redirect_realm_credential_prep_failure_is_quarantined_without_recovery():
+    """A failed optional realm prep cannot monopolize the guest browser loop."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -8961,11 +8961,9 @@ def test_redirect_realm_credential_prep_uses_browser_recovery():
 
     assert "try:" in redirect_block
     assert "await _prepare_credentials_for_url(current_url)" in redirect_block
-    assert 'f"credential_prep_error:' in redirect_block
-    assert "recovered = await _recover_browser_step(" in redirect_block
-    assert "reload_page=True" in redirect_block
-    assert "if recovered:" in redirect_block
-    assert "raise" in redirect_block
+    assert "failed_credential_prep_realms" in redirect_block
+    assert "continuing without saved credentials" in redirect_block
+    assert "_recover_browser_step(" not in redirect_block
 
 
 # ── _execute_click ───────────────────────────────────────────────────
@@ -9190,6 +9188,81 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     assert out["approval_type"] == "purchase"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
+
+
+async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input():
+    """A textless shadow input inherits the bounded label beside it in its nearest ancestor."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    parent = SimpleNamespace(
+        attributes={"id": "methods-section-continue-button"},
+        parent_node=None,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Confirm your return",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=parent,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+    )
+    session = _fake_session_with_event_bus()
+    session.get_page = AsyncMock(return_value=None)
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=(25, 40))
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+
+    with patch(
+        "browser_use.browser.events.ClickElementEvent",
+        side_effect=AssertionError("write lock allowed the shadow submit click"),
+    ):
+        out = await service_actions._execute_click(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=28752,
+            coords=None,
+            thinking=None,
+            humanizer=None,
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            current_url="https://www.amazon.com/spr/returns/confirm",
+            system_name="Rose",
+        )
+
+    assert out["status"] == "needs_write_approval"
+    assert out["approval_type"] == "purchase"
+    assert "Confirm your return" in out["element_text"]
+    ah.record_action.assert_not_awaited()
+
+
+def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
+    """An unrelated higher container cannot donate a purchase phrase to a local control."""
+    from domains.spawn_browser_agent_v3.service_actions import _element_write_lock_signal
+
+    grandparent = SimpleNamespace(
+        parent_node=None,
+        node_name="SECTION",
+        get_all_children_text=lambda: "Confirm your return",
+    )
+    parent = SimpleNamespace(
+        parent_node=grandparent,
+        node_name="SPAN",
+        get_all_children_text=lambda: "Continue",
+    )
+    element = SimpleNamespace(
+        attributes={"type": "submit"},
+        parent_node=parent,
+        node_name="INPUT",
+        get_all_children_text=lambda: "",
+    )
+
+    signal = _element_write_lock_signal(element)
+
+    assert "Continue" in signal
+    assert "Confirm your return" not in signal
 
 
 def test_write_lock_purchase_button_detects_order_controls():
@@ -13587,8 +13660,8 @@ async def run_all_tests():
         test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary,
     )
     r.record(
-        "redirect_realm_credential_prep_uses_browser_recovery",
-        test_redirect_realm_credential_prep_uses_browser_recovery,
+        "redirect_realm_credential_prep_failure_is_quarantined",
+        test_redirect_realm_credential_prep_failure_is_quarantined_without_recovery,
     )
     r.record(
         "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets
@@ -14262,6 +14335,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_click_write_lock_return_confirmation",
         test_execute_click_write_lock_return_confirmation_triggers_approval,
+    )
+    await r.record_async(
+        "execute_click_write_lock_shadow_input_ancestor_text",
+        test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_input,
+    )
+    r.record(
+        "element_write_lock_signal_nearest_bounded_ancestor_text",
+        test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text,
     )
     r.record(
         "write_lock_purchase_button_order_controls",
