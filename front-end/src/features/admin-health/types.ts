@@ -1,5 +1,12 @@
 export type AdminHealthTimeSlice = 'weekly' | 'monthly' | 'quarterly' | 'yearly';
 
+export interface AdminHealthTaskCostPerTask {
+  zeroLlmCostDollars: number | null;
+  apiRateDollars: number | null;
+  computeTokenRateDollars: number | null;
+  sampleSize: number;
+}
+
 export interface AdminHealthSeriesPoint {
   key: string;
   label: string;
@@ -13,6 +20,7 @@ export interface AdminHealthSeriesPoint {
   tasksIssuedPerUser: number;
   outputTokensPerTask: number;
   taskCompletionRate: number;
+  costPerTask: AdminHealthTaskCostPerTask;
   andyLinearPoints: number | null;
   githubCommits: number | null;
   tamaraLinearPoints: number | null;
@@ -90,6 +98,7 @@ export interface AdminHealthData {
     tasksIssuedPerUser: number;
     outputTokensPerTask: number;
     taskCompletionRate: number;
+    costPerTask: AdminHealthTaskCostPerTask;
   };
   series: AdminHealthSeriesPoint[];
   retentionCohorts: AdminHealthRetentionCohort[];

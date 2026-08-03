@@ -8,7 +8,7 @@ import path from 'node:path';
 
 import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
-const tsxCli = path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs');
+const tsxCli = require.resolve('tsx/cli');
 
 function test(name: string, fn: () => void): void {
   try {

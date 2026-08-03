@@ -3,6 +3,12 @@
 import assert from 'node:assert';
 import type { AgentStatus } from '@prisma/client';
 import 'dotenv/config';
+import {
+  buildArchivedRootCostTelemetry,
+  buildStoredRootCostTelemetry,
+  readStoredRootCostTelemetry,
+} from '../../domains/admin-health/costTelemetry';
+import { calculateTaskCostPerTask } from '../../domains/admin-health/costs';
 import { buildRetentionCohorts, buildSeries } from '../../domains/admin-health/metrics';
 import { parseTimeSlice } from '../../domains/admin-health/service';
 import { buildPeriods } from '../../domains/admin-health/time';
@@ -32,7 +38,34 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = 
   status: 'COMPLETED' as AgentStatus,
 });
 
+const run = (taskId: string, createdAt: string) => ({ taskId, createdAt: new Date(createdAt) });
+
 const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
+
+const usage = (
+  taskId: string,
+  overrides: Partial<{
+    kind: string;
+    model: string;
+    fromFastCache: boolean;
+    tokensIn: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    tokensOut: number;
+    costCents: number;
+  }> = {}
+) => ({
+  taskId,
+  kind: 'service',
+  model: 'unknown',
+  fromFastCache: false,
+  tokensIn: 0,
+  cacheReadInputTokens: 0,
+  cacheCreationInputTokens: 0,
+  tokensOut: 0,
+  costCents: 0,
+  ...overrides,
+});
 
 const series = buildSeries(
   periods,
@@ -58,6 +91,17 @@ const series = buildSeries(
   [
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
+  ],
+  [
+    run('may-1', '2026-05-03T00:00:00.000Z'),
+    run('may-outside-cohort', '2026-05-21T00:00:00.000Z'),
+    run('jun-1', '2026-06-03T00:00:00.000Z'),
+  ],
+  [
+    usage('may-1', { costCents: 20 }),
+    usage('may-outside-cohort', { costCents: 1_000 }),
+    usage('jun-1', { costCents: 30 }),
+    usage('unrelated-child-agent', { costCents: 10_000 }),
   ]
 );
 
@@ -76,8 +120,155 @@ assert.deepStrictEqual(
   [2, 3],
   'Task metrics must exclude users outside the counted user cohort'
 );
+assert.deepStrictEqual(
+  series.map((point) => point.costPerTask.zeroLlmCostDollars),
+  [5.1, 0.3],
+  'Cost per task must use real root runs independently of the subscriber task cohort'
+);
 assert.strictEqual(parseTimeSlice(undefined), 'monthly');
 assert.strictEqual(parseTimeSlice('weekly'), 'weekly');
+
+const cacheAwareCost = calculateTaskCostPerTask(
+  [{ taskId: 'root-task' }],
+  [
+    usage('root-task', { costCents: 25 }),
+    usage('root-task', {
+      kind: 'llm',
+      model: 'claude-sonnet-5-claude',
+      tokensIn: 100_000,
+      cacheReadInputTokens: 200_000,
+      cacheCreationInputTokens: 100_000,
+      tokensOut: 10_000,
+    }),
+    usage('root-task', {
+      kind: 'llm',
+      model: 'gpt-5.6-sol-gpt',
+      fromFastCache: true,
+      tokensIn: 1_000_000,
+      tokensOut: 1_000_000,
+    }),
+    usage('spawned-child', { costCents: 1_000 }),
+  ]
+);
+assert.strictEqual(
+  buildStoredRootCostTelemetry([{ agentId: 'chat-only', toolName: 'chat_router', usageItems: [] }]),
+  null,
+  'Chat/setup-only agent records must not become cost samples'
+);
+const storedTelemetry = buildStoredRootCostTelemetry([
+  {
+    agentId: 'root-task',
+    toolName: 'execute_loop',
+    usageItems: [
+      {
+        type: 'llm',
+        model: 'claude-sonnet-5',
+        tokens_in: 100,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 300,
+        tokens_out: 40,
+        cost_cents: 2,
+      },
+    ],
+  },
+]);
+assert.ok(storedTelemetry, 'An execute-loop usage row must be recognized as a real agent run');
+assert.deepStrictEqual(readStoredRootCostTelemetry('root-task', storedTelemetry), [
+  {
+    taskId: 'root-task',
+    kind: 'llm',
+    model: 'claude-sonnet-5',
+    fromFastCache: false,
+    tokensIn: 100,
+    cacheReadInputTokens: 200,
+    cacheCreationInputTokens: 300,
+    tokensOut: 40,
+    costCents: 2,
+  },
+]);
+assert.deepStrictEqual(
+  buildArchivedRootCostTelemetry('archived-root', {
+    rows: {
+      Agent: [{ id: 'archived-root' }],
+      ToolUsage: [
+        {
+          agentId: 'archived-root',
+          toolName: 'execute_loop',
+          usageItems: [{ type: 'service', cost_cents: 5 }],
+        },
+        {
+          agentId: 'spawned-child',
+          toolName: 'execute_loop',
+          usageItems: [{ type: 'service', cost_cents: 5_000 }],
+        },
+      ],
+    },
+  }),
+  {
+    worldModelMode: 'real',
+    telemetry: {
+      schemaVersion: 1,
+      usage: [
+        {
+          kind: 'service',
+          model: 'unknown',
+          fromFastCache: false,
+          tokensIn: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          tokensOut: 0,
+          costCents: 5,
+        },
+      ],
+    },
+  },
+  'R2 end fixtures must recover only root-owned usage and default legacy runs to real mode'
+);
+assert.deepStrictEqual(
+  calculateTaskCostPerTask([], []),
+  {
+    zeroLlmCostDollars: null,
+    apiRateDollars: null,
+    computeTokenRateDollars: null,
+    sampleSize: 0,
+  },
+  'Periods without a real root-run sample must be unavailable rather than reported as zero cost'
+);
+assert.deepStrictEqual(
+  cacheAwareCost,
+  {
+    zeroLlmCostDollars: 0.25,
+    apiRateDollars: 0.84,
+    computeTokenRateDollars: 0.2795,
+    sampleSize: 1,
+  },
+  'Cost scenarios must retain service spend, apply cache rates, price Fast Cache at zero, and exclude children'
+);
+const sonnetFiveUsage = [
+  usage('root-task', {
+    kind: 'llm',
+    model: 'claude-sonnet-5',
+    tokensIn: 1_000_000,
+  }),
+];
+assert.strictEqual(
+  calculateTaskCostPerTask(
+    [{ taskId: 'root-task' }],
+    sonnetFiveUsage,
+    Date.parse('2026-08-31T23:59:59.999Z')
+  ).apiRateDollars,
+  2,
+  'Claude Sonnet 5 must use its introductory API price through August 2026'
+);
+assert.strictEqual(
+  calculateTaskCostPerTask(
+    [{ taskId: 'root-task' }],
+    sonnetFiveUsage,
+    Date.parse('2026-09-01T00:00:00.000Z')
+  ).apiRateDollars,
+  3,
+  'Claude Sonnet 5 must automatically adopt its published September 2026 API price'
+);
 
 // Benchmark stripping: an internal operator account (Andy) replaying the SAME goal
 // string many times per period — the signature of pre-`isBenchmark` benchmark runs —

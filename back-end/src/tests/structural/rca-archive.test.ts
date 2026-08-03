@@ -110,7 +110,43 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The instructions must keep pointing at the archive in both directions:
+// 4. The documented scaffold command must remain executable. Redirect its
+//    cases directory to a temporary folder so this probe never mutates the
+//    checked-in archive or races the validator above.
+if (fs.existsSync(VALIDATOR)) {
+  try {
+    const probe = execFileSync(
+      'python3',
+      [
+        '-c',
+        [
+          'import pathlib, sys, tempfile',
+          'sys.path.insert(0, "scripts")',
+          'import rca_archive',
+          'with tempfile.TemporaryDirectory(dir=rca_archive.REPO_ROOT / ".context") as directory:',
+          '    rca_archive.CASES_DIR = pathlib.Path(directory)',
+          '    sys.argv = ["rca_archive.py", "new", "command-probe"]',
+          '    raise SystemExit(rca_archive.main())',
+        ].join('\n'),
+      ],
+      {
+        cwd: REPO_ROOT,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    if (!probe.includes('command-probe.md')) {
+      failures.push(`rca_archive.py new did not report the scaffolded case path.`);
+    }
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string };
+    failures.push(
+      `rca_archive.py new failed:\n${(err.stderr ?? '').trim()}\n${(err.stdout ?? '').trim()}`
+    );
+  }
+}
+
+// 5. The instructions must keep pointing at the archive in both directions:
 //    read it before diagnosing, write to it after.
 const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: string }> = [
   {
