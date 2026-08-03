@@ -26,7 +26,11 @@ import {
   RoseServerError,
 } from './errors';
 import type { PoolSpec } from './pools';
-import { extractRateLimitedUntil, providerRequiredWaitMs } from './rateLimitReset';
+import {
+  boundedRateLimitBackoffMs,
+  extractRateLimitedUntil,
+  providerRequiredWaitMs,
+} from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
@@ -403,7 +407,10 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
       const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
       const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
       if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
-        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+        await sleep(
+          boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
+          opts.abortSignal
+        );
         continue;
       }
       throw new RoseRateLimitError(
@@ -515,7 +522,10 @@ export async function* openAiApiKeyComplete(
       const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
       const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
       if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
-        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+        await sleep(
+          boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
+          opts.abortSignal
+        );
         continue;
       }
       throw new RoseRateLimitError(
@@ -546,21 +556,6 @@ export async function* openAiApiKeyComplete(
 
   if (lastError) throw new RoseServerError(`OpenAI exhausted retries: ${lastError.message}`);
   throw new RoseServerError('OpenAI exhausted retries');
-}
-
-function backoffFor429(headers: Headers, attempt: number): number {
-  let delay: number;
-  const retryAfter = headers.get('retry-after');
-  const parsed = retryAfter !== null ? Number.parseFloat(retryAfter) : Number.NaN;
-  if (!Number.isNaN(parsed)) {
-    delay = Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
-  } else {
-    delay = Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
-  }
-  // Jitter so concurrent workers retrying the same credential don't wake in
-  // lockstep. Matches _backoff_for_429 in agents/providers/rose/gpt_auth.py.
-  const jitter = Math.random() * Math.min(delay * 0.25, 1000);
-  return Math.min(delay + jitter, BACKOFF_CAP_MS);
 }
 
 function sleep(ms: number, abortSignal?: AbortSignal): Promise<void> {

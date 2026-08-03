@@ -10,7 +10,7 @@ const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 // bypass Stripe and receive company-funded cards, while these benchmarks assert the ordinary
 // authorize/capture/refund lifecycle.
 const DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106';
-const BENCHMARK_CREDIT_CENTS = 100_000;
+const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
 async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
@@ -82,10 +82,56 @@ function requireStripeTestKey(): string {
   return key;
 }
 
+/**
+ * This command mutates billing, integration, and credit state, so it may only target the
+ * disposable identity reserved for the AgentCard lifecycle suite. Accepting an arbitrary
+ * --user-id made a typo capable of deleting or replacing a real user's payment state.
+ */
+function assertDedicatedBenchmarkUser(userId: string): void {
+  if (userId === DEFAULT_BENCHMARK_USER_ID) return;
+  throw new Error(
+    `Refusing to seed payment fixtures for ${userId}; this command is restricted to the ` +
+      `dedicated benchmark user ${DEFAULT_BENCHMARK_USER_ID}`
+  );
+}
+
+/**
+ * Keep the synthetic user solvent without deleting ledger history. The transaction-level
+ * advisory lock serializes concurrent setup processes for this fixture, while topping up only
+ * the deficit makes repeated runs idempotent even as ToolUsage accumulates.
+ */
+async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(
+        hashtext(${`benchmark-payment-credit:${userId}`})::bigint
+      )`;
+      const now = new Date();
+      const [creditTotal, usageTotal] = await Promise.all([
+        tx.credit.aggregate({
+          where: { userId, OR: [{ expirationDate: null }, { expirationDate: { gt: now } }] },
+          _sum: { amountCents: true },
+        }),
+        tx.toolUsage.aggregate({ where: { userId }, _sum: { totalCostCents: true } }),
+      ]);
+      const availableCents = creditTotal._sum.amountCents ?? 0;
+      const usedCents = usageTotal._sum.totalCostCents ?? 0;
+      const deficitCents = usedCents + BENCHMARK_CREDIT_HEADROOM_CENTS - availableCents;
+      if (deficitCents > 0) {
+        await tx.credit.create({
+          data: { userId, amountCents: deficitCents, expirationDate: null },
+        });
+      }
+    },
+    { maxWait: 10_000, timeout: 10_000 }
+  );
+}
+
 async function main(): Promise<void> {
   assertBenchmarkOrgCardholderPair();
   const userId =
     argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
+  assertDedicatedBenchmarkUser(userId);
   if (isAdminUser(userId)) {
     throw new Error(
       `AgentCard lifecycle fixture user ${userId} must be non-admin so Stripe hold semantics remain testable`
@@ -101,17 +147,9 @@ async function main(): Promise<void> {
       create: { userId, isAnonymous: true },
     });
 
-    // Non-admin agents are subject to the normal Rose credit gate. Reset only the disposable
-    // fixture's grants so interrupted benchmark agents can remain available for diagnostics while
-    // every new run starts with a deterministic positive balance.
-    await prisma.credit.deleteMany({ where: { userId } });
-    await prisma.credit.create({
-      data: {
-        userId,
-        amountCents: BENCHMARK_CREDIT_CENTS,
-        expirationDate: null,
-      },
-    });
+    // Non-admin agents are subject to the normal Rose credit gate. Preserve ledger history and
+    // guarantee deterministic headroom for every isolated run.
+    await ensureBenchmarkCredits(prisma, userId);
 
     const customer = await stripe.customers.create({
       name: 'Rose Labs Benchmark User',

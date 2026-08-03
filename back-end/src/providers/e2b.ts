@@ -4,7 +4,6 @@ import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { prisma } from './database';
 import { createLogger } from './logger';
-import { retryWithBackoff } from './retry';
 import {
   buildFastModeAnthropicEnv,
   buildFastModeCodexEnv,
@@ -28,6 +27,8 @@ import {
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
 import { workDirForGithubRepo } from './e2bWorkDir';
+import { createSandboxWithRetry } from './e2bSandboxCreate';
+export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -171,124 +172,6 @@ export function resolveClaudeCodeTokenSource(
   credentialMeta: ClaudeCodeCredentialResult | null
 ): 'user' | 'pool' | 'anthropic' {
   return credentialMeta?.source ?? 'anthropic';
-}
-
-const SANDBOX_CREATE_ATTEMPTS = 3;
-const SANDBOX_CREATE_BASE_BACKOFF_MS = 500;
-
-/**
- * A transport-level failure reaching the E2B control plane, as opposed to a
- * rejection *by* it. `fetch` surfaces these as an opaque `TypeError: fetch
- * failed` whose real reason hides in `.cause`, so match the message and the
- * usual socket errno set.
- *
- * Auth failures, quota rejections, and bad-template errors are NOT transient —
- * retrying those just burns time and money, so they fall through immediately.
- */
-export function isTransientSandboxCreateError(error: unknown): boolean {
-  const parts: string[] = [];
-  let cursor: unknown = error;
-  for (let depth = 0; depth < 4 && cursor !== null && cursor !== undefined; depth += 1) {
-    if (cursor instanceof Error) {
-      parts.push(cursor.message);
-      const code = (cursor as NodeJS.ErrnoException).code;
-      if (typeof code === 'string') parts.push(code);
-      cursor = (cursor as { cause?: unknown }).cause;
-      continue;
-    }
-    parts.push(String(cursor));
-    break;
-  }
-  const haystack = parts.join(' | ');
-  if (/\b(401|403|404|invalid api key|unauthorized|forbidden|quota|not found)\b/i.test(haystack)) {
-    return false;
-  }
-  return /fetch failed|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EADDRNOTAVAIL|EAI_AGAIN|ENOTFOUND|EPIPE|ENETUNREACH|socket hang up|UND_ERR|terminated/i.test(
-    haystack
-  );
-}
-
-/**
- * Create an E2B sandbox, retrying only transport-level failures.
- *
- * Sandbox creation is a single un-retried outbound call on the critical path of
- * every code agent. Under concurrent load one transient `fetch failed` turned
- * into a hard 500 and failed the whole agent — reproducibly, 3/3, in the
- * concurrent blackbox batch while passing 2/2 in isolation. At the 10k-agent
- * design target this is the difference between a blip and a fleet-wide failure,
- * so the retry belongs in the product path, not the test harness.
- */
-async function createSandboxWithRetry(
-  templateId: string,
-  options: Parameters<typeof Sandbox.create>[1],
-  label: string
-): Promise<Awaited<ReturnType<typeof Sandbox.create>>> {
-  // E2B's create API has no idempotency key, so a transport failure is
-  // AMBIGUOUS: the sandbox may already exist server-side and only the response
-  // was lost. Retrying blind would then leave a running, unreferenced, BILLED
-  // sandbox behind. Tag every attempt of one logical create with a shared id and
-  // adopt/reap by that tag, which is the idempotency-key pattern implemented
-  // client-side (CLAUDE.md rule 20 — side effects must be safe to repeat).
-  const createRequestId = uuidv4();
-  const taggedOptions = {
-    ...options,
-    metadata: { ...(options?.metadata ?? {}), createRequestId },
-  } as Parameters<typeof Sandbox.create>[1];
-
-  let attempt = 0;
-  return retryWithBackoff(
-    async () => {
-      attempt += 1;
-      if (attempt > 1) {
-        // A previous attempt may have created a sandbox before its response was
-        // lost. Adopt it instead of creating a second one.
-        const orphan = await findSandboxByCreateRequestId(createRequestId, label);
-        if (orphan) {
-          log.warn(
-            `E2B:${label} adopting sandbox ${orphan.sandboxId} from a prior attempt of ` +
-              `create ${createRequestId} (response was lost, sandbox was not)`
-          );
-          return orphan;
-        }
-      }
-      return Sandbox.create(templateId, taggedOptions);
-    },
-    {
-      maxRetries: SANDBOX_CREATE_ATTEMPTS,
-      initialBackoffMs: SANDBOX_CREATE_BASE_BACKOFF_MS,
-      // Default `isRetryable` retries every TypeError, which would include a
-      // rejection surfaced as one. Classify explicitly instead.
-      isRetryable: isTransientSandboxCreateError,
-      component: `E2B:${label}`,
-    }
-  );
-}
-
-/**
- * Find a running sandbox created by an earlier attempt of the same logical
- * create, identified by the `createRequestId` metadata tag.
- *
- * Best-effort by design: a lookup failure must never convert a retryable create
- * into a hard failure, so this returns null and lets the retry proceed. The
- * worst case then degrades to today's behavior (a possible orphan), never worse.
- */
-async function findSandboxByCreateRequestId(
-  createRequestId: string,
-  label: string
-): Promise<Awaited<ReturnType<typeof Sandbox.connect>> | null> {
-  try {
-    const paginator = Sandbox.list({ query: { metadata: { createRequestId } } });
-    const items = await paginator.nextItems();
-    const existing = items?.[0];
-    if (!existing?.sandboxId) return null;
-    return await Sandbox.connect(existing.sandboxId);
-  } catch (error) {
-    log.warn(
-      `E2B:${label} could not check for an orphaned sandbox from create ${createRequestId}: ` +
-        `${error instanceof Error ? error.message : String(error)}`
-    );
-    return null;
-  }
 }
 
 /**

@@ -191,6 +191,10 @@ export function providerRequiredWaitMs(
     if (/^\d+(\.\d+)?$/.test(stripped)) {
       return Math.max(0, Number.parseFloat(stripped) * 1000);
     }
+    const retryAt = parseHttpDate(stripped);
+    if (retryAt !== null) {
+      return Math.max(0, Date.parse(retryAt) - Date.now());
+    }
   }
   const reset = rateLimitedUntil ?? extractRateLimitedUntil(headers, errorBody);
   if (reset) {
@@ -198,4 +202,22 @@ export function providerRequiredWaitMs(
     if (!Number.isNaN(ms)) return Math.max(0, ms - Date.now());
   }
   return null;
+}
+
+/**
+ * Jittered in-place retry delay that never sleeps less than a provider-required wait. Callers
+ * decide first whether that wait fits their cap; a missing provider value uses exponential
+ * fallback. Supplying randomness keeps the calculation deterministic in tests.
+ */
+export function boundedRateLimitBackoffMs(
+  attempt: number,
+  requiredWaitMs: number | null,
+  capMs: number,
+  random: () => number = Math.random
+): number {
+  const fallbackMs = Math.min(2 ** attempt * 1000, capMs);
+  const delay =
+    requiredWaitMs === null ? fallbackMs : Math.max(1000, Math.min(requiredWaitMs, capMs));
+  const jitter = Math.max(0, Math.min(1, random())) * Math.min(delay * 0.25, 1000);
+  return Math.min(delay + jitter, capMs);
 }

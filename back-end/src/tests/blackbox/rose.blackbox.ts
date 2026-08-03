@@ -54,7 +54,12 @@ import {
 } from '../../providers/rose';
 import { claudeAuthComplete } from '../../providers/rose/claudeAuth';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
-import { extractRateLimitedUntil, resetIsFarFuture } from '../../providers/rose/rateLimitReset';
+import {
+  boundedRateLimitBackoffMs,
+  extractRateLimitedUntil,
+  providerRequiredWaitMs,
+  resetIsFarFuture,
+} from '../../providers/rose/rateLimitReset';
 import {
   parseAnthropicSSE,
   parseOpenAISSE,
@@ -1098,6 +1103,32 @@ async function testRateLimitReset_extractionBranches() {
     ),
     iso,
     'reset header wins over retry-after'
+  );
+
+  // Retry eligibility uses Retry-After before the longer credential reset. HTTP-date is a valid
+  // Retry-After form and must not be skipped merely because rateLimitedUntil was precomputed.
+  const retryAt = new Date(Date.now() + 4_000);
+  retryAt.setMilliseconds(0);
+  const httpDateWaitMs = providerRequiredWaitMs(
+    h({ 'retry-after': retryAt.toUTCString(), 'anthropic-ratelimit-unified-reset': iso }),
+    '',
+    iso
+  );
+  assert(httpDateWaitMs !== null, 'HTTP-date retry-after produces a required wait');
+  assert(
+    httpDateWaitMs! > 2_000 && httpDateWaitMs! <= 4_000,
+    `HTTP-date retry-after wins over multi-day reset, got ${httpDateWaitMs}ms`
+  );
+
+  assertEqual(
+    boundedRateLimitBackoffMs(0, 4_000, 5_000, () => 0),
+    4_000,
+    'provider wait is the minimum in-place retry delay'
+  );
+  assertEqual(
+    boundedRateLimitBackoffMs(0, null, 5_000, () => 0),
+    1_000,
+    'missing provider timing uses exponential fallback'
   );
 
   // Nothing supplied → null, so the caller knowingly uses a synthetic cooldown.

@@ -1147,8 +1147,15 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
         / "setup-benchmark-payment.ts"
     ).read_text()
     assert "DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106'" in fixture
-    assert "await prisma.credit.deleteMany({ where: { userId } })" in fixture
-    assert "amountCents: BENCHMARK_CREDIT_CENTS" in fixture
+    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "pg_advisory_xact_lock" in fixture
+    assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
+    assert "await prisma.$transaction" in fixture
+    assert "tx.credit.aggregate" in fixture
+    assert "tx.toolUsage.aggregate" in fixture
+    assert "if (deficitCents > 0)" in fixture
+    assert "tx.credit.create" in fixture
+    assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
 
 
