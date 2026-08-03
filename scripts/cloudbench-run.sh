@@ -63,6 +63,13 @@ CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
 BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$REPO_DIR/scripts/cloudbench-benchmark-target.py}"
+if [ -n "${CLOUDBENCH_PYTHON_BIN:-}" ]; then
+    TASK_CATALOG_PYTHON="$CLOUDBENCH_PYTHON_BIN"
+elif [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
+    TASK_CATALOG_PYTHON="$REPO_DIR/agents/venv/bin/python"
+else
+    TASK_CATALOG_PYTHON=python3
+fi
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -199,7 +206,7 @@ TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
 if ! BENCH_NEEDS_SOURCE_CONNECT="$(
-    PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" python3 - "${BENCH_TASK_LIST[@]}" <<'PY'
+    PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" "$TASK_CATALOG_PYTHON" - "${BENCH_TASK_LIST[@]}" <<'PY'
 import sys
 
 from benchmarks.benchmark_tasks import selected_tasks_require_gate_type

@@ -6061,6 +6061,7 @@ def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
             env={
                 **os.environ,
                 "PATH": f"{temp_dir}{os.pathsep}{os.environ['PATH']}",
+                "CLOUDBENCH_PYTHON_BIN": str(fake_python),
                 "CLOUDBENCH_REPO_DIR": str(repo_root),
                 "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
                 "CLOUDBENCH_PRINT_TASK_ENV": "1",
