@@ -120,6 +120,50 @@ cd mac-app && bash scripts/run-blackbox-tests.sh <domain>  # Mac-app blackbox: s
 **Benchmarks:** See `agents/benchmarks/README.md` for the full CLI reference. Quick: `scripts/run-bench list`. For local iteration, prefer `scripts/run-bench <task...>` or `scripts/run-bench --rerun-failed latest`; the local wrapper starts an isolated `scripts/run.sh --benchmark` stack with per-run ports, DB container/volume name, frontend/public URL, Temporal task queue, and manifest under `.context/benchmarks/<run-id>/`, runs selected tasks with max concurrency 5, keeps failed agents long enough to run `agent_latency.py`, `agent_logs.py`, and `agent_cache.py`, then tears services down. To checkpoint any single benchmark, use `scripts/run-bench <task> --checkpoint <turn_n>`; the runner creates the source by running that benchmark to the root message index, pauses/exports it, and resumes a cloned checkpoint. Add `--checkpoint-no-start` to create a paused FE-visible checkpoint, then resume it with the printed `--checkpoint-start-agent-id` command. Use `scripts/run-bench --full` only when you intentionally want the whole local suite. Use `scripts/run-bench eval` for the full eval suite through the same isolation layer. Direct `run_benchmark.py --port N` remains the lower-level path for already-running services or special cases. Simulator run: `cd agents && python benchmarks/run_benchmark.py --task <task> --simulate --world-model-url http://localhost:<wmh-port> --world-model-name <model>`; add `--wmh-eval` when you want post-run prediction-accuracy scoring recorded in the benchmark JSON. R2 trace-corpus hygiene: `cd back-end && TRACE_ARCHIVE_BACKEND=r2 npx tsx scripts/curate-trace-archive.ts --all --dry-run`; use `--delete` only to remove non-gold legacy/partial bundles after reviewing the dry-run report. The `/benchmark` command delegates to `scripts/run-bench` so Claude and shell users share the same isolation/concurrency behavior.
 - Every time a benchmark task is run, include the valid FE link to view the run (for example, `http://localhost:5050/?agent-id=ac267c32-470f-41da-8343-091b8965c410`) and verify it actually displays the agent.
 
+## Cursor Cloud / Linux dev environment
+
+Cloud agents run on Linux. **Read this whole file first**, and use the repo's own
+skills by default — the `.claude/commands/*` slash-commands (`/deploy`, `/RCA`,
+`/benchmark`, etc.) and the `docs/` guides they point to (e.g. `/RCA` →
+`docs/root-cause-analysis.md`, testing → `docs/testing.md`). These are the source
+of truth; do not duplicate them into other files.
+
+- **Setup / refresh:** run `bash scripts/cloud-build.sh` — the repo's designated
+  cloud build command (idempotent: root `npm install` + `prisma generate`, the
+  `agents/venv`, and a local Postgres). No bespoke setup script is needed.
+- **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
+  **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
+  `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
+  `sudo service postgresql start` if needed.
+- **Toolchain:** `agents/venv` uses Python 3.11 (the pinned version; system
+  `python3` may be newer). A few suites also need `ruby` + `rsync` installed
+  (deploy-gate + cloudbench tests) — otherwise you'll see `ruby: command not
+  found` / `rsync: command not found`.
+- **Skip `mac-app` on Cloud/Linux — tests AND `dev`.** It is macOS-only (Electron
+  + `darwin`-only native deps such as `node-mac-contacts`); its `npm install`,
+  `npm run dev`, and blackbox suite cannot run on Linux. `run.sh` and the husky
+  pre-commit hook already skip it on non-Darwin. Do mac-app work on macOS only.
+- **Running services directly (no ngrok/secrets):** backend
+  `cd back-end && PORT=<N> npx tsx watch src/bootstrap.ts`; frontend
+  `cd front-end && npx vite --port <N+1>`. In dev the frontend infers the backend
+  as `frontendPort - 1` (see `front-end/src/lib/backendUrl.ts`) unless
+  `VITE_BACKEND_API_URL` is non-default — matching `run.sh` (backend=base,
+  frontend=base+1). The backend `ALLOWED_ORIGINS` must include the frontend origin.
+- **Injected env vars override `.env` (important).** Node `dotenv.config()` and
+  Python `load_dotenv(override=False)` never override an already-set variable, so
+  anything injected by the Cloud environment/Secrets wins over `.env`.
+  `TEMPORAL_TASK_QUEUE` is injected pointing at a shared queue — always `export
+  TEMPORAL_TASK_QUEUE=navi-agent-tasks-<unique>` for BOTH backend and worker so a
+  local worker never consumes other runs' workflows (mirrors `run.sh`'s
+  per-workspace queue). `BROWSER_PROVIDER` must be `kernel` or `steel`. When
+  something is misconfigured despite a correct `.env`, check for an injected env
+  var of the same name first.
+- **Tests needing funded/live accounts** (RCA Step 4: third-party/config — surface,
+  don't mask): the Codex E2B backend blackbox domain and all **smoke benchmarks**
+  need OpenAI account credits (+ OpenRouter access to the `rose-1-ultra` waterfall
+  models); `admin-health` needs Amplitude + admin-Stripe creds; `agentcard` needs
+  `AGENTCARD_PUBLIC_URL`.
+
 ## Eval Suite
 
 **`agents/benchmarks/tasks.json` is the ONE canonical benchmark catalog.** Benchmark tasks and migrated long-horizon evals live here; ordinary blackbox/vitest tests do not. Each entry carries the additive eval contract: `status`, `runner` (`agent`), `bench` (`pipeline-e2e` for Rose harness plumbing vs. `rose-bench` for harness-independent capability), `description`, `environment` (mode/db_fixtures/base_images/services/secrets/live_targets/context_notes), `evaluators[]` (`static_check` | `single_turn_llm_judge` | `agentic_llm_judge`), and `source` (provenance pointers). Validated by `agents/benchmarks/long_horizon.py:validate_catalog()`. Idea kernels that haven't become evals yet live in `agents/benchmarks/long_horizon_ideas.json`.
