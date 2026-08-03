@@ -22,9 +22,10 @@ tags:
 sources:
   - plan:agents/benchmarks/runs/20260802_220629_browser-opentable-reservation,browser-instacart-grocery-order,browser-doordash-usb-c-cable,browser-alchemy-springs-sauna,browser-hotel-booking,browser-event-ticket,browser-imax-group-tickets,browser-amazon-return,minted-a+0c2d11688d28.json
   - plan:agents/benchmarks/run_benchmark.py:_assert_live_cookie_domains_usable
-  - plan:agents/tests/blackbox/benchmark.blackbox.py:test_live_fixture_fails_when_declared_cookie_domain_has_no_injectable_bundle
+  - plan:agents/tests/blackbox/benchmark.blackbox.py:test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
 repro: run the live fixture's scoped credential sync and _assert_live_cookie_domains_usable for booking.com, amctheatres.com, instacart.com, and uber.com
-status: open
+status: superseded
+superseded_by: 2026-08-03-cookie-sync-scope-misread-as-required-auth
 ---
 
 ## Problem
@@ -101,7 +102,20 @@ affected benchmark tasks.
 
 ## Human feedback
 
-None recorded.
+Andy clarified that the affected commerce sites should not all require saved
+login state and specifically expected guest checkout outside the account-bound
+Uber flow. That feedback exposed that this case had mistaken every scoped
+domain for a required authentication realm. The corrected RCA retains the
+missing-credential finding only for task contracts that actually require an
+account and records the harness defect separately.
+
+## Supersession
+
+This case correctly captured the production source counts, but its grouping and
+remediation were overbroad. `live_cookie_domains` was introduced as a sync
+performance scope, not as proof that every task required a logged-in account.
+The corrected boundary and proposed contract split are recorded in
+`2026-08-03-cookie-sync-scope-misread-as-required-auth`.
 
 ## Reusable lesson
 
