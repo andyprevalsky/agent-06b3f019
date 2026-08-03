@@ -105,14 +105,30 @@ Verified end-to-end here:
   environment problem. The local DB has no `User` row for the test user, so
   `get_user_context` logs a non-fatal error.
 
+### System tools required by some test suites
+Beyond the update-script deps, the deploy-gate and cloudbench test suites need
+`ruby` (workflow-YAML parse in `scripts/tests/auto-rca-workflow.test.sh`) and
+`rsync` (`scripts/cloudbench-sync-deps.sh`). Install with
+`sudo apt-get install -y ruby rsync` if missing (they're captured in the VM
+snapshot). Without them you'll see `ruby: command not found` /
+`rsync: command not found`.
+
+### Config vars some blackbox domains need
+- `AGENTCARD_PUBLIC_URL` must be set (dev: point it at the local backend origin,
+  i.e. the same value as `BACKEND_URL`) or the `agentcard` blackbox 500s with
+  `Missing AGENTCARD_PUBLIC_URL`. It's in the dev `back-end/.env`.
+
 ### Tests
-See `docs/testing.md` and `CLAUDE.md` for the full command list. Offline suites
-that need no secrets and pass here: `back-end` `npm run lint` + `npm run test:structural`
-+ `bash scripts/run-blackbox-tests.sh` (self-starts a backend on local Postgres),
-`front-end` `bash scripts/run-blackbox-tests.sh`, and `agents`
-`python scripts/run_blackbox_tests.py`. Known secret-gated exceptions:
-- Agents blackbox domains `attachments` and `benchmark` fail without a real
-  `SUPABASE_SERVICE_ROLE_KEY` / LLM keys (the other ~88 pass).
+See `docs/testing.md` and `CLAUDE.md` for the full command list. `scripts/test.sh
+--no-smoke` runs the full offline suite. Notes/known exceptions:
 - `front-end` `npm run lint` reports a few pre-existing `max-lines` errors on
   `main` (a codebase state, not an environment problem).
 - Python is 3.11 via `agents/venv` (system `python3` is 3.12; the project pins 3.11).
+- **External blockers (only resolvable with funded/live accounts):** the Codex
+  E2B backend blackbox domain and all **smoke benchmarks** need the OpenAI account to have
+  **credits** (observed `credit_balance_exhausted` even with a valid key) and the
+  `rose-1-ultra` execute pool needs OpenRouter access to its Gemini model;
+  `admin-health` needs `AMPLITUDE_*` + `ADMIN_HEALTH_STRIPE_*`. These are Step-4
+  third-party/config errors — surface, don't mask.
+- **Platform:** `mac-app` blackbox cannot run on Linux (has a `darwin`-only native
+  dep, `node-mac-contacts`); run it on macOS.
