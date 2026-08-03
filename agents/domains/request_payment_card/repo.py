@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 from temporalio import activity
 
-from domains.request_payment_card.contracts import (
+from domains.request_payment_card.config import (
     MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS,
 )
 
