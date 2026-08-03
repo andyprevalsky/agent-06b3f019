@@ -125,9 +125,16 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Execute JavaScript in the live browser page context. Use for ACTIONS or LIVE DOM STATE QUERIES "
             "that page markdown cannot answer: hover, drag, custom selectors, shadow DOM traversal, reading "
             "computed styles, dispatching events, querying iframe contents. Wrap in IIFE with try-catch. "
-            "NOT for extracting visible content; for that, use `extract`. NOT interchangeable with `extract`."
+            "For load-bearing facts visible on the current page, set preserve_evidence=true before navigating away; "
+            "this retains a bounded browser-extracted DOM snapshot for the verifier."
         ),
-        "params": {"code": {"type": "string", "description": "JavaScript code to execute", "required": True}},
+        "params": {
+            "code": {"type": "string", "description": "JavaScript code to execute", "required": True},
+            "preserve_evidence": {
+                "type": "boolean",
+                "description": "Retain the current browser-extracted DOM as grounded verifier evidence.",
+            },
+        },
     },
     "switch_tab": {
         "description": "Switch to another open tab by tab_id (last 4 chars of target_id shown in browser state)",
@@ -605,6 +612,11 @@ action envelope in text; use the provided tool call.
 - NEVER sign legal agreements on the user's behalf (accepting Terms of Service checkboxes is acceptable)
 - When making payments or posting to social media, you may be asked to confirm with the user first
 - Once a requested purchase is visibly placed or an order confirmation is shown, do not open cancellation, return, edit, or modification flows. The pre-write checkout state and prior actions are retained for verification; call attempt_completion promptly from the confirmation or order-details page instead of reopening product or checkout pages solely to reconstruct evidence.
+
+# Evidence Retention
+
+- Completion verification retains action results, the final DOM, bounded pre-write DOM checkpoints, and explicitly preserved page evidence, not arbitrary historical DOM snapshots.
+- Before navigating away from a page containing load-bearing facts required by the goal (for example product length, wattage, or model), call `evaluate` with `preserve_evidence=true`. The runtime captures the current browser-extracted DOM independently of the JavaScript result.
 
 # Authentication
 
@@ -1131,6 +1143,8 @@ def _normalize_action_params(
 
     if params.get("code"):
         out["code"] = params["code"]
+    if params.get("preserve_evidence") is not None:
+        out["preserve_evidence"] = bool(params["preserve_evidence"])
 
     if normalized_action == "select_dropdown" and params.get("text"):
         out["value"] = params["text"]

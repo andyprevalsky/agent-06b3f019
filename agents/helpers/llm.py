@@ -279,14 +279,16 @@ Goal: "Generate a logo as a PNG."
 GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
 
 Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
-GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
+GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "purchase_completion_evidence", "type": "str" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "added_to_cart", "type": "bool" }, { "name": "checkout_status", "type": "str" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "item_acquired", "type": "bool" }]
 
 For shopping goals phrased as "buy", "purchase", "order", or "complete checkout",
-the schema MUST require a grounded order/confirmation identifier proving that the item was actually acquired
-(for example, an order id, confirmation id, receipt number, or purchase confirmation number).
+the schema MUST require grounded provider-native purchase completion evidence proving that the item was actually
+acquired. Accept a labeled order/confirmation/receipt identifier when the provider displays one, OR an explicit
+provider confirmation/status page showing that the purchase was placed or completed. Do not require a specific
+identifier unless the user explicitly asks for that identifier.
 Selecting a product URL, adding an item to cart, or reaching checkout is not enough to verify a purchase goal.
 
 # YOUR JOB
@@ -625,21 +627,60 @@ def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool
     return False
 
 
+def _goal_explicitly_requests_purchase_confirmation_identifier(goal: str) -> bool:
+    normalized = " ".join(goal.lower().replace("_", " ").replace("-", " ").split())
+    return any(
+        phrase in normalized
+        for phrase in (
+            "order id",
+            "order number",
+            "confirmation id",
+            "confirmation number",
+            "receipt id",
+            "receipt number",
+            "purchase confirmation id",
+            "purchase confirmation number",
+        )
+    )
+
+
+def _is_purchase_confirmation_identifier_field(field: Dict[str, Any]) -> bool:
+    return _schema_has_purchase_confirmation_identifier({"fields": [field]})
+
+
 def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure goal-critical fields are present when the model under-specifies a schema."""
-    if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
+    if not _is_purchase_goal(goal):
         return schema
 
-    normalized = {"fields": list(schema.get("fields", []))}
-    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
-
-    if "order_confirmation_id" not in field_names:
+    normalized = {**schema, "fields": list(schema.get("fields", []))}
+    if _goal_explicitly_requests_purchase_confirmation_identifier(goal):
+        if _schema_has_purchase_confirmation_identifier(normalized):
+            return normalized
         normalized["fields"].append(
             {
                 "name": "order_confirmation_id",
                 "type": "str",
                 "required": True,
-                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
+                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number explicitly requested by the user.",
+            }
+        )
+        return normalized
+
+    normalized["fields"] = [
+        field
+        for field in normalized["fields"]
+        if not _is_purchase_confirmation_identifier_field(field)
+    ]
+    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
+
+    if "purchase_completion_evidence" not in field_names:
+        normalized["fields"].append(
+            {
+                "name": "purchase_completion_evidence",
+                "type": "str",
+                "required": True,
+                "description": "Grounded provider-native proof that the purchase was placed or completed: a labeled order, confirmation, or receipt identifier when displayed, or explicit confirmation/status-page evidence when no identifier is displayed.",
             }
         )
 

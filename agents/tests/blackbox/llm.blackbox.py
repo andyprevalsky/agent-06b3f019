@@ -658,30 +658,63 @@ def test_build_verifier_response_model_requires_nested_object_properties():
     assert raised
 
 
-def test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier():
-    """Purchase goals cannot be satisfied by product selection or checkout fields alone."""
-    from helpers.llm import _normalize_response_schema_for_goal
+def test_normalize_response_schema_for_generic_purchase_accepts_provider_native_completion_evidence():
+    """Generic purchase goals must not require an identifier the provider may not display."""
+    from helpers.llm import _RESPONSE_SCHEMA_SYSTEM_PROMPT, _normalize_response_schema_for_goal
 
-    schema = {
+    goal = (
+        "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San "
+        "Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 "
+        "before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, "
+        "multi-pack, or cable with a permanently attached wall charger. Complete checkout."
+    )
+    generated_schema = {
         "fields": [
-            {"name": "selected_beanie_url", "type": "str", "required": True},
-            {"name": "selected_beanie_price_usd", "type": "float", "required": True},
+            {"name": "doordash_order_confirmation_id", "type": "str", "required": True},
+            {
+                "name": "purchased_usb_c_cable",
+                "type": "object",
+                "required": True,
+                "properties": [
+                    {"name": "brand", "type": "str"},
+                    {"name": "length_feet", "type": "float"},
+                    {"name": "wattage", "type": "int"},
+                    {"name": "item_price_usd", "type": "float"},
+                ],
+            },
+            {"name": "scheduled_delivery_time", "type": "str", "required": True},
         ]
     }
 
-    result = _normalize_response_schema_for_goal(
-        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made.",
-        schema,
-    )
+    result = _normalize_response_schema_for_goal(goal, generated_schema)
 
     field_names = [field["name"] for field in result["fields"]]
     assert field_names == [
-        "selected_beanie_url",
-        "selected_beanie_price_usd",
+        "purchased_usb_c_cable",
+        "scheduled_delivery_time",
+        "purchase_completion_evidence",
+    ]
+    proof = result["fields"][-1]
+    assert proof["required"] is True
+    assert "provider-native" in proof["description"]
+    assert "confirmation" in proof["description"]
+    assert "MUST require a grounded order/confirmation identifier" not in _RESPONSE_SCHEMA_SYSTEM_PROMPT
+    assert "provider-native purchase completion evidence" in _RESPONSE_SCHEMA_SYSTEM_PROMPT
+
+
+def test_normalize_response_schema_preserves_explicit_confirmation_identifier_request():
+    """An identifier remains required when the user explicitly requests it."""
+    from helpers.llm import _normalize_response_schema_for_goal
+
+    result = _normalize_response_schema_for_goal(
+        "Purchase the selected cable and return the order confirmation ID.",
+        {"fields": [{"name": "purchased_cable", "type": "str", "required": True}]},
+    )
+
+    assert [field["name"] for field in result["fields"]] == [
+        "purchased_cable",
         "order_confirmation_id",
     ]
-    assert result["fields"][-1]["required"] is True
-    assert "confirmation id" in result["fields"][-1]["description"]
 
 
 async def test_fetch_claude_max_token_activity():
@@ -6304,8 +6337,12 @@ async def run_all_tests():
         test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
     r.record(
-        "normalize_response_schema_purchase_confirmation_identifier",
-        test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier,
+        "normalize_response_schema_generic_purchase_completion_evidence",
+        test_normalize_response_schema_for_generic_purchase_accepts_provider_native_completion_evidence,
+    )
+    r.record(
+        "normalize_response_schema_explicit_confirmation_identifier",
+        test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
     )
     await r.record_async("stream_no_json_content_raises", test_call_llm_structured_streaming_no_json_content_raises)
     await r.record_async("check_progress_empty_context", test_check_progress_empty_context_runs_verifier)

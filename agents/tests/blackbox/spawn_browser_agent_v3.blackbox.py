@@ -347,6 +347,13 @@ async def test_browser_verifier_context_grounds_in_final_state():
                     "url": "https://shop.example/checkout",
                     "title": "Review order",
                     "dom_tree": "<main>Cart checkout; Item price: $42.00</main>",
+                    "kind": "pre_write",
+                },
+                {
+                    "url": "https://shop.example/item",
+                    "title": "Item details",
+                    "dom_tree": "<main>Six-foot cable; supports 100 watts</main>",
+                    "kind": "preserved_evidence",
                 }
             ],
         )
@@ -360,10 +367,50 @@ async def test_browser_verifier_context_grounds_in_final_state():
     assert "FINAL STATE" in ctx[0]["text"]
     assert "PRE-WRITE CHECKPOINTS" in ctx[0]["text"]
     assert "Cart checkout; Item price: $42.00" in ctx[0]["text"]
+    assert "PRESERVED PAGE EVIDENCE" in ctx[0]["text"]
+    assert "Six-foot cable; supports 100 watts" in ctx[0]["text"]
     assert "browser ground truth, not an agent claim" in ctx[0]["text"]
     # Final-state screenshot rides through as a multimodal image reference.
     screenshot_msg = next(m for m in ctx if m.get("metadata", {}).get("toolName") == "final_screenshot")
     assert screenshot_msg["metadata"]["screenshot_b64"] == "ZmFrZS1iNjQ="
+
+
+def test_requested_browser_evidence_checkpoint_is_bounded_browser_ground_truth():
+    from domains.spawn_browser_agent_v3.handler import _append_requested_evidence_checkpoint
+
+    checkpoints = [
+        {"url": f"https://shop.example/old-{index}", "title": "Old", "dom_tree": f"old-{index}"}
+        for index in range(3)
+    ]
+    captured = _append_requested_evidence_checkpoint(
+        action={"action": "evaluate", "params": {"code": "document.title", "preserve_evidence": True}},
+        browser_state={
+            "url": "https://shop.example/cable",
+            "title": "Cable details",
+            "dom_tree": "<main>6 feet; 100 watts; USB-C to USB-C</main>",
+        },
+        current_url="https://shop.example/cable",
+        verifier_checkpoints=checkpoints,
+    )
+
+    assert captured is True
+    assert len(checkpoints) == 3
+    assert checkpoints[-1] == {
+        "url": "https://shop.example/cable",
+        "title": "Cable details",
+        "dom_tree": "<main>6 feet; 100 watts; USB-C to USB-C</main>",
+        "kind": "preserved_evidence",
+    }
+
+    assert (
+        _append_requested_evidence_checkpoint(
+            action={"action": "evaluate", "params": {"code": "document.title"}},
+            browser_state={"dom_tree": "not requested"},
+            current_url="https://shop.example/ignored",
+            verifier_checkpoints=checkpoints,
+        )
+        is False
+    )
 
 
 def test_action_history_restores_across_activity_boundary():
@@ -13560,6 +13607,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "browser_verifier_context_grounds_final_state", test_browser_verifier_context_grounds_in_final_state
+    )
+    r.record(
+        "requested_browser_evidence_checkpoint_bounded_ground_truth",
+        test_requested_browser_evidence_checkpoint_is_bounded_browser_ground_truth,
     )
     r.record("action_history_restores_across_activity", test_action_history_restores_across_activity_boundary)
     await r.record_async(

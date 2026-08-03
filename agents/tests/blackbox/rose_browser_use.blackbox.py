@@ -182,6 +182,25 @@ def test_build_browser_use_system_prompt_does_not_advertise_extract():
     assert "tool call" in prompt
 
 
+def test_browser_use_evidence_contract_preserves_load_bearing_page_facts():
+    """The advertised observation path must preserve facts before historical DOM disappears."""
+    evaluate_description = BROWSER_USE_TOOLS["evaluate"]["description"]
+    assert "use `extract`" not in evaluate_description
+    assert "preserve_evidence=true" in evaluate_description
+    assert "browser-extracted DOM" in evaluate_description
+    assert "before navigating away" in evaluate_description
+
+    evaluate_tool = build_browser_use_tools(["evaluate"])[0]
+    preserve_schema = evaluate_tool["input_schema"]["properties"]["preserve_evidence"]
+    assert preserve_schema["type"] == "boolean"
+    assert "verifier" in preserve_schema["description"]
+
+    prompt = build_browser_use_system_prompt([])
+    assert "not arbitrary historical DOM snapshots" in prompt
+    assert "Before navigating away" in prompt
+    assert "preserve_evidence=true" in prompt
+
+
 def test_state_has_indexed_dom_targets_detects_interactive_indices():
     browser_state = {"dom_tree": "[81]<button />\n\tSchedule your order for later"}
 
@@ -1726,6 +1745,10 @@ async def run_all_tests():
     r.record("tool_catalog_completeness", test_browser_use_tool_catalog_completeness)
     r.record("system_prompt_uses_native_tools", test_build_browser_use_system_prompt_uses_native_tools_not_action_list)
     r.record("system_prompt_hides_extract", test_build_browser_use_system_prompt_does_not_advertise_extract)
+    r.record(
+        "browser_evidence_contract_preserves_page_facts",
+        test_browser_use_evidence_contract_preserves_load_bearing_page_facts,
+    )
     r.record("state_has_indexed_dom_targets", test_state_has_indexed_dom_targets_detects_interactive_indices)
     r.record(
         "filter_actions_removes_coordinates_when_indexed",

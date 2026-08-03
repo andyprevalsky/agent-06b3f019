@@ -559,6 +559,8 @@ async def _prepare_pending_write_lock_action(
 def _browser_ground_truth_checkpoint(
     browser_state: Dict[str, Any],
     current_url: str,
+    *,
+    kind: str = "pre_write",
 ) -> Optional[Dict[str, str]]:
     """Keep a browser-extracted DOM snapshot across an approval activity boundary."""
     dom_tree = str(browser_state.get("dom_tree") or "")
@@ -568,7 +570,45 @@ def _browser_ground_truth_checkpoint(
         "url": str(browser_state.get("url") or current_url or ""),
         "title": str(browser_state.get("title") or ""),
         "dom_tree": dom_tree,
+        "kind": kind,
     }
+
+
+def _append_bounded_verifier_checkpoint(
+    verifier_checkpoints: List[Dict[str, Any]],
+    checkpoint: Optional[Dict[str, Any]],
+) -> bool:
+    """Append distinct browser ground truth while enforcing the verifier payload cap."""
+    if not checkpoint:
+        return False
+    appended = not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
+    if appended:
+        verifier_checkpoints.append(checkpoint)
+    verifier_checkpoints[:] = verifier_checkpoints[-3:]
+    return appended
+
+
+def _append_requested_evidence_checkpoint(
+    *,
+    action: Dict[str, Any],
+    browser_state: Dict[str, Any],
+    current_url: str,
+    verifier_checkpoints: List[Dict[str, Any]],
+) -> bool:
+    """Retain bounded browser ground truth when evaluate explicitly requests it."""
+    params = action.get("params") if isinstance(action, dict) else None
+    if action.get("action") != "evaluate" or not isinstance(params, dict) or not params.get("preserve_evidence"):
+        return False
+
+    checkpoint = _browser_ground_truth_checkpoint(
+        browser_state,
+        current_url,
+        kind="preserved_evidence",
+    )
+    if not checkpoint:
+        return False
+    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
+    return True
 
 
 def _browser_resume_continuity_state(
@@ -6050,6 +6090,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
 
+            _append_requested_evidence_checkpoint(
+                action=unified_action,
+                browser_state=browser_state,
+                current_url=current_url,
+                verifier_checkpoints=verifier_checkpoints,
+            )
+
             if thinking:
                 reasoning_messages.append(thinking)
                 await save_browser_assistant_message(
@@ -7064,8 +7111,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
-                    verifier_checkpoints.append(checkpoint)
+                _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:
                     try:
@@ -7182,8 +7228,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
-                    verifier_checkpoints.append(checkpoint)
+                _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:
                     try:

@@ -369,19 +369,38 @@ async def build_browser_verifier_context(
     else:
         files_text += "  (no files downloaded)\n"
 
-    checkpoint_sections = []
-    for checkpoint_number, checkpoint in enumerate(browser_checkpoints or [], 1):
+    pre_write_checkpoint_sections = []
+    preserved_evidence_sections = []
+    pre_write_number = 0
+    preserved_number = 0
+    for checkpoint in browser_checkpoints or []:
         if not isinstance(checkpoint, dict):
             continue
         checkpoint_dom = str(checkpoint.get("dom_tree") or "")
         if not checkpoint_dom:
             continue
-        checkpoint_sections.append(
+        kind = str(checkpoint.get("kind") or "pre_write")
+        if kind == "preserved_evidence":
+            preserved_number += 1
+            section_title = f"### Preserved page evidence {preserved_number}"
+            section_description = (
+                "This snapshot was extracted directly from the browser when the acting agent requested bounded "
+                "evidence retention; it is browser ground truth, not an agent claim."
+            )
+            destination = preserved_evidence_sections
+        else:
+            pre_write_number += 1
+            section_title = f"### Pre-write checkpoint {pre_write_number}"
+            section_description = (
+                "This snapshot was extracted directly from the browser before an irreversible action; "
+                "it is browser ground truth, not an agent claim."
+            )
+            destination = pre_write_checkpoint_sections
+        destination.append(
             "\n\n".join(
                 [
-                    f"### Pre-write checkpoint {checkpoint_number}",
-                    "This snapshot was extracted directly from the browser before an irreversible action; "
-                    "it is browser ground truth, not an agent claim.",
+                    section_title,
+                    section_description,
                     f"URL: {checkpoint.get('url') or 'Unknown'}",
                     f"Title: {checkpoint.get('title') or 'Unknown'}",
                     "DOM Tree:\n" + checkpoint_dom,
@@ -390,10 +409,15 @@ async def build_browser_verifier_context(
         )
 
     checkpoints_text = ""
-    if checkpoint_sections:
+    if pre_write_checkpoint_sections:
         checkpoints_text = (
             "\n\n## Browser Ground Truth (PRE-WRITE CHECKPOINTS)\n"
-            + "\n\n".join(checkpoint_sections)
+            + "\n\n".join(pre_write_checkpoint_sections)
+        )
+    if preserved_evidence_sections:
+        checkpoints_text += (
+            "\n\n## Browser Ground Truth (PRESERVED PAGE EVIDENCE)\n"
+            + "\n\n".join(preserved_evidence_sections)
         )
 
     user_prompt = (

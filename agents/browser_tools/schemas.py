@@ -153,6 +153,13 @@ class EvaluateTool(BaseModel):
 
     tool: Literal["evaluate"]
     code: str = Field(description="JavaScript code to execute. Returns the result of the expression.")
+    preserve_evidence: bool = Field(
+        default=False,
+        description=(
+            "Set true before leaving a page whose visible facts are required by the goal. The verifier will retain "
+            "a bounded browser-extracted DOM snapshot from the current page as grounded evidence."
+        ),
+    )
 
 
 # ============================================================================
