@@ -57,11 +57,16 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+# Payment lifecycle tasks must exercise the regular Stripe-backed purchase path. The default Rose
+# benchmark identity is a production admin and intentionally receives a company-funded card with no
+# personal Stripe hold, so use an isolated non-admin fixture for these settlement benchmarks.
+AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
 
@@ -735,6 +740,10 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        os.environ.setdefault(
+            AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+            AGENT_PAYMENT_BENCHMARK_USER_ID,
+        )
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
@@ -757,7 +766,10 @@ def seed_payment_fixture(manifest: dict) -> None:
             "tsx",
             "scripts/setup-benchmark-payment.ts",
             "--user-id",
-            os.environ.get("BENCHMARK_USER_ID", BENCHMARK_USER_ID),
+            os.environ.get(
+                AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+                AGENT_PAYMENT_BENCHMARK_USER_ID,
+            ),
         ],
         cwd=REPO_ROOT / "back-end",
         env=env,
