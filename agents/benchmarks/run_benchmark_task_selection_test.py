@@ -50,6 +50,7 @@ def test_agent_payment_tasks_use_a_dedicated_non_admin_user():
 
 def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch):
     monkeypatch.delenv("BENCHMARK_AGENT_PAYMENT_USER_ID", raising=False)
+    monkeypatch.delenv("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", raising=False)
     local_runner.configure_task_environment(["agent-payment-test-shop"])
 
     assert (
@@ -59,6 +60,10 @@ def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch)
     assert (
         local_runner.os.environ[local_runner.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV]
         == local_runner.AGENT_PAYMENT_BENCHMARK_USER_ID
+    )
+    assert (
+        local_runner.os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"]
+        == "1"
     )
 
     calls = []
@@ -88,6 +93,8 @@ def test_payment_fixture_guards_identity_and_funds_non_admin_credit():
     assert "if (isAdminUser(userId))" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "pg_advisory_xact_lock" in fixture
+    assert "WITH acquired AS MATERIALIZED" in fixture
+    assert "SELECT 1 AS locked FROM acquired" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert (
         "export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = "

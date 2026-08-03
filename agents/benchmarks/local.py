@@ -740,6 +740,10 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
+        # token pool-eligible only inside the isolated benchmark DB; never copy its Integration row
+        # into the synthetic user's account.
+        os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"] = "1"
         os.environ.setdefault(
             AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
             AGENT_PAYMENT_BENCHMARK_USER_ID,

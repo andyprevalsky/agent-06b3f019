@@ -98,9 +98,16 @@ function assertDedicatedBenchmarkUser(userId: string): void {
 async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
   await prisma.$transaction(
     async (tx) => {
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(
-        hashtext(${`benchmark-payment-credit:${userId}`})::bigint
-      )`;
+      // Prisma cannot deserialize PostgreSQL's `void` return type, so materialize the lock call
+      // and project a supported scalar instead of selecting pg_advisory_xact_lock directly.
+      await tx.$queryRaw`
+        WITH acquired AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtext(${`benchmark-payment-credit:${userId}`})::bigint
+          )
+        )
+        SELECT 1 AS locked FROM acquired
+      `;
       const now = new Date();
       const [creditTotal, usageTotal] = await Promise.all([
         tx.credit.aggregate({

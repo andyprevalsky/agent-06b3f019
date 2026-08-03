@@ -4649,6 +4649,55 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
     return True
 
 
+def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
+    """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
+
+    The shared workspace copy can still look connected after OpenAI has
+    invalidated its access token. Local Codex owns the freshest renewable auth
+    envelope, so GPT-only local benchmark lanes must replace the copied row
+    before agents start. The row stays owned by the dev user and is made
+    pool-eligible only inside the isolated benchmark database.
+    """
+    if sys.platform != "darwin":
+        return False
+    auth_path = Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+    if not auth_path.is_file():
+        print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
+        return False
+    decryption_key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", _BACKEND_ENV)
+    if not decryption_key:
+        print("    ⚠ Local Codex refresh skipped: credential encryption key unavailable")
+        return False
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] = decryption_key
+    env["CODEX_AUTH_PATH"] = str(auth_path)
+    env["CODEX_TOKEN_POOLING_ENABLED"] = "true"
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/sync-codex-token.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "    ⚠ Local Codex refresh timed out "
+            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        )
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Local Codex refresh error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Local Codex refresh unavailable: {_seed_sync_error_detail(result)}")
+        return False
+    print("    🔑 Refreshed GPT credentials from local Codex auth")
+    return True
+
+
 def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
@@ -4821,6 +4870,9 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     if _anthropic_family_excluded():
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
+        database_url = _local_victoria_database_url()
+        if not database_url or not _refresh_local_gpt_token_from_codex_auth(database_url):
+            raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.

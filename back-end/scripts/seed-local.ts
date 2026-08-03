@@ -84,6 +84,8 @@ const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
   process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES
 );
+const POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS =
+  process.env.SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS === '1';
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -121,12 +123,10 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) =>
-      remote.localStorageOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
     indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) =>
-      remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
@@ -210,6 +210,33 @@ async function syncIntegrations(): Promise<number> {
     console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
   }
   return syncedIds.length;
+}
+
+/**
+ * Synthetic benchmark users must not receive copies of the developer's credential rows. For
+ * isolated benchmark databases only, this explicit opt-in exposes the already-synced dev-owned
+ * provider through the normal compute pool instead. Ownership and encrypted configuration stay
+ * on the original Integration row; only its local pool eligibility changes.
+ */
+async function poolRequiredDevComputeTokensForSyntheticUsers(): Promise<number> {
+  if (!POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS) return 0;
+
+  const requiredNames = [...COMPUTE_TOKEN_REQUIRED_TYPES].map((type) =>
+    type === 'claude' ? 'claude_code' : 'gpt_code'
+  );
+  const result = await local.integration.updateMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: requiredNames },
+      status: 'CONNECTED',
+    },
+    data: { poolingEnabled: true },
+  });
+  console.log(
+    `  🧪 Compute Tokens (integrations): ${result.count} dev-owned row(s) made pool-eligible ` +
+      'inside the isolated synthetic-user benchmark database'
+  );
+  return result.count;
 }
 
 // Browser auth sync shared by full sync and --credentials-only. Natural-keyed
@@ -490,6 +517,7 @@ async function syncComputeTokensWithRetries(): Promise<void> {
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
       const count = await syncIntegrations();
+      await poolRequiredDevComputeTokensForSyntheticUsers();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
