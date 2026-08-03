@@ -198,16 +198,27 @@ read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
-if PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" python3 - "${BENCH_TASK_LIST[@]}" <<'PY'
+if ! BENCH_NEEDS_SOURCE_CONNECT="$(
+    PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" python3 - "${BENCH_TASK_LIST[@]}" <<'PY'
 import sys
 
 from benchmarks.benchmark_tasks import selected_tasks_require_gate_type
 
-raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 1)
+print("1" if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else "0")
 PY
+    )"
 then
-    TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+    echo "[cloudbench] FATAL: failed to resolve benchmark task gate requirements" >&2
+    exit 1
 fi
+case "$BENCH_NEEDS_SOURCE_CONNECT" in
+    1) TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1") ;;
+    0) ;;
+    *)
+        echo "[cloudbench] FATAL: invalid source-connect gate resolution: $BENCH_NEEDS_SOURCE_CONNECT" >&2
+        exit 1
+        ;;
+esac
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
