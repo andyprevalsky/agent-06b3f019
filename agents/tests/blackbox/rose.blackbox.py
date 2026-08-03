@@ -179,6 +179,7 @@ def test_pool_registry_lookup():
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    assert ultra.waterfall[-1] == "openai/gpt-5.6-sol"
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
     assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
     assert lite.waterfall != ultra.waterfall
@@ -2840,6 +2841,41 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
     assert any(c.kind == "content" for c in chunks)
 
 
+async def test_ultra_structured_output_falls_through_gemini_invalid_request():
+    """The ultra pool retains a structured-output-capable fallback after Gemini 400s."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": '{"ok":true}'}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    models_seen: list[str] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        models_seen.append(body["model"])
+        if body["model"] == "google/gemini-3.1-pro-preview":
+            return httpx.Response(400, text="invalid structured-output argument")
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+            openrouter_key="ork-test",
+            request_id="r-ultra-structured-fallback",
+            exclude_anthropic_family=True,
+        )
+    )
+
+    assert models_seen == ["google/gemini-3.1-pro-preview", "openai/gpt-5.6-sol"]
+    assert any(c.kind == "content" for c in chunks)
+
+
 async def test_waterfall_all_failed_raises_with_step_errors():
     def handler(req):
         return httpx.Response(503, text="upstream down")
@@ -5408,6 +5444,10 @@ async def run_all_tests():
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
     await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
+    await r.record_async(
+        "ultra_structured_output_falls_through_gemini_invalid_request",
+        test_ultra_structured_output_falls_through_gemini_invalid_request,
+    )
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 

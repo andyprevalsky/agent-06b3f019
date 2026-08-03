@@ -19,6 +19,7 @@ Model contract (P1):
         claudeAuth = claude-fable-5
         gptAuth    = gpt-5.6-sol
         waterfall  = anthropic/claude-opus-4.8 -> google/gemini-3.1-pro-preview
+                     -> openai/gpt-5.6-sol
 
     rose-1-browser-use:
         claudeAuth = claude-fable-5
@@ -81,6 +82,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         waterfall=(
             "anthropic/claude-opus-4.8",
             "google/gemini-3.1-pro-preview",
+            "openai/gpt-5.6-sol",
         ),
     ),
     # Browser-use shares the claudeAuth + waterfall machinery; the only

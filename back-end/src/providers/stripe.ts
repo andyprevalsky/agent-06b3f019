@@ -157,10 +157,16 @@ export function getTestPaymentMerchantStripeClient(): Stripe {
     // fallback is observably identical to billing instead of masquerading as a merchant account.
     return stripe;
   }
-  if (!/^(sk|rk)_(test|live)_/.test(resolved.secretKey)) {
+  const requiredKeyPattern =
+    process.env.NODE_ENV === 'production' ? /^(sk|rk)_live_/ : /^(sk|rk)_(test|live)_/;
+  if (!requiredKeyPattern.test(resolved.secretKey)) {
+    const expected =
+      process.env.NODE_ENV === 'production'
+        ? 'an sk_live_ or rk_live_ value in production'
+        : 'an sk_live_/sk_test_/rk_live_/rk_test_ value';
     throw new Error(
       `${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV} is not a Stripe secret/restricted key ` +
-        '(expected an sk_live_/sk_test_/rk_live_/rk_test_ value)'
+        `(expected ${expected})`
     );
   }
   let client = merchantStripeClients.get(resolved.secretKey);

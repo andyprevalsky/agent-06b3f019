@@ -15,9 +15,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { settleRoseCardStripeCheckout } from '../../providers/agentcard/checkout-settlement';
+import {
+  findHeldPurchasesByTotal,
+  type HeldPurchase,
+} from '../../providers/agentcard/sandbox-settlement';
 import { getTestPaymentMerchantStripeClient, type Stripe } from '../../providers/stripe';
 import { calculateTotals, normalizeLineItems } from './catalog';
-import { TEST_PAYMENT_CHECKOUT_RETURN_URL } from './config';
+import { TEST_PAYMENT_CHECKOUT_RETURN_URL, TEST_PAYMENT_LIVE_LIFECYCLE_QUERY } from './config';
 import { TestPaymentError } from './errors';
 import type { TestPaymentConfirmation, TestPaymentLineItem } from './types';
 
@@ -44,24 +48,65 @@ function merchantStripe(): Stripe {
  * authorized on real card rails. Stripe collects the PAN on its own page, keeping us out of PCI
  * scope entirely.
  */
-export async function createTestPaymentCheckoutSession(input: {
-  items: TestPaymentLineItem[];
-}): Promise<{ sessionId: string; url: string; totalCents: number }> {
-  const lineItems = normalizeLineItems(input.items);
+interface CheckoutSessionDependencies {
+  findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
+}
+
+function checkoutFeeLineItem(name: string, amountCents: number) {
+  return {
+    price_data: {
+      currency: 'usd' as const,
+      unit_amount: amountCents,
+      product_data: { name },
+    },
+    quantity: 1,
+  };
+}
+
+export async function createTestPaymentCheckoutSession(
+  input: { items?: TestPaymentLineItem[] } | null | undefined,
+  dependencies: CheckoutSessionDependencies = {}
+): Promise<{ sessionId: string; url: string; totalCents: number }> {
+  const lineItems = normalizeLineItems(input?.items ?? []);
   const totals = calculateTotals(lineItems);
-  // Acquirer side: the shop's own key, NOT the billing key.
-  const session = await merchantStripe().checkout.sessions.create({
-    mode: 'payment',
-    line_items: lineItems.map((item) => ({
+  const findPurchases = dependencies.findHeldPurchasesByTotal ?? findHeldPurchasesByTotal;
+  const candidates = await findPurchases(totals.totalCents);
+  if (candidates.length !== 1) {
+    throw new TestPaymentError(
+      candidates.length === 0
+        ? 'No held Rose purchase matches this checkout total'
+        : 'Multiple held Rose purchases match this checkout total; refusing an ambiguous charge',
+      409
+    );
+  }
+  const purchase = candidates[0];
+  if (purchase === undefined) {
+    throw new TestPaymentError('No held Rose purchase matches this checkout total', 409);
+  }
+  const stripeLineItems = [
+    ...lineItems.map((item) => ({
       price_data: {
-        currency: 'usd',
+        currency: 'usd' as const,
         unit_amount: item.unitPriceCents,
         product_data: { name: item.name },
       },
       quantity: item.quantity,
     })),
-    success_url: `${TEST_PAYMENT_CHECKOUT_RETURN_URL}/test_payment?checkout_session_id={CHECKOUT_SESSION_ID}`,
-    cancel_url: `${TEST_PAYMENT_CHECKOUT_RETURN_URL}/test_payment?checkout=cancelled`,
+    ...(totals.taxCents > 0 ? [checkoutFeeLineItem('Tax', totals.taxCents)] : []),
+    ...(totals.shippingCents > 0 ? [checkoutFeeLineItem('Shipping', totals.shippingCents)] : []),
+  ];
+  // Acquirer side: the shop's own key, NOT the billing key.
+  const session = await merchantStripe().checkout.sessions.create({
+    mode: 'payment',
+    line_items: stripeLineItems,
+    client_reference_id: purchase.id,
+    metadata: { purchaseId: purchase.id },
+    success_url:
+      `${TEST_PAYMENT_CHECKOUT_RETURN_URL}/test_payment?` +
+      `benchmark=${TEST_PAYMENT_LIVE_LIFECYCLE_QUERY}&checkout_session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url:
+      `${TEST_PAYMENT_CHECKOUT_RETURN_URL}/test_payment?` +
+      `benchmark=${TEST_PAYMENT_LIVE_LIFECYCLE_QUERY}&checkout=cancelled`,
     billing_address_collection: 'auto',
   });
   if (session.url === null || session.url === '') {
@@ -105,8 +150,20 @@ export async function settleTestPaymentCheckoutSession(
   }
   const last4 = paymentMethod.card?.last4 ?? '';
   const amountCents = session.amount_total ?? 0;
+  const clientReferenceId = session.client_reference_id?.trim() ?? '';
+  const metadataPurchaseId = session.metadata?.purchaseId?.trim() ?? '';
+  if (clientReferenceId === '' || metadataPurchaseId === '') {
+    throw new TestPaymentError('Checkout session has no Rose purchase reference', 502);
+  }
+  if (clientReferenceId !== metadataPurchaseId) {
+    throw new TestPaymentError('Checkout session purchase references do not match', 502);
+  }
 
-  const settlement = await settleRoseCardStripeCheckout({ last4, amountCents });
+  const settlement = await settleRoseCardStripeCheckout({
+    purchaseId: clientReferenceId,
+    last4,
+    amountCents,
+  });
   return {
     orderId: `tp_${randomUUID().slice(0, 8)}`,
     status: 'succeeded',

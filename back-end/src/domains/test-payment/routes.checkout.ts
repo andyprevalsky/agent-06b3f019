@@ -25,9 +25,11 @@ checkoutRouter.post(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     try {
-      res.json(
-        await createTestPaymentCheckoutSession(req.body as { items: TestPaymentLineItem[] })
-      );
+      const body =
+        typeof req.body === 'object' && req.body !== null && !Array.isArray(req.body)
+          ? (req.body as { items?: TestPaymentLineItem[] })
+          : null;
+      res.json(await createTestPaymentCheckoutSession(body));
     } catch (error) {
       if (error instanceof TestPaymentError) {
         res.status(error.statusCode).json({ error: error.message });
@@ -43,7 +45,10 @@ checkoutRouter.post(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
     try {
-      const body = req.body as Record<string, unknown>;
+      const body =
+        typeof req.body === 'object' && req.body !== null && !Array.isArray(req.body)
+          ? (req.body as Record<string, unknown>)
+          : {};
       const sessionId = typeof body.checkoutSessionId === 'string' ? body.checkoutSessionId : '';
       res.json(await settleTestPaymentCheckoutSession(sessionId));
     } catch (error) {

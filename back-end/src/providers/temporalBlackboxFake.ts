@@ -72,6 +72,16 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
       },
       async terminate() {
         const execution = getExecution(workflowId);
+        if (
+          firstExecutionRunId !== undefined &&
+          execution.firstExecutionRunId !== firstExecutionRunId
+        ) {
+          throw new WorkflowNotFoundError(
+            `Workflow execution ${workflowId}/${firstExecutionRunId} was not found`,
+            workflowId,
+            firstExecutionRunId
+          );
+        }
         execution.status = 'TERMINATED';
       },
     };

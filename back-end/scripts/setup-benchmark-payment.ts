@@ -325,8 +325,10 @@ async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promi
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
   const customerId = await ensureLiveBillingCustomer(stripe, prisma, userId);
-  const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
+  // Persist the customer before asking for a card. The first cardless run intentionally throws a
+  // hosted setup URL; saving first makes the next run reuse the customer that URL attached to.
   await upsertBenchmarkSubscription(prisma, userId, customerId);
+  const paymentMethodId = await ensureLiveDefaultPaymentMethod(stripe, customerId);
   await seedAgentCardConnection(prisma, userId, cardholderId);
   console.log(
     `Provisioned the production payment-lifecycle identity ${userId}: live customer ${customerId} ` +

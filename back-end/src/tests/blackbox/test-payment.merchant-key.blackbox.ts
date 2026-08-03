@@ -69,13 +69,20 @@ const FAKE_MERCHANT_KEY = 'sk_test_merchant_blackbox_never_dialed';
 
 function withMerchantKey<T>(key: string | undefined, fn: () => T): T {
   const previous = process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
+  const restore = () => {
+    if (previous === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
+    else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = previous;
+  };
   if (key === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
   else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = key;
   try {
-    return fn();
-  } finally {
-    if (previous === undefined) delete process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV];
-    else process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV] = previous;
+    const result = fn();
+    if (result instanceof Promise) return result.finally(restore) as T;
+    restore();
+    return result;
+  } catch (error) {
+    restore();
+    throw error;
   }
 }
 
@@ -91,6 +98,7 @@ function checkoutSessions(client: Stripe): CheckoutSessionsResource {
 interface StubbedCall {
   client: 'merchant' | 'billing';
   op: 'create' | 'retrieve';
+  params?: unknown;
 }
 
 /**
@@ -115,8 +123,8 @@ async function withBothCheckoutClientsStubbed<T>(
   }));
 
   for (const { label, resource } of targets) {
-    resource.create = async () => {
-      calls.push({ client: label, op: 'create' });
+    resource.create = async (params) => {
+      calls.push({ client: label, op: 'create', params });
       return { id: session.id, url: session.url };
     };
     resource.retrieve = async () => {
@@ -211,6 +219,30 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'production rejects a test-mode merchant key before constructing a client',
+    async () => {
+      const previousNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+      try {
+        let failure: unknown;
+        try {
+          withMerchantKey(FAKE_MERCHANT_KEY, getTestPaymentMerchantStripeClient);
+        } catch (error) {
+          failure = error;
+        }
+        assert(
+          failure instanceof Error &&
+            failure.message.includes(TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV) &&
+            failure.message.includes('sk_live_'),
+          `production must fail closed with an actionable live-key error, got ${String(failure)}`
+        );
+      } finally {
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
+      }
+    },
+  ],
+  [
     'the dev fallback returns the billing singleton and warns loudly',
     async () => {
       const written: string[] = [];
@@ -254,12 +286,96 @@ const tests: Array<[string, () => Promise<void>]> = [
             retrieved: {},
           },
           async (calls) => {
-            const created = await createTestPaymentCheckoutSession({ items: CHECKOUT_ITEMS });
+            const created = await createTestPaymentCheckoutSession(
+              { items: CHECKOUT_ITEMS },
+              {
+                findHeldPurchasesByTotal: async (amountCents) => [
+                  {
+                    id: 'purchase-correlated',
+                    userId: 'user-1',
+                    agentId: 'agent-1',
+                    cardId: 'card-1',
+                    stripePaymentIntentId: 'pi_hold_1',
+                    ...(amountCents === 4396 ? {} : { id: 'wrong-total' }),
+                  },
+                ],
+              }
+            );
             assert(created.sessionId === 'cs_test_merchant', 'returned the created session');
+            assert(created.totalCents === 4396, 'returns the full subtotal + tax + shipping total');
             assert(
               calls.length === 1 && calls[0].client === 'merchant' && calls[0].op === 'create',
               `checkout must be created on the merchant client, got ${JSON.stringify(calls)}`
             );
+            const params = calls[0]?.params as {
+              client_reference_id?: string;
+              metadata?: { purchaseId?: string };
+              success_url?: string;
+              line_items?: Array<{ price_data?: { unit_amount?: number }; quantity?: number }>;
+            };
+            assert(
+              params.client_reference_id === 'purchase-correlated' &&
+                params.metadata?.purchaseId === 'purchase-correlated',
+              'the exact Rose purchase id must travel through both Stripe correlation fields'
+            );
+            assert(
+              params.success_url?.includes('benchmark=agentcard-live-lifecycle') === true,
+              'Stripe must return to the production-enabled lifecycle page before settlement'
+            );
+            const stripeTotal = (params.line_items ?? []).reduce(
+              (sum, item) => sum + (item.price_data?.unit_amount ?? 0) * (item.quantity ?? 0),
+              0
+            );
+            assert(
+              stripeTotal === created.totalCents,
+              `Stripe must capture the displayed full total; got ${stripeTotal} vs ${created.totalCents}`
+            );
+          }
+        );
+      });
+    },
+  ],
+  [
+    'the one-item production lifecycle cart creates an exact one-dollar correlated session',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_lifecycle',
+            url: 'https://checkout.stripe.com/c/pay/cs_test_lifecycle',
+            retrieved: {},
+          },
+          async (calls) => {
+            const created = await createTestPaymentCheckoutSession(
+              { items: [{ id: 'agentcard-lifecycle-probe', quantity: 1 }] },
+              {
+                findHeldPurchasesByTotal: async () => [
+                  {
+                    id: 'purchase-live-probe',
+                    userId: 'user-1',
+                    agentId: 'agent-1',
+                    cardId: 'card-live',
+                    stripePaymentIntentId: 'pi_hold_live',
+                  },
+                ],
+              }
+            );
+            assert(created.totalCents === 100, 'the lifecycle probe stays exactly $1.00');
+            const params = calls[0]?.params as {
+              client_reference_id?: string;
+              line_items?: Array<{ price_data?: { unit_amount?: number }; quantity?: number }>;
+            };
+            assert(
+              params.client_reference_id === 'purchase-live-probe',
+              'the lifecycle session carries the exact purchase correlation'
+            );
+            const stripeTotal = (params.line_items ?? []).reduce(
+              (sum, item) => sum + (item.price_data?.unit_amount ?? 0) * (item.quantity ?? 0),
+              0
+            );
+            assert(stripeTotal === 100, 'Stripe lifecycle capture must be exactly $1.00');
           }
         );
       });

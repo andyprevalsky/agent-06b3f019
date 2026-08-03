@@ -279,6 +279,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assert(ultra.claudeAuthModel.startsWith('claude-'), 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
+  assertEqual(ultra.waterfall.at(-1), 'openai/gpt-5.6-sol', 'ultra OpenRouter fallback');
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-sol', 'browserUse.gptAuthModel');
   assertEqual(browserUse.waterfall.at(-1), 'openai/gpt-5.6-sol', 'browserUse OpenRouter fallback');

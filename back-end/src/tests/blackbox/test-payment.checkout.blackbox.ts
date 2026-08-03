@@ -47,6 +47,7 @@ function heldPurchase(overrides: Record<string, unknown> = {}) {
     agentId: 'agent-1',
     cardId: 'card-1',
     stripePaymentIntentId: 'pi_hold_1',
+    totalCents: 100,
     ...overrides,
   };
 }
@@ -57,9 +58,9 @@ const tests: Array<[string, () => Promise<void>]> = [
     async () => {
       const cleared: string[] = [];
       const result = await settleRoseCardStripeCheckout(
-        { last4: '2679', amountCents: 100 },
+        { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
         {
-          findHeldPurchasesByTotal: async () => [heldPurchase()],
+          findHeldPurchaseById: async (id) => (id === 'purchase-1' ? heldPurchase() : null),
           getCardLast4: async () => '2679',
           claimHeldPurchaseForCharge: async () => true,
           markPurchaseCleared: async (id) => {
@@ -79,9 +80,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       const cleared: string[] = [];
       try {
         await settleRoseCardStripeCheckout(
-          { last4: '9999', amountCents: 100 },
+          { purchaseId: 'purchase-1', last4: '9999', amountCents: 100 },
           {
-            findHeldPurchasesByTotal: async () => [heldPurchase()],
+            findHeldPurchaseById: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async (id) => {
@@ -103,9 +104,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       const cleared: string[] = [];
       try {
         await settleRoseCardStripeCheckout(
-          { last4: '2679', amountCents: 100 },
+          { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
           {
-            findHeldPurchasesByTotal: async () => [heldPurchase()],
+            findHeldPurchaseById: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             // A concurrent settle already flipped HELD -> CHARGING.
             claimHeldPurchaseForCharge: async () => false,
@@ -122,28 +123,55 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'skips an unresolvable candidate instead of failing the whole settlement',
+    'never scans same-value purchases when the correlated purchase is missing',
     async () => {
       const cleared: string[] = [];
-      const result = await settleRoseCardStripeCheckout(
-        { last4: '2679', amountCents: 100 },
-        {
-          findHeldPurchasesByTotal: async () => [
-            heldPurchase({ id: 'stale', cardId: 'gone' }),
-            heldPurchase(),
-          ],
-          getCardLast4: async (_userId, _agentId, cardId) => {
-            if (cardId === 'gone') throw new Error('card no longer resolves');
-            return '2679';
-          },
-          claimHeldPurchaseForCharge: async () => true,
-          markPurchaseCleared: async (id) => {
-            cleared.push(id);
-          },
-        }
-      );
-      assert(result.purchaseId === 'purchase-1', 'scanned past the stale candidate');
-      assert(cleared[0] === 'purchase-1', 'cleared only the real match');
+      let requestedId = '';
+      let threw = false;
+      try {
+        await settleRoseCardStripeCheckout(
+          { purchaseId: 'missing-purchase', last4: '2679', amountCents: 100 },
+          {
+            findHeldPurchaseById: async (id) => {
+              requestedId = id;
+              return null;
+            },
+            getCardLast4: async () => '2679',
+            claimHeldPurchaseForCharge: async () => true,
+            markPurchaseCleared: async (id) => {
+              cleared.push(id);
+            },
+          }
+        );
+      } catch {
+        threw = true;
+      }
+      assert(threw, 'a missing correlated purchase must fail closed');
+      assert(requestedId === 'missing-purchase', 'looked up only the Stripe-correlated purchase');
+      assert(cleared.length === 0, 'must not fall through to an equal-value purchase');
+    },
+  ],
+  [
+    'rejects a captured amount that differs from the correlated purchase',
+    async () => {
+      let readCard = false;
+      let threw = false;
+      try {
+        await settleRoseCardStripeCheckout(
+          { purchaseId: 'purchase-1', last4: '2679', amountCents: 99 },
+          {
+            findHeldPurchaseById: async () => heldPurchase(),
+            getCardLast4: async () => {
+              readCard = true;
+              return '2679';
+            },
+          }
+        );
+      } catch {
+        threw = true;
+      }
+      assert(threw, 'amount mismatch must not settle');
+      assert(!readCard, 'amount validation must happen before provider card access');
     },
   ],
   [
@@ -152,9 +180,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       let threw = false;
       try {
         await settleRoseCardStripeCheckout(
-          { last4: '2679', amountCents: 100 },
+          { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
           {
-            findHeldPurchasesByTotal: async () => [heldPurchase({ stripePaymentIntentId: null })],
+            findHeldPurchaseById: async () => heldPurchase({ stripePaymentIntentId: null }),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async () => undefined,
@@ -172,9 +200,9 @@ const tests: Array<[string, () => Promise<void>]> = [
       let threw = false;
       try {
         await settleRoseCardStripeCheckout(
-          { last4: '', amountCents: 100 },
+          { purchaseId: 'purchase-1', last4: '', amountCents: 100 },
           {
-            findHeldPurchasesByTotal: async () => [heldPurchase()],
+            findHeldPurchaseById: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async () => undefined,

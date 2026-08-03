@@ -9,6 +9,8 @@ export const TEST_PAYMENT_PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? '')
   .trim()
   .replace(/\/$/, '');
 
+export const TEST_PAYMENT_LIVE_LIFECYCLE_QUERY = 'agentcard-live-lifecycle';
+
 /**
  * The single JWT-authenticated end user permitted to reach the production
  * benchmark lifecycle routes. Fails closed: when BENCHMARK_USER_ID is unset or

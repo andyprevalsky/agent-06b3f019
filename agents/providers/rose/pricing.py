@@ -96,7 +96,11 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
 # Pool waterfall composition — must stay in sync with pools.py.
 _POOL_WATERFALLS: Dict[str, tuple[str, ...]] = {
     "rose-1-lite":         ("google/gemini-3.5-flash", "moonshotai/kimi-k2.7-code"),
-    "rose-1-ultra":        ("anthropic/claude-opus-4.8", "google/gemini-3.1-pro-preview"),
+    "rose-1-ultra":        (
+        "anthropic/claude-opus-4.8",
+        "google/gemini-3.1-pro-preview",
+        "openai/gpt-5.6-sol",
+    ),
     "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.6-sol"),
 }
 

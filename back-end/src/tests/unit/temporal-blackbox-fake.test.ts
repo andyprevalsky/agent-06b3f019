@@ -117,6 +117,15 @@ async function main(): Promise<void> {
     workflowIdConflictPolicy: 'TERMINATE_EXISTING',
   });
   assert.notEqual(replaced.firstExecutionRunId, duplicate.firstExecutionRunId);
+  await assert.rejects(
+    () => duplicate.terminate('stale handle must not close replacement'),
+    WorkflowNotFoundError
+  );
+  assert.equal(
+    (await replaced.describe()).status.name,
+    'RUNNING',
+    'a stale run-scoped handle must leave the replacement running'
+  );
   await client.workflow.getHandle('duplicate').terminate('close replacement');
   await assert.rejects(
     () =>
