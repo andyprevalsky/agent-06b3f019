@@ -4269,6 +4269,47 @@ async def test_client_rotation_preserves_native_tool_contract_across_provider_ty
     assert captured_gpt_request["tool_choice"] == "any"
 
 
+async def test_client_waterfall_preserves_native_agent_action_tools():
+    """OpenRouter must not receive AgentAction as an incompatible strict schema."""
+    AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
+    captured_waterfall_request = {}
+
+    async def successful_waterfall(**kwargs):
+        captured_waterfall_request.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-5.6-sol"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": "{}", "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    with (
+        patch("providers.rose.client._openai_api_key", return_value=""),
+        patch("providers.rose.client.waterfall_complete", successful_waterfall),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "Finish the task"}],
+                response_model=AgentAction,
+                call_site="execute_loop",
+                _exclude_anthropic_family=True,
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured_waterfall_request["response_format"] is None
+    assert {tool["name"] for tool in captured_waterfall_request["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+    assert captured_waterfall_request["tool_choice"] == "any"
+
+
 async def test_client_splits_pydantic_model_to_claude_native_tools():
     AgentAction = create_agent_action_model(["wait_for", "attempt_completion"])
 
@@ -5531,6 +5572,10 @@ async def run_all_tests():
     await r.record_async(
         "client_rotation_preserves_native_tool_contract",
         test_client_rotation_preserves_native_tool_contract_across_provider_types,
+    )
+    await r.record_async(
+        "client_waterfall_preserves_native_agent_action_tools",
+        test_client_waterfall_preserves_native_agent_action_tools,
     )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(

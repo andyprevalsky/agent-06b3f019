@@ -800,6 +800,21 @@ class RoseClient:
         if anthropic_api_key_tools:
             anthropic_api_key_tool_choice = effective_tool_choice or "any"
 
+        # OpenRouter's OpenAI providers apply the same strict-schema subset as
+        # the Responses API. Rich AgentAction models can contain intentionally
+        # open JSON values (for example spawn_agent.items), which cannot be
+        # represented by that subset and are rejected before inference. Use the
+        # provider-native function contract for real AgentAction tools on the
+        # waterfall too. The structured-streaming caller already reconstructs
+        # native tool chunks into the AgentAction envelope, exactly as it does
+        # for direct Claude/GPT and funded API-key routes. Plain response models
+        # keep their response_format contract via the synthetic-output guard.
+        waterfall_tools = tools
+        waterfall_tool_choice = effective_tool_choice
+        if waterfall_tools is None and not _is_synthetic_output_toolset(direct_auth_tools):
+            waterfall_tools = direct_auth_tools
+            waterfall_tool_choice = effective_tool_choice or "any"
+
         if _exclude_anthropic_family and gpt_auth is not None:
             direct_auth = gpt_auth
         elif _exclude_anthropic_family:
@@ -1361,9 +1376,9 @@ class RoseClient:
                 waterfall_complete(
                     pool_spec=pool_spec,
                     messages=messages,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    response_format=None if tools else openrouter_response_format,
+                    tools=waterfall_tools,
+                    tool_choice=waterfall_tool_choice,
+                    response_format=None if waterfall_tools else openrouter_response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
