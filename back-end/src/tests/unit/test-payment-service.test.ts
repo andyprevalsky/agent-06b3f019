@@ -416,7 +416,9 @@ async function main(): Promise<void> {
       findAttentionRequests: async () => [],
       getCardSummary: async (_userId, id) => {
         assert.equal(id, cardId);
-        return { status: 'CLOSED', balanceCents: 0 };
+        throw new Error(
+          'get_card_details failed: card_closed: This card is closed and its credentials are no longer available.'
+        );
       },
       retrieveStripeHold: async () => ({
         id: 'pi_life',
@@ -475,7 +477,7 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.walletFunding?.status, 'CONSUMED');
     assert.equal(lifecycle.stripeHold?.amountReceivedCents, 4396);
     assert.equal(lifecycle.stripeRefund?.amountCents, 4396);
-    assert.equal(lifecycle.agentCard?.status, 'CLOSED');
+    assert.equal(lifecycle.agentCard?.status, 'closed');
     assert.equal(lifecycle.orgTransfer?.id, 'owt_life');
     assert.equal(lifecycle.orgTransfer?.transferredCents, 4396);
     assert.equal(lifecycle.orgTransfer?.cardId, cardId);

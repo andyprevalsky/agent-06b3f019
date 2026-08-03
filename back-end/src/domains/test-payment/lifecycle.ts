@@ -151,6 +151,31 @@ function mapAgentCard(
   };
 }
 
+function isClosedCardDetailsError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /\bcard_closed\b/i.test(message);
+}
+
+async function loadCardSummary(
+  userId: string,
+  cardId: string,
+  getCardSummary: (
+    userId: string,
+    cardId: string
+  ) => Promise<{ status: string; balanceCents: number }>
+): Promise<{ status: string; balanceCents: number }> {
+  try {
+    return await getCardSummary(userId, cardId);
+  } catch (error) {
+    // AgentCard intentionally stops returning credentials after a card is closed. A lifecycle read
+    // can race that transition during abandonment, but the provider error itself is authoritative:
+    // the card is closed and therefore has no spendable balance. Keep lifecycle reads idempotent
+    // while allowing every other provider error to surface.
+    if (isClosedCardDetailsError(error)) return { status: 'closed', balanceCents: 0 };
+    throw error;
+  }
+}
+
 function transferReleasedCents(transfer: Record<string, unknown> | undefined): number {
   return typeof transfer?.released_cents === 'number' ? transfer.released_cents : 0;
 }
@@ -223,7 +248,7 @@ async function buildLoadedLifecycle(
   const [cardDetails, stripeHold, stripeRefunds, stripeResults, cardResults, transferResults] =
     await Promise.all([
       cardId !== null && cardId !== ''
-        ? getCardSummary(purchase.userId, cardId)
+        ? loadCardSummary(purchase.userId, cardId, getCardSummary)
         : Promise.resolve(null),
       intentId !== null && intentId !== '' ? retrieveStripeHold(intentId) : Promise.resolve(null),
       intentId !== null && intentId !== ''
