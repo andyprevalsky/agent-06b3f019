@@ -25,6 +25,7 @@
  */
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -110,7 +111,40 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The instructions must keep pointing at the archive in both directions:
+// 4. The documented `new` command must actually reach its scaffold writer.
+if (fs.existsSync(VALIDATOR)) {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  try {
+    const tempScriptDir = path.join(tempRoot, 'scripts');
+    const tempCasesDir = path.join(tempRoot, 'docs/rca/cases');
+    fs.mkdirSync(tempScriptDir, { recursive: true });
+    fs.mkdirSync(tempCasesDir, { recursive: true });
+    fs.copyFileSync(VALIDATOR, path.join(tempScriptDir, 'rca_archive.py'));
+    execFileSync(
+      'python3',
+      [path.join(tempScriptDir, 'rca_archive.py'), 'new', 'reachable-subcommand'],
+      {
+        cwd: tempRoot,
+        env: { ...process.env, RCA_ARCHIVE_DATE: '2099-01-02' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    const scaffold = path.join(tempCasesDir, '2099-01-02-reachable-subcommand.md');
+    if (!fs.existsSync(scaffold)) {
+      failures.push('rca_archive.py new exited successfully without creating its scaffold.');
+    }
+  } catch (error) {
+    const err = error as { stdout?: Buffer; stderr?: Buffer; status?: number };
+    failures.push(
+      `rca_archive.py new is unreachable (exit ${err.status ?? 'unknown'}):\n` +
+        `${err.stderr?.toString().trim() ?? ''}\n${err.stdout?.toString().trim() ?? ''}`
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+// 5. The instructions must keep pointing at the archive in both directions:
 //    read it before diagnosing, write to it after.
 const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: string }> = [
   {
