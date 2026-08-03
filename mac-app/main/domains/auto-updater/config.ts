@@ -36,3 +36,8 @@ export const IPC_CHANNELS = {
   download: 'updates:download',
   install: 'updates:install',
 } as const;
+
+export const DOWNLOAD_TELEMETRY_ENDPOINT = '/api/download-telemetry';
+export const DOWNLOAD_TELEMETRY_TIMEOUT_MS = 5000;
+export const DOWNLOAD_TELEMETRY_RETRY_DELAYS_MS = [200, 500] as const;
+export const DOWNLOAD_TELEMETRY_MILESTONES = [25, 50, 75] as const;
