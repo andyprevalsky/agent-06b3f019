@@ -21,7 +21,8 @@
 #   case 3 — edge returns 404             → routing
 #   case 4 — edge always 000              → NOT routing, bounded by the timeout
 #   case 5 — edge 000 then 502            → routing (recovers within the window)
-#   case 6 — run.sh actually recycles a dead tunnel and backs off
+#   case 6 — a curl process that ignores --max-time is killed by the shell watchdog
+#   case 7 — run.sh actually recycles a dead tunnel and backs off
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -97,21 +98,43 @@ echo "PASS: persistent 000 is reported as dead, bounded by the timeout (${elapse
 run_routing_check 20 000 000 502 || fail "case 5: edge that starts routing within the window must pass"
 echo "PASS: edge that becomes reachable within the window counts as routing"
 
-# --- case 6: run.sh recycles dead tunnels instead of dying ------------------
+# --- case 6: a wedged curl cannot consume the harness watchdog --------------
+cat > "$TMP/curl" <<'STUB'
+#!/usr/bin/env bash
+# Model curl ignoring both --max-time and SIGTERM. The parent must escalate.
+trap '' TERM
+exec sleep 30
+STUB
+chmod +x "$TMP/curl"
+started=$SECONDS
+if PATH="$TMP:$PATH" CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS=1 \
+  CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS=3 bash -c "
+    set -euo pipefail
+    CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS=3
+    source '$TMP/fn.sh'
+    cloudflare_tunnel_edge_is_routing https://stub.trycloudflare.com
+  "; then
+  fail "case 6: a wedged no-response probe must NOT count as routing"
+fi
+elapsed=$(( SECONDS - started ))
+[ "$elapsed" -le 12 ] || fail "case 6: wedged curl ran ${elapsed}s; shell watchdog did not bound it"
+echo "PASS: shell watchdog terminates a curl process that ignores --max-time (${elapsed}s)"
+
+# --- case 7: run.sh recycles dead tunnels instead of dying ------------------
 # Structural pins on the shipped retry loop: the old code had neither.
 grep -q 'CLOUDFLARE_TUNNEL_MAX_ATTEMPTS' "$RUN_SH" \
-  || fail "case 6: run.sh no longer bounds quick-tunnel attempts"
+  || fail "case 7: run.sh no longer bounds quick-tunnel attempts"
 grep -q 'recycling the quick tunnel' "$RUN_SH" \
-  || fail "case 6: run.sh no longer recycles a non-routing quick tunnel"
+  || fail "case 7: run.sh no longer recycles a non-routing quick tunnel"
 grep -q 'CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS' "$RUN_SH" \
-  || fail "case 6: run.sh no longer backs off between quick-tunnel attempts"
+  || fail "case 7: run.sh no longer backs off between quick-tunnel attempts"
 # A recycled tunnel must be removed from the service arrays, otherwise cleanup
 # reports a dead pid as a live service.
 awk '/^start_cloudflare_quick_tunnel\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/start.sh"
 grep -q "unset 'PIDS\[" "$TMP/start.sh" \
-  || fail "case 6: recycled tunnel is not removed from PIDS"
+  || fail "case 7: recycled tunnel is not removed from PIDS"
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/start.sh" \
-  || fail "case 6: tunnel startup no longer verifies the edge routes"
+  || fail "case 7: tunnel startup no longer verifies the edge routes"
 echo "PASS: run.sh bounds, backs off, recycles, and de-registers dead quick tunnels"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

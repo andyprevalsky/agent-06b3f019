@@ -1,4 +1,11 @@
-import { defaultPayloadConverter, type Client } from '@temporalio/client';
+import {
+  defaultPayloadConverter,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
+  type Client,
+  type WorkflowIdConflictPolicy,
+  type WorkflowIdReusePolicy,
+} from '@temporalio/client';
 
 interface FakeExecution {
   workflowId: string;
@@ -34,26 +41,21 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
   let nextRun = 1;
 
   const getExecution = (workflowId: string): FakeExecution => {
-    let execution = executions.get(workflowId);
-    if (execution === undefined) {
-      execution = {
-        workflowId,
-        firstExecutionRunId: `blackbox-run-${nextRun++}`,
-        args: [],
-        status: 'RUNNING',
-        startTime: new Date(),
-      };
-      executions.set(workflowId, execution);
-    }
-    return execution;
+    const execution = executions.get(workflowId);
+    if (execution !== undefined) return execution;
+    throw new WorkflowNotFoundError(
+      `Workflow execution ${workflowId} was not found`,
+      workflowId,
+      undefined
+    );
   };
 
-  const getHandle = (workflowId: string) => {
-    const execution = getExecution(workflowId);
+  const getHandle = (workflowId: string, firstExecutionRunId?: string) => {
     return {
       workflowId,
-      firstExecutionRunId: execution.firstExecutionRunId,
+      firstExecutionRunId,
       async describe() {
+        const execution = getExecution(workflowId);
         return {
           status: { name: execution.status },
           runId: execution.firstExecutionRunId,
@@ -65,11 +67,29 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
           },
         };
       },
-      async signal() {},
+      async signal() {
+        getExecution(workflowId);
+      },
       async terminate() {
+        const execution = getExecution(workflowId);
         execution.status = 'TERMINATED';
       },
     };
+  };
+
+  type FakeStartOptions = {
+    workflowId: string;
+    args?: unknown[];
+    workflowIdConflictPolicy?: WorkflowIdConflictPolicy;
+    workflowIdReusePolicy?: WorkflowIdReusePolicy;
+  };
+
+  const alreadyStarted = (workflowId: string, workflowType: string): never => {
+    throw new WorkflowExecutionAlreadyStartedError(
+      `Workflow execution ${workflowId} already exists`,
+      workflowId,
+      workflowType
+    );
   };
 
   const client = {
@@ -78,11 +98,31 @@ export function createBlackboxTemporalClient(namespace = 'blackbox'): Client {
       return operation();
     },
     workflow: {
-      async start(_workflowType: string, options: { workflowId: string; args?: unknown[] }) {
-        const execution = getExecution(options.workflowId);
-        execution.args = options.args ?? [];
-        execution.status = 'RUNNING';
-        return getHandle(options.workflowId);
+      async start(workflowType: string, options: FakeStartOptions) {
+        const existing = executions.get(options.workflowId);
+        if (existing?.status === 'RUNNING') {
+          if (options.workflowIdConflictPolicy === 'USE_EXISTING') {
+            return getHandle(existing.workflowId, existing.firstExecutionRunId);
+          }
+          const terminateExisting =
+            options.workflowIdConflictPolicy === 'TERMINATE_EXISTING' ||
+            (options.workflowIdConflictPolicy === undefined &&
+              options.workflowIdReusePolicy === 'TERMINATE_IF_RUNNING');
+          if (!terminateExisting) alreadyStarted(options.workflowId, workflowType);
+          existing.status = 'TERMINATED';
+        } else if (existing !== undefined && options.workflowIdReusePolicy === 'REJECT_DUPLICATE') {
+          alreadyStarted(options.workflowId, workflowType);
+        }
+
+        const execution: FakeExecution = {
+          workflowId: options.workflowId,
+          firstExecutionRunId: `blackbox-run-${nextRun++}`,
+          args: options.args ?? [],
+          status: 'RUNNING',
+          startTime: new Date(),
+        };
+        executions.set(options.workflowId, execution);
+        return getHandle(options.workflowId, execution.firstExecutionRunId);
       },
       getHandle,
       async *list() {

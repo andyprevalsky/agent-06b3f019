@@ -1041,7 +1041,31 @@ cloudflare_tunnel_edge_is_routing() {
         # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
         # (as on a macOS host with a content blocker configured system-wide)
         # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        # curl's own --max-time is normally sufficient, but under extreme host
+        # contention we have observed the process remain stuck past the entire
+        # isolated harness watchdog. Supervise it from the parent shell so a
+        # wedged edge probe cannot prevent quick-tunnel recycling/ngrok fallback.
+        local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
+        [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
+        local status_file probe_pid probe_deadline
+        status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
+        curl -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+            --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
+            >"$status_file" 2>/dev/null &
+        probe_pid=$!
+        probe_deadline=$((SECONDS + curl_timeout + 2))
+        while kill -0 "$probe_pid" 2>/dev/null; do
+            if [ "$SECONDS" -ge "$probe_deadline" ]; then
+                kill "$probe_pid" 2>/dev/null || true
+                sleep 1
+                kill -9 "$probe_pid" 2>/dev/null || true
+                break
+            fi
+            sleep 1
+        done
+        wait "$probe_pid" 2>/dev/null || true
+        status="$(cat "$status_file")"
+        rm -f "$status_file"
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0
         fi

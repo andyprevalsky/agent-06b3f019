@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { defaultPayloadConverter } from '@temporalio/client';
+import {
+  defaultPayloadConverter,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
+} from '@temporalio/client';
 import {
   createBlackboxTemporalClient,
   shouldUseBlackboxTemporalFake,
@@ -62,6 +66,73 @@ async function main(): Promise<void> {
 
   await client.workflow.getHandle('agent-1').terminate('test complete');
   assert.equal((await client.workflow.getHandle('agent-1').describe()).status.name, 'TERMINATED');
+
+  await assert.rejects(
+    () => client.workflow.getHandle('missing').describe(),
+    WorkflowNotFoundError
+  );
+  await assert.rejects(
+    () =>
+      client.workflowService.getWorkflowExecutionHistory({
+        namespace: 'blackbox-test',
+        execution: { workflowId: 'missing' },
+        maximumPageSize: 1,
+        waitNewEvent: false,
+        skipArchival: true,
+      }),
+    WorkflowNotFoundError
+  );
+  const listedAfterMissingLookup: string[] = [];
+  for await (const execution of client.workflow.list()) {
+    listedAfterMissingLookup.push(execution.workflowId);
+  }
+  assert.equal(listedAfterMissingLookup.includes('missing'), false);
+
+  const duplicate = await client.workflow.start('AgentWorkflow', {
+    workflowId: 'duplicate',
+    taskQueue: 'test',
+    args: ['first'],
+  });
+  await assert.rejects(
+    () =>
+      client.workflow.start('AgentWorkflow', {
+        workflowId: 'duplicate',
+        taskQueue: 'test',
+        args: ['rejected'],
+      }),
+    WorkflowExecutionAlreadyStartedError
+  );
+  const reused = await client.workflow.start('AgentWorkflow', {
+    workflowId: 'duplicate',
+    taskQueue: 'test',
+    args: ['ignored'],
+    workflowIdConflictPolicy: 'USE_EXISTING',
+  });
+  assert.equal(reused.firstExecutionRunId, duplicate.firstExecutionRunId);
+
+  const replaced = await client.workflow.start('AgentWorkflow', {
+    workflowId: 'duplicate',
+    taskQueue: 'test',
+    args: ['replacement'],
+    workflowIdConflictPolicy: 'TERMINATE_EXISTING',
+  });
+  assert.notEqual(replaced.firstExecutionRunId, duplicate.firstExecutionRunId);
+  await client.workflow.getHandle('duplicate').terminate('close replacement');
+  await assert.rejects(
+    () =>
+      client.workflow.start('AgentWorkflow', {
+        workflowId: 'duplicate',
+        taskQueue: 'test',
+        workflowIdReusePolicy: 'REJECT_DUPLICATE',
+      }),
+    WorkflowExecutionAlreadyStartedError
+  );
+  const allowedAfterClose = await client.workflow.start('AgentWorkflow', {
+    workflowId: 'duplicate',
+    taskQueue: 'test',
+    workflowIdReusePolicy: 'ALLOW_DUPLICATE',
+  });
+  assert.notEqual(allowedAfterClose.firstExecutionRunId, replaced.firstExecutionRunId);
 
   process.stdout.write('PASS temporal blackbox fake\n');
 }

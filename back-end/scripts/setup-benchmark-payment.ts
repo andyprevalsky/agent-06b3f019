@@ -8,21 +8,24 @@ import {
 } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
 import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
+import {
+  assertLiveCardholderReady,
+  assertSandboxDatabaseIsLocal,
+  assertUserMatchesMode,
+  DEFAULT_SANDBOX_CARDHOLDER_ID,
+  isStripeResourceMissing,
+  requireLiveCardholderId,
+  requireStripeLiveKey,
+  type FixtureMode,
+} from './setup-benchmark-payment-guards';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-/**
- * `sandbox` seeds the local isolated stack (test-mode Stripe + the AgentCard sandbox cardholder)
- * for the four `agent-payment-*` lifecycle benchmarks. `live` (--live) provisions the PRODUCTION
- * identity used by the two `agent-payment-production-*` probes: live-mode Stripe + the live
- * org cardholder. The two must never share a user id — see BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID.
- */
-type FixtureMode = 'sandbox' | 'live';
 /**
  * A NON-ADMIN synthetic user. Admins are routed to `issueAdminCompanyCard` (company-funded, no
  * Stripe hold), which makes the lifecycle benchmarks' `stripeHold` assertions unreachable.
  */
 const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
-const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 /** Where Stripe returns the operator after the one-time live card-on-file setup. */
 const LIVE_CARD_SETUP_RETURN_URL = 'https://roselabs.ai/?benchmark-payment-card-saved=1';
 /**
@@ -158,77 +161,6 @@ function requireStripeTestKey(): string {
 }
 
 /**
- * The production probes charge and refund REAL money, so their fixture must be provisioned with
- * the live key. A test-mode key would silently create a test customer whose id production's live
- * Stripe account cannot resolve, and every mint would fail with an opaque `No such customer`.
- */
-function requireStripeLiveKey(): string {
-  const key = (process.env.STRIPE_SECRET_KEY ?? '').trim();
-  if (key === '') {
-    throw new Error('STRIPE_SECRET_KEY is required to provision the production payment fixture');
-  }
-  if (!key.startsWith('sk_live_')) {
-    throw new Error(
-      '--live provisions the PRODUCTION payment-lifecycle identity and needs the live Stripe key ' +
-        `(sk_live_*), got "${key.slice(0, 8)}…". Run it with production's STRIPE_SECRET_KEY.`
-    );
-  }
-  return key;
-}
-
-function databaseHost(): string {
-  const raw = (process.env.DATABASE_URL ?? '').trim();
-  if (raw === '') throw new Error('DATABASE_URL is required to seed benchmark payment fixtures');
-  try {
-    return new URL(raw).hostname.toLowerCase();
-  } catch {
-    throw new Error('DATABASE_URL is not a parseable connection URL');
-  }
-}
-
-const LOCAL_DATABASE_HOSTS = new Set(['localhost', '127.0.0.1', '::1', 'host.docker.internal']);
-
-/**
- * The sandbox fixture writes a TEST-mode Stripe customer and the AgentCard SANDBOX cardholder.
- * `back-end/.env` points `DATABASE_URL` at the production database, so a bare invocation from
- * `back-end/` would seed those sandbox pointers into production and break the live probes. Every
- * sanctioned caller (benchmarks/local.py, scripts/run-agentcard-lifecycle-task.sh) passes an
- * explicit localhost URL for the isolated stack, so requiring one here costs nothing.
- */
-function assertSandboxDatabaseIsLocal(): void {
-  const host = databaseHost();
-  if (LOCAL_DATABASE_HOSTS.has(host)) return;
-  if (process.env.BENCHMARK_PAYMENT_ALLOW_REMOTE_DB === 'true') return;
-  throw new Error(
-    `Refusing to seed the sandbox payment fixture into non-local database host "${host}": it ` +
-      'writes a test-mode Stripe customer and the AgentCard sandbox cardholder, which would ' +
-      'clobber the live production fixture. Point DATABASE_URL at the isolated benchmark ' +
-      'database, use --live for the production identity, or set ' +
-      'BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=true if this really is intended.'
-  );
-}
-
-/**
- * The live probes must mint against the org's real KYC-verified cardholder — the same one
- * production already configures. There is deliberately no default: silently falling back to the
- * sandbox cardholder would make every production transfer report `livemode=false`.
- */
-function requireLiveCardholderId(): string {
-  const cardholderId = (
-    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID ??
-    process.env.AGENTCARD_CARDHOLDER_ID ??
-    ''
-  ).trim();
-  if (cardholderId === '') {
-    throw new Error(
-      '--live needs the live AgentCard cardholder id. Set BENCHMARK_AGENTCARD_CARDHOLDER_ID ' +
-        "(or AGENTCARD_CARDHOLDER_ID) to production's value."
-    );
-  }
-  return cardholderId;
-}
-
-/**
  * `offWaitlistAt` keeps the fixture user past the invite gate. Without it the benchmark's FE link
  * (`?agent-id=…`) renders the "You're On The Waitlist!" overlay on top of the run, which makes
  * every human verification of a benchmark agent look broken.
@@ -300,9 +232,14 @@ async function ensureLiveBillingCustomer(
   const existingId = (await prisma.subscription.findUnique({ where: { userId } }))
     ?.stripeCustomerId;
   if (existingId !== undefined && existingId !== null && existingId.trim() !== '') {
-    const existing = await stripe.customers.retrieve(existingId);
-    if (existing.deleted !== true) return existing.id;
-    console.log(`Live Stripe customer ${existingId} was deleted; provisioning a replacement`);
+    try {
+      const existing = await stripe.customers.retrieve(existingId);
+      if (existing.deleted !== true) return existing.id;
+      console.log('Stored live Stripe customer was deleted; provisioning a replacement');
+    } catch (error) {
+      if (!isStripeResourceMissing(error)) throw error;
+      console.log('Stored Stripe customer does not exist in live mode; provisioning a replacement');
+    }
   }
   const customer = await stripe.customers.create({
     name: 'Rose Labs Production Benchmark Payer',
@@ -381,6 +318,10 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
 async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promise<void> {
   const stripe = new Stripe(requireStripeLiveKey(), { apiVersion: STRIPE_API_VERSION });
   const cardholderId = requireLiveCardholderId();
+  // This call uses the production org credential flow. A sandbox-only or foreign id cannot
+  // resolve to a terminal KYC state here, so validate it before touching any shared DB row.
+  const cardholderStatus = await getOrgCardholderVerificationStatus(cardholderId);
+  assertLiveCardholderReady(cardholderStatus);
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
   const customerId = await ensureLiveBillingCustomer(stripe, prisma, userId);
@@ -399,6 +340,7 @@ async function main(): Promise<void> {
   const defaultUserId =
     mode === 'live' ? BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID : DEFAULT_BENCHMARK_USER_ID;
   const userId = argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? defaultUserId;
+  assertUserMatchesMode(userId, mode);
   assertNonAdminBenchmarkUser(userId);
   const prisma = new PrismaClient();
   try {
