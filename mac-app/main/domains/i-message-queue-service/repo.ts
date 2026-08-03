@@ -10,6 +10,7 @@ import Store from 'electron-store';
 import { AuthService } from '../../services/auth';
 import { IMessageSender } from '../../services/iMessageSender';
 import { config } from '../../base/config';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 import { DELIVERY_MARKER_STORE_NAME, QUEUE_POP_PATH, queueResultPath } from './config';
 import type { DeliveryResultOutcome, PopOutcome, PopResponse, Session } from './types';
 
@@ -44,7 +45,7 @@ export function clearSentQueueMarker(queueId: string): void {
  * Fetch the current authenticated session, if any.
  */
 export async function getSession(): Promise<Session | null> {
-  return AuthService.getSession();
+  return sessionForLocalMachineData(await AuthService.getSession());
 }
 
 /**

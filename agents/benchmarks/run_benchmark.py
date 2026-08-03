@@ -164,6 +164,14 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
+AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+}
+AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -1293,6 +1301,24 @@ def _current_benchmark_user_id() -> str:
     return os.environ.get("BENCHMARK_RUN_USER_ID", "").strip() or USER_ID
 
 
+def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) -> Optional[str]:
+    """Return a task-scoped synthetic identity, leaving ordinary and production tasks unchanged."""
+    if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        return _free_credit_subscription_gate_user_id()
+    if task_name in GATE_FIXTURE_TASK_USER_IDS:
+        return GATE_FIXTURE_TASK_USER_IDS[task_name]
+    if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
+        if base_url is not None and not _is_local_base_url(base_url):
+            return None
+        # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
+        # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
+        return (
+            os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
+            or AGENT_PAYMENT_BENCHMARK_USER_ID
+        )
+    return None
+
+
 def _free_credit_subscription_gate_user_id() -> str:
     return (
         os.environ.get("BENCHMARK_FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID", "").strip()
@@ -1799,7 +1825,7 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
             headers=headers,
-            json={"userId": USER_ID, "action": action},
+            json={"userId": _current_benchmark_user_id(), "action": action},
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
@@ -4623,6 +4649,55 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
     return True
 
 
+def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
+    """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
+
+    The shared workspace copy can still look connected after OpenAI has
+    invalidated its access token. Local Codex owns the freshest renewable auth
+    envelope, so GPT-only local benchmark lanes must replace the copied row
+    before agents start. The row stays owned by the dev user and is made
+    pool-eligible only inside the isolated benchmark database.
+    """
+    if sys.platform != "darwin":
+        return False
+    auth_path = Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+    if not auth_path.is_file():
+        print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
+        return False
+    decryption_key = load_env_var("CLAUDE_CREDENTIAL_DECRYPTION_KEY", _BACKEND_ENV)
+    if not decryption_key:
+        print("    ⚠ Local Codex refresh skipped: credential encryption key unavailable")
+        return False
+
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] = decryption_key
+    env["CODEX_AUTH_PATH"] = str(auth_path)
+    env["CODEX_TOKEN_POOLING_ENABLED"] = "true"
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/sync-codex-token.ts"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(
+            "    ⚠ Local Codex refresh timed out "
+            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
+        )
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Local Codex refresh error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Local Codex refresh unavailable: {_seed_sync_error_detail(result)}")
+        return False
+    print("    🔑 Refreshed GPT credentials from local Codex auth")
+    return True
+
+
 def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     """Refresh the complete live browser auth graph (context/provider profiles,
     cookies/storage, CookieBundles, Steel sessions, passwords, and passkeys) from
@@ -4795,6 +4870,9 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     if _anthropic_family_excluded():
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
+        database_url = _local_victoria_database_url()
+        if not database_url or not _refresh_local_gpt_token_from_codex_auth(database_url):
+            raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
@@ -7254,10 +7332,9 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
-    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
-        os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
-    elif task.name in GATE_FIXTURE_TASK_USER_IDS:
-        os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]
+    task_user_id = _benchmark_user_id_for_task(task.name, base_url)
+    if task_user_id is not None:
+        os.environ["BENCHMARK_RUN_USER_ID"] = task_user_id
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)

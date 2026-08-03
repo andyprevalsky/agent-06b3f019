@@ -74,6 +74,38 @@ export function clearImpersonationState(): void {
  * record to the active non-expiring session. Require a finite, future timestamp
  * and the token fields a session is useless without.
  */
+/**
+ * Any `expires_at` at or beyond this value is milliseconds, not seconds.
+ *
+ * Seconds timestamps are ~1.8e9 and stay below this for ~3000 years; millisecond
+ * timestamps are ~1.8e12. Nothing legitimate lands in between.
+ */
+const EXPIRES_AT_MILLISECOND_THRESHOLD = 1e11;
+
+/**
+ * Coerce `expires_at` to SECONDS, the unit this module and Supabase both use.
+ *
+ * The Electron main process deliberately normalizes sessions to MILLISECONDS
+ * (mac-app/main/domains/auth/service.ts), and its bridge writes them straight
+ * into localStorage. Every expiry check here then multiplies by 1000 a second
+ * time, producing dates ~57,000 years out — so a session could NEVER look
+ * expired to the renderer. That is a silent dead-end: the token really does
+ * expire server-side, so every request 401s, while the client refuses to
+ * refresh, unwind an impersonation, or route to sign-in, because as far as it
+ * can tell the session is fine.
+ */
+function toSecondsExpiry(expiresAt: number): number {
+  return expiresAt >= EXPIRES_AT_MILLISECOND_THRESHOLD ? Math.floor(expiresAt / 1000) : expiresAt;
+}
+
+/** Session with `expires_at` coerced to seconds; returns the input when already correct. */
+export function normalizeSessionExpiry<T extends { expires_at?: number }>(session: T): T {
+  const expiresAt = session.expires_at;
+  if (typeof expiresAt !== 'number' || !Number.isFinite(expiresAt)) return session;
+  const seconds = toSecondsExpiry(expiresAt);
+  return seconds === expiresAt ? session : { ...session, expires_at: seconds };
+}
+
 function isRestorableSession(value: unknown): value is Session {
   if (value === null || typeof value !== 'object') return false;
   const candidate = value as Partial<Session>;
@@ -81,7 +113,7 @@ function isRestorableSession(value: unknown): value is Session {
   if (typeof candidate.expires_at !== 'number' || !Number.isFinite(candidate.expires_at)) {
     return false;
   }
-  return candidate.expires_at * 1000 > Date.now();
+  return toSecondsExpiry(candidate.expires_at) * 1000 > Date.now();
 }
 
 export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
@@ -111,7 +143,10 @@ export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
     clearImpersonationState();
     return null;
   }
-  const adminSession = parsed;
+  // Persist the NORMALIZED session, not the raw parse: a legacy millisecond stash
+  // would otherwise re-poison SESSION_KEY on restore and stay immortal until some
+  // later getSession() happened to repair it.
+  const adminSession = normalizeSessionExpiry(parsed);
 
   window.localStorage.removeItem(ADMIN_SESSION_KEY);
   window.localStorage.removeItem(IMPERSONATION_KEY);
@@ -121,9 +156,11 @@ export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
     notifyImpersonationChanged();
     return null;
   }
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(adminSession));
+  // Use the canonical persistence boundary so Electron's main-process session
+  // is restored too. Otherwise the renderer returns to the admin while every
+  // main-process sync remains authenticated as the expired target account.
+  storeSession(adminSession);
   notifyImpersonationChanged();
-  notifyAuthSessionChanged();
   return adminSession;
 }
 
@@ -204,7 +241,34 @@ export function getSession(): Session | null {
   if (!stored) return null;
 
   try {
-    const session = JSON.parse(stored) as Session;
+    const parsed = JSON.parse(stored) as Session;
+
+    // Self-heal a millisecond `expires_at` written by the Electron auth bridge
+    // before it was normalized at the boundary. Without this, an install that
+    // already persisted a ms session stays wedged forever: the expiry check
+    // below can never fire, so the client never refreshes, never unwinds an
+    // impersonation, and never routes to sign-in — it just 401s indefinitely.
+    const session = normalizeSessionExpiry(parsed);
+    if (session !== parsed) {
+      console.warn('[Supabase] Repairing millisecond expires_at on stored session');
+      // Only rewrite the exact value we read, and only when no logout has landed.
+      // Another tab can refresh or clear SESSION_KEY between the read above and
+      // this write; blindly persisting would resurrect a stale token after an
+      // explicit logout. The repair is an optimization — losing the race is fine,
+      // because the next getSession() repairs whatever is current instead.
+      if (
+        window.localStorage.getItem(SESSION_KEY) === stored &&
+        window.localStorage.getItem(LOGOUT_PENDING_KEY) === null
+      ) {
+        try {
+          window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+        } catch (persistError) {
+          // Quota/storage-security failures must NOT bubble into the outer catch:
+          // returning null there would sign out a user whose session is valid.
+          console.warn('[Supabase] Failed to persist normalized session', persistError);
+        }
+      }
+    }
 
     // Check if expired
     if (session.expires_at && session.expires_at * 1000 < Date.now()) {
@@ -237,28 +301,30 @@ export function getSession(): Session | null {
 export function storeSession(session: Session): void {
   if (typeof window === 'undefined') return;
 
-  console.log('[Supabase] Storing session', { userId: session.user?.id });
+  const normalizedSession = normalizeSessionExpiry(session);
+  console.log('[Supabase] Storing session', { userId: normalizedSession.user?.id });
 
-  const isAnonymousSession = isAnonymousUser(session.user);
+  const isAnonymousSession = isAnonymousUser(normalizedSession.user);
   if (!isAnonymousSession) {
     window.localStorage.removeItem(LOGOUT_PENDING_KEY);
   }
 
-  // Store in localStorage
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  // This is the only general persistence boundary. Keep its unit canonical so
+  // no caller can reintroduce the seconds-vs-milliseconds mismatch.
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(normalizedSession));
 
   // For Electron, persist only real signed-in sessions. Anonymous sessions are
   // renderer bootstrap state; saving them to the main-process auth store makes
   // refresh-after-logout look authenticated again.
   if (window.api?.auth && !isAnonymousSession) {
-    window.api.auth.save(session).catch((error: unknown) => {
+    window.api.auth.save(normalizedSession).catch((error: unknown) => {
       console.warn('[Supabase] Failed to save to Electron auth bridge', error);
     });
   }
 
   // Cache the user
-  if (session.user) {
-    persistCachedUser(session.user);
+  if (normalizedSession.user) {
+    persistCachedUser(normalizedSession.user);
   }
 
   notifyAuthSessionChanged();
@@ -526,7 +592,13 @@ if (typeof window !== 'undefined' && window.api?.auth) {
           return;
         }
         console.log('[Supabase] Primed session from Electron auth bridge');
-        window.localStorage.setItem(SESSION_KEY, JSON.stringify(electronSession));
+        // The bridge stores expires_at in MILLISECONDS; this module and Supabase
+        // use SECONDS. Normalize on the way in or every expiry check here is
+        // off by 1000x and the session can never look expired.
+        window.localStorage.setItem(
+          SESSION_KEY,
+          JSON.stringify(normalizeSessionExpiry(electronSession)),
+        );
       } else {
         if (window.localStorage.getItem(LOGOUT_PENDING_KEY)) return;
         // Electron store empty but localStorage may have a session — sync it over

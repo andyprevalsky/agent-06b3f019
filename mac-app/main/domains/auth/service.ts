@@ -16,6 +16,7 @@
 
 import { config } from '../../base/config';
 import { MILLISECOND_THRESHOLD, REFRESH_BUFFER_MS } from './config';
+import { accessTokenIsImpersonated } from './impersonation';
 import { deleteSession, readSession, writeSession } from './repo';
 import type { AuthSession, SupabaseTokenResponse } from './types';
 
@@ -102,6 +103,18 @@ export async function getSession(): Promise<AuthSession | null> {
   // persist the normalized version so subsequent reads don't re-normalize.
   if (session !== stored) {
     writeSession(session);
+  }
+
+  // Impersonated sessions are deliberately one-hour, non-renewable operator
+  // tools. Refreshing one through the generic Supabase path can replace its
+  // server-signed `act` claim with an ordinary target-user token, erasing the
+  // only main-process signal that blocks cross-account machine-data sync.
+  if (accessTokenIsImpersonated(session.access_token)) {
+    if (Date.now() >= session.expires_at) {
+      clearSession();
+      return null;
+    }
+    return session;
   }
 
   // If expired or about to expire, attempt a refresh before returning.
