@@ -39,7 +39,8 @@ gates = (
         (
             sys.executable,
             "-c",
-            "from pathlib import Path; import time; "
+            "from pathlib import Path; import signal; import time; "
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
             "Path({str(started)!r}).write_text('started'); time.sleep(60)",
         ),
     ),
@@ -73,7 +74,7 @@ raise SystemExit(module.run_gates(gates, max_workers=1))
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.wait()
-                self.fail("runner hung after SIGTERM with pending gates")
+                self.fail("runner did not escalate a TERM-resistant gate to SIGKILL")
 
             self.assertEqual(process.returncode, 128 + signal.SIGTERM, output)
             self.assertFalse(never_started.exists(), "signal must not launch pending gates")

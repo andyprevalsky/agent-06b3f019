@@ -227,6 +227,30 @@ describe('an impersonating admin can still use the app', () => {
       expect(result.current.isFullySignedIn).toBe(true);
     });
   });
+
+  it('posts agent messages as the switched-into user, not the stashed admin', async () => {
+    localStorage.setItem('rose-session', JSON.stringify(session('admin-token', ANDY_ID)));
+    await switchToAccount(TARGET_ID);
+
+    let seenAuth: string | null = null;
+    server.use(
+      http.post(`${API_BASE}/agents/:agentId/messages`, ({ request }) => {
+        seenAuth = request.headers.get('authorization');
+        return HttpResponse.json({
+          id: 'message-1',
+          agentId: 'target-agent-1',
+          role: 'USER',
+          message: 'hello from the switched account',
+          createdAt: new Date().toISOString(),
+        });
+      }),
+    );
+
+    const { postMessage } = await import('@/lib/api/messages');
+    await postMessage('target-agent-1', 'hello from the switched account');
+
+    expect(seenAuth).toBe('Bearer target-token');
+  });
 });
 
 /**

@@ -674,6 +674,8 @@ describe('sync-manager refuses to sync while impersonating', () => {
     await SyncManager.startAll();
 
     expect(IMessageSync.startRealTimeSync).not.toHaveBeenCalled();
+    expect(IMessageQueueService.start).not.toHaveBeenCalled();
+    expect(SyncManager.isActive()).toBe(false);
   });
 
   it('still syncs normally on the operator OWN account', async () => {

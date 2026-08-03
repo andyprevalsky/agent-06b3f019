@@ -31,3 +31,19 @@ export function accessTokenIsImpersonated(accessToken: string | undefined | null
     return false;
   }
 }
+
+/** User-facing reason local device data is unavailable during impersonation. */
+export const IMPERSONATED_MACHINE_DATA_MESSAGE = 'Unavailable while viewing another account';
+
+/**
+ * Keep a session only when it is safe to use for data harvested from this Mac.
+ *
+ * This generic form lets every owning upload boundary apply one shared policy
+ * without replacing its existing AuthService mock/test seam.
+ */
+export function sessionForLocalMachineData<T extends { access_token?: string | null }>(
+  session: T | null | undefined
+): T | null {
+  if (session === null || session === undefined) return null;
+  return accessTokenIsImpersonated(session.access_token) ? null : session;
+}

@@ -145,10 +145,9 @@ export function endImpersonation(): boolean {
     return false;
   }
 
-  // Persist NORMALIZED: isSessionExpired() only normalized a throwaway clone, so
-  // handing the raw stash to storeSession() would write a legacy millisecond
-  // expires_at back into SESSION_KEY and recreate the immortal-session mismatch.
-  storeSession(normalizeSessionExpiry(adminSession));
+  // storeSession is the canonical normalization boundary; it repairs any legacy
+  // millisecond stash before restoring both renderer and Electron auth state.
+  storeSession(adminSession);
   notifyImpersonationChanged();
   return true;
 }

@@ -163,7 +163,7 @@ async function syncComputeCredentials(connected?: Set<string>): Promise<void> {
  * user's account. Reads the CURRENT session token, so it re-evaluates on every
  * sync rather than caching a stale answer across a switch.
  */
-async function syncingWouldWriteToAnotherUser(): Promise<boolean> {
+export async function syncingWouldWriteToAnotherUser(): Promise<boolean> {
   const session = await AuthService.getSession();
   return accessTokenIsImpersonated(session?.access_token);
 }

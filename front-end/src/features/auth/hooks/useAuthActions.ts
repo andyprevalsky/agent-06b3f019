@@ -2,6 +2,18 @@
  * Auth state actions shared by useAuth: invite-gate evaluation, session
  * application, refresh, and sign-out.
  *
+ * STATE FLOW
+ *
+ *   session read
+ *       -> apply identity/cache
+ *       -> realtime auth succeeds ------> realtimeReady=true
+ *       -> realtime auth fails ---------> realtimeReady=false, continue
+ *       -> evaluate invite/operator gate
+ *
+ * Realtime is one capability, not the owner of the auth state machine. A
+ * transient socket-auth failure must not strand a valid HTTP session in a
+ * half-applied state or skip the invite/operator decision.
+ *
  * Extracted from features/auth/hooks.ts to keep that file inside its max-lines
  * budget. These four callbacks are one cohesive unit — every one of them writes
  * the same four state setters — so they move together rather than being split.
@@ -84,8 +96,13 @@ export function useAuthActions(setters: AuthStateSetters) {
       setSession(nextSession);
       setUser(nextSession?.user ?? null);
       persistCachedUser(nextSession?.user ?? null);
-      await setRealtimeAuth(nextSession?.access_token ?? null);
-      setRealtimeReady(!!nextSession?.access_token);
+      try {
+        await setRealtimeAuth(nextSession?.access_token ?? null);
+        setRealtimeReady(Boolean(nextSession?.access_token));
+      } catch (error) {
+        console.error('[Auth] Failed to authenticate realtime session', error);
+        setRealtimeReady(false);
+      }
       await updateInviteStatus(nextSession, nextSession?.user ?? null);
     },
     [setSession, setUser, setRealtimeReady, updateInviteStatus],

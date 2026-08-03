@@ -440,15 +440,39 @@ describe('ipc-registry: auth channels', () => {
     expect(syncManagerStop).toHaveBeenCalled();
   });
 
-  it('auth:save still runs post-auth syncs on the operator OWN session', async () => {
+  it('auth:save stops the old identity before persisting an impersonated session', async () => {
+    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const impersonatedToken =
+      `${b64({ alg: 'HS256', typ: 'JWT' })}.` +
+      `${b64({ sub: 'target-user', act: { sub: 'admin-user' } })}.sig`;
+    let finishStop: (() => void) | undefined;
+    syncManagerStop.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          finishStop = resolve;
+        })
+    );
+
+    const saving = invoke('auth:save', { ...fakeSession, access_token: impersonatedToken });
+    await Promise.resolve();
+
+    expect(authSetSession).not.toHaveBeenCalled();
+    finishStop?.();
+    await saving;
+    expect(authSetSession).toHaveBeenCalled();
+  });
+
+  it('auth:save restarts managed syncs without direct upload fan-out on the operator session', async () => {
     const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
     const ownToken = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64({ sub: 'admin-user' })}.sig`;
 
     imsgSyncRun.mockClear();
+    syncManagerStart.mockClear();
 
     await invoke('auth:save', { ...fakeSession, access_token: ownToken });
 
-    expect(imsgSyncRun).toHaveBeenCalled();
+    expect(imsgSyncRun).not.toHaveBeenCalled();
+    expect(syncManagerStart).toHaveBeenCalledTimes(1);
   });
 
   it('auth:clear stops watchers so nothing syncs after sign-out', async () => {
@@ -462,6 +486,45 @@ describe('ipc-registry: auth channels', () => {
     expect(authClearSession).toHaveBeenCalled();
     expect(result).toEqual({ success: true });
   });
+});
+
+describe('ipc-registry: local machine uploads while impersonating', () => {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const impersonatedSession = {
+    ...fakeSession,
+    access_token: `${encode({ alg: 'HS256' })}.${encode({
+      sub: 'target-user',
+      act: { sub: 'admin-user' },
+    })}.signature`,
+  };
+
+  beforeEach(() => {
+    authGetSession.mockReset();
+    authGetSession.mockResolvedValue(impersonatedSession);
+    batchUpload.mockClear();
+    imsgCheckAccess.mockReturnValue(true);
+    imsgReadMessages.mockResolvedValue([]);
+  });
+
+  it.each([
+    ['imessage:startUpload', []],
+    ['cookies:upload', [[]]],
+    ['cookies:uploadBrowser', ['chrome', []]],
+    ['fingerprint:upload', [{}]],
+    ['passkeys:enroll', [{ url: 'https://example.test/security' }]],
+    ['passkeys:importFromToken', ['credential-exchange-token']],
+  ] as const)(
+    '%s refuses to upload this Mac data into the target account',
+    async (channel, args) => {
+      const result = await invoke<{ success: boolean; message?: string }>(channel, ...args);
+
+      expect(result).toEqual({
+        success: false,
+        message: 'Unavailable while viewing another account',
+      });
+      expect(batchUpload).not.toHaveBeenCalled();
+    }
+  );
 });
 
 describe('ipc-registry: iMessage channels', () => {
@@ -905,6 +968,8 @@ describe('ipc-registry: claude channels', () => {
 
 describe('ipc-registry: whatsapp channels', () => {
   beforeEach(() => {
+    authGetSession.mockReset();
+    authGetSession.mockResolvedValue(fakeSession);
     waHas.mockReset();
     waPhone.mockReset();
     waConnected.mockReset();
@@ -951,6 +1016,8 @@ describe('ipc-registry: whatsapp channels', () => {
 
 describe('ipc-registry: telegram channels (non-backend)', () => {
   beforeEach(() => {
+    authGetSession.mockReset();
+    authGetSession.mockResolvedValue(fakeSession);
     tgHasSession.mockReset();
     tgHasApi.mockReset();
     tgConnected.mockReset();
@@ -1056,7 +1123,8 @@ describe('ipc-registry: telegram backend boundary', () => {
 
     const result = await invoke('telegram:connectWithExistingSession');
 
-    expect(result).toEqual({ success: true });
+    expect(result).toEqual({ success: false, error: 'Not authenticated' });
+    expect(tgConnectExisting).not.toHaveBeenCalled();
     expect(fetchCaptures).toHaveLength(0);
   });
 
@@ -1069,7 +1137,7 @@ describe('ipc-registry: telegram backend boundary', () => {
         }),
     });
     tgConnectExisting.mockResolvedValueOnce(true);
-    authGetSession.mockResolvedValueOnce(fakeSession);
+    authGetSession.mockResolvedValue(fakeSession);
     tgSyncHistorical.mockResolvedValueOnce(0);
 
     const result = await invoke('telegram:connectWithExistingSession');
@@ -1089,7 +1157,7 @@ describe('ipc-registry: telegram backend boundary', () => {
       '/api/integrations/telegram/connect': () => new Response('server err', { status: 500 }),
     });
     tgConnectExisting.mockResolvedValueOnce(true);
-    authGetSession.mockResolvedValueOnce(fakeSession);
+    authGetSession.mockResolvedValue(fakeSession);
 
     const result = await invoke('telegram:connectWithExistingSession');
 

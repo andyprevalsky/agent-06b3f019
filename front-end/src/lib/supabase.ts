@@ -156,9 +156,11 @@ export function restoreAdminSessionOnImpersonationExpiry(): Session | null {
     notifyImpersonationChanged();
     return null;
   }
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(adminSession));
+  // Use the canonical persistence boundary so Electron's main-process session
+  // is restored too. Otherwise the renderer returns to the admin while every
+  // main-process sync remains authenticated as the expired target account.
+  storeSession(adminSession);
   notifyImpersonationChanged();
-  notifyAuthSessionChanged();
   return adminSession;
 }
 
@@ -299,28 +301,30 @@ export function getSession(): Session | null {
 export function storeSession(session: Session): void {
   if (typeof window === 'undefined') return;
 
-  console.log('[Supabase] Storing session', { userId: session.user?.id });
+  const normalizedSession = normalizeSessionExpiry(session);
+  console.log('[Supabase] Storing session', { userId: normalizedSession.user?.id });
 
-  const isAnonymousSession = isAnonymousUser(session.user);
+  const isAnonymousSession = isAnonymousUser(normalizedSession.user);
   if (!isAnonymousSession) {
     window.localStorage.removeItem(LOGOUT_PENDING_KEY);
   }
 
-  // Store in localStorage
-  window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  // This is the only general persistence boundary. Keep its unit canonical so
+  // no caller can reintroduce the seconds-vs-milliseconds mismatch.
+  window.localStorage.setItem(SESSION_KEY, JSON.stringify(normalizedSession));
 
   // For Electron, persist only real signed-in sessions. Anonymous sessions are
   // renderer bootstrap state; saving them to the main-process auth store makes
   // refresh-after-logout look authenticated again.
   if (window.api?.auth && !isAnonymousSession) {
-    window.api.auth.save(session).catch((error: unknown) => {
+    window.api.auth.save(normalizedSession).catch((error: unknown) => {
       console.warn('[Supabase] Failed to save to Electron auth bridge', error);
     });
   }
 
   // Cache the user
-  if (session.user) {
-    persistCachedUser(session.user);
+  if (normalizedSession.user) {
+    persistCachedUser(normalizedSession.user);
   }
 
   notifyAuthSessionChanged();
