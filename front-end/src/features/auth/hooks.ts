@@ -20,6 +20,7 @@ import { getImpersonatedAccount } from '@/lib/impersonation';
 import { sendOTP, verifyOTP } from './api';
 import { initAuthSession, logAuth } from './hooks/initAuthSession';
 import { useAuthFormState } from './hooks/useAuthFormState';
+import { useAuthStateLogging } from './hooks/useAuthStateLogging';
 
 /** Extract a human-readable message from an unknown error value. */
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -339,16 +340,7 @@ export function useAuth(options?: { passive?: boolean }) {
     };
   }, [archiveMode, refreshAuthState]);
 
-  useEffect(() => {
-    logAuth('State changed', {
-      userId: user?.id,
-      hasSession: !!session,
-      isAuthenticated,
-      isAnonymous,
-      isFullySignedIn,
-      loading,
-    });
-  }, [user, session, isAuthenticated, isAnonymous, isFullySignedIn, loading]);
+  useAuthStateLogging({ user, session, isAuthenticated, isAnonymous, isFullySignedIn, loading });
 
   return {
     user,
