@@ -3,9 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
 import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import { isAdminUser } from '../src/utils/adminAccess';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-const DEFAULT_BENCHMARK_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+// Keep the Stripe-backed lifecycle fixture on a non-admin identity. Real admin users intentionally
+// bypass Stripe and receive company-funded cards, while these benchmarks assert the ordinary
+// authorize/capture/refund lifecycle.
+const DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106';
+const BENCHMARK_CREDIT_CENTS = 100_000;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
 async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
@@ -81,6 +86,11 @@ async function main(): Promise<void> {
   assertBenchmarkOrgCardholderPair();
   const userId =
     argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? DEFAULT_BENCHMARK_USER_ID;
+  if (isAdminUser(userId)) {
+    throw new Error(
+      `AgentCard lifecycle fixture user ${userId} must be non-admin so Stripe hold semantics remain testable`
+    );
+  }
   const stripe = new Stripe(requireStripeTestKey(), { apiVersion: STRIPE_API_VERSION });
   const prisma = new PrismaClient();
 
@@ -89,6 +99,18 @@ async function main(): Promise<void> {
       where: { userId },
       update: { isAnonymous: true },
       create: { userId, isAnonymous: true },
+    });
+
+    // Non-admin agents are subject to the normal Rose credit gate. Reset only the disposable
+    // fixture's grants so interrupted benchmark agents can remain available for diagnostics while
+    // every new run starts with a deterministic positive balance.
+    await prisma.credit.deleteMany({ where: { userId } });
+    await prisma.credit.create({
+      data: {
+        userId,
+        amountCents: BENCHMARK_CREDIT_CENTS,
+        expirationDate: null,
+      },
     });
 
     const customer = await stripe.customers.create({
@@ -150,7 +172,9 @@ async function main(): Promise<void> {
         `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
     );
 
-    console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);
+    console.log(
+      `Seeded Stripe, Rose credit, and AgentCard payment fixtures for benchmark user ${userId}`
+    );
   } finally {
     await prisma.$disconnect();
   }

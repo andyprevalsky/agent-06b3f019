@@ -946,6 +946,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "BENCHMARK_FAST_MODE_CACHE",
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
+        "BENCHMARK_AGENT_PAYMENT_USER_ID",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -955,9 +956,83 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert (
+            os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"]
+            == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        )
+        assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
+
+
+def test_payment_benchmark_seeds_non_admin_fixture_identity():
+    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+    from benchmarks import run_benchmark as bench
+
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+    assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
+
+    manifest = {"ports": {"local_db": 5432}, "database": {"name": "victoria"}}
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop(local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, None)
+        with patch.object(local.subprocess, "run") as run:
+            local.seed_payment_fixture(manifest)
+
+    command = run.call_args.args[0]
+    assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+
+
+async def test_agentcard_setup_targets_effective_benchmark_user():
+    """Setup reset/complete must mutate the same synthetic user that owns the agent."""
+    import os
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "connected"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            return FakeResponse()
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    with patch.dict(
+        os.environ,
+        {"BENCHMARK_RUN_USER_ID": bench.AGENT_PAYMENT_BENCHMARK_USER_ID},
+        clear=False,
+    ):
+        with patch.object(bench, "_api_headers", fake_headers):
+            with patch.object(bench.httpx, "AsyncClient", FakeClient):
+                await bench.configure_benchmark_agentcard_setup("http://localhost:3001", "complete")
+
+    assert requests[0][2] == {
+        "userId": bench.AGENT_PAYMENT_BENCHMARK_USER_ID,
+        "action": "complete",
+    }
 
 
 def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
@@ -1064,6 +1139,17 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
     assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "scripts"
+        / "setup-benchmark-payment.ts"
+    ).read_text()
+    assert "DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106'" in fixture
+    assert "await prisma.credit.deleteMany({ where: { userId } })" in fixture
+    assert "amountCents: BENCHMARK_CREDIT_CENTS" in fixture
+    assert "if (isAdminUser(userId))" in fixture
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -10764,6 +10850,14 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_lifecycle_stack_contract",
         test_payment_benchmark_preserves_lifecycle_stack_contract,
+    )
+    r.record(
+        "payment_benchmark_non_admin_fixture_identity",
+        test_payment_benchmark_seeds_non_admin_fixture_identity,
+    )
+    await r.record_async(
+        "agentcard_setup_effective_benchmark_user",
+        test_agentcard_setup_targets_effective_benchmark_user,
     )
     r.record(
         "isolated_benchmark_slow_first_sync",

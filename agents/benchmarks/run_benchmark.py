@@ -164,6 +164,17 @@ MINTED_AGENT_ACCOUNT_X_AUTH_HINT = (
 AMAZON_AUTH_ASSISTANCE_TASK_NAME = "browser-agent"
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_PRODUCTION_TASK_NAME = "agent-payment-production-abandonment"
+AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+}
+# The default benchmark operator is an admin and therefore receives a company-funded card with no
+# Stripe hold. Sandbox lifecycle tasks deliberately assert the ordinary customer hold/capture/refund
+# path, so local.py seeds this non-admin fixture and exports the same identity here.
+AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -1799,7 +1810,7 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
             headers=headers,
-            json={"userId": USER_ID, "action": action},
+            json={"userId": _current_benchmark_user_id(), "action": action},
         )
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to {action} benchmark AgentCard setup: {resp.status_code} {resp.text[:300]}")
@@ -7254,7 +7265,12 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
-    if task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+    if task.name in AGENT_PAYMENT_SANDBOX_TASK_NAMES and _is_local_base_url(base_url):
+        os.environ["BENCHMARK_RUN_USER_ID"] = (
+            os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
+            or AGENT_PAYMENT_BENCHMARK_USER_ID
+        )
+    elif task.name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         os.environ["BENCHMARK_RUN_USER_ID"] = _free_credit_subscription_gate_user_id()
     elif task.name in GATE_FIXTURE_TASK_USER_IDS:
         os.environ["BENCHMARK_RUN_USER_ID"] = GATE_FIXTURE_TASK_USER_IDS[task.name]

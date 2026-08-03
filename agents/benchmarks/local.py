@@ -57,6 +57,12 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+# Keep Stripe-backed lifecycle benchmarks off the real operator account. Andy is an admin, so his
+# purchases intentionally take the company-funded no-charge path and have no Stripe hold. These
+# tasks assert the ordinary customer lifecycle (authorize -> capture/refund), so they need a stable
+# non-admin identity with the same Stripe + AgentCard fixture.
+AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
@@ -735,6 +741,10 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        os.environ.setdefault(
+            AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+            AGENT_PAYMENT_BENCHMARK_USER_ID,
+        )
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
@@ -757,7 +767,10 @@ def seed_payment_fixture(manifest: dict) -> None:
             "tsx",
             "scripts/setup-benchmark-payment.ts",
             "--user-id",
-            os.environ.get("BENCHMARK_USER_ID", BENCHMARK_USER_ID),
+            os.environ.get(
+                AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+                AGENT_PAYMENT_BENCHMARK_USER_ID,
+            ),
         ],
         cwd=REPO_ROOT / "back-end",
         env=env,
