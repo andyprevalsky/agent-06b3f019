@@ -19,7 +19,7 @@ import {
   UPLOAD_PROGRESS_START_PERCENT,
 } from './config';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { dispatchUpload, resolveStrategy } from './service';
+import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
 import type { UploadResult } from './types';
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
@@ -46,7 +46,12 @@ export class Uploader {
       emitProgress(window, integrationType, UPLOAD_PROGRESS_START_PERCENT);
 
       const strategy = resolveStrategy(integrationType);
-      const result = await dispatchUpload(strategy, integrationType, data, accessToken);
+      const result = await dispatchUploadWithTransportRetry(
+        strategy,
+        integrationType,
+        data,
+        accessToken
+      );
 
       emitProgress(window, integrationType, UPLOAD_PROGRESS_DONE_PERCENT);
 

@@ -15,7 +15,6 @@ import { existsSync, watch, type FSWatcher } from 'fs';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
 import { IMessageSync } from '../../services/iMessageSync';
-import { CookieSync } from '../../services/cookieSync';
 import { BrowserStateSync } from '../../services/browserStateSync';
 import { ClaudeCredentialSync } from '../../services/claudeCredentialSync';
 import { CODEX_AUTH_PATH, GptCredentialSync } from '../../services/gptCredentialSync';
@@ -164,10 +163,6 @@ export async function syncPlatformCore(platform: Platform, connected?: Set<strin
 
     case 'whatsapp':
       // WhatsApp historical is limited, mainly real-time.
-      break;
-
-    case 'cookies':
-      await CookieSync.sync();
       break;
 
     case 'browserState':

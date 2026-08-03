@@ -11,7 +11,6 @@ import { BatchUploader } from '../services/batchUploader';
 import { AuthService } from '../services/auth';
 import { IMessageSender } from '../services/iMessageSender';
 import { IMessageSync } from '../services/iMessageSync';
-import { CookieSync } from '../services/cookieSync';
 import { BrowserStateSync } from '../services/browserStateSync';
 import { AtlasCredentialStore } from '../services/atlasCredentialStore';
 import { ClaudeCredentialSync } from '../services/claudeCredentialSync';
@@ -97,9 +96,6 @@ export function registerHandlers() {
     // Trigger syncs after successful auth (all run in parallel)
     IMessageSync.sync().catch((err) =>
       logConsoleError('IPC Auth', 'Post-auth iMessage sync error', err)
-    );
-    CookieSync.sync().catch((err) =>
-      logConsoleError('IPC Auth', 'Post-auth cookie sync error', err)
     );
     BrowserStateSync.sync().catch((err) =>
       logConsoleError('IPC Auth', 'Post-auth browser state sync error', err)

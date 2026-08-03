@@ -144,13 +144,6 @@ vi.mock('../../main/services/cookieReader', () => ({
   },
 }));
 
-const cookieSyncRun = vi.fn(async () => undefined);
-vi.mock('../../main/services/cookieSync', () => ({
-  CookieSync: {
-    sync: (...a: unknown[]) => cookieSyncRun(...a),
-  },
-}));
-
 const browserReaderInstalled = vi.fn(() => []);
 const browserReaderReadCookies = vi.fn(async () => []);
 vi.mock('../../main/services/browserCookieReader', () => ({

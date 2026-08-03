@@ -36,12 +36,6 @@ export const PLATFORM_CONFIG: Record<Platform, SyncConfig> = {
     syncOnStartup: false, // Limited historical due to Baileys v7
     integrationNames: ['whatsapp'],
   },
-  cookies: {
-    interval: 5 * 60 * 1000,
-    enableRealTime: false,
-    syncOnStartup: true,
-    integrationNames: ['chrome'], // Legacy cookie integration
-  },
   browserState: {
     interval: 5 * 60 * 1000,
     enableRealTime: false,
