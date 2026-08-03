@@ -22,7 +22,8 @@ sources:
   - commit 1b68963da0
   - agent 2fe8dba2-2938-42b8-a7fb-423cd1f44989
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py test_execute_click_write_lock_return_confirmation_triggers_approval
-status: fixed
+status: superseded
+superseded_by: 2026-08-03-shadow-input-sibling-label-omitted-from-write-lock-signal
 ---
 
 ## Problem
@@ -53,6 +54,13 @@ classifier regression for representative return and order controls and an
 integration regression proving that clicking a return-confirmation control
 raises an attention request instead of executing the site action. The complete
 `spawn-browser-agent-v3` owning domain passes with the fix.
+
+This diagnosis was superseded after an audit established that commit
+`1b68963da0` and its phrases predated the failing August 2 run. The archived
+runtime target was a textless shadow-DOM `input`; its `Confirm your return`
+label was rendered in a sibling node that neither write-lock signal extractor
+included. The corrected diagnosis and open outcome gap are recorded in
+`2026-08-03-shadow-input-sibling-label-omitted-from-write-lock-signal`.
 
 ## Human feedback
 
