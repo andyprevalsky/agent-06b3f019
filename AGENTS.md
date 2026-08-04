@@ -8,6 +8,6 @@ repo's own skills by default: the `.claude/commands/*` slash-commands (`/deploy`
 here.
 
 Cloud/Linux agents: see `CLAUDE.md` → **"Cursor Cloud / Linux dev environment"**
-(setup via `bash scripts/cloud-build.sh`, system Postgres, skip `mac-app`,
+(setup via `bash scripts/cloud-init.sh`, system Postgres, skip `mac-app`,
 injected-env-vars-override-`.env` gotchas, and which test suites need funded/live
 accounts).

@@ -1,6 +1,6 @@
 # Rose Labs
 
-AI agent platform with model racing infrastructure.
+AI agent platform.
 
 - Production: https://roselabs.ai
 - Backend API: https://navi-j9a9.onrender.com
