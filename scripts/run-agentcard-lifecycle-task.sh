@@ -55,6 +55,10 @@ export AGENTCARD_ONBOARDING_RETURN_URL="${AGENTCARD_ONBOARDING_RETURN_URL:-https
 # cooled-down shared Anthropic fallback.
 export ROSE_EXCLUDE_ANTHROPIC_FAMILY=1
 export SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt
+# This stack runs in an isolated database under a synthetic customer identity.
+# Keep the synced GPT credential owned by the dev user and expose it through the
+# local compute pool; never duplicate that Integration into the synthetic user.
+export SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS=1
 # The catalog pins every task accepted by this launcher to
 # requires_claude_code=false. A missing Claude Code integration must not block
 # these root/browser lifecycle checks before an agent exists; Claude-dependent

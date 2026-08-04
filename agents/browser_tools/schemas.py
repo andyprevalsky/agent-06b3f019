@@ -51,14 +51,39 @@ class ExtractTool(BaseModel):
 
 
 class ReadNetworkRequestsBrowserTool(BaseModel):
-    """Read captured HTTP network requests (XHR/Fetch/documents) made by the current page."""
+    """Read the HTTP network requests made by the current page, with optional headers and bodies."""
 
     tool: Literal["read_network_requests"]
     url_pattern: Optional[str] = Field(
         default=None, description="Optional substring to filter request URLs (e.g. '/api/')."
     )
+    method: Optional[str] = Field(default=None, description="Optional HTTP method filter (e.g. 'POST').")
+    status: Optional[str] = Field(
+        default=None,
+        description="Optional status filter: exact ('403'), class ('4xx'), 'error' (>=400 or failed), or 'ok'.",
+    )
+    resource_type: Optional[str] = Field(
+        default=None,
+        description="Optional resource-type filter (e.g. 'XHR', 'Fetch', 'Document', 'Script').",
+    )
     limit: Optional[int] = Field(default=None, description="Maximum number of requests to return (default 100).")
     clear: Optional[bool] = Field(default=None, description="When true, clear the captured buffer after reading.")
+    include_query: Optional[bool] = Field(
+        default=None,
+        description="When true, return full URLs including query strings instead of scheme://host/path only.",
+    )
+    include_headers: Optional[bool] = Field(
+        default=None,
+        description="When true, include request and response headers (cookie/authorization values are masked).",
+    )
+    include_bodies: Optional[bool] = Field(
+        default=None,
+        description="When true, include request post data and captured response bodies.",
+    )
+    max_body_chars: Optional[int] = Field(
+        default=None,
+        description="Per-body character cap when include_bodies is set (default 4000).",
+    )
 
 
 # ============================================================================
@@ -671,6 +696,11 @@ class GenerateWriteLockNotificationTool(BaseModel):
         if self.trigger_type == "purchase" and self.purchase is not None:
             trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
+                # No current_page_url here on purpose: a write-lock purchase
+                # approval is often raised while the agent is standing ON the
+                # product page, so "product_url != current page" would be a
+                # false reject. That rule belongs to the request_payment_card
+                # path, where the agent is necessarily at checkout.
                 if trusted_page_urls:
                     validate_product_url_for_pages(item.product_url, trusted_page_urls)
                 else:

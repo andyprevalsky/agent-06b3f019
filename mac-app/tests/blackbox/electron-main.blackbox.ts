@@ -662,6 +662,31 @@ describe('blackbox: electron-main (main-wiring)', () => {
     expect(mainInstance.webContents.send).toHaveBeenCalledWith('passkeys:importComplete', result);
   });
 
+  it('credential exchange handoff: never imports this Mac credentials while impersonating', async () => {
+    const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    getSessionMock.mockResolvedValue({
+      access_token: `${encode({ alg: 'HS256' })}.${encode({
+        sub: 'target-user',
+        act: { sub: 'operator-user' },
+      })}.signature`,
+    });
+    await loadMainEntry();
+    await flushWhenReady();
+
+    const continueListeners = await appListenersFor('continue-activity');
+    const continueEvent = { preventDefault: vi.fn() };
+    continueListeners[0].listener(
+      continueEvent,
+      'ASCredentialExchangeActivity',
+      { ASCredentialImportToken: '123e4567-e89b-12d3-a456-426614174088' },
+      { webpageURL: undefined }
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(continueEvent.preventDefault).toHaveBeenCalledTimes(1);
+    expect(importPasskeysFromTokenMock).not.toHaveBeenCalled();
+  });
+
   it('credential exchange handoff: ignores duplicate deliveries for the same token', async () => {
     await loadMainEntry();
     await flushWhenReady();

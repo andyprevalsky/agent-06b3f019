@@ -2449,6 +2449,78 @@ async def test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates
     assert set(fake_mouse.moves[1:-1]) != {(360, 240)}
 
 
+async def test_click_press_holds_no_remote_round_trip_between_down_and_up():
+    """RCA (browser-biometrics-webdecoy, FCaptcha 0.183 > ratchet 0.163).
+
+    Every mouse call is a round trip to a REMOTE browser. The release-drift move
+    used to sit BETWEEN mousedown and mouseup, so that latency landed inside the
+    press: we sampled an ~85ms human dwell but the page observed 621.5ms. A
+    submit whose mousedown is older than FCaptcha's 500ms RECENT_GESTURE_MS is
+    scored as `programmatic_click` (bot 0.8x0.85 -> +0.0884), which was the
+    entire gap over the ratchet.
+
+    Assert the ORDER: no move may be dispatched while the button is held. This
+    is latency-independent, so it holds no matter how slow the transport is.
+    """
+    from browser_tools.humanizer import BrowserHumanizer
+
+    events = []
+
+    class OrderTrackingMouse:
+        def __init__(self):
+            self._pos = (0, 0)
+
+        async def move(self, x, y):
+            self._pos = (x, y)
+            events.append("move")
+
+        async def down(self, **kwargs):
+            events.append("down")
+
+        async def up(self, **kwargs):
+            events.append("up")
+
+    class FakeKeyboard:
+        async def press(self, *args, **kwargs):
+            return None
+
+    page = SimpleNamespace(
+        mouse=OrderTrackingMouse(),
+        keyboard=FakeKeyboard(),
+        viewport_size={"width": 1280, "height": 800},
+    )
+
+    with (
+        patch.dict(
+            os.environ,
+            {
+                "BROWSER_AGENT_HUMAN_INPUT_ENABLED": "1",
+                "BROWSER_AGENT_HUMAN_MOUSE_SYNTHESIS": "1",
+            },
+            clear=False,
+        ),
+        patch("browser_tools.humanizer.asyncio.sleep", AsyncMock()),
+    ):
+        humanizer = BrowserHumanizer(dom_page=None, input_page=page, fast=True)
+        await humanizer.initialize_cursor((100, 100))
+        await humanizer.click_at_coords(360, 240, pre_hover=False, overshoot=False)
+
+    assert "down" in events and "up" in events, events
+    held = events[events.index("down") + 1 : events.index("up")]
+    assert held == [], f"no remote call may sit inside the press; found {held}"
+    # This page exposes no CDP session, so this is the Playwright FALLBACK path.
+    # It releases in place: keeping the press inside the sampled dwell matters
+    # more than the sub-pixel offset, because an over-long press is scored as a
+    # programmatic click. Nothing may follow the release either — a post-click
+    # move races navigation the click itself triggers and can raise "Target
+    # closed", turning a successful click into a failure.
+    assert events[events.index("up") + 1 :] == [], (
+        f"nothing may follow the release; found {events[events.index('up') + 1 :]}"
+    )
+    # The drifted release (motor noise without a longer press) is the CDP path's
+    # job and is asserted by test_humanized_click_presses_and_releases_via_cdp_*.
+
+
 async def test_browser_humanizer_cursor_observer_runs_after_visual_cursor_update():
     from browser_tools.humanizer import BrowserHumanizer
 
@@ -2601,11 +2673,24 @@ async def test_browser_humanizer_cdp_mouse_transport_queues_full_path_before_dra
 
         await asyncio.wait_for(task, timeout=1)
 
-    assert page.mouse.downs and page.mouse.ups, "expected a synthesized press and release"
-    assert abs(page.mouse.downs[-1][0] - 360) <= 5 and abs(page.mouse.downs[-1][1] - 240) <= 5
+    # When CDP is available the press AND release ride it, so the release can
+    # carry motor noise without a Playwright move between down and up inflating
+    # the hold the page observes (the programmatic_click RCA). Playwright's
+    # mouse must stay untouched on this path.
+    assert not page.mouse.downs and not page.mouse.ups, "press/release must use CDP when available"
     assert cdp.calls[0][0] == "Input.dispatchMouseEvent"
-    assert cdp.calls[-1][1]["x"] == 360
-    assert cdp.calls[-1][1]["y"] == 240
+    presses = [payload for method, payload in cdp.calls if payload.get("type") == "mousePressed"]
+    releases = [payload for method, payload in cdp.calls if payload.get("type") == "mouseReleased"]
+    assert len(presses) == 1 and len(releases) == 1, (len(presses), len(releases))
+    press_index = next(i for i, (_, p) in enumerate(cdp.calls) if p.get("type") == "mousePressed")
+    release_index = next(i for i, (_, p) in enumerate(cdp.calls) if p.get("type") == "mouseReleased")
+    assert press_index < release_index, "release must follow the press"
+    # No further input may be dispatched after the release: a post-click move
+    # races navigation the click itself triggers.
+    assert release_index == len(cdp.calls) - 1, "release must be the final dispatched input"
+    # Press lands on target; release drifts within motor-noise range of it.
+    assert abs(presses[0]["x"] - 360) <= 5 and abs(presses[0]["y"] - 240) <= 5
+    assert abs(releases[0]["x"] - presses[0]["x"]) <= 3 and abs(releases[0]["y"] - presses[0]["y"]) <= 3
     assert observed[-1] == (360, 240)
 
 
@@ -6873,6 +6958,111 @@ def test_read_network_requests_tool_is_advertised():
     assert any("read_network_requests" in str(s) for s in build_browser_use_tools(sorted(BROWSER_USE_TOOLS)))
 
 
+def test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged():
+    """Retained request bodies must never leak secrets, must respect a BYTE budget,
+    and must distinguish a policy omission from a size truncation.
+
+    The allowlist scopes WHICH endpoints are retained; it cannot promise those
+    payloads are secret-free. Byte-vs-character truncation matters because
+    _max_body_bytes is a byte budget and a character slice both overshoots it and
+    can split a multi-byte code point. Marking an allowlist omission as
+    'truncated' sends the next reader hunting for a limit to raise.
+    """
+    import time as _time
+
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _redact_request_body,
+    )
+
+    # Secrets are stripped even though the host is allowlisted.
+    redacted = _redact_request_body('{"score":0.09,"sessionToken":"tok_live_abc","nested":{"api_key":"sk-1"}}')
+    assert "tok_live_abc" not in redacted, redacted
+    assert "sk-1" not in redacted, redacted
+    assert '"score":0.09' in redacted, redacted
+
+    form = _redact_request_body(
+        "action=form_submit&csrf_token=abc123&width=1280",
+        "application/x-www-form-urlencoded",
+    )
+    assert "abc123" not in form, form
+    assert "action=form_submit" in form and "width=1280" in form, form
+
+    # A payload that parses as neither JSON nor form-encoded cannot be shown to be
+    # secret-free, so it is dropped rather than persisted verbatim.
+    assert _redact_request_body("\x00\x01binary-blob") == BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+    # A lone "=" must NOT be inferred as form encoding: binary payloads contain
+    # "=" too, and splitting one would persist opaque fragments verbatim.
+    assert _redact_request_body("\x00blob=value") == BrowserNetworkRecorder.REDACTED_PLACEHOLDER
+
+    def capture(post_data, *, url, has_post_data=True, max_bytes=64):
+        recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+        recorder._max_entries = 10
+        recorder._ignored_request_ids = set()
+        recorder._active_request_ids = set()
+        recorder._patterns = []
+        recorder._max_body_bytes = max_bytes
+        recorder._started_at = _time.monotonic()
+        recorder.entries = {}
+        recorder._on_request_will_be_sent(
+            {
+                "requestId": "r1",
+                "request": {
+                    "url": url,
+                    "method": "POST",
+                    "postData": post_data,
+                    "hasPostData": has_post_data,
+                },
+                "type": "XHR",
+            },
+            generation=1,
+            session_id="s1",
+        )
+        return recorder.entries.get("1:s1:r1") or next(iter(recorder.entries.values()))
+
+    # Multi-byte truncation stays inside the byte budget and never splits a char.
+    multibyte = '{"pad":"' + ("é" * 200) + '"}'
+    entry = capture(multibyte, url="https://fcaptcha.webdecoy.com/api/score")
+    body = entry["request_body"]
+    assert entry["request_body_truncated"] is True
+    assert len(body.encode("utf-8")) <= 64, len(body.encode("utf-8"))
+    body.encode("utf-8").decode("utf-8")  # must not raise: no split code point
+
+    # A first-party merchant body stays AVAILABLE (read_network_requests exists to
+    # debug real traffic) but its secrets are stripped.
+    merchant = capture('{"password":"hunter2","sku":"desk-lamp"}', url="https://merchant.example.com/checkout")
+    assert "hunter2" not in merchant["request_body"], merchant
+    assert "desk-lamp" in merchant["request_body"], merchant
+
+
+def test_humanized_click_presses_and_releases_via_cdp_without_post_click_move():
+    """The press must stay inside the sampled dwell AND the release must land off it.
+
+    RCA (agent 8724eb5a): a Playwright move between down and up is a REMOTE round
+    trip that inflated an ~85ms sampled dwell to 621.5ms emitted, so the submit's
+    mousedown aged past the 500ms recent-gesture window and scored as a
+    programmatic click (0.18296 -> 0.09456 once fixed). Releasing in place instead
+    would trade that for a pixel-perfect down==up precision tell, and a post-click
+    move races navigation the click itself triggers. CDP carries coordinates on the
+    event, satisfying both with no trailing move.
+    """
+    import inspect
+
+    from browser_tools.humanizer import BrowserHumanizer
+
+    source = inspect.getsource(BrowserHumanizer.click_at_coords)
+    press = source.index("_dispatch_mouse_button(down_x, down_y, pressed=True)")
+    release = source.index("_dispatch_mouse_button(up_x, up_y, pressed=False)")
+    sleep_at = source.index("asyncio.sleep(dwell_seconds)")
+    assert press < sleep_at < release, "dwell must sit between the CDP press and release"
+
+    # No move may follow the release: it would race click-triggered navigation.
+    assert "mouse.move(up_x, up_y)" not in source, "post-click move reintroduces the navigation race"
+
+    # A lost CDP session must still release, or the button wedges every later click.
+    assert "await mouse.up()" in source, "fallback release missing"
+
+
 def test_network_recorder_query_requests_filters_and_shapes():
     """BrowserNetworkRecorder.query_requests backs read_network_requests: newest-first
     url/method/status/resource_type, url_pattern filter, query-string redaction, and
@@ -6884,11 +7074,16 @@ def test_network_recorder_query_requests_filters_and_shapes():
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
+    recorder._max_body_bytes = 262144
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = set()
     recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
     recorder.entries = {
         "1": {
+            "request_id": "1",
             "url": "https://order.online/api/cart?token=SECRET&sig=abc#frag",
             "method": "POST",
             "status": 403,
@@ -6896,6 +7091,7 @@ def test_network_recorder_query_requests_filters_and_shapes():
             "response_ts_ms": 200,
         },
         "2": {
+            "request_id": "2",
             "url": "https://order.online/img.png",
             "method": "GET",
             "status": 200,
@@ -6904,11 +7100,30 @@ def test_network_recorder_query_requests_filters_and_shapes():
         },
     }
     filtered = recorder.query_requests(url_pattern="/api/", limit=10)
-    # Query string + fragment (token/sig) redacted; path preserved.
+    # Query string + fragment (token/sig) redacted by default; path preserved.
     assert filtered == [
-        {"url": "https://order.online/api/cart", "method": "POST", "status": 403, "resource_type": "XHR"}
+        {
+            "id": "1",
+            "url": "https://order.online/api/cart",
+            "method": "POST",
+            "status": 403,
+            "resource_type": "XHR",
+            "body_available": False,
+        }
     ]
     assert len(recorder.query_requests(limit=10)) == 2
+
+    # include_query is the explicit opt-in for the real request URL.
+    unredacted = recorder.query_requests(url_pattern="/api/", include_query=True)
+    assert unredacted[0]["url"] == "https://order.online/api/cart?token=SECRET&sig=abc#frag"
+
+    # Filters: method, status (exact / class / 'error'), resource_type.
+    assert [row["id"] for row in recorder.query_requests(method="post")] == ["1"]
+    assert [row["id"] for row in recorder.query_requests(status="403")] == ["1"]
+    assert [row["id"] for row in recorder.query_requests(status="4xx")] == ["1"]
+    assert [row["id"] for row in recorder.query_requests(status="error")] == ["1"]
+    assert [row["id"] for row in recorder.query_requests(status="ok")] == ["2"]
+    assert [row["id"] for row in recorder.query_requests(resource_type="image")] == ["2"]
 
     # Redaction fails closed for every URL shape that can reach agent history:
     # embedded basic-auth credentials, authority-less URLs, and parse failures.
@@ -6936,14 +7151,21 @@ def test_network_recorder_query_requests_filters_and_shapes():
 
 def test_network_recorder_updates_status_at_capacity():
     """A request already tracked must still get its status update after the buffer
-    is full, or 403/challenge detection breaks on busy pages (CodeRabbit #1)."""
+    is full, or 403/challenge detection breaks on busy pages (CodeRabbit #1).
+    At capacity the buffer evicts the OLDEST request rather than refusing new
+    ones — the tool reads newest-first, so refusing new requests made every API
+    call after a heavy page load invisible."""
     from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 1
+    recorder._max_body_bytes = 262144
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = set()
     recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
     recorder._started_at = 0.0
     recorder.entries = {"r1": {"request_id": "r1", "url": "https://x/api", "resource_type": "XHR", "status": None}}
     recorder._on_response_received(
@@ -6959,35 +7181,251 @@ def test_network_recorder_updates_status_at_capacity():
         None,
     )
     assert recorder.entries["r1"]["status"] == 429
-    # A NEW request is still refused once at capacity.
-    recorder._on_response_received(
-        {
-            "requestId": "r2",
-            "type": "XHR",
-            "response": {"url": "https://x/other", "status": 200, "mimeType": "application/json"},
-        },
+    # A NEW request at capacity evicts the oldest instead of being dropped.
+    recorder._on_request_will_be_sent(
+        {"requestId": "r2", "type": "XHR", "request": {"url": "https://x/other", "method": "GET"}},
         None,
     )
-    assert "r2" not in recorder.entries
+    assert "r2" in recorder.entries
+    assert "r1" not in recorder.entries
 
-    # Even a request dropped at capacity remains active. Clearing must ignore its
-    # late response so pre-clear traffic cannot refill the now-empty buffer.
+    # A request still in flight at clear time must be ignored so its late
+    # response cannot refill the now-empty buffer with pre-clear traffic.
     recorder._on_request_will_be_sent(
-        {"requestId": "r3", "type": "XHR", "request": {"url": "https://x/dropped", "method": "GET"}},
+        {"requestId": "r3", "type": "XHR", "request": {"url": "https://x/inflight", "method": "GET"}},
         None,
     )
     assert "r3" in recorder._active_request_ids
-    assert "r3" not in recorder.entries
     recorder.query_requests(clear=True)
     assert "r3" in recorder._ignored_request_ids
     recorder._on_response_received(
-        {"requestId": "r3", "type": "XHR", "response": {"url": "https://x/dropped", "status": 200}},
+        {"requestId": "r3", "type": "XHR", "response": {"url": "https://x/inflight", "status": 200}},
         None,
     )
     assert recorder.entries == {}
     recorder._on_loading_finished({"requestId": "r3"}, None)
     assert "r3" not in recorder._active_request_ids
     assert "r3" not in recorder._ignored_request_ids
+
+
+def test_network_recorder_captures_every_resource_and_full_detail():
+    """The tool must be able to answer ANY question about the page's traffic:
+    non-XHR resources are visible, headers/post data/redirects are captured, and
+    response bodies are readable back through query_requests."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 100
+    recorder._max_body_bytes = 262144
+    recorder._max_total_body_bytes = 1_000_000
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder.entries = {}
+
+    # A Stylesheet is NOT an XHR/Fetch/Document — the old predicate dropped it
+    # entirely, so "what did this page load" was unanswerable.
+    recorder._on_request_will_be_sent(
+        {"requestId": "s1", "type": "Stylesheet", "request": {"url": "https://shop.test/app.css", "method": "GET"}},
+        None,
+    )
+    assert "s1" in recorder.entries
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "p1",
+            "type": "XHR",
+            "request": {
+                "url": "https://shop.test/api/orders",
+                "method": "POST",
+                "headers": {"Content-Type": "application/json", "Cookie": "session=SECRET", "X-Csrf": "tok"},
+                "postData": '{"store":"blue-bottle"}',
+                "hasPostData": True,
+            },
+            "initiator": {"type": "script"},
+        },
+        None,
+    )
+    recorder._on_response_received(
+        {
+            "requestId": "p1",
+            "type": "XHR",
+            "response": {
+                "url": "https://shop.test/api/orders",
+                "status": 200,
+                "statusText": "OK",
+                "mimeType": "application/json",
+                "headers": {"Content-Type": "application/json", "Set-Cookie": "session=SECRET"},
+                "protocol": "h2",
+            },
+        },
+        None,
+    )
+    recorder._store_body("p1", '{"orders":[{"merchant":"Blue Bottle"}]}')
+    recorder.entries["p1"]["terminal"] = True
+
+    # Summary row advertises that a body is waiting.
+    summary = recorder.query_requests(url_pattern="/api/orders")[0]
+    assert summary["body_available"] is True
+    assert "response_body" not in summary
+
+    detailed = recorder.query_requests(
+        url_pattern="/api/orders",
+        include_headers=True,
+        include_bodies=True,
+    )[0]
+    assert detailed["response_body"] == '{"orders":[{"merchant":"Blue Bottle"}]}'
+    assert detailed["request_body"] == '{"store":"blue-bottle"}'
+    assert detailed["request_headers"]["content-type"] == "application/json"
+    assert detailed["request_headers"]["x-csrf"] == "tok"
+    # Live session credentials never enter turn history / provider logs.
+    assert "SECRET" not in detailed["request_headers"]["cookie"]
+    assert "SECRET" not in detailed["response_headers"]["set-cookie"]
+
+    # max_body_chars caps each body and flags the truncation.
+    capped = recorder.query_requests(url_pattern="/api/orders", include_bodies=True, max_body_chars=5)[0]
+    assert capped["response_body"] == '{"ord'
+    assert capped["response_body_truncated"] is True
+
+    # A redirect chain is preserved rather than collapsed to the final hop.
+    recorder._on_request_will_be_sent(
+        {"requestId": "r9", "type": "Document", "request": {"url": "https://shop.test/login", "method": "POST"}},
+        None,
+    )
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "r9",
+            "type": "Document",
+            "request": {"url": "https://shop.test/2fa", "method": "GET"},
+            "redirectResponse": {"status": 302, "headers": {"location": "https://shop.test/2fa"}},
+        },
+        None,
+    )
+    redirected = recorder.query_requests(url_pattern="/2fa")[0]
+    assert redirected["redirects"] == [
+        {"url": "https://shop.test/login", "status": 302, "location": None}
+    ]
+
+
+def test_network_recorder_body_cache_is_byte_bounded():
+    """At 10k agents a long-lived page must not grow the worker heap: the body
+    cache evicts oldest-first under a fixed byte budget."""
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._max_total_body_bytes = 100
+
+    recorder._store_body("a", "x" * 60)
+    recorder._store_body("b", "y" * 60)
+    assert "a" not in recorder._bodies
+    assert recorder._bodies["b"] == "y" * 60
+    assert recorder._body_bytes == 60
+
+    # A single body larger than the whole budget is still readable once (it is
+    # already capped by _max_body_bytes upstream) and does not wedge the loop.
+    recorder._store_body("c", "z" * 500)
+    assert recorder._bodies == {"c": "z" * 500}
+
+    # The budget is charged in ENCODED bytes. Counting characters would let a
+    # non-ASCII payload occupy several times the configured cap in real memory,
+    # which is the whole point of the bound (CodeRabbit #1).
+    recorder._bodies.clear()
+    recorder._body_byte_sizes.clear()
+    recorder._body_bytes = 0
+    # 40 chars, but 4 bytes each in UTF-8 = 160 bytes > the 100-byte budget.
+    recorder._store_body("emoji", "\U0001f600" * 40)
+    assert recorder._body_bytes == 160
+    # A second body must evict it rather than stacking 320 bytes under a 100-byte cap.
+    recorder._store_body("ascii", "a" * 50)
+    assert "emoji" not in recorder._bodies
+    assert recorder._body_bytes == 50
+    assert recorder._body_byte_sizes == {"ascii": 50}
+
+
+def test_network_recorder_request_body_truncates_on_bytes_not_chars():
+    """POST data is capped by a BYTE budget, so truncation must count bytes.
+
+    Character-count truncation let a non-ASCII payload (unicode form fields,
+    CJK JSON) retain up to ~4x _max_body_bytes, multiplied across every
+    retained request. CodeRabbit #2 on the incremental review.
+    """
+    from domains.spawn_browser_agent_v3.recording import _encoded_len, _truncate_text_to_bytes
+
+    # 40 four-byte code points = 160 bytes.
+    payload = "\U0001f600" * 40
+    assert _encoded_len(payload) == 160
+    assert len(payload) == 40
+
+    kept = _truncate_text_to_bytes(payload, 100)
+    # Byte-accurate: never exceeds the cap, and drops the partial code point
+    # at the boundary rather than raising.
+    assert _encoded_len(kept) <= 100
+    assert kept == "\U0001f600" * 25
+    # Under the cap the payload is returned untouched.
+    assert _truncate_text_to_bytes("short", 100) == "short"
+    assert _truncate_text_to_bytes(None, 100) is None
+
+
+def test_network_recorder_redirect_location_survives_header_casing():
+    """CDP preserves the server's header casing; real servers send "Location".
+
+    Reading a hardcoded lowercase key off the RAW header bag returned None on
+    every standard redirect, silently emptying the redirect chain's location.
+    CodeRabbit #3 on the incremental review.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._max_entries = 100
+    recorder._max_body_bytes = 262144
+    recorder._max_total_body_bytes = 1_000_000
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder.entries = {}
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "r1",
+            "request": {"url": "https://shop.test/login", "method": "POST"},
+            "type": "Document",
+        },
+        "sess",
+    )
+    # Second requestWillBeSent for the SAME requestId carries the prior hop.
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "r1",
+            "request": {"url": "https://shop.test/2fa", "method": "GET"},
+            "type": "Document",
+            "redirectResponse": {
+                "url": "https://shop.test/login",
+                "status": 302,
+                "headers": {"Location": "https://shop.test/2fa"},
+            },
+        },
+        "sess",
+    )
+
+    entry = recorder.entries[recorder._request_key("r1")]
+    assert len(entry["redirects"]) == 1
+    assert entry["redirects"][0]["status"] == 302
+    assert entry["redirects"][0]["location"] == "https://shop.test/2fa"
+
+    rows = recorder.query_requests(include_query=True)
+    assert rows[0]["redirects"][0]["location"] == "https://shop.test/2fa"
+    assert isinstance(recorder, BrowserNetworkRecorder)
 
 
 async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear():
@@ -6997,14 +7435,24 @@ async def test_network_recorder_terminal_requests_do_not_accumulate_after_clear(
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
+    recorder._max_body_bytes = 262_144
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = {"failed", "finished"}
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
     recorder._tasks = set()
     recorder._cdp_client = None
     recorder._fetch_response_body = AsyncMock()
     recorder.entries = {
         "failed": {"url": "https://x/failed", "status": None},
-        "finished": {"url": "https://x/finished", "status": None},
+        "finished": {
+            "url": "https://x/finished",
+            "status": None,
+            "resource_type": "XHR",
+            "mime_type": "application/json",
+        },
     }
 
     recorder._on_loading_failed({"requestId": "failed", "errorText": "blocked"}, None)
@@ -7034,6 +7482,10 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
     recorder._network_generation = 4
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._max_total_body_bytes = 1_000_000
     recorder.persists_network_log = False
     recorder.agent_id = "agent"
     recorder.task_id = "task"
@@ -7063,7 +7515,10 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
         "url": "https://shop.test/verify",
         "browser_generation": 4,
     }
-    assert recorder.entries == {}, "monitor-only request metadata must not accumulate"
+    # Monitor-only sessions keep request metadata so read_network_requests works
+    # in prod; growth is bounded by entry eviction + the body byte budget rather
+    # than by discarding every entry.
+    assert "4:r1" in recorder.entries
     assert recorder.pop_provider_exit_rejection() is None
 
     # A duplicate verdict on the same exit is one recovery signal, not a loop.
@@ -7088,7 +7543,7 @@ async def test_network_recorder_emits_one_explicit_fingerprint_exit_rejection_pe
     }
     await recorder._fetch_response_body("5:r2", "r2", "cdp-5", client)
     assert recorder.pop_provider_exit_rejection() is None
-    assert recorder.entries == {}
+    assert "5:r2" in recorder.entries
 
 
 async def test_network_recorder_does_not_reject_successful_fingerprint_warning():
@@ -7108,6 +7563,10 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
     recorder._network_generation = 1
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._max_total_body_bytes = 1_000_000
     recorder.persists_network_log = False
     recorder.agent_id = "agent"
     recorder.task_id = "task"
@@ -7139,7 +7598,7 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
 
     assert recorder.pop_provider_exit_rejection() is None
     assert recorder._rejected_network_generations == set()
-    assert recorder.entries == {}
+    assert "1:r1" in recorder.entries
 
     recorder.entries["1:r2"] = {
         "browser_generation": 1,
@@ -7220,8 +7679,8 @@ async def test_provider_exit_monitor_runs_without_production_body_log_persistenc
 
 
 async def test_execute_action_read_network_requests():
-    """execute_action returns captured traffic when a recorder is present, and a
-    clear error when network capture is inactive (never a silent success)."""
+    """execute_action forwards every filter/detail flag to the recorder and errors
+    only when no recorder is attached (never a silent success)."""
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
     dom = MagicMock()
@@ -7237,27 +7696,88 @@ async def test_execute_action_read_network_requests():
     out = await execute_action(
         dom,
         ah,
-        {"action": "read_network_requests", "params": {"url_pattern": "/api/", "limit": 5, "clear": True}},
+        {
+            "action": "read_network_requests",
+            "params": {
+                "url_pattern": "/api/",
+                "method": "POST",
+                "status": "4xx",
+                "resource_type": "XHR",
+                "limit": 5,
+                "clear": True,
+                "include_query": True,
+                "include_headers": True,
+                "include_bodies": True,
+                "max_body_chars": 1234,
+            },
+        },
         browser_network_recorder=recorder,
     )
     assert out["success"] is True
     assert out["requests"][0]["status"] == 429
-    recorder.query_requests.assert_called_once_with(url_pattern="/api/", limit=5, clear=True)
+    recorder.query_requests.assert_called_once_with(
+        url_pattern="/api/",
+        method="POST",
+        status="4xx",
+        resource_type="XHR",
+        limit=5,
+        clear=True,
+        include_query=True,
+        include_headers=True,
+        include_bodies=True,
+        max_body_chars=1234,
+    )
+
+    # Defaults: summary rows, no bodies, no headers, no query strings.
+    recorder.query_requests.reset_mock()
+    await execute_action(
+        dom,
+        ah,
+        {"action": "read_network_requests", "params": {}},
+        browser_network_recorder=recorder,
+    )
+    recorder.query_requests.assert_called_once_with(
+        url_pattern="",
+        method="",
+        status="",
+        resource_type="",
+        limit=100,
+        clear=False,
+        include_query=False,
+        include_headers=False,
+        include_bodies=False,
+        max_body_chars=4000,
+    )
+
+    # A summary read that hides available bodies must SAY bodies are available.
+    # Without this the model concludes "this tool can't return bodies" and gives up.
+    recorder.query_requests = MagicMock(
+        return_value=[{"url": "https://x/api", "method": "GET", "status": 200, "body_available": True}]
+    )
+    hinted = await execute_action(
+        dom,
+        ah,
+        {"action": "read_network_requests", "params": {}},
+        browser_network_recorder=recorder,
+    )
+    assert "include_bodies=true" in hinted["message"]
 
     out_none = await execute_action(dom, ah, {"action": "read_network_requests", "params": {}})
     assert out_none["success"] is False
-    assert "not active" in out_none["error"]
+    assert "not attached" in out_none["error"]
 
+    # Monitoring-only sessions (local body-log persistence off, i.e. prod) still
+    # serve reads from the in-memory buffer — the tool is not dev-only.
     monitor_only = MagicMock(persists_network_log=False)
+    monitor_only.query_requests = MagicMock(return_value=[])
     out_monitor = await execute_action(
         dom,
         ah,
         {"action": "read_network_requests", "params": {}},
         browser_network_recorder=monitor_only,
     )
-    assert out_monitor["success"] is False
-    assert "not active" in out_monitor["error"]
-    monitor_only.query_requests.assert_not_called()
+    assert out_monitor["success"] is True
+    monitor_only.query_requests.assert_called_once()
 
 
 async def test_execute_action_request_payment_card_requests_workflow_approval():
@@ -9130,8 +9650,8 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
     assert session.get_or_create_cdp_session.await_count == 4
-    for call in session.get_or_create_cdp_session.await_args_list:
-        assert call.kwargs == {"focus": True}
+    for cdp_call in session.get_or_create_cdp_session.await_args_list:
+        assert cdp_call.kwargs == {"focus": True}
     assert cdp_client.send.Runtime.evaluate.await_count == 4
     evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
     assert evaluate_kwargs["session_id"] == "cdp-1"
@@ -12723,9 +13243,16 @@ _TOAST_PAYMENT_CARD_ARGS = {
             "quantity": 1,
             "unit_price_cents": 2500,
             "line_total_cents": 2500,
-            # Toast is a single-URL food-ordering SPA: no product-detail page,
-            # no star rating, no reviews. This is the exact class of args prod
-            # agent 847adea5 produced and got rejected 5x on.
+            # Toast is a single-URL food-ordering SPA: no star rating, no
+            # reviews. This is the exact class of args prod agent 847adea5
+            # produced and got rejected 5x on.
+            #
+            # The product_url is NO LONGER rejected at schema level. Word-list
+            # URL filtering was removed after it made purchases impossible on
+            # whole ordering platforms (agents 53feac08, 90ac106a); a checkout
+            # URL is now caught by the current-page gate in service_actions,
+            # which has the trajectory to prove it. See
+            # test_execute_action_request_payment_card_rejects_current_session_product_link.
             "product_url": "https://order.toasttab.com/online/nopafish/checkout/12345678-1234-4fab-8043-436e74cc34a9",
             "rating": "No rating displayed on Toast ordering page",
             "review_count": "No reviews displayed on Toast ordering page",
@@ -12751,8 +13278,7 @@ def test_payment_card_tool_args_raise_typed_validation_error():
     except BrowserToolArgsValidationError as err:
         assert err.tool_name == "request_payment_card"
         assert err.tool_args == _TOAST_PAYMENT_CARD_ARGS
-        # The feedback the model receives must name all three unsatisfiable fields.
-        assert "product_url" in err.detail
+        # The feedback the model receives must name every unsatisfiable field.
         assert "rating" in err.detail
         assert "review_count" in err.detail
         # It must be a distinct type, not a bare pydantic ValidationError.
@@ -12798,7 +13324,7 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     tool_msgs = [m for m in browser_turn_messages if m.get("role") == "tool"]
     assert tool_msgs, "validation error was not appended to browser_turn_messages"
     tool_blob = json.dumps(tool_msgs[-1])
-    assert "product_url" in tool_blob and "rating" in tool_blob and "review_count" in tool_blob
+    assert "rating" in tool_blob and "review_count" in tool_blob
     # 2) Recorded in action history as a failed attempt the model can see.
     entries = action_history.get_entries()
     assert entries and entries[-1]["action"] == "request_payment_card"
@@ -13361,8 +13887,20 @@ async def run_all_tests():
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
+    r.record("captured_request_body_redaction", test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged)
+    r.record("humanized_click_cdp_press_release", test_humanized_click_presses_and_releases_via_cdp_without_post_click_move)
     r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
     r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
+    r.record("network_recorder_full_detail", test_network_recorder_captures_every_resource_and_full_detail)
+    r.record("network_recorder_body_cache_bounded", test_network_recorder_body_cache_is_byte_bounded)
+    r.record(
+        "network_recorder_request_body_byte_truncation",
+        test_network_recorder_request_body_truncates_on_bytes_not_chars,
+    )
+    r.record(
+        "network_recorder_redirect_location_casing",
+        test_network_recorder_redirect_location_survives_header_casing,
+    )
     await r.record_async(
         "network_recorder_terminal_requests_bounded",
         test_network_recorder_terminal_requests_do_not_accumulate_after_clear,
@@ -13773,6 +14311,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_humanizer_click_synthesis",
         test_browser_humanizer_click_uses_synthesized_mouse_and_cursor_updates,
+    )
+    await r.record_async(
+        "click_press_has_no_round_trip_inside_hold",
+        test_click_press_holds_no_remote_round_trip_between_down_and_up,
     )
     await r.record_async(
         "browser_humanizer_cursor_observer_after_overlay",

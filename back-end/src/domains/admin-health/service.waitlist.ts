@@ -26,7 +26,7 @@ import {
   WaitlistInviteInProgressError,
 } from './service.waitlist-finalization';
 import { resolveInviteGate } from './service.waitlist-gate';
-import { DEFAULT_WAITLIST_PAGE_SIZE, type WaitlistPagination } from './service.waitlist-pagination';
+import { DEFAULT_PEOPLE_PAGE_SIZE, type PeoplePagination } from './service.pagination';
 import type { AdminWaitlistInviteResponse, AdminWaitlistPeopleResponse } from './types';
 
 export {
@@ -54,6 +54,13 @@ export class WaitlistInviteEmailError extends Error {
   constructor(detail: string) {
     super(`Failed to send invite email: ${detail}`);
     this.name = 'WaitlistInviteEmailError';
+  }
+}
+
+export class WaitlistInviteNoChannelError extends Error {
+  constructor() {
+    super('Waitlist person has no phone or email to deliver an invite to');
+    this.name = 'WaitlistInviteNoChannelError';
   }
 }
 
@@ -203,21 +210,26 @@ function normalizePhoneDigits(phone: string | null | undefined): string {
   return (phone ?? '').replace(/\D/g, '');
 }
 
-/** Return one bounded page of actionable phone-bearing signups with gate state. */
+/** Return one bounded page of real signups (email OR phone) with gate state. */
 export async function getWaitlistPeople(
-  pagination: WaitlistPagination = { page: 1, pageSize: DEFAULT_WAITLIST_PAGE_SIZE }
+  pagination: PeoplePagination = { page: 1, pageSize: DEFAULT_PEOPLE_PAGE_SIZE }
 ): Promise<AdminWaitlistPeopleResponse> {
   const { rows, total } = await repo.findWaitlistPeople({
     skip: (pagination.page - 1) * pagination.pageSize,
     take: pagination.pageSize,
   });
-  const accounts = await repo.findAccountsByPhones(rows.map((row) => row.phone));
+  const accounts = await repo.findAccountsByPhones(
+    rows.map((row) => row.phone).filter((phone): phone is string => phone !== null)
+  );
   const accountByDigits = new Map<string, repo.AccountGateRecord>();
   for (const account of accounts) {
     accountByDigits.set(normalizePhoneDigits(account.phone), account);
   }
   const people = rows.map((row) => {
-    const account = accountByDigits.get(normalizePhoneDigits(row.phone));
+    // Accounts are keyed by phone (auth is phone-based), so an email-only
+    // signup can never resolve to one — leave it ungated rather than guessing.
+    const digits = normalizePhoneDigits(row.phone);
+    const account = digits === '' ? undefined : accountByDigits.get(digits);
     const hasAccount = account !== undefined;
     // Matches the real gate: a redeemed invite code OR an active subscription
     // clears it (offWaitlistAt alone does not).
@@ -275,7 +287,13 @@ export async function inviteWaitlistPerson(
     return storedFinalOutcome;
   }
 
-  const offWaitlist = await resolveInviteGate({ id, idempotencyKey, phone: person.phone });
+  // The gate keys on phone (auth is phone-based), so an email-only signup has
+  // no account to clear — it gets the invite email and clears the gate itself
+  // when it later signs up with a phone.
+  const offWaitlist =
+    person.phone === null
+      ? { userId: null, flagged: false, alreadyOffWaitlist: false }
+      : await resolveInviteGate({ id, idempotencyKey, phone: person.phone });
   const accountEmail =
     offWaitlist.userId === null ? null : await repo.findUserEmailById(offWaitlist.userId);
   const recipientEmail = preferredRecipientEmail(person.email, accountEmail);
@@ -285,19 +303,29 @@ export async function inviteWaitlistPerson(
   let smsSent = false;
   let emailSent = false;
   if (dependencies.isProduction) {
-    await sendInviteSms({
-      id,
-      idempotencyKey,
-      phone: person.phone,
-      dependencies,
-    });
-    smsSent = true;
+    if (person.phone !== null) {
+      await sendInviteSms({
+        id,
+        idempotencyKey,
+        phone: person.phone,
+        dependencies,
+      });
+      smsSent = true;
+    } else {
+      log.info('Skipping waitlist invite SMS: no phone on file', { waitlistId: id });
+    }
 
     if (recipientEmail !== null) {
       await sendInviteEmail({ id, idempotencyKey, recipient: recipientEmail, dependencies });
       emailSent = true;
     } else {
       log.warn('Skipping waitlist invite email: no email on file', { waitlistId: id });
+    }
+
+    // Waitlist_contact_present guarantees one identifier exists, so reaching
+    // here with neither channel sent means delivery silently no-opped.
+    if (!smsSent && !emailSent) {
+      throw new WaitlistInviteNoChannelError();
     }
   } else {
     log.info('Skipping waitlist invite notifications outside production', { waitlistId: id });

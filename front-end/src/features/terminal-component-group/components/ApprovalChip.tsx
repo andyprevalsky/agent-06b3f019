@@ -27,17 +27,33 @@
  *     v (success/error)
  * [IDLE]
  *
+ * OVERFLOW STATES (useHasMoreBelow):
+ * The card is height-capped (55dvh mobile / 70dvh desktop) so it can never
+ * clip itself or bury the trajectory behind it. Its body is the only scroll
+ * region; header, context input and Accept/Reject are pinned outside it.
+ *
+ * [FITS] <-- scrollHeight <= clientHeight; no affordance
+ *     |
+ *     | (content grows / user scrolls up)
+ *     v
+ * [MORE_BELOW] <-- hasMoreBelow: true; bottom fade rendered
+ *     |
+ *     v (user scrolls to end)
+ * [FITS]
+ * Re-measured on scroll and on ResizeObserver resize.
+ *
  * Props:
  * - pendingApproval: { attentionRequestId, question } | null
  * - onApprovalHandled: () => void
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Check, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../hooks';
+import { ApprovalPaymentReceipt } from './ApprovalPaymentReceipt';
 import { MarkdownText } from './MarkdownText';
 
 interface PendingApproval {
@@ -154,78 +170,98 @@ function ApprovalActions({ actionState, onAccept, onReject }: ApprovalActionsPro
   );
 }
 
-function formatCents(cents = 0): string {
-  return `$${(cents / 100).toFixed(2)}`;
+/**
+ * Tracks whether a scroll container still has content below the fold, so the
+ * card can show a "more below" affordance. Without it the capped body slices
+ * whatever line it lands on and reads as a rendering bug rather than a scroll
+ * region — which is exactly how the original cutoff was reported.
+ */
+function useHasMoreBelow(resetKey?: string) {
+  const [hasMoreBelow, setHasMoreBelow] = useState(false);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const contentRef = useRef<HTMLDivElement | null>(null);
+
+  const measure = useCallback(() => {
+    const node = scrollerRef.current;
+    if (!node) return;
+    setHasMoreBelow(node.scrollHeight - node.scrollTop - node.clientHeight > 1);
+  }, []);
+
+  // Observe BOTH boxes. The scroller's own border box never changes when its
+  // content grows, so watching only it leaves the affordance permanently off
+  // for exactly the long receipts that need it; the content box is what grows.
+  useEffect(() => {
+    if (typeof ResizeObserver === 'undefined') {
+      measure();
+      return;
+    }
+    const observer = new ResizeObserver(measure);
+    for (const node of [scrollerRef.current, contentRef.current]) {
+      if (node) observer.observe(node);
+    }
+    measure();
+    return () => observer.disconnect();
+  }, [measure]);
+
+  // AgentChatArea keeps this component mounted for as long as SOME approval is
+  // pending, so a second request reuses the first one's scroll position and
+  // opens already scrolled past its own title — the exact cutoff this card
+  // exists to prevent. Rewind and remeasure whenever the request identity
+  // changes.
+  // useLayoutEffect, not useEffect: a passive effect runs AFTER paint, so the
+  // browser can present one frame of new content at the old scrollTop —
+  // briefly recreating the very cutoff this hook prevents. Rewinding before
+  // paint makes that frame unreachable.
+  useLayoutEffect(() => {
+    if (scrollerRef.current) scrollerRef.current.scrollTop = 0;
+    measure();
+  }, [resetKey, measure]);
+
+  return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
 }
 
-function PaymentReceipt({
-  receipt,
-}: {
-  receipt: NonNullable<PendingApproval['requestPaymentCard']>;
-}) {
+interface ApprovalDetailsProps {
+  pendingApproval: PendingApproval;
+  scrollState: ReturnType<typeof useHasMoreBelow>;
+}
+
+function ApprovalDetails({ pendingApproval, scrollState }: ApprovalDetailsProps) {
+  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = scrollState;
   return (
-    <div className="mb-3 rounded-lg border bg-muted/40 p-3 text-sm">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <span className="font-medium">{receipt.merchant || 'Merchant'}</span>
-        <span className="font-semibold">{formatCents(receipt.totalCents)}</span>
-      </div>
-      <div className="space-y-2">
-        {(receipt.lineItems || []).map((item, index) => (
-          <div key={`${item.name || 'item'}-${index}`} className="flex items-center gap-3">
-            {item.imageUrl && (
-              <img src={item.imageUrl} alt="" className="h-10 w-10 rounded object-cover" />
-            )}
-            <div className="min-w-0 flex-1">
-              <div className="break-words">{item.name || 'Item'}</div>
-              <div className="text-xs text-muted-foreground">
-                Qty {item.quantity || 1} · {formatCents(item.unitPriceCents)}
-              </div>
-              {item.rating && item.reviewCount ? (
-                <div className="text-xs text-muted-foreground">
-                  Reviews: {item.rating} · {item.reviewCount}
-                </div>
-              ) : (
-                <div className="text-xs text-muted-foreground">Review details unavailable</div>
-              )}
-              {item.productUrl ? (
-                <a
-                  href={item.productUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-primary underline-offset-2 hover:underline"
-                >
-                  View product
-                </a>
-              ) : (
-                <div className="text-xs text-muted-foreground">Product link unavailable</div>
-              )}
+    <div className="relative flex min-h-0 flex-1 flex-col">
+      <div
+        ref={scrollerRef}
+        onScroll={onScroll}
+        tabIndex={0}
+        role="region"
+        aria-label="Approval details"
+        className="min-h-0 flex-1 overflow-y-auto"
+      >
+        <div ref={contentRef}>
+          {pendingApproval.imageUrl && (
+            <div className="mb-3 flex justify-center">
+              <img
+                src={pendingApproval.imageUrl}
+                alt="Request context"
+                className="max-w-[200px] max-h-[150px] rounded-md object-contain"
+              />
             </div>
-            <div className="font-medium">{formatCents(item.lineTotalCents)}</div>
+          )}
+          <div className="mb-3 text-sm text-foreground">
+            <MarkdownText text={pendingApproval.question} breaks />
           </div>
-        ))}
-      </div>
-      <div className="mt-3 space-y-1 border-t pt-2">
-        <div className="flex justify-between text-muted-foreground">
-          <span>Subtotal</span>
-          <span>{formatCents(receipt.subtotalCents)}</span>
-        </div>
-        {(receipt.fees || []).map((fee, index) => (
-          <div
-            key={`${fee.label || 'fee'}-${index}`}
-            className="flex justify-between text-muted-foreground"
-          >
-            <span>{fee.label || 'Fee'}</span>
-            <span>{formatCents(fee.amountCents)}</span>
-          </div>
-        ))}
-        <div className="flex justify-between font-semibold">
-          <span>Total</span>
-          <span>{formatCents(receipt.totalCents)}</span>
+          {pendingApproval.requestPaymentCard && (
+            <ApprovalPaymentReceipt receipt={pendingApproval.requestPaymentCard} />
+          )}
         </div>
       </div>
-      <p className="mt-2 text-xs text-muted-foreground">
-        Rose will charge your saved Stripe billing method, then issue a one-time virtual card.
-      </p>
+      {hasMoreBelow && (
+        <div
+          data-testid="approval-scroll-more"
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent"
+        />
+      )}
     </div>
   );
 }
@@ -233,6 +269,7 @@ function PaymentReceipt({
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
+  const scrollState = useHasMoreBelow(pendingApproval?.attentionRequestId);
   const { handleAccept, handleReject } = useApprovalHandlers({
     pendingApproval,
     contextInput,
@@ -246,29 +283,27 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
   return (
     <div className="w-full mb-3">
       <div className="max-w-4xl mx-auto">
-        <div className="rounded-xl border border-border bg-background/80 backdrop-blur-sm p-4 shadow-md">
-          <div className="flex items-start justify-between gap-3 mb-3">
+        {/*
+         * The card owns a fixed height budget and scrolls its body internally.
+         * Without that cap it is a shrinkable flex child of an `overflow-hidden`
+         * column, so on a phone a receipt with several line items pushed the
+         * title under the header and the Approve/Reject buttons off-screen —
+         * an approval you could neither read nor action.
+         *
+         * The mobile cap is deliberately under half the viewport so the agent
+         * trajectory behind the card stays readable while you decide; a purchase
+         * approval you cannot cross-check against what the agent just did is
+         * not a real approval. Desktop has room for more.
+         */}
+        <div className="flex max-h-[55dvh] flex-col rounded-xl border border-border bg-background/80 backdrop-blur-sm p-4 shadow-md md:max-h-[70dvh]">
+          <div className="flex shrink-0 items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
               <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
           </div>
-          {pendingApproval.imageUrl && (
-            <div className="mb-3 flex justify-center">
-              <img
-                src={pendingApproval.imageUrl}
-                alt="Request context"
-                className="max-w-[200px] max-h-[150px] rounded-md object-contain"
-              />
-            </div>
-          )}
-          <div className="mb-3 text-sm text-foreground max-h-[300px] overflow-y-auto">
-            <MarkdownText text={pendingApproval.question} breaks />
-          </div>
-          {pendingApproval.requestPaymentCard && (
-            <PaymentReceipt receipt={pendingApproval.requestPaymentCard} />
-          )}
-          <div className="mb-3">
+          <ApprovalDetails pendingApproval={pendingApproval} scrollState={scrollState} />
+          <div className="mb-3 shrink-0 pt-3">
             <Input
               placeholder="Add context (optional)..."
               value={contextInput}
@@ -277,11 +312,13 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
               disabled={actionState !== null}
             />
           </div>
-          <ApprovalActions
-            actionState={actionState}
-            onAccept={() => void handleAccept()}
-            onReject={() => void handleReject()}
-          />
+          <div className="shrink-0">
+            <ApprovalActions
+              actionState={actionState}
+              onAccept={() => void handleAccept()}
+              onReject={() => void handleReject()}
+            />
+          </div>
         </div>
       </div>
     </div>

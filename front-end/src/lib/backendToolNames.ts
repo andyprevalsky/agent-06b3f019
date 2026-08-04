@@ -59,3 +59,60 @@ export const BACKEND_EMITTED_TOOL_NAMES = [
   'web_search',
   'x402',
 ] as const;
+
+/**
+ * Browser `action_type` values that reach the frontend in
+ * `metadata.actionType` from `agents/domains/spawn_browser_agent_v3/`.
+ *
+ * `ToolMessageIcon` prefers `actionType` over `toolName`, so any value missing
+ * from `TOOL_ICONS` renders the generic Info fallback. Two sources feed this
+ * list: the browser tool literals in `agents/browser_tools/schemas.py` (plus the
+ * `scroll_up`/`scroll_down` split that `build_action_titles` resolves) and the
+ * lifecycle `action_type="..."` literals the handler emits directly.
+ * Append-only, so historical transcripts keep their icons.
+ */
+export const BROWSER_EMITTED_ACTION_TYPES = [
+  'attempt_completion',
+  'browser',
+  'browser_challenge_recovery',
+  'click',
+  'click_coordinates',
+  'close_tab',
+  'credential_propagation',
+  'credential_ref',
+  'diagnostics',
+  'done',
+  'dropdown_options',
+  'email_send',
+  'error',
+  'evaluate',
+  'extract',
+  'generate_write_lock_notification',
+  'goto',
+  'input_text',
+  'navback',
+  'network_recording',
+  'open_new_tab',
+  'press_key',
+  'purchase',
+  'read_network_requests',
+  'recording',
+  'recover_from_challenge',
+  'request_payment_card',
+  'request_user_assistance_for_authentication',
+  'screenshot',
+  'scroll_down',
+  'scroll_up',
+  'select_dropdown',
+  'send_message_to_user',
+  'session_init',
+  'session_paused',
+  'social_post',
+  'supervisor_recovery',
+  'switch_tab',
+  'system',
+  'task_complete',
+  'task_started',
+  'upload_file',
+  'wait',
+] as const;

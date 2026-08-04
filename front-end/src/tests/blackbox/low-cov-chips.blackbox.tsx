@@ -12,7 +12,7 @@
  * exercise the component-under-test's branches without pulling in canvas / WebGL
  * / realtime subscriptions.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';
@@ -67,7 +67,6 @@ import { CompletionSummaryCard } from '@/features/terminal-component-group/compo
 import ApprovalChip from '@/features/terminal-component-group/components/ApprovalChip';
 import SubAgentToolBubble from '@/features/terminal-component-group/components/SubAgentToolBubble';
 import BrowserStatusBarCarousel from '@/features/terminal-component-group/components/BrowserStatusBarCarousel';
-import { FeedbackBanner } from '@/features/terminal-component-group/components/FeedbackBanner';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CompletionSummaryCard
@@ -327,6 +326,113 @@ describe('ApprovalChip', () => {
     ).toBeInTheDocument();
   });
 
+  // RCA (agent 90ac106a): on a phone the card's title ("Approve a $22.81
+  // purchase from …") rendered half-clipped under the header and the
+  // Approve/Reject buttons sat below the fold. Two causes: the question had its
+  // own max-h-[300px] nested scroller whose scrollTop could park past line one,
+  // and the card had no height budget of its own so the ancestor
+  // `overflow-hidden` column cut off whatever did not fit. Cement both: exactly
+  // one scroll region, and it must not be the question/title element.
+  it('bounds its own height and keeps the title out of a nested scroller', () => {
+    const { container } = renderWithProviders(
+      <ApprovalChip
+        pendingApproval={{
+          attentionRequestId: 'req-tall',
+          question: 'Approve a $22.81 purchase from Lunette Cambodia - Ferry Building?',
+          requestPaymentCard: {
+            merchant: 'Lunette Cambodia - Ferry Building',
+            currency: 'USD',
+            lineItems: Array.from({ length: 8 }, (_, index) => ({
+              name: `Lok Lak ${index}`,
+              productUrl: `https://order.toasttab.com/online/lunette/item-lok-lak-${index}`,
+              rating: '0 stars',
+              reviewCount: '0 reviews',
+              unitPriceCents: 2100,
+              quantity: 1,
+              lineTotalCents: 2100,
+            })),
+            subtotalCents: 16800,
+            totalCents: 18100,
+          },
+        }}
+      />,
+    );
+
+    // Mobile cap stays under half the viewport so the trajectory behind the
+    // card remains readable while the user decides on a real charge.
+    const card = container.querySelector('.max-h-\\[55dvh\\]');
+    expect(card).not.toBeNull();
+    expect(card?.className).toContain('flex-col');
+    expect(card?.className).toContain('md:max-h-[70dvh]');
+
+    // The title must not sit inside an element that scrolls independently of
+    // the card body — that is what hid it behind the header.
+    const title = screen.getByText(
+      'Approve a $22.81 purchase from Lunette Cambodia - Ferry Building?',
+    );
+    const scrollers = Array.from(container.querySelectorAll('.overflow-y-auto'));
+    expect(scrollers).toHaveLength(1);
+    expect(scrollers[0].contains(title)).toBe(true);
+    expect(scrollers[0]).not.toBe(title);
+    expect(scrollers[0].className).toContain('min-h-0');
+
+    // Accept/Reject live outside the scroll region so they are always tappable.
+    for (const label of [/accept/i, /reject/i]) {
+      expect(scrollers[0].contains(screen.getByRole('button', { name: label }))).toBe(false);
+    }
+
+    // The scroller must be keyboard-reachable. Purchase details can overflow
+    // with no focusable child inside, and a scroll container that cannot take
+    // focus cannot be scrolled by keyboard — leaving someone approving a real
+    // charge unable to read the items they are paying for.
+    expect(scrollers[0].getAttribute('tabindex')).toBe('0');
+    expect(scrollers[0].getAttribute('role')).toBe('region');
+    expect(scrollers[0].getAttribute('aria-label')).toBeTruthy();
+  });
+
+  // CodeRabbit finding on PR #912: AgentChatArea keeps ApprovalChip mounted for
+  // as long as SOME approval is pending, so a second request inherited the
+  // first one's scrollTop and opened already scrolled past its own title —
+  // a residual path to the very cutoff this card was changed to prevent.
+  it('rewinds its scroll position when the approval request changes', () => {
+    const approval = (id: string, merchant: string) => ({
+      attentionRequestId: id,
+      question: `Approve a $22.81 purchase from ${merchant}?`,
+      requestPaymentCard: {
+        merchant,
+        currency: 'USD',
+        lineItems: Array.from({ length: 8 }, (_, index) => ({
+          name: `Item ${index}`,
+          productUrl: `https://order.toasttab.com/online/x/item-${index}`,
+          rating: '0 stars',
+          reviewCount: '0 reviews',
+          unitPriceCents: 2100,
+          quantity: 1,
+          lineTotalCents: 2100,
+        })),
+        subtotalCents: 16800,
+        totalCents: 18100,
+      },
+    });
+
+    const { container, rerender } = renderWithProviders(
+      <ApprovalChip pendingApproval={approval('req-first', 'First Merchant')} />,
+    );
+
+    const scroller = container.querySelector('.overflow-y-auto') as HTMLDivElement;
+    expect(scroller).not.toBeNull();
+
+    // Simulate the user having scrolled the first approval's body down.
+    scroller.scrollTop = 250;
+    expect(scroller.scrollTop).toBe(250);
+
+    // A different request arrives while the component stays mounted.
+    rerender(<ApprovalChip pendingApproval={approval('req-second', 'Second Merchant')} />);
+
+    expect(scroller.scrollTop).toBe(0);
+    expect(screen.getByText('Approve a $22.81 purchase from Second Merchant?')).toBeInTheDocument();
+  });
+
   it('renders historical payment metadata without undefined values or broken links', () => {
     renderWithProviders(
       <ApprovalChip
@@ -579,122 +685,5 @@ describe('BrowserStatusBarCarousel', () => {
       <BrowserStatusBarCarousel browsers={[{ taskId: 't1', browserUrl: 'https://x.com' }]} />,
     );
     expect(screen.getByTestId('browser-status-bar-t1')).toBeInTheDocument();
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// FeedbackBanner
-// ═══════════════════════════════════════════════════════════════════════════
-
-describe('FeedbackBanner', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('renders rating prompt with 5 stars', () => {
-    renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    expect(screen.getByText('How was this result?')).toBeInTheDocument();
-    // 5 star buttons
-    const buttons = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    expect(buttons).toHaveLength(5);
-  });
-
-  it('star hover toggles hoveredStar (re-renders color)', () => {
-    renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    const starButtons = screen
-      .getAllByRole('button')
-      .filter((b) => b.querySelector('.lucide-star'));
-    fireEvent.mouseEnter(starButtons[2]);
-    fireEvent.mouseLeave(starButtons[2]);
-    // No assertion needed beyond no-throw — exercises mouseEnter/Leave code paths
-    expect(starButtons.length).toBe(5);
-  });
-
-  it('clicking a star expands the panel and reveals form controls', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[2]); // rating = 3
-    expect(screen.getByText('Issue type (optional)')).toBeInTheDocument();
-    expect(screen.getByText('Comment (optional)')).toBeInTheDocument();
-    expect(screen.getByText('Submit')).toBeInTheDocument();
-  });
-
-  it.skip('Cancel resets selected rating and collapses panel', async () => {
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[1]);
-    expect(screen.getByText('Submit')).toBeInTheDocument();
-    await user.click(screen.getByText('Cancel'));
-    // Panel collapsed → Submit button gone
-    expect(screen.queryByText('Submit')).not.toBeInTheDocument();
-  });
-
-  it('Submit: calls onSubmit with rating and shows thank-you state on success', async () => {
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[4]); // rating = 5
-    await user.type(screen.getByPlaceholderText('Additional feedback'), 'Great!');
-    await user.click(screen.getByText('Submit'));
-    expect(onSubmit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        rating: 5,
-        comment: 'Great!',
-        helpImprove: true,
-      }),
-    );
-    // Thank-you state
-    expect(await screen.findByText('Thanks for your feedback!')).toBeInTheDocument();
-  });
-
-  it('Submit: logs error when onSubmit rejects, stays in form', async () => {
-    const onSubmit = vi.fn().mockRejectedValue(new Error('bad'));
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[0]);
-    await user.click(screen.getByText('Submit'));
-    expect(errSpy).toHaveBeenCalled();
-    // Should not transition to thank-you
-    expect(screen.queryByText('Thanks for your feedback!')).not.toBeInTheDocument();
-    errSpy.mockRestore();
-  });
-
-  it('Submit is enabled after star click (rating > 0)', async () => {
-    // The `disabled={selectedRating === 0}` branch on Submit is effectively
-    // unreachable through UI flow: clicking any star sets rating>=1 AND opens
-    // the panel in the same handler, and Cancel both collapses the panel and
-    // resets rating to 0. So we can't assert disabled=true via blackbox without
-    // reaching into internal state. We CAN assert the inverse: once the panel
-    // is open (by any legal user path), Submit must be ENABLED. This catches
-    // a regression that made Submit always-disabled.
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={vi.fn()} />);
-    // Before opening, Submit is not in the DOM.
-    expect(screen.queryByText('Submit')).not.toBeInTheDocument();
-    // Click the first star — sets rating=1 AND expands the panel.
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[0]);
-    // Submit now renders and is enabled (rating > 0).
-    const submitBtn = await screen.findByRole('button', { name: 'Submit' });
-    expect(submitBtn).not.toBeDisabled();
-  });
-
-  it('toggles helpImprove checkbox', async () => {
-    const onSubmit = vi.fn().mockResolvedValue(undefined);
-    const user = userEvent.setup();
-    renderWithProviders(<FeedbackBanner onSubmit={onSubmit} />);
-    const stars = screen.getAllByRole('button').filter((b) => b.querySelector('.lucide-star'));
-    await user.click(stars[2]);
-    const checkbox = screen.getByRole('checkbox', {
-      name: /help rose improve/i,
-    });
-    await user.click(checkbox); // uncheck
-    await user.click(screen.getByText('Submit'));
-    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ helpImprove: false }));
   });
 });

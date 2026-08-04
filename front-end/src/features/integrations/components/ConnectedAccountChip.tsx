@@ -17,6 +17,8 @@ interface ConnectedAccountChipProps {
   onRemove?: () => void;
   removeLabel?: string;
   removing?: boolean;
+  /** Blocks removal while a conflicting mutation on the same entity is in flight. */
+  disabled?: boolean;
   title?: string;
 }
 
@@ -42,6 +44,7 @@ export default function ConnectedAccountChip({
   onRemove,
   removeLabel,
   removing = false,
+  disabled = false,
   title,
 }: ConnectedAccountChipProps) {
   const classes = `group inline-flex h-5 max-w-full items-center gap-1.5 rounded border px-1.5 text-left transition-colors ${toneClasses(tone)}`;
@@ -77,7 +80,7 @@ export default function ConnectedAccountChip({
       type="button"
       aria-label={removeLabel}
       className={`${classes} hover:border-destructive/40 hover:bg-destructive/10 hover:text-destructive disabled:opacity-60`}
-      disabled={removing}
+      disabled={removing || disabled}
       onClick={onRemove}
       title={title}
     >

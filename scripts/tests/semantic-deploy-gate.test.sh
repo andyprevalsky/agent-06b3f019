@@ -201,9 +201,17 @@ if grep -Fq 'credential-health blackbox only when Step 4a is skipped' "$DEPLOY_C
   fail "/deploy must not retain the retired conditional credential-health wiring"
 fi
 set +e
+# This asserts the Amplitude credential contract, so it invokes the suite
+# directly rather than through the runner. The suite's assertLocalDatabase guard
+# refuses a non-local DATABASE_URL and back-end/.env points at prod, so pin a
+# localhost DSN here. That keeps the guard strict (rather than handing this gate
+# the BLACKBOX_TEST_ALLOW_REMOTE_DATABASE escape hatch) and makes it impossible
+# for the probe to reach production even if the credential check ever passed.
 LIVE_AMPLITUDE_OUTPUT=$(
   cd "$ROOT_DIR/back-end" &&
-    AMPLITUDE_API_KEY='' AMPLITUDE_SECRET_KEY='' ADMIN_HEALTH_LIVE_ONLY=1 \
+    DATABASE_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
+      DIRECT_URL='postgresql://postgres:postgres@localhost:1/deploy-gate-unused' \
+      AMPLITUDE_API_KEY='' AMPLITUDE_SECRET_KEY='' ADMIN_HEALTH_LIVE_ONLY=1 \
       npx tsx src/tests/blackbox/admin-health.blackbox.ts 2>&1
 )
 LIVE_AMPLITUDE_RC=$?

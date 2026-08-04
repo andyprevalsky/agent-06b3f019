@@ -17,6 +17,7 @@ from typing import BinaryIO, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+SIGNAL_GRACE_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,10 @@ GATES = (
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
     Gate("run-seed-exit-code", ("bash", "scripts/tests/run-seed-exit-code.test.sh")),
+    Gate(
+        "run-public-tunnel-routing",
+        ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"),
+    ),
 )
 
 
@@ -85,6 +90,17 @@ def _terminate(running: Sequence[RunningGate], signum: int) -> None:
             os.killpg(item.process.pid, signum)
         except ProcessLookupError:
             pass
+
+
+def _stop_running(running: Sequence[RunningGate]) -> None:
+    _terminate(running, signal.SIGTERM)
+    deadline = time.monotonic() + SIGNAL_GRACE_SECONDS
+    while any(item.process.poll() is None for item in running) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    _terminate(running, signal.SIGKILL)
+    for item in running:
+        item.process.wait()
+        item.output.close()
 
 
 def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
@@ -108,7 +124,7 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
     try:
         with tempfile.TemporaryDirectory(prefix="deploy-structural-") as temporary:
             output_root = Path(temporary)
-            while running or (pending and not received_signal):
+            while (running or pending) and not received_signal:
                 while pending and len(running) < max_workers and not received_signal:
                     gate = pending.popleft()
                     output_path = output_root / f"{gate.name}.log"
@@ -149,10 +165,7 @@ def run_gates(gates: Sequence[Gate], max_workers: int) -> int:
                     if rendered:
                         print(rendered, end="" if rendered.endswith("\n") else "\n")
     finally:
-        _terminate(running, signal.SIGTERM)
-        for item in running:
-            item.process.wait()
-            item.output.close()
+        _stop_running(running)
         for signum, previous in previous_handlers.items():
             signal.signal(signum, previous)
 

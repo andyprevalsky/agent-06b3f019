@@ -4,21 +4,17 @@ import { useToast } from '@/hooks/use-toast';
 import * as analytics from '@/lib/analytics';
 import {
   getSession,
-  clearSession,
   getCachedUser,
-  persistCachedUser,
-  createAnonymousSession,
   isAnonymousUser,
-  setRealtimeAuth,
   AUTH_SESSION_CHANGED_EVENT,
   waitForElectronAuthBridgePrimed,
 } from '@/lib/supabase';
-import { checkNeedsInviteCode } from '@/lib/api';
 import { isBenchmarkArchiveMode } from '@/lib/benchmarkArchive';
 
 import { sendOTP, verifyOTP } from './api';
 import { initAuthSession, logAuth } from './hooks/initAuthSession';
 import { useAuthFormState } from './hooks/useAuthFormState';
+import { useAuthActions } from './hooks/useAuthActions';
 
 /** Extract a human-readable message from an unknown error value. */
 function getErrorMessage(error: unknown, fallback: string): string {
@@ -155,79 +151,6 @@ export function usePhoneAuth(
     handleVerifyOTP,
     ...navigation,
   } as const;
-}
-
-interface AuthStateSetters {
-  setUser: React.Dispatch<React.SetStateAction<User | null>>;
-  setSession: React.Dispatch<React.SetStateAction<Session | null>>;
-  setIsFullySignedIn: React.Dispatch<React.SetStateAction<boolean>>;
-  setRealtimeReady: React.Dispatch<React.SetStateAction<boolean>>;
-}
-
-/** Memoized auth actions: updateInviteStatus, applySession, refreshAuthState, signOut. */
-function useAuthActions(setters: AuthStateSetters) {
-  const { setUser, setSession, setIsFullySignedIn, setRealtimeReady } = setters;
-
-  const updateInviteStatus = useCallback(
-    async (currentSession: Session | null, currentUser: User | null) => {
-      if (!currentSession || isAnonymousUser(currentUser)) {
-        setIsFullySignedIn(false);
-        return;
-      }
-      try {
-        const needsInvite = await checkNeedsInviteCode();
-        setIsFullySignedIn(!needsInvite);
-        logAuth('Invite check result', { needsInvite, isFullySignedIn: !needsInvite });
-      } catch (error) {
-        console.error('[Auth] Failed to check invite requirement', error);
-        setIsFullySignedIn(false);
-      }
-    },
-    [setIsFullySignedIn],
-  );
-
-  const applySession = useCallback(
-    async (origin: string, nextSession: Session | null) => {
-      logAuth(`Applying session (${origin})`, {
-        hasSession: !!nextSession,
-        isAnonymous: nextSession?.user?.is_anonymous,
-      });
-      setSession(nextSession);
-      setUser(nextSession?.user ?? null);
-      persistCachedUser(nextSession?.user ?? null);
-      await setRealtimeAuth(nextSession?.access_token ?? null);
-      setRealtimeReady(!!nextSession?.access_token);
-      await updateInviteStatus(nextSession, nextSession?.user ?? null);
-    },
-    [setSession, setUser, setRealtimeReady, updateInviteStatus],
-  );
-
-  const refreshAuthState = useCallback(
-    async (reason = 'manual-refresh') => {
-      logAuth(`refreshAuthState (${reason})`);
-      await applySession(reason, getSession());
-    },
-    [applySession],
-  );
-
-  const signOut = useCallback(async () => {
-    logAuth('Signing out');
-    await clearSession();
-    setSession(null);
-    setUser(null);
-    persistCachedUser(null);
-    setIsFullySignedIn(false);
-    setRealtimeReady(false);
-    await setRealtimeAuth(null);
-    try {
-      const { session: anonSession } = await createAnonymousSession();
-      await applySession('post-signout-anonymous', anonSession);
-    } catch (error) {
-      console.error('[Auth] Failed to create anonymous session after signout:', error);
-    }
-  }, [applySession, setSession, setUser, setIsFullySignedIn, setRealtimeReady]);
-
-  return { applySession, refreshAuthState, signOut };
 }
 
 /**

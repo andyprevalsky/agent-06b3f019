@@ -25,6 +25,12 @@ import {
   quitAndInstall,
   registerListeners,
 } from './repo';
+import {
+  beginDownloadTelemetry,
+  completeDownloadTelemetry,
+  failDownloadTelemetry,
+  recordDownloadProgress,
+} from './service-telemetry';
 import type { UpdaterProgressInfo, UpdaterUpdateInfo, UpdateStatusPayload } from './types';
 
 // ---------------------------------------------------------------------------
@@ -94,13 +100,21 @@ function handleUpdateNotAvailable(): void {
 
 function handleDownloadProgress(progress: UpdaterProgressInfo): void {
   const percent = Math.round(progress.percent);
-  console.log(`[AutoUpdater] Download progress: ${percent}%`);
+  console.log('[AutoUpdater] Download progress:', {
+    percent,
+    bytesPerSecond: progress.bytesPerSecond,
+    transferredBytes: progress.transferred,
+    totalBytes: progress.total,
+    deltaBytes: progress.delta,
+  });
+  recordDownloadProgress(progress);
   sendProgress(progress.percent);
   sendStatus({ state: 'downloading', percent: progress.percent });
 }
 
 function handleUpdateDownloaded(info: UpdaterUpdateInfo): void {
   console.log('[AutoUpdater] Update downloaded:', info.version);
+  completeDownloadTelemetry(info.version);
   updateDownloaded = true;
   pendingVersion = info.version;
   sendStatus({ state: 'downloaded', version: info.version });
@@ -114,12 +128,14 @@ function handleError(error: unknown): void {
   }
 
   if (isMissingChannelFileError(error)) {
+    failDownloadTelemetry(error);
     console.warn('[AutoUpdater] Channel file missing, treating as up to date.');
     sendStatus({ state: 'none' });
     return;
   }
 
   console.error('[AutoUpdater] Error:', error);
+  failDownloadTelemetry(error);
   sendStatus({ state: 'error', message: getErrorMessage(error) });
 }
 
@@ -176,6 +192,7 @@ export async function runManualCheck(): Promise<void> {
 export async function runDownload(): Promise<void> {
   if (config.isDev) return;
 
+  beginDownloadTelemetry(pendingVersion);
   try {
     sendStatus({ state: 'downloading' });
     await downloadUpdateRaw();
@@ -183,10 +200,12 @@ export async function runDownload(): Promise<void> {
     if (updateDownloaded) return;
 
     if (isMissingChannelFileError(err)) {
+      failDownloadTelemetry(err);
       sendStatus({ state: 'none' });
       return;
     }
 
+    failDownloadTelemetry(err);
     sendStatus({ state: 'error', message: getErrorMessage(err) });
     console.error('[AutoUpdater] Download failed:', err);
   }

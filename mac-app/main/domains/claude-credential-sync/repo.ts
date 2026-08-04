@@ -14,6 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { execFileSync, execSync, spawn } from 'child_process';
+import { getAugmentedEnv } from '../../base/shellEnv';
 import { getErrorMessage, toError } from '../../../shared/utils/error';
 import type { SyncStatusCallback } from './types';
 import {
@@ -21,56 +22,7 @@ import {
   KEYCHAIN_SERVICE,
   LONG_LIVED_TOKEN_TTL_MS,
   NPM_INSTALL_TIMEOUT_MS,
-  SHELL_PATH_PROBE_TIMEOUT_MS,
 } from './config';
-
-// ---------------------------------------------------------------------------
-// PATH augmentation (packaged Electron has a minimal PATH)
-// ---------------------------------------------------------------------------
-
-/**
- * Build a ProcessEnv whose PATH covers the common install locations for
- * `npm` and `claude` — critical for packaged Electron apps where the
- * inherited PATH is minimal.
- */
-export function getAugmentedEnv(): NodeJS.ProcessEnv {
-  const home = process.env.HOME ?? '';
-  const extraPaths = ['/usr/local/bin', '/opt/homebrew/bin', `${home}/.npm-global/bin`];
-
-  // Include ALL NVM node version bin dirs (packaged Electron won't have NVM_DIR set).
-  try {
-    const nvmDir = process.env.NVM_DIR ?? `${home}/.nvm`;
-    const versionsDir = path.join(nvmDir, 'versions', 'node');
-    if (fs.existsSync(versionsDir)) {
-      const versions = fs.readdirSync(versionsDir);
-      for (const v of versions) {
-        const binDir = path.join(versionsDir, v, 'bin');
-        if (fs.existsSync(binDir)) {
-          extraPaths.push(binDir);
-        }
-      }
-    }
-  } catch {
-    // NVM not installed, skip.
-  }
-
-  // Also try the user's default shell PATH as a last resort.
-  try {
-    const shellPath = execSync('/bin/bash -ilc "echo $PATH"', {
-      stdio: 'pipe',
-      encoding: 'utf8',
-      timeout: SHELL_PATH_PROBE_TIMEOUT_MS,
-    }).trim();
-    if (shellPath !== '') {
-      extraPaths.push(...shellPath.split(':'));
-    }
-  } catch {
-    // Ignore.
-  }
-
-  const PATH = [...extraPaths, process.env.PATH].filter(Boolean).join(':');
-  return { ...process.env, PATH };
-}
 
 // ---------------------------------------------------------------------------
 // Claude CLI discovery + install

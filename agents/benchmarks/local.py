@@ -57,11 +57,16 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
+# Payment lifecycle tasks must exercise the regular Stripe-backed purchase path. The default Rose
+# benchmark identity is a production admin and intentionally receives a company-funded card with no
+# personal Stripe hold, so use an isolated non-admin fixture for these settlement benchmarks.
+AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
 
@@ -756,7 +761,7 @@ def validate_agentcard_org_credentials(
     )
 
 
-def configure_task_environment(tasks: Sequence[str]) -> None:
+def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
@@ -770,6 +775,17 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
+        # token pool-eligible only after stack selection proves this run owns an isolated database;
+        # never let shared-stack/use-existing modes mutate credential-pool eligibility.
+        if isolated:
+            os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"] = "1"
+        else:
+            os.environ.pop("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", None)
+        os.environ.setdefault(
+            AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+            AGENT_PAYMENT_BENCHMARK_USER_ID,
+        )
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
@@ -792,7 +808,10 @@ def seed_payment_fixture(manifest: dict) -> None:
             "tsx",
             "scripts/setup-benchmark-payment.ts",
             "--user-id",
-            os.environ.get("BENCHMARK_USER_ID", BENCHMARK_USER_ID),
+            os.environ.get(
+                AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+                AGENT_PAYMENT_BENCHMARK_USER_ID,
+            ),
         ],
         cwd=REPO_ROOT / "back-end",
         env=env,
@@ -1849,15 +1868,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
     validate_agentcard_org_credentials(selected_tasks)
-    configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    stack = build_service_stack(args)
+    configure_task_environment(selected_tasks, isolated=stack.isolated)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
-    stack = build_service_stack(args)
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     if stack.isolated:
         # Both the service stack and run_benchmark.py inherit this. Provider

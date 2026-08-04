@@ -62,6 +62,137 @@ describe('lib/supabase', () => {
     expect(localStorage.getItem('rose-session')).toBeNull();
   });
 
+  // RCA cement. Impersonated sessions are deliberately short-lived (1h), and the
+  // expiry branch above called clearSession() -> clearImpersonationState(), which
+  // deleted the STASHED ADMIN SESSION. That stash is the only way back from an
+  // account switch, so a routine expiry silently stranded the admin: the switcher
+  // pill disappeared and every admin-gated call lost its authority at the same
+  // moment, with no recovery path. An expiring impersonation must unwind, not
+  // detonate.
+  it('getSession restores the admin session when an impersonated session expires', () => {
+    const adminSession = {
+      access_token: 'admin-token',
+      refresh_token: 'admin-refresh',
+      expires_in: 7776000,
+      expires_at: Math.floor(Date.now() / 1000) + 7776000,
+      token_type: 'bearer',
+      user: { id: 'admin-1' },
+    };
+    const expiredImpersonated = {
+      access_token: 'target-token',
+      refresh_token: 'target-refresh',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id: 'target-1' },
+    };
+    localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
+    localStorage.setItem('rose-admin-session', JSON.stringify(adminSession));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({
+        userId: 'target-1',
+        name: 'Grace',
+        email: null,
+        phone: null,
+        isAdmin: false,
+      }),
+    );
+
+    // The admin is handed back their own session rather than being logged out.
+    expect(getSession()?.user?.id).toBe('admin-1');
+    expect(getSession()?.access_token).toBe('admin-token');
+    // Impersonation bookkeeping is unwound, not left dangling.
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
+  it('getSession still clears when BOTH the impersonated and stashed sessions expired', () => {
+    const stale = (id: string) => ({
+      access_token: `${id}-token`,
+      refresh_token: 'r',
+      expires_in: 0,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id },
+    });
+    localStorage.setItem('rose-session', JSON.stringify(stale('target-1')));
+    localStorage.setItem('rose-admin-session', JSON.stringify(stale('admin-1')));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
+  // A stashed value is untrusted localStorage. `expires_at: 0` is FALSY, so a
+  // truthiness check skips the expiry test and promotes junk to the active
+  // non-expiring session; `null` throws on property access. Both must fail the
+  // recovery, not silently become the signed-in identity.
+  it.each([
+    ['null', 'null'],
+    ['empty object', '{}'],
+    ['epoch-zero expiry', '{"access_token":"t","expires_at":0}'],
+    ['non-finite expiry', '{"access_token":"t","expires_at":null}'],
+    ['missing access token', `{"expires_at":${Math.floor(Date.now() / 1000) + 9999}}`],
+  ])('getSession refuses to restore a malformed stashed admin session (%s)', (_label, stash) => {
+    const expiredImpersonated = {
+      access_token: 'target-token',
+      refresh_token: 'r',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) - 10,
+      token_type: 'bearer',
+      user: { id: 'target-1' },
+    };
+    localStorage.setItem('rose-session', JSON.stringify(expiredImpersonated));
+    localStorage.setItem('rose-admin-session', stash);
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+  });
+
+  // Logout must win over restoration: another tab signing out while this one is
+  // unwinding an impersonation must not have its logout undone.
+  it('getSession does not resurrect the admin session when a logout is pending', () => {
+    const adminSession = {
+      access_token: 'admin-token',
+      refresh_token: 'admin-refresh',
+      expires_in: 7776000,
+      expires_at: Math.floor(Date.now() / 1000) + 7776000,
+      token_type: 'bearer',
+      user: { id: 'admin-1' },
+    };
+    localStorage.setItem(
+      'rose-session',
+      JSON.stringify({
+        access_token: 'target-token',
+        refresh_token: 'r',
+        expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) - 10,
+        token_type: 'bearer',
+        user: { id: 'target-1' },
+      }),
+    );
+    localStorage.setItem('rose-admin-session', JSON.stringify(adminSession));
+    localStorage.setItem(
+      'rose-impersonation',
+      JSON.stringify({ userId: 'target-1', name: null, email: null, phone: null, isAdmin: false }),
+    );
+    localStorage.setItem('rose-session-logout-pending', '1');
+
+    expect(getSession()).toBeNull();
+    expect(localStorage.getItem('rose-admin-session')).toBeNull();
+    expect(localStorage.getItem('rose-impersonation')).toBeNull();
+  });
+
   it('getSession returns null on parse error', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     localStorage.setItem('rose-session', 'not-json');
@@ -140,6 +271,18 @@ describe('lib/supabase', () => {
       ),
     );
     await expect(createAnonymousSession()).rejects.toThrow('boom');
+  });
+
+  it('storeSession normalizes a millisecond expiry before any persistence boundary', () => {
+    const session = mockSession();
+    const millisecondExpiry = (session.expires_at as number) * 1000;
+
+    storeSession({ ...session, expires_at: millisecondExpiry });
+
+    const stored = JSON.parse(localStorage.getItem('rose-session') ?? '{}') as {
+      expires_at?: number;
+    };
+    expect(stored.expires_at).toBe(Math.floor(millisecondExpiry / 1000));
   });
 
   it('signOut clears the session', async () => {

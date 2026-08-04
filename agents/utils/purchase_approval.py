@@ -5,43 +5,25 @@ from collections.abc import Iterable
 from typing import Any
 from urllib.parse import parse_qsl, unquote, urlparse
 
-_CHECKOUT_ROUTE_TOKENS = {
-    "basket",
-    "baskets",
-    "cart",
-    "carts",
-    "checkout",
-    "checkouts",
-    "payment",
-    "payments",
-}
-
-_CHECKOUT_TOKEN_PAIRS = {
-    ("check", "out"),
-    ("order", "confirmation"),
-    ("order", "history"),
-    ("order", "status"),
-    ("pay", "ment"),
-    ("secure", "order"),
-    ("secure", "pay"),
-}
-_CHECKOUT_LEADING_TOKENS = {"order", "orders", "pay"}
-
+# NO VOCABULARY-BASED URL FILTERING.
+#
+# This module used to guess whether a URL "was a checkout page" by tokenizing it
+# and matching word lists (cart/basket/checkout/payment/order/pay...). Every
+# incident it ever produced was a FALSE REJECT of a real product page, because a
+# URL's words do not tell you what the page is:
+#   - agent 53feac08: order.online (DoorDash white-label) — the registrable
+#     domain is the word "order".
+#   - agent 90ac106a: order.toasttab.com — Toast is the largest US restaurant
+#     ordering platform and EVERY product page lives on that host, so a purchase
+#     was categorically impossible. The agent burned 5 rejected calls, then
+#     escaped by inventing a www.toasttab.com URL it had never loaded — putting
+#     a fabricated link in front of a human approving a real charge. The filter
+#     made the trust surface WORSE than having no filter at all.
+# A blocklist cannot be completed: merchant slugs legitimately contain these
+# words ("/shop/cart-organizer", "/p/payment-processing-book"). What the URL is
+# for is decided by evidence — whether the browser actually observed the host —
+# not by its spelling. See validate_product_url_for_pages.
 _PRODUCT_QUERY_KEYS = {"id", "item", "item_id", "pid", "product", "product_id", "sku"}
-_PRODUCT_ROUTE_MARKERS = {
-    "dp",
-    "ip",
-    "item",
-    "items",
-    "itm",
-    "listing",
-    "listings",
-    "p",
-    "pdp",
-    "product",
-    "products",
-    "sku",
-}
 _PLACEHOLDER_RE = re.compile(r"\b(?:n\s*/?\s*a|none|not\s+available|unavailable|unknown)\b", re.IGNORECASE)
 _RATING_RE = re.compile(r"(?<![\d.,])(\d(?:\.\d+)?)(?![\d.,])")
 _REVIEW_COUNT_RE = re.compile(
@@ -60,116 +42,122 @@ def _decode_url_component(value: str) -> str:
     return decoded
 
 
-def _url_tokens(value: str) -> set[str]:
-    return {token for token in re.split(r"[^a-z0-9]+", _decode_url_component(value).lower()) if token}
+def _normalized_page_route(value: str) -> tuple[str, str, str]:
+    """Host, path, and query — query included so routes stay distinguishable.
 
-
-def _url_token_sequence(value: str) -> list[str]:
-    return [token for token in re.split(r"[^a-z0-9]+", _decode_url_component(value).lower()) if token]
-
-
-def _hostname_subdomain_token_sequence(hostname: str) -> list[str]:
-    """Tokens from a hostname's SUBDOMAIN labels only.
-
-    A checkout-ish word is a real routing signal when it names a subdomain
-    (``checkout.example.com``, ``secure-checkout.shop.example.com``) but not
-    when it *is* the registrable domain of a legitimate ordering platform
-    (``order.online``, ``orders.com``, ``pay.com``). Without a public-suffix
-    list we approximate the registrable domain as the final two labels and
-    treat everything to their left as subdomain labels. Hosts with two or
-    fewer labels have no subdomain and therefore contribute no checkout signal.
+    Dropping the query collapsed `/catalog?id=123` and `/catalog?view=cart` to
+    the same route, so a query-addressed product page was rejected as "the
+    current checkout page" it merely shared a path with. Storefronts that
+    address items purely by query string are common, and that false reject is
+    the failure class this module exists to avoid.
     """
-    labels = [label for label in _decode_url_component(hostname).lower().split(".") if label]
-    subdomain_labels = labels[:-2]
-    return [
-        token for label in subdomain_labels for token in re.split(r"[^a-z0-9]+", label) if token
-    ]
-
-
-def _contains_checkout_route(value: str, *, hostname: bool = False) -> bool:
-    if hostname:
-        # Only inspect subdomain labels: the registrable domain of an ordering
-        # platform (order.online) must never be misread as a checkout page.
-        tokens = _hostname_subdomain_token_sequence(value)
-        if set(tokens) & (_CHECKOUT_ROUTE_TOKENS | _CHECKOUT_LEADING_TOKENS):
-            return True
-        return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
-    tokens = _url_token_sequence(value)
-    if set(tokens) & _CHECKOUT_ROUTE_TOKENS:
-        return True
-    if tokens and tokens[0] in _CHECKOUT_LEADING_TOKENS:
-        return True
-    return any(pair in _CHECKOUT_TOKEN_PAIRS for pair in zip(tokens, tokens[1:]))
-
-
-def _normalized_page_route(value: str) -> tuple[str, str]:
     parsed = urlparse(value)
     hostname = (parsed.hostname or "").lower().removeprefix("www.")
     path = re.sub(r"/+", "/", _decode_url_component(parsed.path).lower()).rstrip("/") or "/"
-    return hostname, path
+    query = "&".join(sorted(f"{k.lower()}={v}" for k, v in parse_qsl(parsed.query, keep_blank_values=True)))
+    return hostname, path, query
 
 
-def _same_merchant_host(left: str, right: str) -> bool:
-    """Match an observed merchant host, including its own subdomains."""
-    if not left or not right:
+def _product_host_is_covered(product_host: str, observed_host: str) -> bool:
+    """Whether an observed host authorizes this product host.
+
+    Directional on purpose. Observing ``shop.example.com`` must NOT authorize
+    ``example.com``: the browser never loaded the parent, and a symmetric match
+    let an agent mint a product link on a host it had not visited — the exact
+    fabrication that put an unverified www.toasttab.com URL in front of a human
+    approving a real charge. A product page may only live on the observed host
+    or beneath it.
+    """
+    if not product_host or not observed_host:
         return False
-    return left == right or left.endswith(f".{right}") or right.endswith(f".{left}")
-
-
-def _looks_like_product_route(value: str) -> bool:
-    parsed = urlparse(value)
-    path_segments = [segment for segment in _decode_url_component(parsed.path).lower().split("/") if segment]
-    if _url_tokens(parsed.path) & _PRODUCT_ROUTE_MARKERS:
-        return True
-    if any(segment.startswith("buy-") for segment in path_segments) and "shop" in path_segments:
-        return True
-    return any(
-        key.lower() in _PRODUCT_QUERY_KEYS and query_value.strip() for key, query_value in parse_qsl(parsed.query)
-    )
+    return product_host == observed_host or product_host.endswith(f".{observed_host}")
 
 
 def validate_product_detail_url(value: Any) -> str:
+    """Structural checks only — never guess intent from the URL's wording."""
     text = str(value or "").strip()
     if any(character.isspace() for character in text) or "<" in text or ">" in text:
         raise ValueError("product_url must not contain whitespace or markup")
     parsed = urlparse(text)
+    try:
+        # urlparse defers port validation until the attribute is read, so a
+        # malformed authority (":99999", ":abc") parses clean and only explodes
+        # later at the HTTP layer. Force it here so a bad URL is rejected at the
+        # boundary that owns URL shape.
+        parsed.port
+    except ValueError as error:
+        raise ValueError("product_url must be an absolute http(s) product-detail URL") from error
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("product_url must be an absolute http(s) product-detail URL")
 
-    if _contains_checkout_route(parsed.hostname or "", hostname=True):
-        raise ValueError("product_url must link to the product page, not cart or checkout")
-
+    # The only remaining rejection: a bare origin identifies no item at all. Any
+    # real product page has a path, so this can never false-reject one.
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
-    if _contains_checkout_route(parsed.path):
-        raise ValueError("product_url must link to the product page, not cart or checkout")
-
     path_has_detail = bool(parsed.path.strip("/"))
     query_has_product_id = any(key.lower() in _PRODUCT_QUERY_KEYS and value.strip() for key, value in query_pairs)
-    if not path_has_detail and not query_has_product_id:
+    # A hash-routed SPA storefront carries its whole route in the fragment, so
+    # `https://shop.example/#/product/123` has an EMPTY path and was rejected as
+    # a bare homepage -- a false reject on every client-side-routed merchant.
+    # The fragment identifies the item just as a path does.
+    fragment_has_detail = bool(parsed.fragment.strip("/"))
+    if not path_has_detail and not query_has_product_id and not fragment_has_detail:
         raise ValueError("product_url must identify a product, not the merchant homepage")
     return text
 
 
-def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
-    return validate_product_url_for_pages(value, [current_page_url])
+def validate_product_url_for_page(value: Any, observed_page_url: Any) -> str:
+    """Host-only check against the single page this caller has observed.
+
+    The argument is deliberately forwarded as a TRUSTED page URL and NOT as
+    ``current_page_url=``. Passing it as the current page would enable the
+    "don't echo the page you're standing on" rule on a caller that has no
+    trajectory — and the write-lock purchase path legitimately raises its
+    approval while sitting ON the product page, so that rule would reject a
+    correct link. The parameter is named ``observed_page_url`` to stop a future
+    refactor from "fixing" this into a false-reject; see
+    validate_product_url_for_pages and browser_tools/schemas.py's write-lock
+    branch.
+    """
+    return validate_product_url_for_pages(value, [observed_page_url])
 
 
-def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any]) -> str:
-    """Require a product URL to use a merchant host observed by the browser."""
+def validate_product_url_for_pages(
+    value: Any,
+    trusted_page_urls: Iterable[Any],
+    *,
+    current_page_url: Any = None,
+) -> str:
+    """The only two semantic gates, both evidence-based rather than lexical.
+
+    1. The host must be one the browser actually loaded. A URL invented from
+       thin air on an unrelated domain cannot reach a human approving a charge.
+    2. The product link must not simply be the page the agent is standing on.
+       When request_payment_card fires the agent is on the checkout/session
+       page, so echoing it back is never a product link.
+
+    Neither rule reads the URL's wording, so neither can false-reject a real
+    product page over its slug — the failure mode that made the old word-list
+    gate unsatisfiable on whole ordering platforms.
+    """
     product_url = validate_product_detail_url(value)
-    product_host, product_path = _normalized_page_route(product_url)
-    observed_routes = [
-        _normalized_page_route(str(page_url).strip())
+    product_route = _normalized_page_route(product_url)
+    observed_hosts = [
+        _normalized_page_route(str(page_url).strip())[0]
         for page_url in trusted_page_urls
         if str(page_url or "").strip().startswith(("http://", "https://"))
     ]
-    if not any(_same_merchant_host(product_host, observed_host) for observed_host, _ in observed_routes):
-        raise ValueError("product_url host was not observed in the browser trajectory")
-    if any(
-        (product_host, product_path) == observed_route and not _looks_like_product_route(product_url)
-        for observed_route in observed_routes
-    ):
-        raise ValueError("product_url must identify the product, not the current checkout or session page")
+    if not any(_product_host_is_covered(product_route[0], observed_host) for observed_host in observed_hosts):
+        raise ValueError(
+            f"product_url host '{product_route[0]}' was not observed in the browser trajectory. "
+            "Link to a page on a site this browser session actually loaded."
+        )
+
+    current = str(current_page_url or "").strip()
+    if current.startswith(("http://", "https://")) and product_route == _normalized_page_route(current):
+        raise ValueError(
+            "product_url must identify the product, not the current checkout or session page "
+            f"('{current}'). Link to the item's own page."
+        )
     return product_url
 
 
