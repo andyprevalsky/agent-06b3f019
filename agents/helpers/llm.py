@@ -1547,7 +1547,7 @@ async def build_llm_messages(
         return f"[{dt.isoformat(timespec='minutes')}] "
 
     messages = [{"role": "system", "content": system_prompt}]
-    declared_tool_call_ids: set[str] = set()
+    declared_tool_names_by_id: Dict[str, str] = {}
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -1702,7 +1702,7 @@ async def build_llm_messages(
                         raise ValueError(
                             f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
                         )
-                    declared_tool_call_ids.add(str(tool_call_id))
+                    declared_tool_names_by_id.setdefault(str(tool_call_id), str(tool_name))
                     args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
                     parsed_tool_calls.append(
                         {
@@ -1739,7 +1739,7 @@ async def build_llm_messages(
                     raise ValueError(
                         f"Terminal TOOL message missing toolCallId (toolName={tool_name}, message_id={msg.get('message_id')})"
                     )
-                if str(tool_call_id) not in declared_tool_call_ids:
+                if str(tool_call_id) not in declared_tool_names_by_id:
                     # DAG-created tool result — include as user message for context
                     tool_content = text
                     if metadata.get("title"):
@@ -1783,8 +1783,10 @@ async def build_llm_messages(
                     "content": tool_content,
                     "tool_call_id": str(tool_call_id),
                 }
-                if tool_name:
-                    tool_msg["name"] = tool_name
+                # The provider requires a tool result's name to match the
+                # assistant declaration. Lifecycle metadata can use a more
+                # specific internal name (for example, spawn_browser_agent).
+                tool_msg["name"] = declared_tool_names_by_id[str(tool_call_id)]
                 messages.append(tool_msg)
                 continue
 

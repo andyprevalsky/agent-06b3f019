@@ -1850,6 +1850,10 @@ async def test_build_llm_messages_skips_empty_file_output_assistant():
     # Both tool messages should immediately follow (no empty assistant in between).
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert len(tool_msgs) == 2, f"Expected 2 tool messages, got {len(tool_msgs)}"
+    assert {m["tool_call_id"]: m.get("name") for m in tool_msgs} == {
+        tc_a: "spawn_agent",
+        tc_b: "spawn_agent",
+    }
 
     # Verify NO empty assistant message ended up in the final list — file-output
     # rows should be filtered out entirely.

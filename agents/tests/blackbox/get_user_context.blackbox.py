@@ -185,6 +185,30 @@ async def test_get_user_context_uses_cache_on_second_call():
     assert sum("/api/integrations" in call["url"] for call in captures) == 1
 
 
+async def test_get_user_context_cache_hit_times_out_to_stale_profile():
+    """A slow identity refresh cannot delay returning an available cached profile."""
+    _setup()
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_context
+
+        cached_result = await get_user_context(user_id="user-cache-timeout")
+
+        module = _get_user_context_module()
+
+        async def timeout_wait_for(awaitable, *, timeout):
+            assert timeout == module.PROFILE_REFRESH_TIMEOUT_SECONDS
+            awaitable.close()
+            raise TimeoutError
+
+        with patch.object(module.asyncio, "wait_for", side_effect=timeout_wait_for):
+            result = await get_user_context(user_id="user-cache-timeout")
+
+    assert "Full Name: Alice Test" in cached_result
+    assert result == cached_result
+
+
 async def test_get_system_name():
     """get_user_system_name returns the custom system name."""
     _setup()
@@ -877,6 +901,7 @@ async def run_all_tests():
     r = BlackboxResult()
     await r.record_async("happy_path", test_get_user_context_happy_path)
     await r.record_async("uses_cache", test_get_user_context_uses_cache_on_second_call)
+    await r.record_async("cache_timeout_uses_stale", test_get_user_context_cache_hit_times_out_to_stale_profile)
     await r.record_async("get_system_name", test_get_system_name)
     await r.record_async("get_system_name_error", test_get_system_name_default_on_error)
     await r.record_async("get_system_name_outer_except", test_get_system_name_outer_except)

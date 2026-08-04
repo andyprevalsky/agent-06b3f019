@@ -18,6 +18,7 @@ logger = structlog.get_logger()
 # for every agent start so a saved identity correction is visible immediately.
 _user_context_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_MINUTES = 5
+PROFILE_REFRESH_TIMEOUT_SECONDS = 2.0
 
 # ============================================================================
 # Cookie Auth Detection Constants
@@ -710,10 +711,19 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             fetched_at = cached.get("fetched_at")
             if fetched_at and (now - fetched_at) < timedelta(minutes=CACHE_TTL_MINUTES):
                 config = load_config()
-                async with httpx.AsyncClient() as client:
-                    user_settings, settings_read_succeeded = await _fetch_user_settings_with_status(
-                        client, config, user_id
+                try:
+                    async with httpx.AsyncClient() as client:
+                        user_settings, settings_read_succeeded = await asyncio.wait_for(
+                            _fetch_user_settings_with_status(client, config, user_id),
+                            timeout=PROFILE_REFRESH_TIMEOUT_SECONDS,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "User settings refresh timed out; using cached profile",
+                        user_id=user_id[:8],
+                        timeout_seconds=PROFILE_REFRESH_TIMEOUT_SECONDS,
                     )
+                    user_settings, settings_read_succeeded = {}, False
                 if settings_read_succeeded:
                     profile_context = _render_profile_context(user_settings)
                     cached["profile_context"] = profile_context

@@ -799,6 +799,15 @@ class RoseClient:
             anthropic_api_key_tools = direct_auth_tools
         if anthropic_api_key_tools:
             anthropic_api_key_tool_choice = effective_tool_choice or "any"
+        waterfall_tools = tools
+        waterfall_tool_choice = tool_choice
+        if tools is None and direct_auth_tools and not _is_synthetic_output_toolset(direct_auth_tools):
+            # AgentAction response models already have provider-neutral native
+            # tool schemas. Preserve that contract through the OpenRouter
+            # waterfall so Anthropic is not skipped merely because the original
+            # caller supplied a response_model instead of explicit tools.
+            waterfall_tools = direct_auth_tools
+            waterfall_tool_choice = effective_tool_choice or "any"
 
         if _exclude_anthropic_family and gpt_auth is not None:
             direct_auth = gpt_auth
@@ -1361,9 +1370,9 @@ class RoseClient:
                 waterfall_complete(
                     pool_spec=pool_spec,
                     messages=messages,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    response_format=None if tools else openrouter_response_format,
+                    tools=waterfall_tools,
+                    tool_choice=waterfall_tool_choice,
+                    response_format=None if waterfall_tools else openrouter_response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
