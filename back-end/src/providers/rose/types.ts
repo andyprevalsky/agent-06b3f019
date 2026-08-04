@@ -26,6 +26,12 @@ export interface CompletionMessage {
   tool_calls?: Array<{
     id?: string;
     call_id?: string;
+    /**
+     * Required by OpenAI-compatible providers. Cerebras rejects a request whose
+     * assistant tool_calls omit it ("tool_calls.0.type: Field required"); the
+     * Anthropic path tolerated its absence, so it only surfaces on Cerebras.
+     */
+    type?: 'function';
     name?: string;
     arguments?: unknown;
     function?: { name?: string; arguments?: unknown };

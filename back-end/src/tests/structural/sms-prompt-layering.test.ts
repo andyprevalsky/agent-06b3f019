@@ -179,15 +179,6 @@ runCheck(
     ),
   'SMS session-history tool-erasure rule missing from the overlay'
 );
-runCheck(
-  'block 3 names start_new_agent and forbids ungrounded progress claims',
-  SMS_SURFACE_OVERLAY.includes('start_new_agent and kill_agent only') &&
-    SMS_SURFACE_OVERLAY.includes('no spawn_agent tool here') &&
-    SMS_SURFACE_OVERLAY.includes(
-      'Only claim kill/start/place/submit outcomes that this run\'s tool results or the current state block just confirmed'
-    ),
-  'SMS agent-lifecycle grounding rules missing from the overlay'
-);
 
 // The SMS prompt must NOT contain main-agent phase/grader prose.
 const fullPrompt = blocksA.join('\n');

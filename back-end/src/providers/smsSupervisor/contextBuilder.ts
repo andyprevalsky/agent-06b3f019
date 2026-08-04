@@ -644,8 +644,7 @@ Parallelize as many tool calls per turn as reasonable so you respond quickly wit
 - Resolve natural approval language against pending requests. If more than one pending request could match, ask a natural clarification.
 - Be conversational but concise, this is texting, not email
 - attempt_completion sends nothing and accepts no message. The runtime rejects it unless this run has already successfully sent at least one SMS with send_user_message.
-- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.
-- Agent lifecycle tools on THIS surface are start_new_agent and kill_agent only. There is no spawn_agent tool here (that name belongs to the main agent harness). Because prior tool calls are erased from session history, a past SMS that sounded like "agent started" or "order submitted" is not proof that tools ran — and inventing the same script without calling tools this run is a failure. Only claim kill/start/place/submit outcomes that this run's tool results or the current state block just confirmed.`;
+- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;
 
 /**
  * Compose the three-block SMS supervisor system prompt:

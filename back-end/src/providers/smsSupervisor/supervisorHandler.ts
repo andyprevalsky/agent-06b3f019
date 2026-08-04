@@ -14,7 +14,13 @@
  */
 
 import { prisma } from '../database';
-import { createStreamingCompletion, CompletionMessage, ContentBlock, markCacheable } from '../rose';
+import {
+  createStreamingCompletion,
+  CompletionMessage,
+  CompletionOptions,
+  ContentBlock,
+  markCacheable,
+} from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { sendSms } from '../smsQueue';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
@@ -588,12 +594,32 @@ async function callSupervisorLlm(
   const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
   const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
 
+  // Same provider path as chat: Cerebras GLM first, with that route's own
+  // failover (quota/rate → OpenRouter unpinned same-model → generic waterfall).
+  // Do not prefer claudeAuth here — SMS reliability must not depend on a user
+  // OAuth token / funded Anthropic key / Anthropic union-schema ceiling.
+  // BENCHMARK_SMS_SUPERVISOR_MODEL(+_ROUTE) overrides for eval isolation only.
+  const modelOverride = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
+  const activeModel =
+    modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
+  const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
+  const providerRoute: NonNullable<CompletionOptions['provider_route']> =
+    modelOverride !== undefined && modelOverride !== ''
+      ? routeOverride === 'direct-cerebras' ||
+        routeOverride === 'openrouter-cerebras' ||
+        routeOverride === 'shared-openai-priority' ||
+        routeOverride === 'openrouter-waterfall'
+        ? routeOverride
+        : 'openrouter-waterfall'
+      : 'direct-cerebras';
+
   // Log the full request
   log.info('[SmsSupervisorLLM] Request', {
-    model: SMS_SUPERVISOR_MODEL,
+    model: activeModel,
+    providerRoute,
     messageCount: messages.length,
-    hasClaudeToken: !!claudeToken,
-    hasGptToken: !!gptToken,
+    hasClaudeToken: !!claudeToken && providerRoute !== 'direct-cerebras',
+    hasGptToken: !!gptToken && providerRoute !== 'direct-cerebras',
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -622,12 +648,17 @@ async function callSupervisorLlm(
 
   // Consume streaming response fully (no FE broadcast needed)
   const stream = await createStreamingCompletion({
-    model: SMS_SUPERVISOR_MODEL,
+    model: activeModel,
     messages,
     temperature: 0.3,
     response_model: SUPERVISOR_RESPONSE_MODEL,
-    ...(claudeToken ? { claude_token: claudeToken } : {}),
-    ...(gptToken ? { gpt_token: gptToken, gpt_account_id: gptAccountId } : {}),
+    provider_route: providerRoute,
+    // Only attach OAuth passthrough when an eval explicitly leaves the Cerebras
+    // route; prod SMS stays on provider_route and ignores these tokens.
+    ...(providerRoute !== 'direct-cerebras' && claudeToken ? { claude_token: claudeToken } : {}),
+    ...(providerRoute !== 'direct-cerebras' && gptToken
+      ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
+      : {}),
   });
 
   let accumulatedContent = '';
