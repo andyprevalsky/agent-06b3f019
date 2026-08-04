@@ -10,7 +10,7 @@
  */
 
 import { Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { findDeploymentFencedToolMessage, lockToolCallLifecycle } from './toolLifecycleMessages';
@@ -154,7 +154,7 @@ export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
 ): Promise<{ resolved: boolean }> {
-  const { fresh, finishedMessageCount, resolved } = await prisma.$transaction(async (tx) => {
+  const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(async (tx) => {
     const updated = await tx.agentAttentionRequest.updateMany({
       where: { id: request.id, userResponse: null },
       data: { userResponse: response },
