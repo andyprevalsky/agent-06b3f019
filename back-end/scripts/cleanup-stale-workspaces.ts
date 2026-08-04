@@ -20,11 +20,10 @@ import { config } from 'dotenv';
 import * as path from 'path';
 import * as os from 'os';
 import { isIsolatedBenchmarkResource } from '../src/utils/benchmarkResources';
+import { QUEUE_PREFIX, baseTaskQueue, classifyCleanupQueue } from '../src/utils/staleWorkflowQueue';
 
 config();
 
-const PROD_QUEUE = 'navi-agent-tasks';
-const QUEUE_PREFIX = 'navi-agent-tasks-';
 const CONDUCTOR_DB = path.join(
   os.homedir(),
   'Library/Application Support/com.conductor.app/conductor.db'
@@ -162,28 +161,18 @@ async function terminateStaleWorkflows(
 
   for await (const wf of workflows) {
     const queue = wf.taskQueue || '';
+    const decision = classifyCleanupQueue(queue, activeNames);
 
-    // Never touch prod queue
-    if (queue === PROD_QUEUE) {
+    if (decision !== 'terminate') {
       skipped++;
       continue;
     }
 
-    // Isolated benchmarks own their queue and DB lifetime through benchmarks/local.py.
-    // They are intentionally absent from Conductor's workspace registry.
-    if (isIsolatedBenchmarkResource(queue)) {
-      skipped++;
-      continue;
-    }
-
-    // Check if queue belongs to an active workspace
-    if (queue.startsWith(QUEUE_PREFIX)) {
-      const queueWorkspace = queue.slice(QUEUE_PREFIX.length);
-      if (activeNames.has(queueWorkspace)) {
-        skipped++;
-        continue;
-      }
-      staleQueues.set(queue, (staleQueues.get(queue) || 0) + 1);
+    // Stale-but-recognized workspace queues are logged for visibility. Key by
+    // the base queue so multiple build IDs of one stale workspace aggregate.
+    const baseQueue = baseTaskQueue(queue);
+    if (baseQueue.startsWith(QUEUE_PREFIX)) {
+      staleQueues.set(baseQueue, (staleQueues.get(baseQueue) || 0) + 1);
     }
 
     // Stale or unknown — terminate
