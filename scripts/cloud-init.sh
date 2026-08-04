@@ -67,11 +67,59 @@ if [ ! -f front-end/.env ] && [ -f front-end/.env.example ]; then
     log "wrote front-end/.env (from front-end/.env.example)"
 fi
 
-# ── 2. Dependencies + local Postgres (existing, validated provisioner) ────────
+# ── 2. System tools a fresh cloud box lacks (idempotent, fail-soft) ───────────
+# Everything our test suites + cloud benchmark runner need beyond the base image:
+#   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)
+#   rsync  — cloudbench dependency sync (scripts/cloudbench-sync-deps.sh)
+#   py3.11 — pinned interpreter for agents/venv (base python may be newer)
+#   flyctl — REQUIRED by scripts/run-bench (the cloud Fly benchmark fleet)
+#   ngrok  — public tunnel for run.sh / local benchmark stack (best-effort)
+SUDO=""
+if [ "$(id -u)" != "0" ] && command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    SUDO="sudo"
+fi
+
+ensure_apt() {  # <binary-to-check> <apt-packages...>
+    local bin="$1"; shift
+    command -v "$bin" >/dev/null 2>&1 && return 0
+    log "installing $* (provides $bin)…"
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO apt-get install -y -qq "$@" >/dev/null 2>&1 || log "WARN: apt install failed: $*"
+}
+ensure_apt ruby ruby
+ensure_apt rsync rsync
+
+if ! command -v python3.11 >/dev/null 2>&1; then
+    log "installing python3.11 (deadsnakes)…"
+    $SUDO add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1 || true
+    $SUDO apt-get update -qq >/dev/null 2>&1 || true
+    $SUDO apt-get install -y -qq python3.11 python3.11-venv python3.11-dev >/dev/null 2>&1 \
+        || log "WARN: python3.11 install failed"
+fi
+# Pre-create the venv with 3.11 so cloud-build.sh reuses it (it would otherwise
+# build with the base python3).
+if command -v python3.11 >/dev/null 2>&1 && [ ! -f agents/venv/bin/activate ]; then
+    python3.11 -m venv agents/venv >/dev/null 2>&1 || log "WARN: python3.11 venv create failed"
+fi
+
+if ! command -v flyctl >/dev/null 2>&1 && [ ! -x "$HOME/.fly/bin/flyctl" ]; then
+    log "installing flyctl…"
+    curl -fsSL https://fly.io/install.sh | sh >/dev/null 2>&1 || log "WARN: flyctl install failed"
+fi
+[ -x "$HOME/.fly/bin/flyctl" ] && export PATH="$HOME/.fly/bin:$PATH"
+
+if ! command -v ngrok >/dev/null 2>&1; then
+    log "installing ngrok…"
+    ( curl -fsSL https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -o /tmp/ngrok.tgz \
+        && $SUDO tar xzf /tmp/ngrok.tgz -C /usr/local/bin ngrok ) >/dev/null 2>&1 \
+        || log "WARN: ngrok install failed (local-bench public tunnel only)"
+fi
+
+# ── 3. Dependencies + local Postgres (existing, validated provisioner) ────────
 log "running scripts/cloud-build.sh (deps + local Postgres)…"
 bash scripts/cloud-build.sh || log "WARN: cloud-build.sh returned non-zero"
 
-# ── 3. Seed the local DB from prod so it is never empty (idempotent) ──────────
+# ── 4. Seed the local DB from prod so it is never empty (idempotent) ──────────
 # seed-local.ts reads the REMOTE (prod) DATABASE_URL from back-end/.env and
 # writes into the LOCAL DATABASE_URL we pass here — the same contract run.sh and
 # setup-db.sh use. Requires the prod-backed back-end/.env from step 1; without it
