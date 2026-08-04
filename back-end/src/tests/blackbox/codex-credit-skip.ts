@@ -23,7 +23,7 @@ export class CredentialExhaustionSkip extends Error {
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -85,6 +85,29 @@ export function testDetectCreditExhaustion_positive(): void {
       { source: 'funded_api_key', reason: 'insufficient_quota' },
     ]) !== null,
     'insufficient_quota event reason must be detected'
+  );
+  // OpenAI's current platform wording. Observed verbatim on 2026-08-04, when the
+  // funded key ran dry and the older "out of credits" phrasing never appeared, so
+  // the smoke hard-failed instead of taking the deploy-approved SKIP.
+  assert(
+    detectCodexCreditExhaustion(
+      'stream disconnected before completion: You have no credits remaining. ' +
+        'Add credits to continue using the API at ' +
+        'https://platform.openai.com/settings/organization/billing/.',
+      []
+    ) !== null,
+    'OpenAI "no credits remaining / add credits to continue" must be detected as credit exhaustion'
+  );
+  // Same wording arriving only through a structured turn.failed event.
+  assert(
+    detectCodexCreditExhaustion('normal output', [
+      {
+        type: 'error',
+        raw_type: 'turn.failed',
+        message: 'stream disconnected before completion: You have no credits remaining.',
+      },
+    ]) !== null,
+    'no-credits-remaining event message must be detected'
   );
   // 402 payment-required is an out-of-funds signal.
   assert(
