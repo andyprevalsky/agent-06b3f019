@@ -159,7 +159,7 @@ assert.ok(
 );
 assert.match(
   blackboxRunner,
-  /lateExclusiveDomainNames = new Set\(\['admin-health', 'benchmarks-test-prompts'\]\)/,
+  /lateExclusiveDomainNames = new Set\(\[[\s\S]*'admin-health',[\s\S]*'benchmarks',[\s\S]*'benchmarks-hub',[\s\S]*'benchmarks-test-prompts',[\s\S]*\]\)/,
   'whole-database and mutable-catalog readers must be isolated from fixture writers'
 );
 assert.match(
