@@ -23,10 +23,41 @@ SELF=$$
 SELF_PPID=$PPID
 MANIFEST="$WORKTREE_DIR/.context/services.json"
 
-# Emit this pid + all descendants, one per line.
+# Return a normalized process birth timestamp. The timestamp is captured when a
+# PID enters the target set and compared again immediately before every signal,
+# so a PID recycled during teardown is never treated as the original service.
+process_start_time() {
+    ps -p "$1" -o lstart= 2>/dev/null \
+        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g' \
+        | head -1
+}
+
+record_pid() {
+    local file=$1 pid=$2 start_time
+    start_time=$(process_start_time "$pid")
+    [[ -n "$start_time" ]] || return 1
+    printf '%s\t%s\n' "$pid" "$start_time" >> "$file"
+}
+
+identity_matches() {
+    local pid=$1 expected_start=$2 current_start
+    current_start=$(process_start_time "$pid")
+    [[ -n "$expected_start" && "$current_start" == "$expected_start" ]]
+}
+
+signal_if_same_identity() {
+    local pid=$1 expected_start=$2 signal=$3
+    if ! identity_matches "$pid" "$expected_start"; then
+        echo "🛡️  Refusing SIG${signal} for gone or recycled PID $pid" >&2
+        return 1
+    fi
+    kill "-$signal" "$pid" 2>/dev/null
+}
+
+# Record this pid + all descendants with their identity at discovery time.
 pid_tree() {
     local root=$1
-    echo "$root"
+    record_pid "$ALL_FILE" "$root" || return
     for child in $(pgrep -P "$root" 2>/dev/null); do
         pid_tree "$child"
     done
@@ -75,7 +106,7 @@ is_self_ancestor() {
 is_benchmark_controller() {
     local cmd
     cmd=$(cmd_of "$1")
-    echo "$cmd" | grep -Eq 'run-predeploy-(local|cloud)|run-bench(-fleet|-cloud|-hub-poller)?( |$)|benchmarks/(local|run_benchmark|run_eval_suite)\.py'
+    echo "$cmd" | grep -Eq '(^|[[:space:]/])run-predeploy-(local|cloud)([[:space:]]|$)|(^|[[:space:]/])run-bench(-fleet|-cloud|-hub-poller)?([[:space:]]|$)|(^|[[:space:]])([^[:space:]]*/)?benchmarks/(local|run_benchmark|run_eval_suite)\.py([[:space:]]|$)'
 }
 
 is_protected_process() {
@@ -173,11 +204,12 @@ PY
 }
 
 add_pid_with_tree_and_ancestors() {
-    local pid=$1
+    local pid=$1 expected_start=$2
+    identity_matches "$pid" "$expected_start" || return
     is_protected_process "$pid" && return
     kill -0 "$pid" 2>/dev/null || return
 
-    pid_tree "$pid" >> "$ALL_FILE"
+    pid_tree "$pid"
 
     local current=$pid
     while true; do
@@ -186,7 +218,7 @@ add_pid_with_tree_and_ancestors() {
         [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return
         is_protected_process "$ppid" && return
         if cwd_matches "$ppid"; then
-            echo "$ppid" >> "$ALL_FILE"
+            record_pid "$ALL_FILE" "$ppid" || return
             current="$ppid"
             continue
         fi
@@ -194,13 +226,25 @@ add_pid_with_tree_and_ancestors() {
     done
 }
 
+# Allow the safety predicates to be sourced by their regression tests without
+# running teardown as a side effect.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
+
 ROOTS_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE"' EXIT
 ALL_FILE=$(mktemp)
+TARGETS_FILE=$(mktemp)
+KEPT_FILE=$(mktemp)
+SURVIVORS_FILE=$(mktemp)
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SURVIVORS_FILE"' EXIT
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
-# is generic after cd'ing into a service directory.
-manifest_pids >> "$ROOTS_FILE"
+# is generic after cd'ing into a service directory. Capture identity at the
+# same moment each numeric PID enters the root set.
+while read -r pid; do
+    [[ -n "$pid" ]] && record_pid "$ROOTS_FILE" "$pid" || true
+done < <(manifest_pids)
 
 # Patterns that identify service roots. The worktree-prefixed patterns catch
 # grandchildren (node, python, vite) that carry the absolute path in argv.
@@ -216,7 +260,7 @@ for pattern in \
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         is_protected_process "$pid" && continue
         cwd_matches "$pid" || echo "$(cmd_of "$pid")" | grep -Fq "$WORKTREE_DIR" || continue
-        echo "$pid" >> "$ROOTS_FILE"
+        record_pid "$ROOTS_FILE" "$pid" || true
     done
 done
 
@@ -224,7 +268,7 @@ for port in $(service_ports); do
     for pid in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
         is_protected_process "$pid" && continue
         cwd_matches "$pid" || continue
-        echo "$pid" >> "$ROOTS_FILE"
+        record_pid "$ROOTS_FILE" "$pid" || true
     done
 done
 
@@ -235,35 +279,46 @@ while read -r pid; do
     [ -n "$pid" ] || continue
     is_protected_process "$pid" && continue
     service_like_process "$pid" || continue
-    echo "$pid" >> "$ROOTS_FILE"
+    record_pid "$ROOTS_FILE" "$pid" || true
 done < <(service_dir_cwd_pids | sort -un)
 
-sort -un "$ROOTS_FILE" -o "$ROOTS_FILE"
+sort -n -u "$ROOTS_FILE" -o "$ROOTS_FILE"
 
-while read -r pid; do
+while IFS=$'\t' read -r pid start_time; do
     [[ -z "$pid" ]] && continue
-    add_pid_with_tree_and_ancestors "$pid"
+    add_pid_with_tree_and_ancestors "$pid" "$start_time"
 done < "$ROOTS_FILE"
 
-PIDS=$(sort -un "$ALL_FILE" | grep -v "^$SELF$" | grep -v "^$SELF_PPID$" || true)
+# Keep one identity only when every observation of a numeric PID agrees. If a
+# PID was recycled while the tree was being collected, drop it fail-closed.
+awk -F '\t' -v self="$SELF" -v parent="$SELF_PPID" '
+    $1 == self || $1 == parent { next }
+    !($1 in first) { first[$1] = $2; order[++count] = $1; next }
+    first[$1] != $2 { unstable[$1] = 1 }
+    END {
+        for (i = 1; i <= count; i++) {
+            pid = order[i]
+            if (!(pid in unstable)) print pid "\t" first[pid]
+        }
+    }
+' "$ALL_FILE" > "$TARGETS_FILE"
 
 # Final backstop: drop any benchmark controller that entered the set as a
 # descendant. `pid_tree` walks downward and does not consult
 # `is_protected_process`, so the ancestor guard alone cannot catch this path.
-if [[ -n "$PIDS" ]]; then
-    KEPT=""
-    while read -r pid; do
-        [[ -z "$pid" ]] && continue
-        if is_benchmark_controller "$pid"; then
-            echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
-            continue
-        fi
-        KEPT+="$pid"$'\n'
-    done <<< "$PIDS"
-    PIDS=$(printf '%s' "$KEPT" | grep -v '^$' || true)
-fi
+while IFS=$'\t' read -r pid start_time; do
+    [[ -n "$pid" ]] || continue
+    identity_matches "$pid" "$start_time" || continue
+    if is_benchmark_controller "$pid"; then
+        echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        continue
+    fi
+    printf '%s\t%s\n' "$pid" "$start_time" >> "$KEPT_FILE"
+done < "$TARGETS_FILE"
+mv "$KEPT_FILE" "$TARGETS_FILE"
+KEPT_FILE=$(mktemp)
 
-if [[ -z "$PIDS" ]]; then
+if [[ ! -s "$TARGETS_FILE" ]]; then
     if [[ $DRY -eq 0 ]]; then
         mark_manifest_stopped
     fi
@@ -271,12 +326,13 @@ if [[ -z "$PIDS" ]]; then
     exit 0
 fi
 
-count=$(echo "$PIDS" | wc -l | tr -d ' ')
+count=$(wc -l < "$TARGETS_FILE" | tr -d ' ')
 echo "🧹 Targets in $WORKTREE_DIR ($count pid(s)):"
-for pid in $PIDS; do
+while IFS=$'\t' read -r pid start_time; do
+    identity_matches "$pid" "$start_time" || continue
     cmd=$(ps -p "$pid" -o command= 2>/dev/null | head -1 | cut -c-100)
     if [[ -n "$cmd" ]]; then echo "   $pid  $cmd"; fi
-done
+done < "$TARGETS_FILE"
 
 if [[ $DRY -eq 1 ]]; then
     echo "(dry-run — no processes killed)"
@@ -284,25 +340,30 @@ if [[ $DRY -eq 1 ]]; then
 fi
 
 # SIGTERM pass
-for pid in $PIDS; do kill -TERM "$pid" 2>/dev/null || true; done
+while IFS=$'\t' read -r pid start_time; do
+    signal_if_same_identity "$pid" "$start_time" TERM || true
+done < "$TARGETS_FILE"
 sleep 2
 
 # SIGKILL any survivors
-SURVIVORS=""
-for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && SURVIVORS="$SURVIVORS $pid"
-done
-if [[ -n "$SURVIVORS" ]]; then
-    echo "   SIGTERM survivors → SIGKILL:$SURVIVORS"
-    for pid in $SURVIVORS; do kill -9 "$pid" 2>/dev/null || true; done
+while IFS=$'\t' read -r pid start_time; do
+    if identity_matches "$pid" "$start_time" && kill -0 "$pid" 2>/dev/null; then
+        printf '%s\t%s\n' "$pid" "$start_time" >> "$SURVIVORS_FILE"
+    fi
+done < "$TARGETS_FILE"
+if [[ -s "$SURVIVORS_FILE" ]]; then
+    echo "   SIGTERM survivors → SIGKILL: $(cut -f1 "$SURVIVORS_FILE" | tr '\n' ' ')"
+    while IFS=$'\t' read -r pid start_time; do
+        signal_if_same_identity "$pid" "$start_time" KILL || true
+    done < "$SURVIVORS_FILE"
     sleep 1
 fi
 
 # Final verify
 STILL=""
-for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && STILL="$STILL $pid"
-done
+while IFS=$'\t' read -r pid start_time; do
+    identity_matches "$pid" "$start_time" && kill -0 "$pid" 2>/dev/null && STILL="$STILL $pid"
+done < "$TARGETS_FILE"
 if [[ -n "$STILL" ]]; then
     echo "⚠️  Survived TERM+KILL:$STILL"
     exit 1

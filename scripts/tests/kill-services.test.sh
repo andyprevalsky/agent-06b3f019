@@ -63,6 +63,65 @@ assert_alive() {
     fi
 }
 
+# Unit-check controller token boundaries without running teardown. Exact
+# controller basenames must be protected; prefixes, suffixes, backup files, and
+# lookalike directories must not be.
+(
+    source "$ROOT_DIR/scripts/kill-services.sh"
+    MATCH_CMD=""
+    cmd_of() { printf '%s\n' "$MATCH_CMD"; }
+
+    assert_controller_match() {
+        local expected="$1" command="$2" actual=0
+        MATCH_CMD="$command"
+        is_benchmark_controller 999999 && actual=1
+        if [ "$actual" -ne "$expected" ]; then
+            echo "FAIL: controller match expected=$expected actual=$actual command=$command" >&2
+            exit 1
+        fi
+    }
+
+    assert_controller_match 1 'bash scripts/run-predeploy-local'
+    assert_controller_match 1 'bash /tmp/work/scripts/run-predeploy-cloud --full'
+    assert_controller_match 1 'bash scripts/run-bench-fleet --task smoke'
+    assert_controller_match 1 'python benchmarks/local.py --port 3001'
+    assert_controller_match 1 'python /tmp/work/agents/benchmarks/run_benchmark.py --task chat'
+    assert_controller_match 1 'python benchmarks/run_eval_suite.py --port 3001'
+
+    assert_controller_match 0 'bash scripts/run-predeploy-local-helper'
+    assert_controller_match 0 'bash scripts/run-predeploy-cloud-old'
+    assert_controller_match 0 'bash scripts/run-bench-fleet-helper'
+    assert_controller_match 0 'python benchmarks/local.py.bak'
+    assert_controller_match 0 'python benchmarks/run_benchmark.py.bak'
+    assert_controller_match 0 'python otherbenchmarks/local.py'
+    assert_controller_match 0 'bash notrun-predeploy-local'
+)
+
+# A mismatched birth timestamp models PID reuse deterministically: the signal
+# helper must preserve that process, while the captured identity may be killed.
+(
+    source "$ROOT_DIR/scripts/kill-services.sh"
+    sleep 1000 &
+    identity_probe_pid=$!
+    trap 'kill "$identity_probe_pid" 2>/dev/null || true' EXIT
+    identity_probe_start=$(process_start_time "$identity_probe_pid")
+    [ -n "$identity_probe_start" ] || {
+        echo "FAIL: could not capture identity probe start time" >&2
+        exit 1
+    }
+
+    signal_if_same_identity "$identity_probe_pid" 'definitely-not-the-start-time' TERM >/dev/null 2>&1 || true
+    assert_alive "$identity_probe_pid" "recycled-PID identity probe"
+
+    signal_if_same_identity "$identity_probe_pid" "$identity_probe_start" TERM
+    wait "$identity_probe_pid" 2>/dev/null || true
+    if kill -0 "$identity_probe_pid" 2>/dev/null; then
+        echo "FAIL: matching PID identity was not signaled" >&2
+        exit 1
+    fi
+    trap - EXIT
+)
+
 WORKTREE="$TMP_ROOT/worktree"
 mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/back-end" "$TMP_ROOT/foreign"
 cp "$ROOT_DIR/scripts/kill-services.sh" "$WORKTREE/scripts/kill-services.sh"
