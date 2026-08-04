@@ -4,6 +4,7 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { getErrorMessage } from '../../../shared/utils/error';
 import { AuthService } from '../../services/auth';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 import {
   APPLE_NOTES_GROUP_CONTAINER,
   CHATGPT_EXPORT_DIR_ENV,
@@ -262,7 +263,7 @@ async function uploadSource(source: UserDataSource, force: boolean): Promise<Sou
   if (!dueForSource(source, force)) {
     return { source, discovered: 0, uploaded: 0, skipped: true };
   }
-  const session = await AuthService.getSession();
+  const session = sessionForLocalMachineData(await AuthService.getSession());
   if (session === null) return { source, discovered: 0, uploaded: 0, skipped: true };
 
   try {

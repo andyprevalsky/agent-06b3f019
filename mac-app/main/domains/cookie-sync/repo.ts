@@ -3,6 +3,7 @@ import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { BrowserCookieReader } from '../../services/browserCookieReader';
 import { BatchUploader } from '../../services/batchUploader';
 import { COOKIE_SYNC_INTEGRATION } from './config';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 import type { AuthSession, CookieData, UploadResult } from './types';
 
 /**
@@ -14,7 +15,7 @@ import type { AuthSession, CookieData, UploadResult } from './types';
  */
 
 export async function fetchCurrentSession(): Promise<AuthSession | null> {
-  return AuthService.getSession();
+  return sessionForLocalMachineData(await AuthService.getSession());
 }
 
 export async function isIntegrationConnected(): Promise<boolean> {

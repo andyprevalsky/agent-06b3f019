@@ -127,6 +127,17 @@ const SESSION: AuthSession = {
   user: { id: 'user-1' },
 };
 
+const encodeJwtPart = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value)).toString('base64url');
+const IMPERSONATED_SESSION: AuthSession = {
+  ...SESSION,
+  access_token: `${encodeJwtPart({ alg: 'HS256' })}.${encodeJwtPart({
+    sub: 'target-user',
+    act: { sub: 'operator-user' },
+  })}.sig`,
+  user: { id: 'target-user' },
+};
+
 const KEYCHAIN_FIND_CMD = 'security find-generic-password -s "Claude Code-credentials" -w';
 const KEYCHAIN_EXISTS_CMD =
   'security find-generic-password -s "Claude Code-credentials" 2>/dev/null';
@@ -198,6 +209,21 @@ describe('claude-credential-sync blackbox', () => {
       expect(result.success).toBe(true);
       expect(fetchCaptures).toHaveLength(1);
       expect(fetchCaptures[0].headers.authorization).toBe(`Bearer ${SESSION.access_token}`);
+    });
+
+    it('does not read or upload this Mac credentials while impersonating another user', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(IMPERSONATED_SESSION);
+      wireKeychainCredentials();
+      installUpload();
+
+      const result = await ClaudeCredentialSync.syncCredentials();
+
+      expect(result).toEqual({
+        success: false,
+        message: 'Unavailable while viewing another account',
+      });
+      expect(execCalls).toHaveLength(0);
+      expect(fetchCaptures).toHaveLength(0);
     });
   });
 

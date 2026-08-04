@@ -13,6 +13,8 @@
 
 import assert from 'node:assert/strict';
 
+import { uniqueRealWaitlistPhone } from './waitlistTestPhone';
+
 import {
   isRealWaitlistPerson,
   isWaitlistTestContact,
@@ -97,6 +99,17 @@ function testReservedNamesAndPhonesStayClassifiedAsTests() {
   assert.equal(isWaitlistTestContact(person({ email: null, phone: '+19995550000' })), true);
 }
 
+function testGeneratedWaitlistPhonesNeverUseFixturePrefixes() {
+  for (let index = 0; index < 10_000; index += 1) {
+    const phone = uniqueRealWaitlistPhone();
+    assert.equal(
+      isRealWaitlistPerson(person({ email: null, phone })),
+      true,
+      `${phone} must exercise the real-person path`
+    );
+  }
+}
+
 function testRealPeopleAreNotMisclassified() {
   const reals = [
     person({
@@ -132,6 +145,7 @@ function main() {
   testKnownHarnessAddressesAreClassifiedAsTests();
   testRfcReservedDomainsStayClassifiedAsTests();
   testReservedNamesAndPhonesStayClassifiedAsTests();
+  testGeneratedWaitlistPhonesNeverUseFixturePrefixes();
   testRealPeopleAreNotMisclassified();
   testNormalizationIsCanonical();
   console.log('✅ waitlist contact identity contract passed');
