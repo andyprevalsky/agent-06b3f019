@@ -170,14 +170,17 @@ export async function callSupervisorLlm(
  *   - Content path: the structured-output JSON envelope arrived as content
  *     (Codex / waterfall, or claudeAuth when extraction didn't fit the schema).
  *
- * When the model emits NEITHER — a reasoning-only or empty stream — return
- * empty tool_calls so the supervisor loop can nudge-and-retry.
+ * When the model emits NEITHER — a reasoning-only or empty stream — the
+ * structured-output extractor cannot select a single item. That extraction is
+ * wrapped in the same try/catch as JSON parsing so a StructuredOutputCardinality
+ * error degrades to nudge-and-retry instead of throwing out of the supervisor turn.
  */
 export function finalizeSupervisorResponse(
   accumulatedToolCalls: ToolCall[],
   structuredOutput: StructuredOutputAccumulator,
   accumulatedReasoning: string
 ): SupervisorResponse {
+  // Native tool path: each tool_use block came through as a tool_calls delta.
   if (accumulatedToolCalls.length > 0) {
     log.info('[SmsSupervisorLLM] Native tool calls received', {
       tools: accumulatedToolCalls.map((tc) => tc.tool),
@@ -188,11 +191,21 @@ export function finalizeSupervisorResponse(
     };
   }
 
+  // Content-path envelope (Codex / waterfall). finalText() is INSIDE the try:
+  // a reasoning-only / empty / ambiguous stream makes the extractor throw
+  // StructuredOutputCardinalityError — same "nothing actionable" condition as
+  // a JSON parse failure. Empty tool_calls → supervisor loop nudge-and-retry.
   let accumulatedContent = '';
   let parsed: SupervisorResponse;
   try {
     accumulatedContent = structuredOutput.finalText();
-    parsed = JSON.parse(accumulatedContent) as SupervisorResponse;
+    const candidate: unknown = JSON.parse(accumulatedContent);
+    // JSON.parse happily returns null / primitives / arrays. Treat non-objects
+    // as parse failure so we take the nudge-retry path instead of throwing.
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
+    }
+    parsed = candidate as SupervisorResponse;
   } catch (error) {
     log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
@@ -202,17 +215,32 @@ export function finalizeSupervisorResponse(
     return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
+  const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
+  // Provider JSON is untrusted: drop entries without a string `tool` rather
+  // than letting them reach the dispatcher (or throw inside this log call).
+  const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+  const toolCalls = rawToolCalls.filter(
+    (tc): tc is (typeof rawToolCalls)[number] =>
+      tc !== null && typeof tc === 'object' && typeof (tc as { tool?: unknown }).tool === 'string'
+  );
+  if (toolCalls.length !== rawToolCalls.length) {
+    log.warn('[SmsSupervisorLLM] Discarded malformed tool_call entries', {
+      received: rawToolCalls.length,
+      usable: toolCalls.length,
+    });
+  }
+
   log.info('[SmsSupervisorLLM] Parsed response', {
-    reasoning: parsed.reasoning.substring(0, 300),
-    toolCallCount: parsed.tool_calls?.length || 0,
-    toolCalls: parsed.tool_calls?.map((tc) => ({
+    reasoning: reasoning.substring(0, 300),
+    toolCallCount: toolCalls.length,
+    toolCalls: toolCalls.map((tc) => ({
       tool: tc.tool,
-      args: JSON.stringify(tc.arguments).substring(0, 100),
+      args: JSON.stringify(tc.arguments ?? {}).substring(0, 100),
     })),
   });
 
   return {
-    reasoning: parsed.reasoning || '',
-    tool_calls: Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [],
+    reasoning,
+    tool_calls: toolCalls,
   };
 }

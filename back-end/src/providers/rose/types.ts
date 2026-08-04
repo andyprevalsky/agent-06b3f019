@@ -27,9 +27,9 @@ export interface CompletionMessage {
     id?: string;
     call_id?: string;
     /**
-     * Required by OpenAI-compatible providers. Cerebras rejects a request whose
-     * assistant tool_calls omit it ("tool_calls.0.type: Field required"); the
-     * Anthropic path tolerated its absence, so it only surfaces on Cerebras.
+     * OpenAI's discriminator. Cerebras and strict OpenRouter validators (e.g.
+     * Google) reject assistant tool_calls that omit it; Anthropic tolerated
+     * absence, so the bug only surfaces off the Anthropic path.
      */
     type?: 'function';
     name?: string;

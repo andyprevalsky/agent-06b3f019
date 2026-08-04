@@ -47,7 +47,7 @@ interface MediaRoundTripParams {
   fixtureFile: string;
   contentType: string;
   expectInReply: string;
-  expectInPersistedUserTurn: string;
+  expectedPersistedUserTurn: string;
 }
 
 async function runRealLlmMediaRoundTrip(
@@ -125,11 +125,11 @@ async function runRealLlmMediaRoundTrip(
       throw new Error(`Expected SmsSession after ${params.label} round-trip`);
     }
     const messages = JSON.parse(session.messages) as { role?: string; content?: string }[];
-    const userTurn = messages.find((m) => m.role === 'user');
-    if (!userTurn?.content?.includes(params.expectInPersistedUserTurn)) {
+    const userTurns = messages.filter((m) => m.role === 'user');
+    if (userTurns.length !== 1 || userTurns[0].content !== params.expectedPersistedUserTurn) {
       throw new Error(
-        `Expected persisted user turn to contain "${params.expectInPersistedUserTurn}", ` +
-          `got: "${userTurn?.content?.substring(0, 200)}"`
+        `Expected one canonical persisted user turn "${params.expectedPersistedUserTurn}", ` +
+          `got: ${JSON.stringify(userTurns.map((turn) => turn.content))}`
       );
     }
   } finally {
@@ -146,7 +146,8 @@ export async function testRealLlm_photoAttachmentRoundTrip(prisma: PrismaClient)
     fixtureFile: 'red-square.png',
     contentType: 'image/png',
     expectInReply: 'red',
-    expectInPersistedUserTurn: 'photo(s) attached',
+    expectedPersistedUserTurn:
+      'What is the dominant color of the attached photo? Reply with just the color name.\n\n[1 attachment(s)]',
   });
 }
 
@@ -157,6 +158,6 @@ export async function testRealLlm_voiceNoteRoundTrip(prisma: PrismaClient) {
     fixtureFile: 'voice-note.wav',
     contentType: 'audio/wav',
     expectInReply: 'paris',
-    expectInPersistedUserTurn: 'capital of France',
+    expectedPersistedUserTurn: '[1 attachment(s)]',
   });
 }
