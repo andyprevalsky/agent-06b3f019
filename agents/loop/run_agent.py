@@ -1402,6 +1402,16 @@ async def run_agent(
                     "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
+            # A failed LLM call produced no assistant turn, no tool call, and no
+            # context growth — it is a retry of this iteration, not a new one.
+            # Counting it would let transient provider/schema errors eat the
+            # agent's remaining turns: agent 16ae3e8f's explore sub-agent had
+            # completed 18 turns of real work, then spent iterations 19 and 20
+            # on two failed parses and died on "Reached max iterations (20)"
+            # without ever getting another chance to act. The retry budget
+            # (consecutive_llm_failures, capped at 3 above) bounds this path;
+            # max_iterations bounds productive work.
+            iteration -= 1
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The

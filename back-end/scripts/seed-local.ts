@@ -175,10 +175,34 @@ async function syncRequiredTable(
   }
 }
 
+/**
+ * Upsert prod rows into the local database keyed on primary id.
+ *
+ * A model can carry a compound unique key in addition to `id` (for example
+ * `EmailIntegrationCredential` is unique on `(userId, provider, email)`). When a
+ * stale local row holds the same tuple under a DIFFERENT primary key, the
+ * id-keyed upsert falls through to `create` and dies on P2002, which aborts the
+ * entire seed and blocks every deploy from that worktree. Reconcile by updating
+ * the row that already owns the tuple, preserving its local id so dependent rows
+ * survive — the same treatment `syncIntegrationCredentials` gives `Integration`.
+ */
 async function upsertById(model: any, records: any[]): Promise<number> {
   for (const r of records) {
     const { id, ...rest } = r;
-    await model.upsert({ where: { id }, create: r, update: rest });
+    try {
+      await model.upsert({ where: { id }, create: r, update: rest });
+    } catch (error) {
+      const target =
+        (error as { code?: string; meta?: { target?: unknown } })?.code === 'P2002'
+          ? (error as { meta?: { target?: unknown } }).meta?.target
+          : undefined;
+      if (!Array.isArray(target) || target.length === 0 || target.includes('id')) throw error;
+      const fields = target as string[];
+      const compoundKey = fields.join('_');
+      const compoundValue = Object.fromEntries(fields.map((field) => [field, r[field]]));
+      // Refresh the conflicting row in place; its local id stays authoritative.
+      await model.update({ where: { [compoundKey]: compoundValue }, data: rest });
+    }
   }
   return records.length;
 }

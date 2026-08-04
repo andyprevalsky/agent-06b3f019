@@ -32,6 +32,82 @@ ngrok_configure_endpoint_mode() {
   NGROK_RESERVE_DOMAIN=1
 }
 
+# Classify a malformed NGROK_API_KEY before spending an API round-trip on it,
+# and print the specific defect. A valid key is `FIRSTPART_SECONDPART`.
+#
+# Both defects below have already cost real debugging time. A stray apostrophe
+# captured inside the .env value (`NGROK_API_KEY="..fmmT'"`) made a perfectly
+# good key return an opaque 403 "properly formed, but it is invalid" — which was
+# filed as a *stale* key on 2026-07-27 and left every workspace's key broken for
+# a week, when the actual fix was deleting one character. The other is pasting
+# the dashboard's `ak_...` key *ID* instead of the token it identifies.
+#
+# ngrok's own 400 for the ID case is excellent; its 403 for the quote case is
+# actively misleading. Name the defect so the next reader doesn't re-derive it.
+ngrok_api_key_defect() {
+    local key="${1:-}"
+    [ -n "$key" ] || return 1
+    case "$key" in
+        ak_*) printf '%s\n' "looks like an API key ID (ak_...), not the key token"; return 0 ;;
+        *\'*|*\"*) printf '%s\n' "contains a quote character (stray quote in .env?)"; return 0 ;;
+        *[[:space:]]*) printf '%s\n' "contains whitespace"; return 0 ;;
+        *_*) return 1 ;;
+        *) printf '%s\n' "is not in FIRSTPART_SECONDPART form"; return 0 ;;
+    esac
+}
+
+# Pre-reserve an ngrok domain, defaulting to this worktree's primary domain.
+#
+# Reservation is ADVISORY, never authoritative. `--domain` binds with only an
+# agent authtoken on our plan, so the API key here buys nothing except a
+# friendlier error earlier. This used to `exit 1` on any API rejection, which
+# meant a rotated-out NGROK_API_KEY took down every stack that merely *had* the
+# variable set — while the tunnel it was gating would have come up fine. An
+# absent key was tolerated but a stale one was fatal, which is backwards.
+#
+# The authoritative check is the agent actually publishing the endpoint moments
+# later; that path already prints the actionable billing/plan guidance. So every
+# failure here degrades to a warning and returns success, and callers under
+# `set -e` flow straight through to the real check.
+ensure_ngrok_domain_reserved() {
+    local domain="${1:-${WORKTREE_DOMAIN:-}}"
+    [ -n "$domain" ] || return 0
+    [ -n "${NGROK_API_KEY:-}" ] || return 0
+
+    local defect
+    if defect="$(ngrok_api_key_defect "$NGROK_API_KEY")"; then
+        echo "⚠️  NGROK_API_KEY $defect — skipping domain pre-reservation."
+        echo "   Fix it in back-end/.env; --domain still binds via the agent authtoken."
+        return 0
+    fi
+
+    echo "🌐 Checking ngrok reserved domain $domain"
+    local domains_json
+    if ! domains_json=$(ngrok api reserved-domains list \
+        --api-key "$NGROK_API_KEY" --limit 1000 2>&1); then
+        printf '%s\n' "$domains_json"
+        echo "⚠️  Could not list ngrok reserved domains (NGROK_API_KEY stale, rotated, or unscoped)."
+        echo "   Continuing — --domain binds without an API key; the tunnel start is authoritative."
+        return 0
+    fi
+
+    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
+        echo "🌐 Reserved domain already exists: $domain"
+        return 0
+    fi
+
+    echo "🌐 Reserving ngrok domain $domain"
+    local create_output
+    if ! create_output=$(ngrok api reserved-domains create \
+        --api-key "$NGROK_API_KEY" \
+        --domain "$domain" \
+        --description "Conductor workspace ${CONDUCTOR_WORKSPACE_NAME:-unknown} public frontend" 2>&1); then
+        printf '%s\n' "$create_output"
+        echo "⚠️  Could not reserve $domain. Continuing — the tunnel start is authoritative."
+        return 0
+    fi
+}
+
 public_tunnel_publish_environment() {
   local public_url="$1" existing_origins="${2:-}"
   [ -n "$public_url" ] || return 1
