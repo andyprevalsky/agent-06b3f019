@@ -33,6 +33,7 @@ import {
 } from './seed-local-helpers';
 import {
   createScopedBrowserAuthReaders,
+  DEFAULT_COOKIE_PAGE_SIZE,
   parseCookieDomains,
   passkeySyncWhere,
 } from './cookie-domain-scope';
@@ -123,7 +124,7 @@ function positivePageSize(name: string, fallback: number): number {
   return value;
 }
 
-const COOKIE_PAGE_SIZE = positivePageSize('SEED_COOKIE_PAGE_SIZE', 25);
+const COOKIE_PAGE_SIZE = positivePageSize('SEED_COOKIE_PAGE_SIZE', DEFAULT_COOKIE_PAGE_SIZE);
 const PERSON_PAGE_SIZE = positivePageSize('SEED_PERSON_PAGE_SIZE', 50);
 const MESSAGE_PAGE_SIZE = positivePageSize('SEED_MESSAGE_PAGE_SIZE', 50);
 const CREDENTIAL_PAGE_SIZE = positivePageSize('SEED_CREDENTIAL_PAGE_SIZE', 50);

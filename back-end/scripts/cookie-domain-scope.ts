@@ -108,6 +108,13 @@ export type BrowserAuthRowTypes = {
  */
 export type BrowserAuthPage = { skip: number; take: number };
 
+// A complete developer account currently carries roughly 22k cookies. At 25
+// rows per page the warm-stack credential refresh needed about 880 production
+// round trips and could not satisfy the deploy stack's 120-second readiness
+// contract. Five hundred rows keeps residency bounded to a small fraction of
+// the full table while reducing that startup path to roughly 44 round trips.
+export const DEFAULT_COOKIE_PAGE_SIZE = 500;
+
 export type BrowserAuthReaders<Rows extends BrowserAuthRowTypes> = {
   [Table in keyof Rows]: (
     where: Record<string, unknown>,

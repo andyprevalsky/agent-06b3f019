@@ -40,7 +40,10 @@ import {
   pipeJsonbCopy,
   psqlDatabaseUrl,
 } from '../../../scripts/seed-jsonb-stream';
-import { createScopedBrowserAuthReaders } from '../../../scripts/cookie-domain-scope';
+import {
+  createScopedBrowserAuthReaders,
+  DEFAULT_COOKIE_PAGE_SIZE,
+} from '../../../scripts/cookie-domain-scope';
 import type { LocalStorageOrigin } from '@prisma/client';
 
 type TestFn = () => Promise<void>;
@@ -280,6 +283,20 @@ test('an invalid page size is rejected instead of silently reading unpaged', asy
     threw = true;
   }
   assert(threw, 'page size 0 must throw — silently falling back to an unpaged read is the bug');
+});
+
+test('the default cookie page stays bounded without exceeding the deploy startup round-trip budget', () => {
+  const productionCookieCount = 22_000;
+  const maximumStartupPages = 50;
+  const pages = Math.ceil(productionCookieCount / DEFAULT_COOKIE_PAGE_SIZE);
+  assert(
+    pages <= maximumStartupPages,
+    `default cookie page requires ${pages} production round trips; expected at most ${maximumStartupPages}`
+  );
+  assert(
+    DEFAULT_COOKIE_PAGE_SIZE <= 1_000,
+    `default cookie page must remain memory-bounded, got ${DEFAULT_COOKIE_PAGE_SIZE}`
+  );
 });
 
 test('large JSONB origins cross the seed boundary as text without fidelity loss', async () => {
