@@ -149,6 +149,10 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
       const delay = backoff === 0 ? 0 : backoff + Math.floor(Math.random() * 250);
 
       reconnectTimeoutRef.current = window.setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        // jsdom / vitest can tear down `window` before a queued reconnect fires;
+        // never call setState after this effect has been cancelled.
+        if (cancelled) return;
         setForceResubscribeCounter((prev) => prev + 1);
       }, delay);
     };
@@ -246,7 +250,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
       } catch (error) {
         console.error('Failed to subscribe:', error);
         isReconnectingRef.current = false;
-        scheduleReconnect();
+        if (!cancelled) scheduleReconnect();
       }
     };
 
