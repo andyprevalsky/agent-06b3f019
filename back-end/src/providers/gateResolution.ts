@@ -82,7 +82,8 @@ async function signalAllWaiters(request: ResolvableGateRequest, response: string
 
 export async function finishAttentionMessages(
   tx: Prisma.TransactionClient,
-  request: ResolvableGateRequest
+  request: ResolvableGateRequest,
+  workflowGenerationAlreadyLocked = false
 ): Promise<number> {
   const pendingMessages = await tx.message.findMany({
     where: {
@@ -108,13 +109,17 @@ export async function finishAttentionMessages(
   });
 
   let finishedCount = 0;
+  let workflowGenerationLocked = workflowGenerationAlreadyLocked;
   for (const message of pendingMessages) {
     if (message.metadata === null || Array.isArray(message.metadata)) continue;
     const metadata = message.metadata as Prisma.JsonObject;
     const toolCallId = metadata.toolCallId;
     if (typeof toolCallId === 'string' && toolCallId.length > 0) {
       const workflowGeneration = message.workflowGeneration ?? request.agentId;
-      await lockAgentWorkflowGeneration(tx, request.agentId);
+      if (!workflowGenerationLocked) {
+        await lockAgentWorkflowGeneration(tx, request.agentId);
+        workflowGenerationLocked = true;
+      }
       await lockToolCallLifecycle(tx, request.agentId, workflowGeneration, toolCallId);
       const deploymentFence = await findDeploymentFencedToolMessage(
         tx,
@@ -124,20 +129,19 @@ export async function finishAttentionMessages(
       );
       if (deploymentFence !== null) continue;
     }
-    const current = await tx.message.findUnique({ where: { id: message.id } });
-    if (current?.metadata === null || Array.isArray(current?.metadata)) continue;
-    const currentMetadata = current?.metadata as Prisma.JsonObject | undefined;
-    if (currentMetadata?.toolStatus !== 'IN_PROGRESS') continue;
-    await tx.message.update({
-      where: { id: message.id },
+    const updated = await tx.message.updateMany({
+      // Compare-and-swap the metadata snapshot returned above. Lifecycle-aware
+      // messages are serialized by the advisory locks; legacy messages without
+      // a toolCallId still cannot overwrite a concurrent terminal transition.
+      where: { id: message.id, metadata: { equals: metadata } },
       data: {
         metadata: {
-          ...currentMetadata,
+          ...metadata,
           toolStatus: 'FINISHED',
         },
       },
     });
-    finishedCount += 1;
+    finishedCount += updated.count;
   }
 
   return finishedCount;
@@ -155,20 +159,20 @@ export async function resolveAndSignal(
   response: string
 ): Promise<{ resolved: boolean }> {
   const { fresh, finishedMessageCount, resolved } = await prisma.$transaction(async (tx) => {
-    const updated = await tx.agentAttentionRequest.updateMany({
-      where: { id: request.id, userResponse: null },
-      data: { userResponse: response },
-    });
-    const current = await tx.agentAttentionRequest.findUnique({
-      where: { id: request.id },
-    });
-    if (current === null) {
-      throw new Error(`Attention request ${request.id} disappeared during resolution`);
+    // Deployment cleanup takes this lock before terminalizing attention rows.
+    // Keep the same order here so a response can never hold the row while
+    // waiting for cleanup's generation lock.
+    await lockAgentWorkflowGeneration(tx, request.agentId);
+    const [current] = await tx.$queryRaw<ResolvableGateRequest[]>`
+      UPDATE "AgentAttentionRequest"
+      SET "userResponse" = ${response}, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE id = ${request.id} AND "userResponse" IS NULL
+      RETURNING id, "workflowId", "agentId", metadata
+    `;
+    if (current === undefined) {
+      return { fresh: null, finishedMessageCount: 0, resolved: false };
     }
-    if (updated.count === 0) {
-      return { fresh: current, finishedMessageCount: 0, resolved: false };
-    }
-    const finishedCount = await finishAttentionMessages(tx, request);
+    const finishedCount = await finishAttentionMessages(tx, current, true);
     return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
   });
   log.info('Resolved attention request read model', {
@@ -177,7 +181,7 @@ export async function resolveAndSignal(
     finished_message_count: finishedMessageCount,
     resolved,
   });
-  if (!resolved) return { resolved: false };
+  if (!resolved || fresh === null) return { resolved: false };
   await signalAllWaiters(fresh, response);
   return { resolved: true };
 }
