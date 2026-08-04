@@ -13,7 +13,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
-import { findDeploymentFencedToolMessage, lockToolCallLifecycle } from './toolLifecycleMessages';
+import { findDeploymentFencedToolMessage } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 
 const log = createLogger('GateResolution');
@@ -120,7 +120,10 @@ export async function finishAttentionMessages(
         await lockAgentWorkflowGeneration(tx, request.agentId);
         workflowGenerationLocked = true;
       }
-      await lockToolCallLifecycle(tx, request.agentId, workflowGeneration, toolCallId);
+      // Every lifecycle writer takes the generation lock in shared mode before
+      // its tool-call lock. Holding the exclusive generation lock therefore
+      // proves that no lifecycle writer can overlap this cleanup; taking the
+      // subordinate lock again only adds a transaction-expiring round trip.
       const deploymentFence = await findDeploymentFencedToolMessage(
         tx,
         request.agentId,

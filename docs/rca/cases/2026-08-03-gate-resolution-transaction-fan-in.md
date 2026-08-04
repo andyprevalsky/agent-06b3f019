@@ -8,10 +8,11 @@ classification: our-bug
 problem_class: concurrency-inefficiency
 first_bad_boundary: back-end/src/providers/gateResolution.ts resolveAndSignal and back-end/src/providers/toolLifecycleMessages.ts persistLockedToolLifecycleMessage
 symptoms:
-  - "Transaction already closed: A query cannot be executed on an expired transaction"
+  - "Transaction already closed: A query cannot be executed on an expired transaction / A commit cannot be executed on an expired transaction"
   - "Transaction API error: Transaction not found"
   - "auth-looking metadata without child row responds generically" returned 500
   - "repeat respond preserves first terminal response" returned 500
+  - "POST /:id/reject - happy path persists rejected state" returned 500
 tags:
   - approvals
   - prisma
@@ -37,6 +38,12 @@ seconds and the following read reached 5.022 seconds. A focused concurrency unit
 run also exposed the sibling lock problem as `Transaction API error: Transaction
 not found` while 24 distinct tool calls for one agent resolved together.
 
+The same deploy rerun later reproduced the class in the reject happy path. The
+transaction's generation lock, conditional request update, pending-message read,
+tool-call lock, deployment-fence read, and metadata update each succeeded, but
+their queued durations reached 5,025 ms and Prisma rejected the commit. The HTTP
+request returned 500 after 7,045 ms while the other 35 attention cases passed.
+
 ## Diagnosis
 
 Both failures entered healthy routes and authenticated successfully, so the
@@ -56,6 +63,13 @@ the required same-call serialization. The generation lock only needs to exclude
 a deployment cutover, so making ordinary writes mutually exclusive was stricter
 than the consistency contract and created avoidable fan-in.
 
+The recurrence exposed one remaining redundant round trip. Once gate resolution
+holds the workflow-generation lock exclusively, no lifecycle writer can hold or
+acquire a tool-call lock: every legitimate lifecycle writer first holds the same
+generation lock in shared mode. Taking the subordinate lifecycle lock again
+could not add serialization, but under saturated database scheduling it consumed
+1.799 seconds inside the already-running interactive transaction.
+
 ## Solution
 
 `resolveAndSignal` now claims and returns the unresolved attention request with
@@ -63,10 +77,12 @@ one conditional `UPDATE ... RETURNING`, eliminating the redundant request read.
 It acquires the generation lock before touching the attention row, matching
 deployment cleanup's lock order and preventing an attention-row/generation-lock
 ABBA deadlock.
-`finishAttentionMessages` locks the agent generation once, keeps the per-tool
-lock, and compare-and-swaps each selected metadata snapshot with `updateMany`
-instead of re-reading every row. This preserves the request/message atomic commit
-and still signals Temporal only after commit.
+`finishAttentionMessages` locks the agent generation once and compare-and-swaps
+each selected metadata snapshot with `updateMany` instead of re-reading every
+row. Because that generation lock is exclusive, it also dominates the
+subordinate lifecycle locks taken by ordinary shared-generation writers. This
+preserves the request/message atomic commit and still signals Temporal only after
+commit.
 
 Lifecycle persistence now takes a shared workflow-generation advisory lock.
 Independent tool calls can proceed together, while deployment cutovers retain
@@ -79,6 +95,13 @@ pending messages. A single gate with many Temporal waiters still has its
 pre-existing per-gate waiter list and sequential signaling cost; this change
 removes cross-tool and cross-agent fan-in rather than claiming that one hot gate
 is constant-time.
+
+The recurrence fix removes that dominated tool-call lock acquisition from
+`finishAttentionMessages`. Deployment-fence reads and compare-and-swap updates
+remain inside the exclusive generation-lock transaction, so the consistency
+contract is unchanged while one database round trip per matching message is
+removed. The shared/exclusive lock-order unit tests and all 14 workflow restart
+reconciliation cases passed afterward.
 
 ## Human feedback
 

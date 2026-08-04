@@ -31,7 +31,6 @@ import { join } from 'node:path';
 import { NonBlockingFileCache } from '../../providers/nonBlockingFetchCache';
 
 const writeLine = (m: string): void => process.stdout.write(`${m}\n`);
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function run(): Promise<void> {
   // ── (1) Wiring guard: fetchCapture must NOT use the sync FileSystemCache ──
@@ -62,7 +61,7 @@ async function run(): Promise<void> {
   const bigPath = join(nsDir, `${createHash('sha256').update(bigKey).digest('hex')}.json`);
   // The sync FileSystemCache would have the file on disk already; the async one
   // flushes on a later tick.
-  await sleep(200);
+  await cache.flushPendingWrites();
   assert.ok(existsSync(bigPath), 'async write must eventually flush to disk');
 
   // ── (3) Disk-seeded fixtures (how blackbox tests seed) are read + memoized ──

@@ -1,12 +1,12 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
 
-import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
+import { cacheRequestTimeoutMs, get, objectKey } from '../../../scripts/seed-dump-cache';
 
 const tsxCli = require.resolve('tsx/cli');
 
@@ -87,53 +87,61 @@ test('CLI fails closed (exit 1) on a missing subcommand argument', () => {
 
 async function testHangingEndpointIsBounded(): Promise<void> {
   let requestObserved = false;
-  let requestWatchdog: NodeJS.Timeout | undefined;
-  let killedByRequestWatchdog = false;
   const server = createServer(() => {
     // Intentionally leave the response open: the client deadline must abort it.
     requestObserved = true;
-    requestWatchdog = setTimeout(() => {
-      killedByRequestWatchdog = true;
-      child.kill('SIGKILL');
-    }, 2_000);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   assert(address && typeof address !== 'string');
 
-  const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
-  const child = spawn(
-    process.execPath,
-    [tsxCli, script, 'get', 'tok', '/tmp/seed-dump-cache-hang.out'],
-    {
-      env: {
-        ...process.env,
-        R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
-        R2_ACCOUNT_ID: 'test-account',
-        R2_ACCESS_KEY_ID: 'test-access',
-        R2_SECRET_ACCESS_KEY: 'test-secret',
-        R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
-        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
-      },
-      stdio: 'pipe',
-    }
-  );
-  let killedByStartupWatchdog = false;
-  const startupWatchdog = setTimeout(() => {
-    killedByStartupWatchdog = true;
-    child.kill('SIGKILL');
-  }, 30_000);
-  const [code] = (await once(child, 'close')) as [number | null];
-  clearTimeout(startupWatchdog);
-  if (requestWatchdog) clearTimeout(requestWatchdog);
-  server.closeAllConnections();
-  server.close();
+  const ownedEnv = [
+    'R2_BUCKET_TRACE_ARCHIVE',
+    'R2_ACCOUNT_ID',
+    'R2_ACCESS_KEY_ID',
+    'R2_SECRET_ACCESS_KEY',
+    'R2_ENDPOINT',
+    'SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS',
+  ] as const;
+  const previousEnv = new Map(ownedEnv.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, {
+    R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
+    R2_ACCOUNT_ID: 'test-account',
+    R2_ACCESS_KEY_ID: 'test-access',
+    R2_SECRET_ACCESS_KEY: 'test-secret',
+    R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
+    SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+  });
 
-  assert.equal(killedByStartupWatchdog, false, 'R2 deadline test CLI did not start');
+  let harnessDeadlineFired = false;
+  let requestFailed = false;
+  let harnessTimer: NodeJS.Timeout | undefined;
+  const harnessDeadline = new Promise<never>((_, reject) => {
+    harnessTimer = setTimeout(() => {
+      harnessDeadlineFired = true;
+      reject(new Error('R2 request exceeded the harness deadline'));
+    }, 2_000);
+    harnessTimer.unref();
+  });
+  try {
+    await Promise.race([get('tok', `/tmp/seed-dump-cache-hang-${process.pid}.out`), harnessDeadline]);
+  } catch {
+    requestFailed = true;
+  } finally {
+    if (harnessTimer !== undefined) clearTimeout(harnessTimer);
+    for (const key of ownedEnv) {
+      const previous = previousEnv.get(key);
+      if (previous === undefined) delete process.env[key];
+      else process.env[key] = previous;
+    }
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+
   assert.equal(requestObserved, true, 'R2 deadline test never reached the hanging endpoint');
-  assert.equal(killedByRequestWatchdog, false, 'R2 request exceeded its client-owned deadline');
-  assert.equal(code, 1, 'timed-out cache lookup must fail closed');
+  assert.equal(harnessDeadlineFired, false, 'R2 request exceeded its client-owned deadline');
+  assert.equal(requestFailed, true, 'timed-out cache lookup must fail closed');
 }
 
 testHangingEndpointIsBounded()
