@@ -2998,6 +2998,17 @@ async def call_llm_structured_streaming(
 
         return response, usage, detected_tools_ordered
 
+    # The direct OpenRouter/Instructor path below parses JSON content and does
+    # not consume provider-native tool calls. Dispatching it with a forced tool
+    # choice would therefore pretend to constrain generation while only
+    # validating the result after the fact. Fail closed before the provider
+    # request; Rose models project AgentAction into native tools and are the
+    # supported path for required-tool calls.
+    if tool_choice is not None:
+        raise LLMStructuredOutputError(
+            "Required native tool selection is unsupported for direct OpenRouter models; use a Rose model"
+        )
+
     # For OpenRouter models, use Instructor's partial streaming
     base_client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
 

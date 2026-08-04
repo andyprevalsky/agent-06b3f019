@@ -1363,8 +1363,8 @@ async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
     assert reads == 1
 
 
-async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
-    """One provider timeout cannot erase an already-started durable compensation."""
+async def test_abandonment_tolerates_provider_outage_beyond_three_lifecycle_reads():
+    """AgentCard throttling can outlast the old three-read cutoff and still recover."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
@@ -1374,7 +1374,7 @@ async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
         nonlocal reads
         reads += 1
-        if reads == 1:
+        if reads <= 4:
             raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
         return task.expected_payment_lifecycle
 
@@ -1392,32 +1392,52 @@ async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
     )
 
     assert result["purchase"]["status"] == "VOIDED"
-    assert reads == 2
+    assert reads == 5
 
 
-async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
-    """The transient guard stays bounded and reports a persistent provider outage."""
+async def test_abandonment_surfaces_lifecycle_outage_at_reconciliation_deadline():
+    """A persistent provider outage stays bounded by the reconciliation deadline."""
+    from types import SimpleNamespace
+
     import pytest
 
+    import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    reads = 0
+    clock_reads = 0
 
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
         raise RuntimeError("upstream unavailable")
 
-    with pytest.raises(RuntimeError, match="unavailable after 3 consecutive reads"):
-        await _wait_for_expected_payment_lifecycle(
-            "http://localhost:55120",
-            "agent-123",
-            get_task_by_name("agent-payment-abandonment"),
-            {
-                "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
-                "walletFunding": {"status": "RECLAIM_FAILED"},
-            },
-            timeout_seconds=1,
-            poll_interval_seconds=0,
-            fetch_lifecycle=fetch_lifecycle,
-        )
+    def monotonic() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        return 0 if clock_reads < 7 else 1
+
+    # Replace only the benchmark module's clock. Patching time.monotonic on the
+    # shared stdlib module also changes asyncio's event-loop clock, making the
+    # number of simulated reads scheduler-dependent.
+    with patch.object(bench, "time", SimpleNamespace(monotonic=monotonic)):
+        with pytest.raises(
+            RuntimeError,
+            match="unavailable at the reconciliation deadline after 3 consecutive reads",
+        ):
+            await bench._wait_for_expected_payment_lifecycle(
+                "http://localhost:55120",
+                "agent-123",
+                get_task_by_name("agent-payment-abandonment"),
+                {
+                    "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+                    "walletFunding": {"status": "RECLAIM_FAILED"},
+                },
+                timeout_seconds=1,
+                poll_interval_seconds=0,
+                fetch_lifecycle=fetch_lifecycle,
+            )
+    assert reads == 3
 
 
 async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
@@ -10844,12 +10864,12 @@ async def run_all_tests():
         test_abandonment_waits_between_funding_reclaim_and_purchase_void,
     )
     await r.record_async(
-        "abandonment_tolerates_transient_lifecycle_read",
-        test_abandonment_tolerates_one_transient_lifecycle_read_failure,
+        "abandonment_tolerates_extended_lifecycle_outage",
+        test_abandonment_tolerates_provider_outage_beyond_three_lifecycle_reads,
     )
     await r.record_async(
         "abandonment_bounds_persistent_lifecycle_outage",
-        test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
+        test_abandonment_surfaces_lifecycle_outage_at_reconciliation_deadline,
     )
     await r.record_async(
         "initial_payment_lifecycle_tolerates_transient_read",

@@ -4902,6 +4902,36 @@ async def test_call_llm_structured_streaming_openrouter_path():
     assert len(chunks_received) >= 1
 
 
+async def test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice():
+    """Missing or alternate direct-OpenRouter tools cannot bypass a required tool."""
+    import pytest
+    from unittest.mock import MagicMock, patch
+    from helpers.llm import LLMStructuredOutputError, call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model(["web_search", "attempt_completion"])
+    from_openai = MagicMock()
+
+    async def on_chunk(_text: str, _tokens: int):
+        raise AssertionError("a rejected direct OpenRouter request must not stream")
+
+    with patch("helpers.llm.AsyncOpenAI") as async_openai, patch("helpers.llm.instructor.from_openai", from_openai):
+        with pytest.raises(LLMStructuredOutputError, match="unsupported for direct OpenRouter"):
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Finish from the completed child"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="openrouter-required-tool-contract",
+                tool_choice={"name": "attempt_completion"},
+            )
+
+    async_openai.assert_not_called()
+    from_openai.assert_not_called()
+
+
 async def test_call_llm_structured_streaming_openrouter_exception_raises():
     """OpenRouter streaming propagates exceptions from instructor."""
     from unittest.mock import MagicMock, patch
@@ -6314,6 +6344,10 @@ async def run_all_tests():
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
+    await r.record_async(
+        "stream_openrouter_required_tool_fails_closed",
+        test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice,
+    )
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
     await r.record_async(
         "stream_rose_cancelled_propagates",
