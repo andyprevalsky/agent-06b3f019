@@ -540,22 +540,13 @@ def main() -> int:
     p_new = sub.add_parser("new", help="scaffold a new case file")
     p_new.add_argument("slug")
 
-    args = parser.parse_args()
-
-    if args.command == "search":
-        return search(args.terms, args.limit)
-    if args.command == "show":
-        return show(args.id)
-    if args.command == "list":
-        return list_cases()
-    if args.command == "stats":
-        return stats()
-    if args.command == "reindex":
+    def do_reindex(args: argparse.Namespace) -> int:
         INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
         INDEX_PATH.write_text(render_index(load_cases()), encoding="utf-8")
         print(f"wrote {INDEX_PATH.relative_to(REPO_ROOT)}")
         return 0
-    if args.command == "validate":
+
+    def do_validate(args: argparse.Namespace) -> int:
         errors = validate()
         if errors:
             for error in errors:
@@ -564,7 +555,25 @@ def main() -> int:
             return 1
         print(f"RCA archive OK ({len(load_cases())} cases)")
         return 0
-    return 2
+
+    # Keyed by subcommand so "registered but never dispatched" is impossible.
+    # The if-chain this replaced silently omitted `new`, so it exited 2 with no
+    # output while still passing a structural test that only greps the docs.
+    dispatch = {
+        "search": lambda args: search(args.terms, args.limit),
+        "show": lambda args: show(args.id),
+        "list": lambda args: list_cases(),
+        "stats": lambda args: stats(),
+        "new": lambda args: new_case(args.slug),
+        "reindex": do_reindex,
+        "validate": do_validate,
+    }
+    undispatched = set(sub.choices) - set(dispatch)
+    if undispatched:
+        raise AssertionError(f"subcommands registered but not dispatched: {sorted(undispatched)}")
+
+    args = parser.parse_args()
+    return dispatch[args.command](args)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     // Umbrella source: no connector requirement, no channel restriction.
     connector: null,
     channel: null,
@@ -18,7 +18,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     // Alias of `email`; kept for backward compatibility.
     connector: 'gmail',
     channel: 'EMAIL',
@@ -28,7 +28,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     connector: 'gmail',
     channel: 'EMAIL',
   },
@@ -37,7 +37,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     connector: 'imessage',
     channel: 'IMESSAGE',
   },
@@ -46,7 +46,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     connector: 'whatsapp',
     channel: 'WHATSAPP',
   },
@@ -55,7 +55,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'MessageRecord' as const,
     searchField: 'message',
     groupBy: 'personId',
-    filters: ['person', 'since'] as const,
+    filters: ['person', 'since', 'path'] as const,
     connector: 'sms',
     channel: 'SMS',
   },
@@ -64,7 +64,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'Person' as const,
     searchField: 'contact fields',
     groupBy: 'personId',
-    filters: [] as const,
+    filters: ['path'] as const,
     connector: null,
     channel: null,
   },
@@ -73,7 +73,7 @@ export const DATA_SOURCE_CONFIGS = {
     table: 'Message' as const,
     searchField: 'text',
     groupBy: 'agentId',
-    filters: [] as const,
+    filters: ['path'] as const,
     connector: null,
     channel: null,
   },
@@ -83,6 +83,7 @@ export const DATA_SOURCE_CONFIGS = {
     searchField: 'transaction fields',
     groupBy: 'plaidAccountId',
     filters: [
+      'path',
       'since',
       'until',
       'account',
@@ -226,6 +227,10 @@ export interface GrepResult {
 }
 
 export interface TransactionGrepFilters {
+  /** Parsed from `filters.path` — addresses an institution/account/transaction subtree. */
+  pathInstitution?: string;
+  pathAccount?: string;
+  pathTransactionId?: string;
   since?: Date;
   until?: Date;
   account?: string;
@@ -236,6 +241,9 @@ export interface TransactionGrepFilters {
 }
 
 export interface DocumentGrepFilters {
+  /** Set when `filters.path` was a path this tool printed. */
+  pathDocumentSource?: string;
+  pathRest?: string;
   documentSource?: string;
   since?: Date;
   until?: Date;
@@ -246,6 +254,21 @@ export interface DocumentGrepFilters {
 export interface MessageGrepFilters {
   person?: string;
   since?: Date;
+  /** Parsed from `filters.path` — addresses one thread, optionally one message. */
+  pathThread?: string;
+  pathMessageId?: string;
+}
+
+/** `network` narrowing. `path` addresses one contact record. */
+export interface NetworkGrepFilters {
+  pathContact?: string;
+}
+
+/** `agent_network` narrowing. `path` addresses a depth/agent/role/message subtree. */
+export interface AgentNetworkGrepFilters {
+  pathAgentId?: string;
+  pathRole?: string;
+  pathMessageId?: string;
 }
 
 // Normalized, validated grep input shared by the service (validation) and the
@@ -264,6 +287,8 @@ export interface ValidatedGrepInput {
   offset: number;
   filters: {
     messages?: MessageGrepFilters;
+    network?: NetworkGrepFilters;
+    agentNetwork?: AgentNetworkGrepFilters;
     transactions?: TransactionGrepFilters;
     documents?: DocumentGrepFilters;
   };

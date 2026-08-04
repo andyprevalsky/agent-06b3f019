@@ -10,17 +10,21 @@ import { config } from 'dotenv';
 config();
 
 const TASK_QUEUES = [
-  'navi-agent-tasks',      // Production
+  'navi-agent-tasks', // Production
   'navi-agent-tasks-test', // Test/Development
 ];
 
 async function queryTemporalWorkers() {
   const address = process.env.TEMPORAL_ADDRESS || 'us-east-1.aws.api.temporal.io:7233';
-  const namespace = process.env.TEMPORAL_NAMESPACE || 'rose-labs-us-east-1.tch2n';
+  // No default: a stale hardcoded namespace silently aims this at another cluster.
+  const namespace = process.env.TEMPORAL_NAMESPACE;
   const apiKey = process.env.TEMPORAL_API_KEY;
 
   if (!apiKey) {
     throw new Error('Missing TEMPORAL_API_KEY environment variable');
+  }
+  if (!namespace) {
+    throw new Error('Missing TEMPORAL_NAMESPACE environment variable');
   }
 
   console.log('🔗 Connecting to Temporal Cloud...');
@@ -47,7 +51,7 @@ async function queryTemporalWorkers() {
   // Note: The TypeScript SDK doesn't expose task queue poller info directly
   // We can infer worker presence by looking at running workflows
   const queueWorkflows: Record<string, number> = {};
-  
+
   try {
     const workflows = client.workflow.list({
       query: 'ExecutionStatus="Running"',
@@ -64,9 +68,9 @@ async function queryTemporalWorkers() {
   for (const taskQueue of TASK_QUEUES) {
     console.log(`🔍 Task Queue: ${taskQueue}`);
     console.log('─'.repeat(60));
-    
+
     const count = queueWorkflows[taskQueue] || 0;
-    
+
     if (count > 0) {
       console.log(`   ✅ ${count} workflow(s) running`);
       console.log(`   → Workers are likely polling this queue`);
@@ -84,7 +88,7 @@ async function queryTemporalWorkers() {
 
   const totalWorkflows = Object.values(queueWorkflows).reduce((a, b) => a + b, 0);
   console.log(`   Total running workflows: ${totalWorkflows}`);
-  
+
   if (totalWorkflows > 0) {
     console.log('\n   Workflows by queue:');
     Object.entries(queueWorkflows)
@@ -102,7 +106,7 @@ async function queryTemporalWorkers() {
   console.log('   • To see worker details, check Temporal UI:');
   console.log('     https://cloud.temporal.io/namespaces/quickstart-navi.lqjlv');
   console.log('\n═══════════════════════════════════════════════════════════\n');
-  
+
   await connection.close();
 }
 
@@ -111,4 +115,3 @@ queryTemporalWorkers().catch((error) => {
   console.error('Fatal error:', error);
   process.exit(1);
 });
-

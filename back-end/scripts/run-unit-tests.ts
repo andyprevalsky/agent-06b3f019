@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type UnitResult = {
   durationMs: number;
@@ -17,6 +18,26 @@ const coverageDir = process.env.BACKEND_UNIT_COVERAGE_DIR;
 
 if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
   console.error('BACKEND_UNIT_CONCURRENCY must be a positive integer.');
+  process.exit(2);
+}
+
+/**
+ * Unit tests create and delete real rows (agents, messages, attention requests)
+ * through `providers/database`. That provider falls back to `back-end/.env`,
+ * whose DATABASE_URL points at the PRODUCTION Supabase pooler — so running this
+ * suite without an explicit local database silently exercises prod, and the
+ * added network latency blows Prisma's 10s interactive-transaction budget and
+ * manufactures failures that look like real bugs.
+ *
+ * `scripts/run-coverage.sh` exports the isolated container URL before invoking
+ * this runner, so the supported path is unaffected.
+ */
+const nonLocalDatabase = nonLocalDatabaseReason(process.env.DATABASE_URL);
+if (nonLocalDatabase) {
+  console.error(
+    `Refusing to run backend unit tests: ${nonLocalDatabase}. These tests create and delete real rows.\n` +
+      'Run the suite via `bash scripts/run-coverage.sh`, or export DATABASE_URL/DIRECT_URL for your workspace Postgres container first.'
+  );
   process.exit(2);
 }
 

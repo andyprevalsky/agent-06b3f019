@@ -17,7 +17,41 @@ import {
 } from './providers/smsSupervisor';
 import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaidTransactions';
 import { runGmailSyncJob } from './services/integrations/gmailSync';
+import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
+
+function scheduleWorkflowLivenessReconcile(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_WORKFLOW_LIVENESS_RECONCILE === '1') {
+    cronLog.info('Workflow liveness reconcile disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_WORKFLOW_LIVENESS_RECONCILE',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Workflow liveness reconcile already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    reconcileWorkflowLiveness()
+      .then((summary) => {
+        if (summary.sealed > 0 || summary.inconclusive > 0) {
+          cronLog.info('Workflow liveness reconcile summary', summary);
+        }
+      })
+      .catch((error) => {
+        cronLog.error('Workflow liveness reconcile failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  setInterval(run, 60_000).unref?.();
+}
 
 function scheduleTemporalWorkflowCleanup(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -216,6 +250,7 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
  */
 export function registerCronJobs(isProduction: boolean): void {
   scheduleTemporalWorkflowCleanup(isProduction);
+  scheduleWorkflowLivenessReconcile(isProduction);
   scheduleGmailSync();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();

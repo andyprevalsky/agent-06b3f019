@@ -40,7 +40,8 @@ from helpers.llm import (
     check_progress,
 )
 from helpers.messages import CoalescingStreamBroadcaster, schedule_background_broadcast
-from helpers.summarize import compress_context
+from helpers.summarize import ESTIMATE_SAFETY_MULTIPLIER as SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
+from helpers.summarize import compaction_saved_ratio, compress_context, estimate_context_tokens
 from helpers.tracing import span, traced
 from helpers.update_status import update_agent_status
 from helpers.workflow_safe import safe_now as _safe_now
@@ -93,7 +94,9 @@ AUTOCOMPACT_BUFFER_TOKENS = 13_000  # matches Claude Code's AUTOCOMPACT_BUFFER
 # _estimate_tokens is a chars-÷-4 heuristic that under-counts JSON-heavy tool
 # results (observed 308k actual Anthropic tokens reported as <80k). Multiply
 # by this safety factor so the trigger fires before we hit the real ceiling.
-ESTIMATE_SAFETY_MULTIPLIER = 1.4
+# Owned by helpers.summarize so the loop and the compactor share one value;
+# re-exported here for callers that read it off this module.
+ESTIMATE_SAFETY_MULTIPLIER = SUMMARIZE_ESTIMATE_SAFETY_MULTIPLIER
 
 # Compactor circuit-breaker: stop attempting compaction after this many
 # consecutive failures so a broken compactor doesn't loop forever.
@@ -814,6 +817,34 @@ async def run_agent(
         ):
             context_tokens = _estimate_tokens(context)
 
+        if context_tokens >= compaction_trigger and compactor_failures >= MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
+            # Breaker open while the context is still over the trigger. Falling
+            # through would send an over-window context to the model on every
+            # remaining iteration and fail with a provider-side length error
+            # that says nothing about compaction. Fail loudly instead.
+            message = (
+                "Context compression unavailable: compactor failed "
+                f"{compactor_failures} consecutive times and the context estimate "
+                f"{context_tokens} tokens still exceeds trigger {compaction_trigger}."
+            )
+            logger.error(
+                "Compactor circuit breaker open with context still over trigger",
+                context_tokens=context_tokens,
+                trigger=compaction_trigger,
+                compactor_failures=compactor_failures,
+            )
+            return {
+                "status": "error",
+                "context": context,
+                "tokens_in": tokens_in,
+                "tokens_out": tokens_out,
+                "token_count": token_count,
+                "context_size": context_size,
+                "cache_read_input_tokens": cache_read_total,
+                "cache_creation_input_tokens": cache_write_total,
+                "message": message,
+            }
+
         if context_tokens >= compaction_trigger and compactor_failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES:
             logger.info(
                 "Context overflow",
@@ -848,9 +879,13 @@ async def run_agent(
 
             if success:
                 compressed_tokens = _estimate_tokens(compressed)
-                saved_ratio = 0.0
-                if context_tokens > 0:
-                    saved_ratio = max(0.0, (context_tokens - compressed_tokens) / context_tokens)
+                # Signed on purpose: a compaction that GREW the context must not
+                # be indistinguishable from one that saved nothing. The old
+                # max(0.0, ...) clamp reported 0.0 for the -0.4% growth in prod
+                # agent e14d5abb. Negative values are still < the minimum, so
+                # the MIN_AUTOCOMPACT_SAVINGS_RATIO check below is unchanged in
+                # direction — it just now sees the real number.
+                saved_ratio = compaction_saved_ratio(context_tokens, compressed_tokens)
 
                 if compressed_tokens >= compaction_trigger:
                     message = (
@@ -2270,13 +2305,20 @@ async def run_agent(
 def _estimate_tokens(context: List[Dict]) -> int:
     """Rough token estimation: ~4 chars per token × safety multiplier.
 
-    Excludes sub-agent internal messages (tagged with subAgentId) since
-    these are filtered out before sending to the LLM. The chars/4 heuristic
-    severely under-counts JSON-heavy content (observed 308k actual Anthropic
-    tokens reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
+    Thin alias for the canonical ``helpers.summarize.estimate_context_tokens``
+    so the overflow trigger and the compactor measure the SAME thing. This used
+    to join only ``m["text"]``, which scored production tool-call rows (empty
+    text, payload in ``metadata.tool_calls``) at ~0 while the compactor counted
+    them in full — compaction then removed ~0 measured tokens and added a
+    measured summary, i.e. it GREW the context it was asked to shrink
+    (prod agent e14d5abb, 2026-08-03).
+
+    Excludes sub-agent internal messages (tagged with subAgentId) since these
+    are filtered out before sending to the LLM. The chars/4 heuristic severely
+    under-counts JSON-heavy content (observed 308k actual Anthropic tokens
+    reported as <80k); ESTIMATE_SAFETY_MULTIPLIER pads for that.
     """
-    text = "\n".join([m.get("text", "") for m in context if not (m.get("metadata") or {}).get("subAgentId")])
-    return int((len(text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
+    return estimate_context_tokens(context)
 
 
 async def _compress_context(
@@ -2361,6 +2403,21 @@ async def _compress_context(
                 logger.warning(f"on_tokens callback failed for context_compression: {e}")
 
     if not success or not new_context:
+        return context, False
+
+    # Defense in depth: the compactor activity runs out-of-process and can be a
+    # different code version, so re-verify here that it actually shrank the
+    # context. Adopting a larger context guarantees the caller's overflow
+    # trigger fires again on the very next check (prod agent e14d5abb).
+    original_tokens = _estimate_tokens(context)
+    compressed_tokens = _estimate_tokens(new_context)
+    if compressed_tokens >= original_tokens:
+        logger.warning(
+            "Compactor returned a context that is not smaller; keeping original",
+            original_tokens=original_tokens,
+            compressed_tokens=compressed_tokens,
+            saved_ratio=compaction_saved_ratio(original_tokens, compressed_tokens),
+        )
         return context, False
 
     return new_context, True
