@@ -2047,6 +2047,7 @@ async def call_llm_structured_streaming(
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
     thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
     effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
+    tool_choice: Any = None,  # Optional native-tool choice, including a forced {"name": ...} selection
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
@@ -2197,6 +2198,7 @@ async def call_llm_structured_streaming(
                     "pool": pool,
                     "messages": messages,
                     "response_model": response_model,
+                    "tool_choice": tool_choice,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "seed": model_seed,
@@ -2241,6 +2243,7 @@ async def call_llm_structured_streaming(
             pool=pool,
             messages=messages,
             response_model=response_model,
+            tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=model_seed,
@@ -2628,6 +2631,7 @@ async def call_llm_structured_streaming(
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
+                tool_choice=tool_choice,
                 _is_escalation=True,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
@@ -2865,6 +2869,7 @@ async def call_llm_structured_streaming(
                     call_site=call_site,
                     thinking=thinking,
                     effort=effort,
+                    tool_choice=tool_choice,
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
@@ -4982,6 +4987,7 @@ async def call_llm_activity(
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
+                tool_choice={"name": required_tool} if required_tool else None,
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.
