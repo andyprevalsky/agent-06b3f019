@@ -171,10 +171,21 @@ runCheck(
   'SMS send/completion contract missing from the overlay'
 );
 runCheck(
+  'block 3 states prior tool calls are erased from session history',
+  SMS_SURFACE_OVERLAY.includes('Tool calls from previous runs') &&
+    SMS_SURFACE_OVERLAY.includes('erased from this context to save space') &&
+    SMS_SURFACE_OVERLAY.includes(
+      'Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it'
+    ),
+  'SMS session-history tool-erasure rule missing from the overlay'
+);
+runCheck(
   'block 3 names start_new_agent and forbids ungrounded progress claims',
   SMS_SURFACE_OVERLAY.includes('start_new_agent and kill_agent only') &&
     SMS_SURFACE_OVERLAY.includes('no spawn_agent tool here') &&
-    SMS_SURFACE_OVERLAY.includes('texting progress without the matching tool call is a failure'),
+    SMS_SURFACE_OVERLAY.includes(
+      'Only claim kill/start/place/submit outcomes that this run\'s tool results or the current state block just confirmed'
+    ),
   'SMS agent-lifecycle grounding rules missing from the overlay'
 );
 

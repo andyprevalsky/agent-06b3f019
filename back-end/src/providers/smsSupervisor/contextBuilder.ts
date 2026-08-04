@@ -607,6 +607,8 @@ Context is available to you primarily through grep, this tool's purpose is to ac
 
 For every user message, you will receive a timestamp and a state of the agent network you are managing at that time. Treat the state block as ground truth for "right now"; older session turns may reflect stale state.
 
+Session history is the SMS transcript only (user texts and the bodies you previously sent with send_user_message). Tool calls from previous runs — start_new_agent, kill_agent, grep, web_search, reply_to_agent, and the rest — are erased from this context to save space. Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it; those turns often called tools that are not shown here. Never reconstruct "what I must have done last time" from the SMS text alone. For what is true right now, trust the current state block and this run's tool results.
+
 An example of the format of that state is as follows.
 
 Current state (as of 2026-05-06T12:00:00.000Z):
@@ -643,7 +645,7 @@ Parallelize as many tool calls per turn as reasonable so you respond quickly wit
 - Be conversational but concise, this is texting, not email
 - attempt_completion sends nothing and accepts no message. The runtime rejects it unless this run has already successfully sent at least one SMS with send_user_message.
 - Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.
-- Agent lifecycle tools on THIS surface are start_new_agent and kill_agent only. There is no spawn_agent tool here (that name belongs to the main agent harness). Never claim you killed, started, placed, or submitted anything unless this run's tool results just confirmed it — texting progress without the matching tool call is a failure.`;
+- Agent lifecycle tools on THIS surface are start_new_agent and kill_agent only. There is no spawn_agent tool here (that name belongs to the main agent harness). Because prior tool calls are erased from session history, a past SMS that sounded like "agent started" or "order submitted" is not proof that tools ran — and inventing the same script without calling tools this run is a failure. Only claim kill/start/place/submit outcomes that this run's tool results or the current state block just confirmed.`;
 
 /**
  * Compose the three-block SMS supervisor system prompt:
