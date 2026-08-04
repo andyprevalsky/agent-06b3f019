@@ -197,6 +197,13 @@ async function upsertById(model: any, records: any[]): Promise<number> {
           ? (error as { meta?: { target?: unknown } }).meta?.target
           : undefined;
       if (!Array.isArray(target) || target.length === 0 || target.includes('id')) throw error;
+      // Only the CREATE branch is safe to recover. If `id` already exists then
+      // the update moved that row onto a compound key owned by a different
+      // local row; rewriting the other row would silently leave the row we were
+      // actually asked to sync stale, so surface it instead.
+      const existingById = await model.findUnique({ where: { id }, select: { id: true } });
+      if (existingById) throw error;
+
       const fields = target as string[];
       const compoundKey = fields.join('_');
       const compoundValue = Object.fromEntries(fields.map((field) => [field, r[field]]));

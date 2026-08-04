@@ -1219,6 +1219,12 @@ async def run_agent(
                                 continue
                             raise
 
+                    # Validated provider response in hand. Everything below
+                    # (tool-call normalization, stream close, drainer dispose)
+                    # is post-response bookkeeping, so a failure there must not
+                    # refund the turn — its tokens are already spent.
+                    llm_response_accepted = True
+
                     # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
                     tool_calls_as_dicts = []
                     if pydantic_result.tool_calls:
@@ -1294,6 +1300,9 @@ async def run_agent(
                     heartbeat_timeout=timedelta(seconds=180),
                 )
 
+                # The activity returned a validated payload; the turn is spent.
+                llm_response_accepted = True
+
                 # Reconstruct result object from activity response
                 class ActivityResult:
                     def __init__(self, response: str, tool_calls: list, codex_reasoning_items: list):
@@ -1313,10 +1322,6 @@ async def run_agent(
 
                 # Get detected tools for ID matching (from activity)
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
-
-            # The provider returned a usable response: this iteration is spent
-            # regardless of what fails after this point.
-            llm_response_accepted = True
 
             # Account the successful provider attempt. Semantically rejected
             # attempts were already accounted before their retries above.
