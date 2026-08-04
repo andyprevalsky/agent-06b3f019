@@ -8,6 +8,13 @@
 # Usage: DIRECT_URL=... bash scripts/backup-impersonation-contaminated-account.sh <victimUserId> [outDir]
 set -euo pipefail
 
+# These CSVs are the most sensitive artifact this repo produces: cleartext
+# session cookies, browser-password ciphertext, and message history for a real
+# user. Written under the default 022 umask they land 0644/0755 — readable by
+# every account and every process on the host. Restrict before anything is
+# created; `umask` applies to the mkdir and to psql's \copy output alike.
+umask 077
+
 VICTIM="${1:?usage: backup-impersonation-contaminated-account.sh <victimUserId> [outDir]}"
 OUT_DIR="${2:-../.context/impersonation-restore}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -16,6 +23,14 @@ DEST="$OUT_DIR/$VICTIM-$STAMP"
 # psql rejects libpq-incompatible query params such as ?pgbouncer=true.
 DB_URL="${DIRECT_URL%%\?*}"
 [ -n "$DB_URL" ] || { echo "DIRECT_URL is not set" >&2; exit 1; }
+
+# A userId is always a UUID here. Validating it keeps the value out of the
+# \copy SQL string as anything but a literal, and catches a shell-quoting slip
+# before it becomes a predicate.
+case "$VICTIM" in
+  [0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*-[0-9a-fA-F]*) ;;
+  *) echo "victimUserId must be a UUID, got: $VICTIM" >&2; exit 1 ;;
+esac
 
 mkdir -p "$DEST"
 
