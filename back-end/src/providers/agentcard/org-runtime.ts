@@ -10,11 +10,16 @@ const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
  * payment-lifecycle fan-out). A throttled window therefore drains and refills within seconds, so a
  * small bounded wait converts a hard failure into a successful call.
  *
- * Bounded by a TOTAL delay budget rather than a per-attempt delay: some callers (the wallet-funding
- * release observer, the card-mint transfer-visibility poll) poll this runtime repeatedly, and a
- * per-attempt bound would let the nested waits multiply into a multi-minute request. The budget
- * caps what one `callTool` can ever add, so the outer poll loop's own timing stays the dominant
- * term.
+ * Bounded by a TOTAL delay budget rather than a per-attempt delay, and that budget is anchored to a
+ * DEADLINE THE CALLER OWNS rather than re-armed inside every `callTool`. A per-call budget bounds
+ * exactly one call and nothing more: the callers that poll this runtime in a loop (the
+ * wallet-funding release observer, the card-mint transfer-visibility poll) re-enter `callTool` per
+ * observation, so a per-call budget multiplies — 6 observations could add 6 budgets (180s) and the
+ * mint's 12 reads 12 budgets (360s), swamping the poll's own schedule and overrunning the upstream
+ * request/activity timeout. A looping caller therefore takes ONE deadline from
+ * {@link orgRetryDeadlineAtMs} before its loop and threads it through every call in that loop, so
+ * the whole loop can never add more than one budget. A call that passes no deadline still gets a
+ * full fresh budget, so single-shot callers are unaffected.
  *
  * Retrying is the LAST line of defence, not the fix: the budget is far smaller than the throttle
  * window (60s), so the durable remedy is issuing fewer requests. See `org-poll-schedule.ts` for the
@@ -33,6 +38,18 @@ const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
 const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 
+/**
+ * One rate-limit retry budget, anchored now.
+ *
+ * A caller that issues a single organization call can ignore this: `callTool` arms a fresh budget
+ * per call by default. A caller that LOOPS over `callTool` must take ONE deadline before its loop
+ * and pass it to every call inside the loop — otherwise each iteration re-arms the budget and the
+ * loop accumulates one budget per iteration instead of one in total.
+ */
+export function orgRetryDeadlineAtMs(): number {
+  return Date.now() + RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
+}
+
 function orgTokenTimeoutMs(): number {
   const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
   if (!raw) return DEFAULT_ORG_TOKEN_TIMEOUT_MS;
@@ -49,7 +66,12 @@ type TokenMcpToolCaller = (
 
 export type AgentCardOrgToolCaller = (
   toolName: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  /**
+   * Rate-limit retry deadline shared with the caller's other calls. Omit it for a one-shot call;
+   * see {@link orgRetryDeadlineAtMs} for why a looping caller must supply one.
+   */
+  deadlineAtMs?: number
 ) => Promise<unknown>;
 
 export class AgentCardOrgRuntimeError extends Error {
@@ -216,14 +238,22 @@ export class AgentCardOrgRuntime {
    *
    * A throttle used to escape as a raw transport error, so every caller that lacked its own
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
+   *
+   * `deadlineAtMs` is the caller-owned end of the rate-limit delay budget. Defaulting it here means
+   * a one-shot call still gets a full budget; a looping caller passes the SAME deadline to every
+   * call so the loop shares one budget (see {@link orgRetryDeadlineAtMs}).
    */
-  async callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+  async callTool(
+    toolName: string,
+    args: Record<string, unknown>,
+    deadlineAtMs: number = orgRetryDeadlineAtMs()
+  ): Promise<unknown> {
     if (!IDEMPOTENT_READ_TOOLS.has(toolName))
-      return this.callToolWithRateLimitRetry(toolName, args);
+      return this.callToolWithRateLimitRetry(toolName, args, deadlineAtMs);
     const key = readKey(toolName, args);
     const joined = this.inFlightReads.get(key);
     if (joined !== undefined) return detachedCopy(await joined);
-    const read = this.callToolWithRateLimitRetry(toolName, args).finally(() => {
+    const read = this.callToolWithRateLimitRetry(toolName, args, deadlineAtMs).finally(() => {
       if (this.inFlightReads.get(key) === read) this.inFlightReads.delete(key);
     });
     this.inFlightReads.set(key, read);
@@ -232,10 +262,10 @@ export class AgentCardOrgRuntime {
 
   private async callToolWithRateLimitRetry(
     toolName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    deadlineAtMs: number
   ): Promise<unknown> {
     let lastRateLimitError: unknown;
-    let remainingBudgetMs = RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
       try {
         return await this.callToolOnce(toolName, args);
@@ -243,9 +273,11 @@ export class AgentCardOrgRuntime {
         if (!looksLikeRateLimitError(error)) throw error;
         lastRateLimitError = error;
         if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) break;
-        const waitMs = rateLimitDelayMs(error, attempt, remainingBudgetMs);
+        // Derived from the deadline, not decremented locally: time spent inside the throttled call
+        // itself counts against the budget too, and a shared deadline already reflects every wait
+        // the caller's earlier calls consumed.
+        const waitMs = rateLimitDelayMs(error, attempt, deadlineAtMs - Date.now());
         if (waitMs === null) break;
-        remainingBudgetMs -= waitMs;
         await delay(waitMs);
       }
     }
@@ -285,8 +317,14 @@ export class AgentCardOrgRuntime {
       return cachedToken.accessToken;
     }
 
+    // A forced refresh must start its OWN exchange. It only ever runs after the MCP rejected the
+    // token we just sent, and an exchange that was already in flight when that rejection arrived
+    // can resolve to that very token (client-credential endpoints re-serve a still-unexpired token
+    // for the same client). Joining it would resend the rejected credential and fail again — the
+    // reachable case being the concurrent read fan-out, where one member of a burst gets a 401
+    // while a sibling's proactive refresh is still pending.
     let tokenPromise = this.inFlightToken;
-    if (tokenPromise === undefined) {
+    if (tokenPromise === undefined || forceClientCredentials) {
       tokenPromise = this.fetchAccessToken().finally(() => {
         if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
       });

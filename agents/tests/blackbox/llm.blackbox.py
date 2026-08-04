@@ -2190,6 +2190,86 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
     assert response.response == "recovered"
 
 
+async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers():
+    """A parse retry must not strand delta consumers on the rejected attempt's text.
+
+    `on_chunk` hands out a monotonically growing buffer, so every streaming
+    consumer (domains/reasoning/service.py, call_llm_activity, run_agent) emits
+    `text_so_far[len(last_text):]` and keeps `last_text`. A parse retry restarts
+    that buffer at "", so without a rewind the rejected text stays in the
+    consumer's accumulator and a corrected response that is NOT a
+    prefix-extension of it is delivered as an empty (or garbled tail) delta —
+    the consumer completes holding stale output.
+    """
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    # Divergent AND shorter than the rejected text, so pure suffix math yields ""
+    # — this is the case that silently drops the correction entirely.
+    rejected_text = "The first attempt claims the meeting is Monday at noon."
+    corrected_text = "Actually the meeting is Friday."
+    assert not corrected_text.startswith(rejected_text)
+    assert len(corrected_text) < len(rejected_text)
+
+    def _payload(content: str) -> dict:
+        return {
+            "actual_model": "claude-sonnet-4-6",
+            "pool_name": "test-pool",
+            "pool_size": 1,
+            "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    # tool_calls must be a list — the first generation fails validation only
+    # AFTER its `response` text has already streamed out through on_chunk.
+    malformed_body = _sse_body([_payload(json.dumps({"response": rejected_text, "tool_calls": "not-a-list"}))])
+    valid_body = _sse_body([_payload(json.dumps({"response": corrected_text, "tool_calls": []}))])
+
+    call_count = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        body = malformed_body if call_count["n"] == 1 else valid_body
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    AgentAction = create_agent_action_model([])
+
+    # Mirrors the real consumers' delta-suffix bookkeeping exactly.
+    last_text = [""]
+    broadcast: list[str] = []
+
+    async def on_chunk(text_so_far: str, tokens: int):
+        delta = text_so_far[len(last_text[0]) :]
+        if delta:
+            broadcast.append(delta)
+        last_text[0] = text_so_far
+
+    response, _usage, _detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "when is the meeting?"}],
+        model="rose-labs/rose-1-lite",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        call_site="test",
+        _exclude_anthropic_family=True,
+    )
+
+    assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    assert response.response == corrected_text, response.response
+
+    # The whole point: what the consumer reconstructed must be the corrected
+    # response, not the rejected one and not a tail of it.
+    reconstructed = "".join(broadcast)
+    assert corrected_text in reconstructed, f"correction never reached the consumer: {reconstructed!r}"
+    assert reconstructed.endswith(corrected_text), f"consumer ends on stale text: {reconstructed!r}"
+    assert last_text[0] == corrected_text, f"consumer state stranded on rejected attempt: {last_text[0]!r}"
+
+
 async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
     """A schema-invalid native tool_use is replayed with a paired tool_result error."""
     from helpers.llm import call_llm_structured_streaming
@@ -6252,6 +6332,10 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_structured_streaming_retries_malformed_output",
         test_call_llm_structured_streaming_retries_malformed_output,
+    )
+    await r.record_async(
+        "structured_parse_retry_rewinds_streamed_text_for_delta_consumers",
+        test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers,
     )
     await r.record_async(
         "call_llm_structured_streaming_replays_invalid_native_tool_use",

@@ -138,6 +138,33 @@ async function overlayCodexCodeWsServer(
  * @returns Session info including WebSocket URL for terminal streaming
  */
 /**
+ * A code-agent session could not be given any usable credential.
+ *
+ * SECURITY: the `/api/claude-code-session/create` and `/api/codex-code-session/create` handlers
+ * return `error.message` VERBATIM in their 500 body, so anything the message says about our
+ * credential inventory (which sources are synced, whether the shared funded key exists, whether it
+ * is on an out-of-credits cooldown) is disclosed to every API caller. `message` is therefore a
+ * fixed, state-free string; the operator-facing breakdown lives in `detail`, which is logged
+ * server-side only and never returned.
+ */
+export class CodeAgentCredentialError extends Error {
+  constructor(
+    message: string,
+    readonly detail: string
+  ) {
+    super(message);
+    this.name = 'CodeAgentCredentialError';
+  }
+}
+
+/**
+ * The single client-facing string for a credential-resolution failure. Deliberately says only that
+ * the session cannot start — never which credential source is missing, present, or cooled down.
+ */
+export const CODE_AGENT_CREDENTIALS_UNAVAILABLE =
+  'Code agent credentials are unavailable; the session could not be started';
+
+/**
  * Decide which auth env vars the Claude Code CLI sandbox should receive.
  *
  * Preference order (mirrors the Rose completions fallback so the code agent
@@ -174,14 +201,16 @@ export function resolveClaudeCodeAuthEnvs(
   // triage of this error into DB archaeology to tell a missing key (config
   // gap, fixable here) apart from an out-of-credits/bad-key cooldown
   // (external funding, not fixable here). The caller already resolved both
-  // inputs, so the distinction is free.
+  // inputs, so the distinction is free. It stays on `detail` (logs only) —
+  // the route echoes `message` straight back to the client.
   const fallbackState = anthropicApiKey
     ? 'ANTHROPIC_API_KEY is configured but on its out-of-credits/bad-key cooldown'
     : 'ANTHROPIC_API_KEY is not set';
-  throw new Error(
+  const detail =
     'No Claude Code credentials available: no synced user credentials, no available pool tokens, ' +
-      `and no usable ANTHROPIC_API_KEY fallback (${fallbackState})`
-  );
+    `and no usable ANTHROPIC_API_KEY fallback (${fallbackState})`;
+  log.error('Claude Code credential resolution failed', { detail });
+  throw new CodeAgentCredentialError(CODE_AGENT_CREDENTIALS_UNAVAILABLE, detail);
 }
 
 export function resolveClaudeCodeTokenSource(
@@ -230,10 +259,17 @@ export function resolveCodexCodeAuthEnvs(
   if (fundedKey !== undefined) {
     return { OPENAI_API_KEY: fundedKey };
   }
-  throw new Error(
+  // Same split as the Claude path: the credential-inventory breakdown is operator-only, because the
+  // codex-code route returns `error.message` verbatim to the API client.
+  const detail =
     'No GPT Code credentials available: no synced user credentials, no available pool tokens, ' +
-      'and no usable OPENAI_API_KEY (GPT_API_KEY) fallback configured'
-  );
+    `and no usable OPENAI_API_KEY (GPT_API_KEY) fallback (${
+      openaiApiKey !== undefined && openaiApiKey !== ''
+        ? 'configured but on its out-of-credits/bad-key cooldown'
+        : 'not set'
+    })`;
+  log.error('Codex Code credential resolution failed', { detail });
+  throw new CodeAgentCredentialError(CODE_AGENT_CREDENTIALS_UNAVAILABLE, detail);
 }
 
 export async function createClaudeCodeSession(

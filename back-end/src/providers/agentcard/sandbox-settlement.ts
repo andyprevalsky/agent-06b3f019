@@ -1,8 +1,11 @@
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../database';
 import { isAdminUser } from '../../utils/adminAccess';
-import { createCardProviderForAgent } from '../card-provider';
+import { AgentCardProviderError, createCardProviderForAgent } from '../card-provider';
+import { createLogger } from '../logger';
 import { callOrgTool } from './org-runtime';
+
+const log = createLogger('AgentCardSandboxSettlement');
 
 export interface AgentCardSandboxSettlementInput {
   cardNumber: string;
@@ -80,6 +83,22 @@ export async function getCardPan(
   const provider = await createCardProviderForAgent(userId, agentId);
   const details = await provider.getDetails(cardId);
   return details.pan;
+}
+
+/**
+ * The ONLY provider outcome that proves a candidate purchase is not the card that was just charged.
+ *
+ * A card the provider explicitly does not have (404 — e.g. the static provider rejecting a
+ * pre-cutoff AgentCard id via `static_card_id_not_managed`) genuinely means "this stale HELD
+ * purchase is somebody else's dead card, keep scanning". Everything else — OAuth/setup gates, org
+ * rate limits, MCP transport errors, malformed provider responses — means we simply COULD NOT READ
+ * the PAN. Treating those as "not this card" is a money bug: the lookup for the ACTUAL Rose card
+ * fails, settlement reports 404, `confirmTestPayment` falls through to the raw Stripe path, and the
+ * real Rose purchase is left HELD with its wallet funding never consumed. Fail closed instead.
+ */
+function isCardNotFoundFailure(error: unknown): boolean {
+  if (!(error instanceof AgentCardProviderError)) return false;
+  return error.status === 404 || error.code === 'static_card_id_not_managed';
 }
 
 async function testCharge(input: {
@@ -172,15 +191,28 @@ export async function settleAgentCardSandboxPayment(
 
   for (const purchase of candidates) {
     if (purchase.cardId === null) continue;
-    // A candidate we cannot resolve a PAN for is simply NOT this card — skip it. Settlement is now
-    // attempted for every PAN (routing is by ownership, not BIN), so an unrelated shopper card can
-    // legitimately scan past stale HELD purchases whose provider card no longer resolves. Throwing
-    // here would fail an ordinary Stripe checkout because of someone else's abandoned purchase.
+    // A candidate whose card the provider explicitly does not have is simply NOT this card — skip
+    // it. Settlement is attempted for every PAN (routing is by ownership, not BIN), so an unrelated
+    // shopper card can legitimately scan past stale HELD purchases whose provider card no longer
+    // exists; throwing there would fail an ordinary Stripe checkout because of someone else's
+    // abandoned purchase. Any OTHER failure means the PAN could not be READ, which is not evidence
+    // of a mismatch — swallowing it silently mislabels the real Rose card as an ordinary card and
+    // leaves its purchase HELD while Stripe charges it raw. Fail closed on those.
     let pan: string;
     try {
       pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
-    } catch {
-      continue;
+    } catch (error) {
+      if (isCardNotFoundFailure(error)) continue;
+      log.error('AgentCard PAN lookup failed during settlement', {
+        purchaseId: purchase.id,
+        cardId: purchase.cardId,
+        userId: purchase.userId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new AgentCardSandboxSettlementError(
+        'Could not read the Rose card for a candidate purchase; refusing to treat it as a non-Rose card',
+        502
+      );
     }
     if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
 

@@ -1,6 +1,7 @@
 import {
   AgentCardOrgRuntimeError,
   callOrgTool,
+  orgRetryDeadlineAtMs,
   type AgentCardOrgToolCaller,
 } from './agentcard/org-runtime';
 import { orgPollWaitsMs } from './agentcard/org-poll-schedule';
@@ -239,10 +240,14 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
     // org-wide 120-requests-per-minute window that every other AgentCard caller shares.
     const waits = orgPollWaitsMs(this.releaseRetry.attempts, this.releaseRetry.delayMs);
     const observations = waits.length + 1;
+    // ONE rate-limit retry budget for the WHOLE observation window. The org runtime's budget bounds
+    // a single `callTool`; re-arming it per observation would let this loop accumulate one budget
+    // per read (6 x 30s = 180s) on top of its own ~57s schedule and overrun the caller's timeout.
+    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
     for (let attempt = 1; attempt <= observations; attempt += 1) {
       let result: unknown;
       try {
-        result = await this.toolCaller('list_transfers', { limit: 100 });
+        result = await this.toolCaller('list_transfers', { limit: 100 }, retryDeadlineAtMs);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;

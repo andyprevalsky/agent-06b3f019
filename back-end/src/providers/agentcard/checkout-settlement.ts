@@ -51,7 +51,7 @@ export interface CheckoutSettlementResult {
 }
 
 interface CheckoutSettlementDependencies {
-  findHeldPurchaseById?: (purchaseId: string) => Promise<CheckoutHeldPurchase | null>;
+  findPurchaseForCheckout?: (purchaseId: string) => Promise<CheckoutHeldPurchase | null>;
   getCardLast4?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
   claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
   markPurchaseCleared?: (purchaseId: string) => Promise<void>;
@@ -64,11 +64,24 @@ export interface CheckoutHeldPurchase {
   cardId: string;
   stripePaymentIntentId: string | null;
   totalCents: number;
+  status: PurchaseSpendStatus;
 }
 
-async function findHeldPurchaseById(purchaseId: string): Promise<CheckoutHeldPurchase | null> {
+/**
+ * Load the correlated purchase in ANY status — deliberately NOT held-only.
+ *
+ * A held-only lookup made this whole path unrecoverable: Stripe captures BEFORE settlement runs, so
+ * once the HELD -> CHARGING claim lands the row is no longer HELD. If the CLEARED write then failed
+ * (pool timeout, process restart, reclaimed funding), every retry of the very same paid Checkout
+ * session 404'd and the purchase stayed CHARGING forever — money captured, purchase never cleared.
+ * The same held-only filter also 404'd a shopper who simply reloaded a successful return URL.
+ *
+ * Loading every status lets `settleRoseCardStripeCheckout` re-validate the capture against the row
+ * and then either resume the interrupted transition or replay the already-settled result.
+ */
+async function findPurchaseForCheckout(purchaseId: string): Promise<CheckoutHeldPurchase | null> {
   const purchase = await prisma.purchaseSpend.findFirst({
-    where: { id: purchaseId, status: PurchaseSpendStatus.HELD, cardId: { not: null } },
+    where: { id: purchaseId, cardId: { not: null } },
     select: {
       id: true,
       userId: true,
@@ -76,6 +89,7 @@ async function findHeldPurchaseById(purchaseId: string): Promise<CheckoutHeldPur
       cardId: true,
       stripePaymentIntentId: true,
       totalCents: true,
+      status: true,
     },
   });
   if (purchase === null || purchase.cardId === null) return null;
@@ -98,16 +112,34 @@ async function getCardLast4(
 }
 
 /**
- * Mark the HELD purchase whose minted card Stripe just charged as CLEARED.
+ * Mark the purchase whose minted card Stripe just charged as CLEARED.
  *
  * Stripe has ALREADY captured by the time this runs, so this function must never itself move money
- * — it only reconciles our records to an authorization that already happened.
+ * — it only reconciles our records to an authorization that already happened. Because the money has
+ * already moved, reconciliation MUST be retryable: a failed CLEARED write can never be allowed to
+ * strand a captured purchase in CHARGING.
+ *
+ * RECONCILIATION IDENTITY. The retry-safe key is the verified triple
+ * `(purchaseId, capturedAmountCents, chargedCardLast4)`: the purchase id is carried by Stripe in
+ * `client_reference_id`/metadata, and the amount + last4 are re-proved against the persisted row on
+ * EVERY call, including retries. A later Checkout that differs in either dimension is rejected (409)
+ * instead of replaying someone else's settlement. Only a capture that re-proves all three — i.e.
+ * the same session, or a duplicate capture of the same cart on the same Rose card — is allowed to
+ * finish or replay the transition, and it clears the purchase exactly once.
+ *
+ * State machine (status is re-read from the row on every call):
+ *   HELD     -> claim HELD->CHARGING, then CLEARED. Lost claim = a concurrent settler won (409).
+ *   CHARGING -> an earlier attempt captured and claimed but failed to clear: RESUME the CLEARED
+ *               write. `markPurchaseCleared` only matches CHARGING rows, so this is idempotent.
+ *   CLEARED  -> already reconciled (e.g. the shopper reloaded the success URL): replay the result
+ *               without touching the row, so the purchase can never clear twice.
+ *   anything else -> not reconcilable to a paid checkout (409).
  */
 export async function settleRoseCardStripeCheckout(
   input: CheckoutSettlementInput,
   dependencies: CheckoutSettlementDependencies = {}
 ): Promise<CheckoutSettlementResult> {
-  const findPurchase = dependencies.findHeldPurchaseById ?? findHeldPurchaseById;
+  const findPurchase = dependencies.findPurchaseForCheckout ?? findPurchaseForCheckout;
   const readLast4 = dependencies.getCardLast4 ?? getCardLast4;
   const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
   const markCleared = dependencies.markPurchaseCleared ?? markPurchaseCleared;
@@ -124,7 +156,7 @@ export async function settleRoseCardStripeCheckout(
   const purchase = await findPurchase(purchaseId);
   if (purchase === null) {
     throw new AgentCardSandboxSettlementError(
-      'Stripe checkout purchase is no longer held or does not exist',
+      'Stripe checkout purchase does not exist or never minted a card',
       404
     );
   }
@@ -158,16 +190,41 @@ export async function settleRoseCardStripeCheckout(
     throw new AgentCardSandboxSettlementError('Cleared purchase is missing its Stripe hold', 502);
   }
 
-  // Atomic claim keeps a double-delivered success_url (or a retried settle call) from clearing the
-  // same purchase twice.
-  if (!(await claimForCharge(purchase.id))) {
-    throw new AgentCardSandboxSettlementError('Rose purchase was already claimed', 409);
-  }
-
-  await markCleared(purchase.id);
-  return {
+  const settled: CheckoutSettlementResult = {
     purchaseId: purchase.id,
     cardId: purchase.cardId,
     stripePaymentIntentId: purchase.stripePaymentIntentId,
   };
+
+  // Every branch below has already re-proved the reconciliation identity above, so reaching here
+  // means this capture is entitled to (and only to) this purchase's single CLEARED transition.
+  switch (purchase.status) {
+    case PurchaseSpendStatus.CLEARED:
+      // Already reconciled — a re-delivered success_url or a shopper reloading the return URL.
+      // Replaying the stored result is the only safe answer: re-running `markPurchaseCleared` here
+      // would fail its CHARGING guard and turn a settled purchase into a 502.
+      return settled;
+
+    case PurchaseSpendStatus.CHARGING:
+      // An earlier attempt captured at Stripe, won the claim, and then failed to write CLEARED.
+      // Resume that exact transition instead of stranding captured money in CHARGING forever.
+      await markCleared(purchase.id);
+      return settled;
+
+    case PurchaseSpendStatus.HELD: {
+      // Atomic claim keeps a double-delivered success_url (or a concurrent settle call) from
+      // clearing the same purchase twice. The loser retries and lands on CHARGING/CLEARED above.
+      if (!(await claimForCharge(purchase.id))) {
+        throw new AgentCardSandboxSettlementError('Rose purchase was already claimed', 409);
+      }
+      await markCleared(purchase.id);
+      return settled;
+    }
+
+    default:
+      throw new AgentCardSandboxSettlementError(
+        `Rose purchase is ${purchase.status} and cannot be reconciled to a paid checkout`,
+        409
+      );
+  }
 }

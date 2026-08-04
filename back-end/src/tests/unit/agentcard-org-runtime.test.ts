@@ -16,6 +16,11 @@ const ENV_NAMES = [
   'AGENTCARD_OAUTH_CLIENT_SECRET',
 ] as const;
 
+/** Yields one macrotask so every pending microtask chain settles before the test looks again. */
+function tick(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
@@ -137,6 +142,75 @@ async function main(): Promise<void> {
       );
     } finally {
       Date.now = originalDateNow;
+    }
+
+    // Regression: a FORCED refresh (the one `callToolOnce` runs after the MCP rejects our token)
+    // read `inFlightToken` without consulting `forceClientCredentials`. `callToolOnce` clears
+    // `cachedToken` on an auth rejection but NOT `inFlightToken`, so the forced refresh could join
+    // an exchange that was already in flight when the 401 arrived — and a client-credential
+    // endpoint re-serves the same still-unexpired token, i.e. the very credential the MCP just
+    // rejected — then resend it. Reachable in the concurrent read fan-out: one member of a burst
+    // 401s while a sibling's proactive refresh is still pending.
+    let forcedNowMs = 1_700_000_000_000;
+    let forcedExchanges = 0;
+    const forcedToolTokens: string[] = [];
+    let siblingRead: Promise<unknown> | undefined;
+    let releasePendingExchange: (() => void) | undefined;
+    const pendingExchange = new Promise<void>((resolve) => {
+      releasePendingExchange = resolve;
+    });
+    try {
+      Date.now = () => forcedNowMs;
+      const forcedRuntime: AgentCardOrgRuntime = new AgentCardOrgRuntime(
+        async (accessToken, toolName) => {
+          if (toolName !== 'get_card') return { structuredContent: { cards: [] } };
+          forcedToolTokens.push(accessToken);
+          if (forcedToolTokens.length > 1) return { structuredContent: { card: { id: 'card-1' } } };
+          // Step into the token refresh window and let a SIBLING read open an exchange that is
+          // still in flight when this call's 401 lands.
+          forcedNowMs += 61_000;
+          siblingRead = forcedRuntime.callTool('list_cards', { limit: 1 });
+          await tick();
+          throw new Error('401 Unauthorized: invalid_token');
+        },
+        async () => {
+          forcedExchanges += 1;
+          // Exchange 2 is the sibling's proactive refresh: held open across the 401, and resolving
+          // to the SAME token the MCP rejected.
+          if (forcedExchanges === 2) await pendingExchange;
+          const accessToken = forcedExchanges >= 3 ? 'replacement-org-token' : 'rejected-org-token';
+          return new Response(JSON.stringify({ access_token: accessToken, expires_in: 120 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+      );
+
+      await forcedRuntime.callTool('get_company_wallet', {});
+      assert.equal(forcedExchanges, 1);
+      const forcedRead = forcedRuntime.callTool('get_card', { card_id: 'card-forced' });
+      // Let the 401 land and the forced refresh resolve its token before the stale exchange is
+      // allowed to finish — otherwise the stale promise is already settled and cannot be joined.
+      await tick();
+      await tick();
+      await tick();
+      releasePendingExchange?.();
+      await forcedRead;
+      await siblingRead;
+
+      assert.deepEqual(
+        forcedToolTokens,
+        ['rejected-org-token', 'replacement-org-token'],
+        'a forced refresh must never resend the token the MCP just rejected'
+      );
+      assert.equal(
+        forcedExchanges,
+        3,
+        'a forced refresh must start a NEW token exchange, never join the in-flight one'
+      );
+    } finally {
+      Date.now = originalDateNow;
+      releasePendingExchange?.();
     }
 
     // A stalled/aborted token endpoint surfaces as an AgentCardOrgRuntimeError, not a raw hang.

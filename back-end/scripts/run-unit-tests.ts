@@ -20,6 +20,38 @@ if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
   process.exit(2);
 }
 
+/**
+ * Refuse to run DB-touching unit tests against a remote database.
+ *
+ * `back-end/.env` DATABASE_URL points at PROD Supabase. `run-coverage.sh` exports a local URL
+ * before delegating here, but invoking this runner directly inherits the prod pooler and silently
+ * runs writes against production. `run-blackbox-tests.sh` already documents this exact hazard and
+ * guards itself; this runner did not, so safety depended on which entrypoint you happened to use.
+ * Fail closed instead, and name an override so a deliberate remote run stays possible.
+ */
+function assertLocalDatabaseUrl(): void {
+  if (process.env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1') return;
+  const raw = process.env.DATABASE_URL?.trim();
+  if (raw === undefined || raw === '') return;
+  let host: string;
+  try {
+    host = new URL(raw).hostname;
+  } catch {
+    return; // Not a parseable URL: leave validation to whatever consumes it.
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.local')) {
+    return;
+  }
+  console.error(
+    `Refusing to run unit tests against non-local DATABASE_URL host "${host}".\n` +
+      'back-end/.env points at prod. Run via `npm run test:coverage` (which exports the local\n' +
+      'container URL), or set BACKEND_UNIT_ALLOW_REMOTE_DB=1 to override deliberately.'
+  );
+  process.exit(2);
+}
+
+assertLocalDatabaseUrl();
+
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const nested = await Promise.all(

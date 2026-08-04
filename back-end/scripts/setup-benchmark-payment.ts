@@ -10,6 +10,14 @@ import { isAdminUser } from '../src/utils/adminAccess';
 import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
 import {
+  callOrgTool as defaultCallOrgTool,
+  type AgentCardOrgToolCaller,
+} from '../src/providers/agentcard/org-runtime';
+import {
+  extractAgentCardOrgWallet,
+  type AgentCardOrgWallet,
+} from '../src/providers/agentcard/org-wallet-monitor';
+import {
   assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
   assertUserMatchesMode,
@@ -125,6 +133,56 @@ function argValue(name: string): string | undefined {
   const index = process.argv.indexOf(name);
   if (index >= 0) return process.argv[index + 1];
   return undefined;
+}
+
+/**
+ * Resolve the fixture identity from `--user-id`, `BENCHMARK_USER_ID`, then the mode default.
+ *
+ * `argValue` returns the raw text after `=`, so `--user-id=` (and an exported-but-blank
+ * `BENCHMARK_USER_ID`) resolves to `''` — which `??` KEEPS, because an empty string is not nullish.
+ * An empty id then clears both downstream guards (it is neither a reserved sandbox/production
+ * identity nor an admin), and `upsertBenchmarkUser` / `upsertBenchmarkSubscription` go on to create
+ * a User and Subscription row keyed on `''`. Under `--live` that garbage row lands in the
+ * PRODUCTION database. Treat every blank candidate as absent, and refuse a blank final answer.
+ */
+export function resolveBenchmarkUserId(candidates: Array<string | undefined>): string {
+  for (const candidate of candidates) {
+    const trimmed = candidate?.trim() ?? '';
+    if (trimmed !== '') return trimmed;
+  }
+  throw new Error(
+    'Refusing to seed the payment fixture with an empty user id: it would create User and ' +
+      'Subscription rows keyed on "". Pass a non-blank --user-id, set BENCHMARK_USER_ID, or omit ' +
+      'both to use the default fixture identity for this mode.'
+  );
+}
+
+/**
+ * A terminal KYC state proves the cardholder RESOLVES; it does not prove the ambient AgentCard org
+ * credentials are the production ones. Sandbox credentials resolve their own sandbox cardholder to
+ * `verified` just as happily, so `getOrgCardholderVerificationStatus` alone cannot stop a sandbox
+ * cardholder id from being persisted into the PRODUCTION fixture — after which every "live"
+ * benchmark transfer would run against the sandbox wallet and report `livemode: false`.
+ *
+ * `get_company_wallet` is the one org call that reports the credential's actual mode, so require it
+ * before any `--live` write.
+ */
+export function assertLiveOrgWallet(wallet: AgentCardOrgWallet): void {
+  if (wallet.livemode) return;
+  throw new Error(
+    '--live refuses to provision the production payment fixture with SANDBOX AgentCard org ' +
+      'credentials: get_company_wallet reported livemode=false. A sandbox credential resolves a ' +
+      'sandbox cardholder to a verified KYC state, so persisting its id would point the production ' +
+      "fixture at the sandbox wallet. Export production's AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET."
+  );
+}
+
+export async function requireLiveOrgWallet(
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<AgentCardOrgWallet> {
+  const wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
+  assertLiveOrgWallet(wallet);
+  return wallet;
 }
 
 /**
@@ -322,6 +380,13 @@ async function provisionLiveFixture(prisma: PrismaClient, userId: string): Promi
   // resolve to a terminal KYC state here, so validate it before touching any shared DB row.
   const cardholderStatus = await getOrgCardholderVerificationStatus(cardholderId);
   assertLiveCardholderReady(cardholderStatus);
+  // KYC proves the cardholder resolves; the company wallet proves WHICH mode resolved it. Checked
+  // before the first production write so sandbox credentials can never seed the live fixture.
+  const orgWallet = await requireLiveOrgWallet();
+  console.log(
+    `AgentCard org wallet confirmed LIVE at $${(orgWallet.availableCents / 100).toFixed(2)} ` +
+      `available ($${(orgWallet.balanceCents / 100).toFixed(2)} balance)`
+  );
   await upsertBenchmarkUser(prisma, userId);
   await ensureBenchmarkCredits(prisma, userId);
   const customerId = await ensureLiveBillingCustomer(stripe, prisma, userId);
@@ -341,7 +406,11 @@ async function main(): Promise<void> {
   if (mode === 'sandbox') assertBenchmarkOrgCardholderPair();
   const defaultUserId =
     mode === 'live' ? BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID : DEFAULT_BENCHMARK_USER_ID;
-  const userId = argValue('--user-id') ?? process.env.BENCHMARK_USER_ID ?? defaultUserId;
+  const userId = resolveBenchmarkUserId([
+    argValue('--user-id'),
+    process.env.BENCHMARK_USER_ID,
+    defaultUserId,
+  ]);
   assertUserMatchesMode(userId, mode);
   assertNonAdminBenchmarkUser(userId);
   const prisma = new PrismaClient();
@@ -356,7 +425,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exit(1);
-});
+// Guarded so the exported guards above can be unit-tested by importing this module without the
+// import itself connecting to Postgres and seeding a fixture (same pattern as
+// scripts/cleanup-stale-workspaces.ts).
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  });
+}

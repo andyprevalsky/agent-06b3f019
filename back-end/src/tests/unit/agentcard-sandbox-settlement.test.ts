@@ -5,6 +5,7 @@ import {
   AgentCardSandboxSettlementError,
   settleAgentCardSandboxPayment,
 } from '../../providers/agentcard/sandbox-settlement';
+import { AgentCardProviderError } from '../../providers/card-provider';
 import { ADMIN_USER_IDS } from '../../utils/adminAccess';
 
 const ADMIN_USER_ID = [...ADMIN_USER_IDS][0];
@@ -221,6 +222,103 @@ async function main(): Promise<void> {
       error.statusCode === 402 &&
       error.message.includes('declined')
   );
+
+  // REGRESSION: a PAN lookup that FAILS is not evidence that the candidate is a different card.
+  // The catch used to swallow every error and `continue`, so a provider/transport failure on the
+  // ACTUAL Rose card made settlement report 404 -> `confirmTestPayment` treated a live Rose card as
+  // an ordinary card and started the raw Stripe payment path, while the matching Rose purchase
+  // stayed HELD with its wallet funding never consumed. Only an explicit card-not-found may skip.
+  for (const providerFailure of [
+    new Error('ECONNRESET: AgentCard MCP transport failed'),
+    new AgentCardProviderError('AgentCard MCP get_card_details failed: rate limited', 429),
+    new AgentCardProviderError(
+      'AgentCard setup required: connect_required',
+      409,
+      undefined,
+      'agentcard_setup_required'
+    ),
+  ]) {
+    const unreadableCharges: Array<Record<string, unknown>> = [];
+    await assert.rejects(
+      () =>
+        settleAgentCardSandboxPayment(
+          {
+            cardNumber: '4242424242420640',
+            amountCents: 4396,
+            merchant: 'Rose Labs Test Payment',
+          },
+          {
+            findHeldPurchasesByTotal: async () => [
+              {
+                id: 'purchase-unreadable',
+                userId: 'user-1',
+                agentId: null,
+                cardId: 'card-unreadable',
+                stripePaymentIntentId: 'pi_hold_unreadable',
+              },
+            ],
+            getCardPan: async () => {
+              throw providerFailure;
+            },
+            claimHeldPurchaseForCharge: async () => true,
+            testCharge: async (input) => {
+              unreadableCharges.push(input);
+              return {};
+            },
+          }
+        ),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError &&
+        error.statusCode === 502 &&
+        // Never 404: a 404 is the caller's signal to fall through to the raw Stripe card path.
+        error.statusCode !== 404,
+      `an unreadable PAN (${providerFailure.message}) must not be reported as "not a Rose card"`
+    );
+    assert.deepEqual(unreadableCharges, [], 'an unreadable candidate must never be charged');
+  }
+
+  // ...but an EXPLICIT card-not-found still means "this stale purchase is somebody else's dead
+  // card": keep scanning so an unrelated shopper's checkout is not failed by an abandoned purchase.
+  const notFoundCleared: string[] = [];
+  const notFoundResult = await settleAgentCardSandboxPayment(
+    { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+    {
+      findHeldPurchasesByTotal: async () => [
+        {
+          id: 'purchase-dead-card',
+          userId: 'user-1',
+          agentId: null,
+          cardId: 'card-dead',
+          stripePaymentIntentId: 'pi_hold_dead',
+        },
+        {
+          id: 'purchase-live',
+          userId: 'user-1',
+          agentId: null,
+          cardId: 'card-live',
+          stripePaymentIntentId: 'pi_hold_live',
+        },
+      ],
+      getCardPan: async (_userId, _agentId, cardId) => {
+        if (cardId === 'card-dead') {
+          throw new AgentCardProviderError(
+            'StaticRoseAgentCardProvider.getDetails received an id it does not manage (card-dead)',
+            404,
+            undefined,
+            'static_card_id_not_managed'
+          );
+        }
+        return '4242424242420640';
+      },
+      claimHeldPurchaseForCharge: async () => true,
+      testCharge: async () => ({}),
+      markPurchaseCleared: async (purchaseId) => {
+        notFoundCleared.push(purchaseId);
+      },
+    }
+  );
+  assert.equal(notFoundResult.purchaseId, 'purchase-live');
+  assert.deepEqual(notFoundCleared, ['purchase-live']);
 
   process.stdout.write('AgentCard sandbox settlement tests passed\n');
 }

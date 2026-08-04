@@ -2017,6 +2017,35 @@ STRUCTURED_RETRY_FEEDBACK = (
 )
 
 
+async def _rewind_stream_consumers(
+    on_chunk: Callable[[str, int], Awaitable[None]],
+    last_emitted_for_chunk: str,
+    token_count: int,
+) -> None:
+    """Rewind delta-tracking consumers before a retry restarts the text stream.
+
+    `on_chunk` hands out a monotonically growing buffer, so every streaming
+    consumer keeps a `last_text` and emits only `text_so_far[len(last_text):]`
+    (domains/reasoning/service.py, call_llm_activity, loop/run_agent.py). A retry
+    — max_tokens escalation or structured-parse re-generation — restarts that
+    buffer at "", which silently breaks the invariant: the consumer still holds
+    the rejected attempt's text, so a corrected response that is not a
+    prefix-extension of it is delivered as an empty delta (dropped entirely when
+    it is shorter) or as a garbled tail.
+
+    Emitting `""` is the reset signal inside the existing contract: every
+    consumer computes an empty delta (broadcasting nothing) and assigns
+    `last_text = ""`, so the retry's text is then emitted in full. No consumer
+    needs new wiring, and callers that ignore the text are unaffected.
+
+    No-op when the attempt never streamed, so the ordinary no-retry path never
+    invokes this and its callback sequence is unchanged.
+    """
+    if not last_emitted_for_chunk:
+        return
+    await on_chunk("", token_count)
+
+
 def _build_structured_retry_messages(
     messages: List[Dict[str, Any]],
     *,
@@ -2638,20 +2667,12 @@ async def call_llm_structured_streaming(
                 f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)"
             )
 
-            # Known limitation: the retry restarts text_so_far from "" but callers that
-            # track delta state (e.g. last_text[0] in run_agent.py) still hold the first
-            # attempt's accumulated text. This causes the caller to emit empty deltas until
-            # the retry response exceeds the first attempt's length, then only the tail is
-            # shown. The final parsed result is correct — only the live-streaming display
-            # is affected. A proper fix requires a stream-reset signal in the on_chunk
-            # callback contract (or buffering the first attempt and not calling on_chunk
-            # until we know there's no escalation, which defeats streaming).
             first_attempt_chars = len(last_emitted_for_chunk)
             logger.info(
                 f"⚠️ [{call_site}] Escalation retry starting — first attempt streamed "
-                f"{first_attempt_chars} chars to caller; live-streaming of retry may show "
-                f"a content jump on the frontend"
+                f"{first_attempt_chars} chars to caller; rewinding the stream first"
             )
+            await _rewind_stream_consumers(on_chunk, last_emitted_for_chunk, token_count)
 
             return await call_llm_structured_streaming(
                 messages=messages,
@@ -2895,6 +2916,7 @@ async def call_llm_structured_streaming(
                     text_buffer=text_buffer,
                     raw_json=accumulated_json,
                 )
+                await _rewind_stream_consumers(on_chunk, last_emitted_for_chunk, token_count)
                 return await call_llm_structured_streaming(
                     messages=retry_messages,
                     model=model,

@@ -15,6 +15,7 @@ import {
 } from './service';
 import { checkoutRouter } from './routes.checkout';
 import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
+import type { TestPaymentConfirmInput } from './types';
 
 const router = Router();
 
@@ -167,7 +168,12 @@ router.post(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
-    const body = req.body as Record<string, unknown>;
+    // Never assume a body parser ran. body-parser 1.x (Express 4) happens to default `req.body`
+    // to `{}` before its Content-Type check, but body-parser 2.x (Express 5) dropped that and
+    // leaves `undefined` for anything it skips — an omitted body, or `text/plain`. Reading
+    // `.agentId` off `undefined` throws OUTSIDE the try below, escaping `respondTestPaymentError`
+    // into Express' default error page instead of this endpoint's own 400.
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const agentId = typeof body.agentId === 'string' ? body.agentId : '';
     try {
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
@@ -210,7 +216,10 @@ router.post(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res)) return;
     try {
-      const result = await confirmTestPayment(req.body);
+      // Same unparsed-body hazard: `confirmTestPayment(undefined)` throws a TypeError on
+      // `input.items`, which `respondTestPaymentError` can only report as an opaque 500.
+      // An empty object reaches `normalizeLineItems`, which answers with its own 400.
+      const result = await confirmTestPayment((req.body ?? {}) as TestPaymentConfirmInput);
       res.json(result);
     } catch (error) {
       respondTestPaymentError(res, error, 'Failed to confirm test payment');

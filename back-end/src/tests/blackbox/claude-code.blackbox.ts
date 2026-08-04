@@ -63,7 +63,12 @@ import crypto from 'crypto';
 import { execFileSync } from 'child_process';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../../providers/database';
-import { resolveClaudeCodeAuthEnvs, resolveClaudeCodeTokenSource } from '../../providers/e2b';
+import {
+  CODE_AGENT_CREDENTIALS_UNAVAILABLE,
+  CodeAgentCredentialError,
+  resolveClaudeCodeAuthEnvs,
+  resolveClaudeCodeTokenSource,
+} from '../../providers/e2b';
 import { AgentOwnerMismatchError, resolveAgentContext } from '../../domains/claude-code/service';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
 config();
@@ -492,43 +497,65 @@ function testResolveAuthEnvs_apiKeyFallbackRecordsSharedSource() {
   assert(resolveClaudeCodeTokenSource(OAUTH_META) === 'pool', 'OAuth source must remain pool');
 }
 
-function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
-  let message = '';
+/**
+ * The credential breakdown must live on `detail` (server logs) and NEVER on `message`, because
+ * `POST /api/claude-code-session/create` returns `error.message` verbatim in its 500 body — so a
+ * stateful message discloses our credential inventory to every API caller.
+ */
+function credentialFailure(run: () => unknown): { message: string; detail: string } {
   try {
-    resolveClaudeCodeAuthEnvs(null, 'sk-ant-api03-key', true);
+    run();
   } catch (err) {
-    message = err instanceof Error ? err.message : String(err);
+    assert(
+      err instanceof CodeAgentCredentialError,
+      `expected CodeAgentCredentialError, got: ${err}`
+    );
+    return { message: err.message, detail: err.detail };
   }
-  assert(message !== '', 'throws when no OAuth credential and api-key is on cooldown');
-  // The two throw branches (external funding vs local config gap) demand
-  // different remediation, so the message must name which one fired instead
-  // of forcing a DB/env investigation to tell them apart.
+  throw new Error('expected a credential-resolution throw');
+}
+
+function assertClientMessageRedacted(message: string, label: string) {
   assert(
-    message.includes('configured but on its out-of-credits/bad-key cooldown'),
-    `cooldown throw must name the cooldown state, got: ${message}`
+    message === CODE_AGENT_CREDENTIALS_UNAVAILABLE,
+    `${label}: client-facing message must be the fixed redacted string, got: ${message}`
+  );
+  for (const leak of ['ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'cooldown', 'pool tokens']) {
+    assert(
+      !message.includes(leak),
+      `${label}: client-facing message must not disclose "${leak}", got: ${message}`
+    );
+  }
+}
+
+function testResolveAuthEnvs_apiKeyOnCooldownThrows() {
+  const { message, detail } = credentialFailure(() =>
+    resolveClaudeCodeAuthEnvs(null, 'sk-ant-api03-key', true)
+  );
+  assertClientMessageRedacted(message, 'cooldown throw');
+  // The two throw branches (external funding vs local config gap) demand
+  // different remediation, so the operator-facing detail must name which one
+  // fired instead of forcing a DB/env investigation to tell them apart.
+  assert(
+    detail.includes('configured but on its out-of-credits/bad-key cooldown'),
+    `cooldown throw must name the cooldown state, got: ${detail}`
   );
   assert(
-    !message.includes('is not set'),
-    `cooldown throw must not claim the key is unset, got: ${message}`
+    !detail.includes('is not set'),
+    `cooldown throw must not claim the key is unset, got: ${detail}`
   );
 }
 
 function testResolveAuthEnvs_noCredsNoKeyThrows() {
-  let message = '';
-  try {
-    resolveClaudeCodeAuthEnvs(null, undefined, false);
-  } catch (err) {
-    message = err instanceof Error ? err.message : String(err);
-  }
-  assert(message !== '', 'throws when no OAuth credential and no api-key configured');
-  assert(
-    message.includes('ANTHROPIC_API_KEY is not set'),
-    `unset-key throw must name the missing key, got: ${message}`
+  const { message, detail } = credentialFailure(() =>
+    resolveClaudeCodeAuthEnvs(null, undefined, false)
   );
+  assertClientMessageRedacted(message, 'unset-key throw');
   assert(
-    !message.includes('cooldown'),
-    `unset-key throw must not blame a cooldown, got: ${message}`
+    detail.includes('ANTHROPIC_API_KEY is not set'),
+    `unset-key throw must name the missing key, got: ${detail}`
   );
+  assert(!detail.includes('cooldown'), `unset-key throw must not blame a cooldown, got: ${detail}`);
 }
 
 async function testCreate_noAuth() {

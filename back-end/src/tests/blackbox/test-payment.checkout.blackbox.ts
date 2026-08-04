@@ -12,6 +12,7 @@
  */
 
 import 'dotenv/config';
+import { PurchaseSpendStatus } from '@prisma/client';
 import { settleRoseCardStripeCheckout } from '../../providers/agentcard/checkout-settlement';
 
 interface TestResult {
@@ -48,6 +49,7 @@ function heldPurchase(overrides: Record<string, unknown> = {}) {
     cardId: 'card-1',
     stripePaymentIntentId: 'pi_hold_1',
     totalCents: 100,
+    status: PurchaseSpendStatus.HELD,
     ...overrides,
   };
 }
@@ -60,7 +62,7 @@ const tests: Array<[string, () => Promise<void>]> = [
       const result = await settleRoseCardStripeCheckout(
         { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
         {
-          findHeldPurchaseById: async (id) => (id === 'purchase-1' ? heldPurchase() : null),
+          findPurchaseForCheckout: async (id) => (id === 'purchase-1' ? heldPurchase() : null),
           getCardLast4: async () => '2679',
           claimHeldPurchaseForCharge: async () => true,
           markPurchaseCleared: async (id) => {
@@ -82,7 +84,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'purchase-1', last4: '9999', amountCents: 100 },
           {
-            findHeldPurchaseById: async () => heldPurchase(),
+            findPurchaseForCheckout: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async (id) => {
@@ -106,7 +108,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
           {
-            findHeldPurchaseById: async () => heldPurchase(),
+            findPurchaseForCheckout: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             // A concurrent settle already flipped HELD -> CHARGING.
             claimHeldPurchaseForCharge: async () => false,
@@ -132,7 +134,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'missing-purchase', last4: '2679', amountCents: 100 },
           {
-            findHeldPurchaseById: async (id) => {
+            findPurchaseForCheckout: async (id) => {
               requestedId = id;
               return null;
             },
@@ -160,7 +162,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'purchase-1', last4: '2679', amountCents: 99 },
           {
-            findHeldPurchaseById: async () => heldPurchase(),
+            findPurchaseForCheckout: async () => heldPurchase(),
             getCardLast4: async () => {
               readCard = true;
               return '2679';
@@ -182,7 +184,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'purchase-1', last4: '2679', amountCents: 100 },
           {
-            findHeldPurchaseById: async () => heldPurchase({ stripePaymentIntentId: null }),
+            findPurchaseForCheckout: async () => heldPurchase({ stripePaymentIntentId: null }),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async () => undefined,
@@ -202,7 +204,7 @@ const tests: Array<[string, () => Promise<void>]> = [
         await settleRoseCardStripeCheckout(
           { purchaseId: 'purchase-1', last4: '', amountCents: 100 },
           {
-            findHeldPurchaseById: async () => heldPurchase(),
+            findPurchaseForCheckout: async () => heldPurchase(),
             getCardLast4: async () => '2679',
             claimHeldPurchaseForCharge: async () => true,
             markPurchaseCleared: async () => undefined,
