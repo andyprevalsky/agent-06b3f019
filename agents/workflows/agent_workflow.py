@@ -25,6 +25,7 @@ from temporalio.exceptions import TimeoutError as TemporalTimeoutError
 # - This is a safety net, not strictly required for our code
 with workflow.unsafe.imports_passed_through():
     from domains.spawn_agent.handler import spawn_agent  # Unified: browser/code/general_purpose/explore
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
     from helpers import (
         check_user_usage,
         fetch_agent_config,
@@ -1546,6 +1547,12 @@ class AgentWorkflow:
         # Note: Don't pass initial_context - run_agent polls from DB each step
         # DAG already posted all results to DB via post_message callback
 
+        # A deploy that migrated this agent mid-wait must resume the scheduled
+        # wait from its original absolute target BEFORE the LLM loop runs, so the
+        # agent picks up where it left off instead of the wait firing early/late.
+        if self._deployment_resume:
+            await self._resume_interrupted_wait(execute_context)
+
         # Refresh compute token before execute phase (may have expired during PLAN)
         await self._refresh_compute_token(user_id)
 
@@ -2294,6 +2301,27 @@ class AgentWorkflow:
                 self._cloud_agent_lifecycle_finished = True
         except Exception as e:
             workflow.logger.warning(f"Failed to advance cloud agent lifecycle tool: {e}")
+
+    async def _resume_interrupted_wait(self, conversation: List[Dict]) -> None:
+        """Re-arm a deploy-interrupted timestamp ``wait_for`` from its original target.
+
+        When a deploy migrates an agent mid-wait (workflow replacement), the
+        in-flight ``wait_for`` sleep is torn down and its tool call is force-closed
+        with the ``DEPLOY_INTERRUPTED`` sentinel. Re-issue the wait against its
+        ORIGINAL absolute target so the agent resumes exactly where it left off —
+        ``workflow.sleep`` computes the remaining delta — instead of firing whenever
+        the LLM next happens to re-issue the tool. No-op when there is nothing to
+        resume or the target has already elapsed (the normal loop fires it now).
+        """
+        try:
+            target = pending_timestamp_wait_to_resume(conversation or [], workflow.now())
+        except Exception as e:  # never block resume on a best-effort re-arm
+            workflow.logger.warning(f"[deploy-resume] wait resume check failed: {e}")
+            return
+        if not target:
+            return
+        workflow.logger.info(f"[deploy-resume] Resuming interrupted wait_for until {target}")
+        await wait_for(self, {"until_timestamp": target}, f"wait-resume-{workflow.uuid4()}")
 
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.

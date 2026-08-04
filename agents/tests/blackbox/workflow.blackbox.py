@@ -1428,6 +1428,83 @@ def test_workflow_get_children_tokens_sums_correctly():
     assert wf._get_children_tokens() == (350, 30)
 
 
+class _FakeResumeWorkflow:
+    """Minimal stand-in for the temporalio ``workflow`` module symbol."""
+
+    def __init__(self, now):
+        self._now = now
+        self.logger = type("L", (), {"info": lambda *a, **k: None, "warning": lambda *a, **k: None})()
+
+    def now(self):
+        return self._now
+
+    def uuid4(self):
+        return "00000000-0000-0000-0000-000000000000"
+
+
+async def _run_resume(conversation, now):
+    """Call _resume_interrupted_wait with module-level wait_for/workflow patched.
+
+    Returns the tool_call dict passed to wait_for, or None if it was not called.
+    """
+    import workflows.agent_workflow as awf
+
+    captured: Dict[str, Any] = {}
+
+    async def fake_wait_for(instance, tool_call, tool_call_id):
+        captured["tool_call"] = tool_call
+        captured["tool_call_id"] = tool_call_id
+        return ("FINISHED", "")
+
+    orig_wait_for = awf.wait_for
+    orig_workflow = awf.workflow
+    awf.wait_for = fake_wait_for
+    awf.workflow = _FakeResumeWorkflow(now)
+    try:
+        wf = _bare_workflow_instance()
+        wf.agent_id = "agent-1"
+        await wf._resume_interrupted_wait(conversation)
+    finally:
+        awf.wait_for = orig_wait_for
+        awf.workflow = orig_workflow
+    return captured.get("tool_call")
+
+
+def _interrupted_ts_conversation(until):
+    md = {
+        "toolName": "wait_for",
+        "waitForMode": "timestamp",
+        "toolCallId": "wf-1",
+        "untilTimestamp": until,
+    }
+    return [
+        {"role": "TOOL", "text": "", "metadata": {**md, "toolStatus": "IN_PROGRESS"}},
+        {"role": "TOOL", "text": "", "metadata": {**md, "toolStatus": "FINISHED", "errorCode": "DEPLOY_INTERRUPTED"}},
+    ]
+
+
+async def test_workflow_resume_rearms_interrupted_future_wait():
+    """On deploy resume, an interrupted future wait is re-armed at its original target."""
+    now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+    tool_call = await _run_resume(_interrupted_ts_conversation("2026-08-03T17:00:00Z"), now)
+    assert tool_call is not None, "expected wait_for to be re-armed"
+    assert tool_call.get("until_timestamp") == "2026-08-03T17:00:00Z"
+
+
+async def test_workflow_resume_skips_elapsed_wait():
+    """A wait whose target already elapsed is NOT re-armed (loop fires it now)."""
+    now = datetime(2026, 8, 3, 20, 0, 0, tzinfo=timezone.utc)
+    tool_call = await _run_resume(_interrupted_ts_conversation("2026-08-03T17:00:00Z"), now)
+    assert tool_call is None
+
+
+async def test_workflow_resume_noop_without_pending_wait():
+    """No timestamp wait in the conversation → no re-arm."""
+    now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
+    convo = [{"role": "TOOL", "text": "", "metadata": {"toolName": "message_person", "toolStatus": "FINISHED"}}]
+    assert await _run_resume(convo, now) is None
+
+
 def test_workflow_get_status_query():
     wf = _bare_workflow_instance()
     wf.agent_id = "agent-1"
@@ -5545,6 +5622,9 @@ async def run_all_tests():
     r.record("wf_pending_children_populated", test_workflow_get_pending_child_workflow_ids_populated)
     r.record("wf_children_tokens_empty", test_workflow_get_children_tokens_empty)
     r.record("wf_children_tokens_sums", test_workflow_get_children_tokens_sums_correctly)
+    await r.record_async("wf_resume_rearms_future_wait", test_workflow_resume_rearms_interrupted_future_wait)
+    await r.record_async("wf_resume_skips_elapsed_wait", test_workflow_resume_skips_elapsed_wait)
+    await r.record_async("wf_resume_noop_no_wait", test_workflow_resume_noop_without_pending_wait)
     r.record("wf_get_status_query", test_workflow_get_status_query)
     r.record("wf_is_paused_default", test_workflow_is_paused_query_default_false)
     r.record("wf_is_paused_true", test_workflow_is_paused_query_true)
