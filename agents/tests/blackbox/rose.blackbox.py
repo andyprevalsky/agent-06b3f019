@@ -2796,6 +2796,48 @@ def test_openrouter_body_without_tools_preserves_structured_tool_result_blocks()
     assert result["content"] != "[Result of inspect_page]", "tool result became an empty user message"
 
 
+def test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result():
+    """Direct structured results must not block a no-tools retry when JSON encoding fails."""
+
+    class ProviderValue:
+        def __str__(self) -> str:
+            return "provider-specific-value"
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_provider_value",
+                    "type": "function",
+                    "function": {"name": "inspect_provider", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_provider_value",
+            "content": {"z": ProviderValue(), "a": "first"},
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert "provider-specific-value" in result["content"]
+    assert result["content"].index('"a"') < result["content"].index('"z"')
+
+
 def test_openrouter_body_with_tools_preserves_tool_history():
     """The flattening must apply ONLY when no tools are declared."""
     body = build_openrouter_body(
@@ -5522,6 +5564,10 @@ async def run_all_tests():
     r.record(
         "openrouter_body_no_tools_preserves_structured_tool_results",
         test_openrouter_body_without_tools_preserves_structured_tool_result_blocks,
+    )
+    r.record(
+        "openrouter_body_no_tools_stringifies_non_json_structured_result",
+        test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result,
     )
     r.record(
         "openrouter_body_with_tools_keeps_tool_history",

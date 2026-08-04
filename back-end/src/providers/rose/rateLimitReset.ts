@@ -53,7 +53,7 @@ function parseEpochValue(value: string): string | null {
   let epoch = Number.parseInt(value.trim(), 10);
   if (!Number.isFinite(epoch)) return null;
   if (epoch > MAX_EPOCH_S) epoch = Math.floor(epoch / 1000);
-  if (epoch < MIN_EPOCH_S) return null;
+  if (epoch < MIN_EPOCH_S || epoch > MAX_EPOCH_S) return null;
   return formatUtc(new Date(epoch * 1000));
 }
 

@@ -60,6 +60,23 @@ if docker_available_for_workspace_db 'victoria-db-another-workspace'; then
 fi
 echo "PASS: a pre-started workspace DB survives a slow docker info probe"
 
+DOCKER_COLD_SEED_PROBES=0
+docker_info_quick() {
+    DOCKER_COLD_SEED_PROBES=$((DOCKER_COLD_SEED_PROBES + 1))
+    [ "$DOCKER_COLD_SEED_PROBES" -ge 3 ]
+}
+COLD_SEED_DOCKER_RETRY_DELAY_SECONDS=0
+if ! docker_available_for_cold_seed; then
+    echo "FAIL: a cold isolated seed must retry a transient Docker health miss" >&2
+    exit 1
+fi
+[ "$DOCKER_COLD_SEED_PROBES" -eq 3 ] || {
+    echo "FAIL: cold-seed Docker retry did not stop after daemon recovery" >&2
+    exit 1
+}
+unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
+echo "PASS: cold isolated seed retries transient Docker health misses"
+
 find_free_port() {
     local port
     for port in $(seq 61000 62000); do

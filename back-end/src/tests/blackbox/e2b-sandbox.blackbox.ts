@@ -77,6 +77,55 @@ async function testFinalAttemptAdoptsProvisionedSandbox(): Promise<void> {
   }
 }
 
+async function testAdoptionRetriesTransientConnectWithoutCreatingDuplicate(): Promise<void> {
+  const originalCreate = Sandbox.create;
+  const originalList = Sandbox.list;
+  const originalConnect = Sandbox.connect;
+  let createCalls = 0;
+  let listCalls = 0;
+  let connectCalls = 0;
+
+  const adoptedSandbox = { sandboxId: 'sandbox-with-transient-connect' } as Awaited<
+    ReturnType<typeof Sandbox.connect>
+  >;
+
+  Sandbox.create = (async () => {
+    createCalls += 1;
+    if (createCalls > 1) throw new Error('duplicate sandbox create attempted');
+    throw Object.assign(new TypeError('fetch failed after provisioning'), { code: 'ECONNRESET' });
+  }) as typeof Sandbox.create;
+
+  Sandbox.list = (() => {
+    listCalls += 1;
+    return { nextItems: async () => [{ sandboxId: adoptedSandbox.sandboxId }] };
+  }) as typeof Sandbox.list;
+
+  Sandbox.connect = (async () => {
+    connectCalls += 1;
+    if (connectCalls === 1) {
+      throw Object.assign(new TypeError('fetch failed while connecting'), { code: 'ECONNRESET' });
+    }
+    return adoptedSandbox;
+  }) as typeof Sandbox.connect;
+
+  try {
+    const result = await createSandboxWithRetry(
+      'test-template',
+      { apiKey: 'test-e2b-key' },
+      'blackbox-connect'
+    );
+
+    assert(result === adoptedSandbox, 'retry must adopt the sandbox after connect recovers');
+    assert(createCalls === 1, `expected no duplicate create, got ${createCalls} calls`);
+    assert(listCalls === 2, `expected adoption to be retried once, got ${listCalls} lookups`);
+    assert(connectCalls === 2, `expected connect to be retried once, got ${connectCalls} calls`);
+  } finally {
+    Sandbox.create = originalCreate;
+    Sandbox.list = originalList;
+    Sandbox.connect = originalConnect;
+  }
+}
+
 function testDnsNotFoundIsTransient(): void {
   const error = Object.assign(new TypeError('fetch failed'), {
     cause: Object.assign(new Error('getaddrinfo ENOTFOUND api.e2b.dev'), { code: 'ENOTFOUND' }),
@@ -92,6 +141,10 @@ async function main(): Promise<void> {
     {
       name: 'terminal ambiguous create adopts the provisioned sandbox',
       run: testFinalAttemptAdoptsProvisionedSandbox,
+    },
+    {
+      name: 'transient orphan connect retries adoption without duplicate create',
+      run: testAdoptionRetriesTransientConnectWithoutCreatingDuplicate,
     },
     { name: 'ENOTFOUND is a transient create failure', run: testDnsNotFoundIsTransient },
   ];

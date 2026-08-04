@@ -91,17 +91,16 @@ export async function createSandboxWithRetry(
   }
 }
 
-/** Best-effort lookup: a control-plane read failure must not suppress a retryable create. */
+/** Best-effort lookup: a control-plane list failure must not suppress a retryable create. */
 async function findSandboxByCreateRequestId(
   createRequestId: string,
   label: string
 ): Promise<Awaited<ReturnType<typeof Sandbox.connect>> | null> {
+  let sandboxId: string | undefined;
   try {
     const paginator = Sandbox.list({ query: { metadata: { createRequestId } } });
     const items = await paginator.nextItems();
-    const existing = items?.[0];
-    if (!existing?.sandboxId) return null;
-    return await Sandbox.connect(existing.sandboxId);
+    sandboxId = items?.[0]?.sandboxId;
   } catch (error) {
     log.warn(
       `E2B:${label} could not check for an orphaned sandbox from create ${createRequestId}: ` +
@@ -109,4 +108,9 @@ async function findSandboxByCreateRequestId(
     );
     return null;
   }
+  if (!sandboxId) return null;
+
+  // A failed connection does not mean the tagged sandbox disappeared. Let the
+  // outer retry adopt it again instead of falling through to a duplicate create.
+  return Sandbox.connect(sandboxId);
 }

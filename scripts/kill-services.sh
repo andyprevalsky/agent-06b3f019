@@ -90,8 +90,34 @@ is_benchmark_controller() {
     echo "$cmd" | grep -Eq 'run-predeploy-(local|cloud)|run-bench(-fleet|-cloud|-hub-poller)?( |$)|benchmarks/(local|run_benchmark|run_eval_suite)\.py'
 }
 
+benchmark_controller_for_pid() {
+    local current=$1
+    while true; do
+        if is_benchmark_controller "$current"; then
+            echo "$current"
+            return 0
+        fi
+        local ppid
+        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        current="$ppid"
+    done
+}
+
+is_protected_benchmark_tree() {
+    local pid=$1
+    local target_controller self_controller
+    target_controller=$(benchmark_controller_for_pid "$pid") || return 1
+
+    # The controller process itself is never a service target. A child cleanup
+    # may, however, reap services owned by that SAME controller.
+    [ "$target_controller" = "$pid" ] && return 0
+    self_controller=$(benchmark_controller_for_pid "$SELF" 2>/dev/null || true)
+    [ -z "$self_controller" ] || [ "$target_controller" != "$self_controller" ]
+}
+
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1" || is_benchmark_controller "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1"
 }
 
 safe_to_signal() {
@@ -104,8 +130,8 @@ safe_to_signal() {
         echo "🛡️  Refusing to signal changed/reused PID $pid" >&2
         return 1
     fi
-    if is_benchmark_controller "$pid"; then
-        echo "🛡️  Refusing to signal benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+    if is_protected_benchmark_tree "$pid"; then
+        echo "🛡️  Refusing to signal benchmark controller tree PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
         return 1
     fi
     return 0
@@ -286,8 +312,8 @@ if [[ -n "$PIDS" ]]; then
     KEPT=""
     while read -r pid; do
         [[ -z "$pid" ]] && continue
-        if is_benchmark_controller "$pid"; then
-            echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        if is_protected_benchmark_tree "$pid"; then
+            echo "🛡️  Refusing to kill benchmark controller tree PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
             continue
         fi
         KEPT+="$pid"$'\n'
@@ -302,8 +328,8 @@ fi
 if [[ -n "$PIDS" ]]; then
     while read -r pid; do
         [[ -z "$pid" ]] && continue
-        if is_benchmark_controller "$pid"; then
-            echo "🛡️  Refusing to target benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+        if is_protected_benchmark_tree "$pid"; then
+            echo "🛡️  Refusing to target benchmark controller tree PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
             continue
         fi
         fingerprint=$(process_fingerprint "$pid") || continue

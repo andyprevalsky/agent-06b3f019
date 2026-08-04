@@ -1145,6 +1145,11 @@ async function testRateLimitReset_extractionBranches() {
     null,
     'sub-epoch → null'
   );
+  assertEqual(
+    extractRateLimitedUntil(h({ 'x-ratelimit-reset': '17000000000000' }), ''),
+    null,
+    'oversized epoch remains invalid after millisecond conversion'
+  );
 
   assert(resetIsFarFuture(iso), 'multi-day reset is a usage window');
   assert(

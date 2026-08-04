@@ -1358,6 +1358,77 @@ async def test_payment_cleanup_reuses_an_already_valid_terminal_snapshot():
     assert abandon_calls == 0
 
 
+async def test_abandonment_recovers_a_disconnected_response_without_reposting():
+    """An accepted POST with a lost response is reconciled by GET, not repeated mutation calls."""
+    import httpx
+
+    from benchmarks.run_benchmark import _start_payment_abandonment_with_recovery
+
+    abandon_calls = 0
+    lifecycle_reads = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal lifecycle_reads
+        lifecycle_reads += 1
+        return {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        }
+
+    lifecycle = await _start_payment_abandonment_with_recovery(
+        "http://localhost:55120",
+        "agent-123",
+        retry_delay_seconds=0,
+        abandon_payment=abandon_payment,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert lifecycle["walletFunding"]["status"] == "RECLAIMING"
+    assert abandon_calls == 1
+    assert lifecycle_reads == 1
+
+
+async def test_payment_cleanup_polls_with_reads_after_one_abandonment_post():
+    """Provider reconciliation polling must not repeatedly invoke the mutation endpoint."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import ensure_payment_lifecycle_cleanup
+
+    task = get_task_by_name("agent-payment-abandonment")
+    abandon_calls = 0
+    lifecycle_reads = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        return {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        }
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal lifecycle_reads
+        lifecycle_reads += 1
+        return task.expected_payment_lifecycle
+
+    lifecycle = await ensure_payment_lifecycle_cleanup(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        abandon_payment=abandon_payment,
+        fetch_lifecycle=fetch_lifecycle,
+        poll_interval_seconds=0,
+    )
+
+    assert lifecycle == task.expected_payment_lifecycle
+    assert abandon_calls == 1
+    assert lifecycle_reads == 1
+
+
 async def test_abandonment_waits_for_cron_reconciliation():
     """A delayed AgentCard release is observed through the same lifecycle endpoint cron updates."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -1540,8 +1611,8 @@ async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
         )
 
 
-async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
-    """The terminal snapshot gets the same bounded transient tolerance as cleanup reads."""
+async def test_initial_payment_lifecycle_retries_across_eventual_consistency_window():
+    """The terminal snapshot tolerates the provider's multi-read consistency lag."""
     from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
 
     reads = 0
@@ -1549,7 +1620,7 @@ async def test_initial_payment_lifecycle_retries_one_transient_provider_failure(
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
         nonlocal reads
         reads += 1
-        if reads == 1:
+        if reads <= 4:
             raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
         return {"purchase": {"status": "CLEARED"}}
 
@@ -1561,7 +1632,7 @@ async def test_initial_payment_lifecycle_retries_one_transient_provider_failure(
     )
 
     assert result["purchase"]["status"] == "CLEARED"
-    assert reads == 2
+    assert reads == 5
 
 
 async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
@@ -1581,6 +1652,7 @@ async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
         await _get_initial_payment_lifecycle_with_retry(
             "http://localhost:55120",
             "agent-123",
+            max_attempts=3,
             retry_delay_seconds=0,
             fetch_lifecycle=fetch_lifecycle,
         )
@@ -6757,6 +6829,44 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
 
 
+def test_local_cold_seed_bootstrap_extends_service_start_timeout():
+    """An explicitly allowed cold seed must not exhaust the warm-start watchdog."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def capture_wait(*_args, **kwargs):
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        return {"ports": {}}
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_REQUIRE_SEED_DUMP": "0"}, clear=False),
+        patch.object(local_bench.subprocess, "Popen", return_value=FakeProcess()),
+        patch.object(local_bench, "wait_for_services", side_effect=capture_wait),
+        patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack", return_value=False),
+        tempfile.TemporaryDirectory() as tmp,
+    ):
+        context_dir = Path(tmp) / "cold-seed-run"
+        stack = local_bench.ServiceStack(
+            run_id="cold-seed-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-cold-seed-run",
+            base_port=55120,
+        )
+        local_bench.start_services(stack, clean_first=False)
+
+    assert captured["timeout_seconds"] >= 1200
+    assert captured["timeout_seconds"] > local_bench.SERVICE_START_TIMEOUT_SECONDS
+
+
 def test_local_shared_stack_preserves_public_tunnel_mode():
     """The shared dev stack must retain its configured stable tunnel mode."""
     from benchmarks import local as local_bench
@@ -7375,7 +7485,9 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     assert reachable_probe in run_script
     assert ownership_probe in run_script
     assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
-    assert run_script.index(reachable_probe) < run_script.index("docker_info_quick; then")
+    workspace_daemon_probe = 'docker_available_for_workspace_db "$DB_CONTAINER"; then'
+    assert workspace_daemon_probe in run_script
+    assert run_script.index(reachable_probe) < run_script.index(workspace_daemon_probe)
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
 
     function_start = run_script.index("workspace_db_container_owns_port() {")
@@ -10721,6 +10833,10 @@ async def run_all_tests():
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
+        "local_cold_seed_extended_start_timeout",
+        test_local_cold_seed_bootstrap_extends_service_start_timeout,
+    )
+    r.record(
         "local_shared_public_tunnel_mode",
         test_local_shared_stack_preserves_public_tunnel_mode,
     )
@@ -10938,6 +11054,14 @@ async def run_all_tests():
         test_payment_cleanup_reuses_an_already_valid_terminal_snapshot,
     )
     await r.record_async(
+        "abandonment_recovers_disconnected_response",
+        test_abandonment_recovers_a_disconnected_response_without_reposting,
+    )
+    await r.record_async(
+        "payment_cleanup_reads_after_one_abandonment",
+        test_payment_cleanup_polls_with_reads_after_one_abandonment_post,
+    )
+    await r.record_async(
         "abandonment_waits_for_cron_reconciliation",
         test_abandonment_waits_for_cron_reconciliation,
     )
@@ -10963,7 +11087,7 @@ async def run_all_tests():
     )
     await r.record_async(
         "initial_payment_lifecycle_tolerates_transient_read",
-        test_initial_payment_lifecycle_retries_one_transient_provider_failure,
+        test_initial_payment_lifecycle_retries_across_eventual_consistency_window,
     )
     await r.record_async(
         "initial_payment_lifecycle_bounds_persistent_outage",

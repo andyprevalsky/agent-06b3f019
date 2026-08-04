@@ -1708,11 +1708,11 @@ async def _get_initial_payment_lifecycle_with_retry(
     base_url: str,
     agent_id: str,
     *,
-    max_attempts: int = 3,
-    retry_delay_seconds: float = 2,
+    max_attempts: int = 43,
+    retry_delay_seconds: float = 10,
     fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
 ) -> dict:
-    """Bound transient provider failures while assembling the first lifecycle snapshot."""
+    """Observe the first lifecycle snapshot across the provider's consistency window."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     last_error: Optional[Exception] = None
@@ -1804,6 +1804,64 @@ async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
         return resp.json()
 
 
+def _payment_abandonment_has_started(lifecycle: dict) -> bool:
+    """Recognize durable evidence that an indeterminate abandon POST reached the backend."""
+    purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
+    funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
+    purchase_status = purchase.get("status") if isinstance(purchase, dict) else None
+    funding_status = funding.get("status") if isinstance(funding, dict) else None
+    return purchase_status in {"VOIDED", "FUNDING_RECLAIM_FAILED", "REFUND_FAILED"} or funding_status in {
+        "RECLAIMING",
+        "RECLAIMED",
+        "RECLAIM_FAILED",
+    }
+
+
+async def _start_payment_abandonment_with_recovery(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 2,
+    abandon_payment: Callable[[str, str], Awaitable[dict]] = abandon_test_payment,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+) -> dict:
+    """Recover an accepted abandon POST whose HTTP response was disconnected.
+
+    The mutation is idempotent, but immediately reposting it makes the provider
+    cleanup race with itself and needlessly consumes AgentCard's request budget.
+    First reconcile the indeterminate result through the read endpoint. Only
+    retry the POST when no durable reclaim state exists yet.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await abandon_payment(base_url, agent_id)
+        except Exception as error:
+            if not isinstance(error, httpx.TransportError) and "Failed to abandon test payment: 5" not in str(error):
+                raise
+            last_error = error
+            try:
+                lifecycle = await fetch_lifecycle(base_url, agent_id)
+                if _payment_abandonment_has_started(lifecycle):
+                    print("    ♻ Recovered accepted payment abandonment after a disconnected response")
+                    return lifecycle
+            except Exception as read_error:
+                last_error = read_error
+            if attempt >= max_attempts:
+                break
+            print(
+                "    ⚠ Payment abandonment response was indeterminate; "
+                f"retrying ({attempt}/{max_attempts}): {error}"
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Payment abandonment remained unavailable after {max_attempts} attempts: {last_error}"
+    ) from last_error
+
+
 async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
@@ -1824,6 +1882,8 @@ async def ensure_payment_lifecycle_cleanup(
     *,
     current_lifecycle: Optional[dict] = None,
     abandon_payment: Callable[[str, str], Awaitable[dict]] = abandon_test_payment,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+    poll_interval_seconds: float = 10,
 ) -> Optional[dict]:
     """Idempotently compensate issued benchmark cards before agent deletion."""
     if not agent_id or task.payment_card_request_action != "abandon":
@@ -1838,13 +1898,19 @@ async def ensure_payment_lifecycle_cleanup(
                 print("    🧹 Reused already-reconciled payment lifecycle")
                 return current_lifecycle
 
-        lifecycle = await abandon_payment(base_url, agent_id)
+        lifecycle = await _start_payment_abandonment_with_recovery(
+            base_url,
+            agent_id,
+            abandon_payment=abandon_payment,
+            fetch_lifecycle=fetch_lifecycle,
+        )
         lifecycle = await _wait_for_expected_payment_lifecycle(
             base_url,
             agent_id,
             task,
             lifecycle,
-            recover_lifecycle=abandon_test_payment,
+            poll_interval_seconds=poll_interval_seconds,
+            fetch_lifecycle=fetch_lifecycle,
         )
         lifecycle_error = _validate_payment_lifecycle(
             task,
@@ -2821,7 +2887,7 @@ async def poll_agent(
                 for message in messages
             )
         ):
-            lifecycle = await abandon_test_payment(base_url, agent_id)
+            lifecycle = await _start_payment_abandonment_with_recovery(base_url, agent_id)
             lifecycle = await _wait_for_expected_payment_lifecycle(
                 base_url,
                 agent_id,

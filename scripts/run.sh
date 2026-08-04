@@ -119,6 +119,23 @@ docker_available_for_workspace_db() {
     docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
 }
 
+docker_available_for_cold_seed() {
+    local attempt delay_seconds
+    delay_seconds="${COLD_SEED_DOCKER_RETRY_DELAY_SECONDS:-1}"
+    # A false-negative Docker probe here makes the one-time seed run against a
+    # potentially newer system Postgres. Its archive can then be unreadable by
+    # the normal postgres:16 workspace container. Cold boot is rare, so spend a
+    # bounded retry window preserving a single toolchain instead of poisoning
+    # the shared seed cache.
+    for attempt in 1 2 3 4 5 6; do
+        docker_info_quick && return 0
+        if [ "$attempt" -lt 6 ] && [ "$delay_seconds" != "0" ]; then
+            sleep "$delay_seconds"
+        fi
+    done
+    return 1
+}
+
 # Check cwd first because many service command lines are just "node" or
 # "python3" and do not include the worktree path.
 process_belongs_to_this_worktree() {
@@ -474,12 +491,14 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
 fi
 DOCKER_OK=false
 if ! $PRESTARTED_WORKSPACE_DB && \
-   docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
-    # /deploy pre-starts this exact workspace container. Prefer that direct,
-    # authoritative check even when a busy Docker Desktop daemon makes the
-    # broader `docker info` probe miss its bounded response window.
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   docker_available_for_workspace_db "$DB_CONTAINER"; then
     DOCKER_OK=true
-elif ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
+elif ! $PRESTARTED_WORKSPACE_DB && \
+     [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+     [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && \
+     [ "${BENCHMARK_REQUIRE_SEED_DUMP:-1}" = "0" ] && \
+     docker_available_for_cold_seed; then
     DOCKER_OK=true
 fi
 

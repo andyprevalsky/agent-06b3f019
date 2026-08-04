@@ -50,6 +50,11 @@ RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 # run.sh can publish services.json. That fixture currently includes 10k messages
 # and 20k+ browser cookies, so a healthy first start can exceed three minutes.
 SERVICE_START_TIMEOUT_SECONDS = 600
+# An explicitly opted-in cold seed can spend the entire warm-start budget
+# copying browser state before run.sh starts the public tunnel and publishes its
+# manifest. Keep the normal bound for cached starts, but give that one-time
+# bootstrap enough room to finish cleanly.
+COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -987,10 +992,14 @@ def start_services(
                 start_new_session=True,
             )
         try:
+            service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
+            if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
+                service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
             manifest = wait_for_services(
                 stack.manifest_path,
                 process=process,
                 service_log=stack.service_log,
+                timeout_seconds=service_start_timeout,
             )
         except BaseException:
             # Ownership transfers to the caller only after readiness succeeds.

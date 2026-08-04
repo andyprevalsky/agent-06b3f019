@@ -65,6 +65,7 @@ assert_alive() {
 
 WORKTREE="$TMP_ROOT/worktree"
 mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/back-end" "$TMP_ROOT/foreign"
+WORKTREE="$(cd "$WORKTREE" && pwd -P)"
 cp "$ROOT_DIR/scripts/kill-services.sh" "$WORKTREE/scripts/kill-services.sh"
 cp "$ROOT_DIR/scripts/list-services.sh" "$WORKTREE/scripts/list-services.sh"
 printf 'import time\ntime.sleep(1000)\n' > "$WORKTREE/agents/worker.py"
@@ -173,7 +174,8 @@ CONTROLLER
 chmod +x "$WORKTREE/scripts/run-predeploy-local"
 cat > "$WORKTREE/scripts/run.sh" <<'ISOLATED'
 #!/usr/bin/env bash
-sleep 1000
+sleep 1000 &
+wait
 ISOLATED
 chmod +x "$WORKTREE/scripts/run.sh"
 
@@ -181,17 +183,56 @@ chmod +x "$WORKTREE/scripts/run.sh"
 controller_pid=$!
 sleep 1
 
-isolated_runsh_pid="$(pgrep -P "$controller_pid" -f 'run\.sh' 2>/dev/null | head -1 || true)"
+isolated_runsh_pid=""
+for candidate in $(pgrep -f 'scripts/run\.sh --benchmark' 2>/dev/null || true); do
+    candidate_cwd="$(lsof -a -p "$candidate" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
+    if [ "$candidate_cwd" = "$WORKTREE" ]; then
+        isolated_runsh_pid="$candidate"
+        break
+    fi
+done
+[ -n "$isolated_runsh_pid" ] || {
+    echo "FAIL: benchmark controller did not retain an identifiable run.sh child" >&2
+    exit 1
+}
+PIDS+=("$isolated_runsh_pid")
 
 (cd "$WORKTREE" && bash scripts/kill-services.sh > /dev/null 2>&1) || true
 
 assert_alive "$controller_pid" "benchmark controller (run-predeploy-local)"
-if [ -n "$isolated_runsh_pid" ]; then
-    assert_alive "$isolated_runsh_pid" "benchmark controller's isolated run.sh child"
-fi
+assert_alive "$isolated_runsh_pid" "benchmark controller's isolated run.sh child"
 
 kill "$controller_pid" 2>/dev/null || true
 [ -n "$isolated_runsh_pid" ] && kill "$isolated_runsh_pid" 2>/dev/null || true
+
+# The controller's OWN cleanup must still reap its isolated stack. The real
+# benchmarks/local.py invokes kill-services.sh from beneath the controller; an
+# ancestor guard that cannot distinguish ownership would leak every local run.
+cat > "$WORKTREE/scripts/run-predeploy-local" <<'OWNER_CONTROLLER'
+#!/usr/bin/env bash
+bash scripts/run.sh --benchmark &
+owned_child=$!
+bash scripts/kill-services.sh > /dev/null 2>&1
+for _attempt in $(seq 1 20); do
+    kill -0 "$owned_child" 2>/dev/null || break
+    sleep 0.05
+done
+if kill -0 "$owned_child" 2>/dev/null; then
+    kill "$owned_child" 2>/dev/null || true
+    wait "$owned_child" 2>/dev/null || true
+    echo "FAIL: benchmark controller could not reap its own isolated child" >&2
+    exit 1
+fi
+wait "$owned_child" 2>/dev/null || true
+OWNER_CONTROLLER
+chmod +x "$WORKTREE/scripts/run-predeploy-local"
+(cd "$WORKTREE" && bash scripts/run-predeploy-local)
+cat > "$WORKTREE/scripts/run-predeploy-local" <<'CONTROLLER'
+#!/usr/bin/env bash
+bash "$(dirname "$0")/run.sh" --benchmark &
+sleep 1000
+CONTROLLER
+chmod +x "$WORKTREE/scripts/run-predeploy-local"
 
 # A service may exec in place after discovery and become a benchmark
 # controller before the signal pass. Its PID stays the same, so cleanup must
@@ -228,5 +269,50 @@ fi
 transition_child="$(pgrep -P "$transition_pid" 2>/dev/null | head -1 || true)"
 kill "$transition_pid" 2>/dev/null || true
 [ -n "$transition_child" ] && kill "$transition_child" 2>/dev/null || true
+
+# The protected boundary can also appear in an ANCESTOR after discovery. Keep
+# the service child's identity stable while its parent execs into a benchmark
+# controller; safe_to_signal must re-check the whole ancestor chain.
+ancestor_transition_marker="$TMP_ROOT/ancestor-before-signal.marker"
+cat > "$WORKTREE/agents/worker.py" <<'ANCESTOR_CHILD'
+#!/usr/bin/env bash
+sleep 1000 &
+wait
+ANCESTOR_CHILD
+chmod +x "$WORKTREE/agents/worker.py"
+cat > "$WORKTREE/agents/controller-transition.sh" <<'ANCESTOR_PARENT'
+#!/usr/bin/env bash
+bash worker.py &
+while [ ! -f "$KILL_SERVICES_ANCESTOR_TRANSITION_MARKER" ]; do sleep 0.01; done
+exec bash ../scripts/run-predeploy-local
+ANCESTOR_PARENT
+chmod +x "$WORKTREE/agents/controller-transition.sh"
+(
+    cd "$WORKTREE/agents"
+    export KILL_SERVICES_ANCESTOR_TRANSITION_MARKER="$ancestor_transition_marker"
+    exec bash controller-transition.sh
+) > /dev/null 2>&1 &
+ancestor_controller_pid=$!
+PIDS+=("$ancestor_controller_pid")
+sleep 0.2
+ancestor_worker_pid="$(pgrep -P "$ancestor_controller_pid" -f 'worker\.py' 2>/dev/null | head -1 || true)"
+[ -n "$ancestor_worker_pid" ] || {
+    echo "FAIL: ancestor-transition worker did not start" >&2
+    exit 1
+}
+PIDS+=("$ancestor_worker_pid")
+
+(
+    cd "$WORKTREE"
+    KILL_SERVICES_TEST_BEFORE_SIGNAL_MARKER="$ancestor_transition_marker" \
+        KILL_SERVICES_TEST_BEFORE_SIGNAL_DELAY_SECONDS=0.5 \
+        bash scripts/kill-services.sh > /dev/null 2>&1
+)
+
+assert_alive "$ancestor_controller_pid" "ancestor that became a benchmark controller"
+assert_alive "$ancestor_worker_pid" "service beneath a benchmark controller ancestor"
+ancestor_transition_children="$(pgrep -P "$ancestor_controller_pid" 2>/dev/null || true)"
+kill "$ancestor_controller_pid" 2>/dev/null || true
+for pid in $ancestor_transition_children; do kill "$pid" 2>/dev/null || true; done
 
 echo "All kill-services tests passed."

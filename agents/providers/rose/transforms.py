@@ -843,7 +843,7 @@ def _message_content_to_text(content: Any) -> str:
             elif not isinstance(block, str):
                 parts.append(json.dumps(block, ensure_ascii=False, sort_keys=True, default=str))
         return "\n".join(parts)
-    return json.dumps(content)
+    return json.dumps(content, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def flatten_tool_history_to_text(
