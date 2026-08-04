@@ -7385,16 +7385,27 @@ def test_local_seed_dump_primes_once_from_healthy_shared_stack():
         assert Path(f"{seed_dump}.schemahash").read_text() == schema_hash
 
 
-def test_local_seed_dump_promotes_previous_utc_day_during_rollover_grace():
-    """A schema-identical seed must survive the UTC midnight cache-key rollover."""
+def test_local_seed_dump_prime_promotes_previous_utc_day_during_rollover_grace():
+    """The owning priming boundary must reuse a fresh schema-identical prior-day pair."""
     from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
 
     from benchmarks import local as local_bench
 
-    schema_hash = "8c27cf62e1abe4b698af89c10008798f3f507e89"
     now = datetime(2026, 8, 4, 0, 23, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    schema_hash = hashlib.sha1(
+        (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+    ).hexdigest()
     with tempfile.TemporaryDirectory() as tmp:
         cache_root = Path(tmp)
+        stopped_manifest = cache_root / "services.json"
+        stopped_manifest.write_text(json.dumps({"status": "stopped"}))
         current = cache_root / f"{schema_hash}-20260804.dump"
         previous = cache_root / f"{schema_hash}-20260803.dump"
         previous.write_bytes(b"schema-matched-production-seed")
@@ -7402,17 +7413,152 @@ def test_local_seed_dump_promotes_previous_utc_day_during_rollover_grace():
         previous_mtime = (now - timedelta(hours=23)).timestamp()
         os.utime(previous, (previous_mtime, previous_mtime))
 
-        assert local_bench._promote_previous_utc_day_seed_dump(current, now=now)
+        with (
+            patch.object(local_bench, "datetime", FrozenDateTime, create=True),
+            patch.object(local_bench, "SERVICES_MANIFEST", stopped_manifest),
+        ):
+            assert local_bench._prime_local_seed_dump_from_shared_stack(current)
+
         assert current.read_bytes() == b"schema-matched-production-seed"
         assert Path(f"{current}.schemahash").read_text() == schema_hash
 
-        current.unlink()
-        Path(f"{current}.schemahash").unlink()
+
+def test_local_seed_dump_rollover_uses_canonical_publish_lock():
+    """Promotion must wait behind the producer/consumer lock used by run.sh and setup-db."""
+    import threading
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    now = datetime(2026, 8, 4, 0, 23, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    schema_hash = hashlib.sha1(
+        (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+    ).hexdigest()
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_root = Path(tmp)
+        stopped_manifest = cache_root / "services.json"
+        stopped_manifest.write_text(json.dumps({"status": "stopped"}))
+        current = cache_root / f"{schema_hash}-20260804.dump"
+        previous = cache_root / f"{schema_hash}-20260803.dump"
+        previous.write_bytes(b"schema-matched-production-seed")
+        Path(f"{previous}.schemahash").write_text(schema_hash)
+        previous_mtime = (now - timedelta(hours=23)).timestamp()
+        os.utime(previous, (previous_mtime, previous_mtime))
+        publish_lock = Path(f"{current}.publish.lock")
+        publish_lock.symlink_to(str(os.getpid()))
+        result = []
+
+        def prime():
+            result.append(local_bench._prime_local_seed_dump_from_shared_stack(current))
+
+        with (
+            patch.object(local_bench, "datetime", FrozenDateTime, create=True),
+            patch.object(local_bench, "SERVICES_MANIFEST", stopped_manifest),
+        ):
+            worker = threading.Thread(target=prime, daemon=True)
+            worker.start()
+            time.sleep(0.2)
+            assert worker.is_alive(), "promotion ignored the canonical publish lock"
+            assert not current.exists(), "current pair was published while its lock was held"
+            publish_lock.unlink()
+            worker.join(timeout=3)
+
+        assert not worker.is_alive(), "promotion did not resume after publish lock release"
+        assert result == [True]
+        assert current.read_bytes() == b"schema-matched-production-seed"
+        assert Path(f"{current}.schemahash").read_text() == schema_hash
+
+
+def test_local_seed_dump_rollover_rejects_invalid_candidates_and_replaces_invalid_current():
+    """Rollover may only publish a usable pair for the repository's actual schema."""
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    now = datetime(2026, 8, 4, 0, 23, tzinfo=timezone.utc)
+
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    actual_hash = hashlib.sha1(
+        (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
+    ).hexdigest()
+
+    def candidate(cache_root, *, schema_hash=actual_hash, sidecar=None, age_hours=23):
+        cache_root.mkdir(parents=True, exist_ok=True)
+        current = cache_root / f"{schema_hash}-20260804.dump"
+        previous = cache_root / f"{schema_hash}-20260803.dump"
+        previous.write_bytes(b"schema-matched-production-seed")
+        Path(f"{previous}.schemahash").write_text(sidecar or schema_hash)
+        previous_mtime = (now - timedelta(hours=age_hours)).timestamp()
+        os.utime(previous, (previous_mtime, previous_mtime))
+        return current
+
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_root = Path(tmp)
+        stopped_manifest = cache_root / "services.json"
+        stopped_manifest.write_text(json.dumps({"status": "stopped"}))
+        with (
+            patch.object(local_bench, "datetime", FrozenDateTime, create=True),
+            patch.object(local_bench, "SERVICES_MANIFEST", stopped_manifest),
+        ):
+            current = candidate(cache_root / "zero-current")
+            current.parent.mkdir(parents=True, exist_ok=True)
+            current.write_bytes(b"")
+            Path(f"{current}.schemahash").write_text(actual_hash)
+            assert local_bench._prime_local_seed_dump_from_shared_stack(current)
+            assert current.read_bytes() == b"schema-matched-production-seed"
+
+            wrong_hash = "0" * 40
+            wrong_schema_current = candidate(cache_root / "wrong-schema", schema_hash=wrong_hash)
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(wrong_schema_current)
+            assert not wrong_schema_current.exists()
+
+            wrong_sidecar_current = candidate(
+                cache_root / "wrong-sidecar",
+                sidecar="f" * 40,
+            )
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(wrong_sidecar_current)
+            assert not wrong_sidecar_current.exists()
+
+            stale_current = candidate(cache_root / "stale", age_hours=27)
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(stale_current)
+            assert not stale_current.exists()
+
+            future_current = candidate(cache_root / "future", age_hours=-1)
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(future_current)
+            assert not future_current.exists()
+
+            malformed_current = cache_root / "malformed" / "not-a-schema-day.dump"
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(malformed_current)
+            assert not malformed_current.exists()
+
         after_grace = datetime(2026, 8, 4, 3, 0, tzinfo=timezone.utc)
-        assert not local_bench._promote_previous_utc_day_seed_dump(
-            current,
-            now=after_grace,
-        )
+
+        class AfterGraceDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return after_grace if tz is None else after_grace.astimezone(tz)
+
+        after_grace_current = candidate(cache_root / "after-grace")
+        with (
+            patch.object(local_bench, "datetime", AfterGraceDateTime, create=True),
+            patch.object(local_bench, "SERVICES_MANIFEST", stopped_manifest),
+        ):
+            assert not local_bench._prime_local_seed_dump_from_shared_stack(
+                after_grace_current
+            )
+            assert not after_grace_current.exists()
 
 
 def test_local_start_services_reaps_process_when_readiness_fails():
@@ -11626,8 +11772,16 @@ async def run_all_tests():
         test_local_seed_dump_primes_once_from_healthy_shared_stack,
     )
     r.record(
-        "local_seed_dump_promotes_previous_utc_day_during_rollover_grace",
-        test_local_seed_dump_promotes_previous_utc_day_during_rollover_grace,
+        "local_seed_dump_prime_promotes_previous_utc_day_during_rollover_grace",
+        test_local_seed_dump_prime_promotes_previous_utc_day_during_rollover_grace,
+    )
+    r.record(
+        "local_seed_dump_rollover_uses_canonical_publish_lock",
+        test_local_seed_dump_rollover_uses_canonical_publish_lock,
+    )
+    r.record(
+        "local_seed_dump_rollover_candidate_guards",
+        test_local_seed_dump_rollover_rejects_invalid_candidates_and_replaces_invalid_current,
     )
     r.record(
         "local_start_services_cleanup_error_preserves_readiness_failure",
