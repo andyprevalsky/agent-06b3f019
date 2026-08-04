@@ -2106,3 +2106,4 @@
 {"task": "parallel-tool-calls", "duration_seconds": 194.6, "cost_cents": 39.0, "timestamp": "2026-07-28T17:13:36.115487+00:00", "agent_id": "461ff8e5-4366-4a5f-b6a9-d0fd477099a3"}
 {"task": "spawn-sub-agents", "duration_seconds": 334.8, "cost_cents": 56.0, "timestamp": "2026-07-28T17:13:36.115487+00:00", "agent_id": "d3ade129-97ac-47de-a867-8a8325e24ee6"}
 {"task": "browser-alchemy-springs-sauna", "duration_seconds": 376.3, "cost_cents": 0.0, "timestamp": "2026-08-03T22:18:40.569648+00:00", "agent_id": "312b1b54-5740-4037-8720-4564fb20a609"}
+{"task": "browser-event-ticket", "duration_seconds": 510.2, "cost_cents": 8.0, "timestamp": "2026-08-04T01:17:35.471663+00:00", "agent_id": "8d6fd488-575b-4693-b1ab-7c4972271ce6"}
