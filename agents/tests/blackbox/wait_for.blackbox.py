@@ -656,6 +656,17 @@ def test_resume_unparseable_target_returns_none():
     assert pending_timestamp_wait_to_resume(msgs) is None
 
 
+def test_resume_tolerates_nondict_metadata():
+    """A truthy non-dict metadata row must not abort the scan of later valid waits."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        {"role": "TOOL", "text": "", "metadata": "garbage-not-a-dict"},
+        _ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z", error_code="DEPLOY_INTERRUPTED"),
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T17:00:00Z"
+
+
 def test_resume_latest_wait_wins():
     """An older completed wait is ignored; the newer interrupted wait resumes."""
     from domains.wait_for.service import pending_timestamp_wait_to_resume
@@ -692,6 +703,29 @@ async def test_handler_timestamp_resume_past_completes_not_errors():
     assert MessageStatus.ERROR not in statuses
     # No sleep for an already-elapsed target.
     assert fake.sleep_records == []
+
+
+async def test_handler_timestamp_resume_nonbool_still_errors_in_past():
+    """A truthy non-bool resume (e.g. the string 'false') must NOT bypass the past-error."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 3, 18, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"until_timestamp": "2026-08-03T17:00:00Z", "resume": "false"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.ERROR in statuses
+    assert MessageStatus.FINISHED not in statuses
 
 
 async def run_all_tests():
@@ -738,8 +772,10 @@ async def run_all_tests():
     r.record("resume_in_progress", test_resume_still_in_progress_returns_target)
     r.record("resume_no_wait_none", test_resume_no_wait_returns_none)
     r.record("resume_unparseable_none", test_resume_unparseable_target_returns_none)
+    r.record("resume_nondict_metadata", test_resume_tolerates_nondict_metadata)
     r.record("resume_latest_wins", test_resume_latest_wait_wins)
     await r.record_async("handler_ts_resume_past", test_handler_timestamp_resume_past_completes_not_errors)
+    await r.record_async("handler_ts_resume_nonbool", test_handler_timestamp_resume_nonbool_still_errors_in_past)
     teardown_mock()
     return r.all_passed
 

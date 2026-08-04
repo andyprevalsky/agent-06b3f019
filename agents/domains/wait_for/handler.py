@@ -47,8 +47,10 @@ class WaitForManager(ToolManager):
         condition = tool_call.get("condition")
         description = tool_call.get("description")
         # resume=True (deploy-migration re-arm): an already-elapsed target
-        # completes immediately instead of erroring "in the past".
-        resume = bool(tool_call.get("resume"))
+        # completes immediately instead of erroring "in the past". Require a
+        # strict boolean True so only the internal _resume_interrupted_wait path
+        # enables it — a truthy string (e.g. an LLM-forwarded "false") must not.
+        resume = tool_call.get("resume") is True
 
         if until_timestamp:
             async for event in self._timestamp_mode(

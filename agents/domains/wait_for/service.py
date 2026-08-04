@@ -98,7 +98,9 @@ def pending_timestamp_wait_to_resume(messages: list[dict[str, Any]]) -> Optional
     for msg in messages:
         if msg.get("role") != "TOOL":
             continue
-        metadata = msg.get("metadata") or {}
+        metadata = msg.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
         if metadata.get("waitForMode") != "timestamp":
             continue
         call_id = metadata.get("toolCallId")
