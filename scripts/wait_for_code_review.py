@@ -84,21 +84,92 @@ def normalize_status(entry: dict[str, object]) -> ReviewStatus:
     return ReviewStatus(normalized, False, False, kind, entry)
 
 
+def _gh_json(command: list[str]) -> object:
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise ReviewWaitError(completed.stderr.strip() or " ".join(command) + " failed")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ReviewWaitError("gh returned invalid JSON") from error
+
+
+def _repo_slug(repo: str | None) -> str:
+    if repo:
+        return repo
+    payload = _gh_json(["gh", "repo", "view", "--json", "nameWithOwner"])
+    if not isinstance(payload, dict) or not payload.get("nameWithOwner"):
+        raise ReviewWaitError("could not resolve OWNER/REPO for commit status fallback")
+    return str(payload["nameWithOwner"])
+
+
+def gh_commit_status_rollup(head: str, repo: str | None = None) -> list[dict[str, object]]:
+    """Build a StatusContext-shaped rollup from the REST commit status API.
+
+    Some cloud-agent tokens can read ``gh pr view --json headRefOid`` and
+    ``/commits/{sha}/status``, but GraphQL ``statusCheckRollup`` and the
+    Checks API return 403. Commit statuses remain sufficient for CodeRabbit.
+    """
+    slug = _repo_slug(repo)
+    payload = _gh_json(["gh", "api", f"repos/{slug}/commits/{head}/status"])
+    if not isinstance(payload, dict):
+        raise ReviewWaitError("commit status API returned a non-object payload")
+    statuses = payload.get("statuses")
+    if not isinstance(statuses, list):
+        return []
+    rollup: list[dict[str, object]] = []
+    for entry in statuses:
+        if not isinstance(entry, dict):
+            continue
+        context = entry.get("context")
+        state = entry.get("state")
+        if not context or not state:
+            continue
+        rollup.append(
+            {
+                "__typename": "StatusContext",
+                "context": context,
+                "state": str(state).upper(),
+            }
+        )
+    return rollup
+
+
 def gh_payload(pr: str, repo: str | None = None) -> dict[str, object]:
     command = ["gh", "pr", "view", pr]
     if repo:
         command.extend(["--repo", repo])
     command.extend(["--json", "headRefOid,statusCheckRollup"])
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise ReviewWaitError(completed.stderr.strip() or "gh pr view failed")
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise ReviewWaitError("gh pr view returned invalid JSON") from error
-    if not isinstance(payload, dict):
-        raise ReviewWaitError("gh pr view returned a non-object payload")
-    return payload
+    if completed.returncode == 0:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise ReviewWaitError("gh pr view returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise ReviewWaitError("gh pr view returned a non-object payload")
+        return payload
+
+    stderr = completed.stderr.strip()
+    # Limited tokens often fail only on statusCheckRollup; recover HEAD alone
+    # and synthesize the rollup from the REST commit status endpoint.
+    if "statusCheckRollup" not in stderr and "Resource not accessible" not in stderr:
+        raise ReviewWaitError(stderr or "gh pr view failed")
+
+    head_command = ["gh", "pr", "view", pr]
+    if repo:
+        head_command.extend(["--repo", repo])
+    head_command.extend(["--json", "headRefOid"])
+    head_payload = _gh_json(head_command)
+    if not isinstance(head_payload, dict):
+        raise ReviewWaitError("gh pr view headRefOid returned a non-object payload")
+    head = str(head_payload.get("headRefOid") or "")
+    if not head:
+        raise ReviewWaitError("gh pr view did not return headRefOid")
+    return {
+        "headRefOid": head,
+        "statusCheckRollup": gh_commit_status_rollup(head, repo),
+    }
 
 
 def wait_for_review(

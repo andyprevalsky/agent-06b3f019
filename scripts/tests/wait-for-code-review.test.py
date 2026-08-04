@@ -114,6 +114,96 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertTrue(status.terminal)
         self.assertFalse(status.successful)
 
+    def test_commit_status_rollup_maps_rest_payload(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_json(command: list[str]) -> object:
+            calls.append(command)
+            if command[:3] == ["gh", "api", "repos/acme/rose/commits/abc/status"]:
+                return {
+                    "statuses": [
+                        {"context": "CodeRabbit", "state": "success"},
+                        {"context": "Vercel", "state": "pending"},
+                        {"context": None, "state": "success"},
+                    ]
+                }
+            raise AssertionError(command)
+
+        original = MODULE._gh_json
+        MODULE._gh_json = fake_gh_json
+        try:
+            rollup = MODULE.gh_commit_status_rollup("abc", repo="acme/rose")
+        finally:
+            MODULE._gh_json = original
+
+        self.assertEqual(
+            rollup,
+            [
+                {
+                    "__typename": "StatusContext",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "Vercel",
+                    "state": "PENDING",
+                },
+            ],
+        )
+        self.assertEqual(len(calls), 1)
+
+    def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
+        head = "c" * 40
+        calls: list[list[str]] = []
+
+        def fake_run(command, check=False, capture_output=True, text=True):
+            del check, capture_output, text
+            calls.append(list(command))
+            if command[-1] == "headRefOid,statusCheckRollup":
+                return MODULE.subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout="",
+                    stderr=(
+                        "GraphQL: Resource not accessible by access token "
+                        "(repository.pullRequest.statusCheckRollup)"
+                    ),
+                )
+            if command[-1] == "headRefOid":
+                return MODULE.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=MODULE.json.dumps({"headRefOid": head}),
+                    stderr="",
+                )
+            raise AssertionError(command)
+
+        original_run = MODULE.subprocess.run
+        original_rollup = MODULE.gh_commit_status_rollup
+
+        def fake_rollup(_head, repo=None):
+            del _head, repo
+            return [
+                {
+                    "__typename": "StatusContext",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
+                }
+            ]
+
+        MODULE.subprocess.run = fake_run
+        MODULE.gh_commit_status_rollup = fake_rollup
+        try:
+            payload = MODULE.gh_payload("938", repo="acme/rose")
+        finally:
+            MODULE.subprocess.run = original_run
+            MODULE.gh_commit_status_rollup = original_rollup
+
+        self.assertEqual(payload["headRefOid"], head)
+        self.assertEqual(payload["statusCheckRollup"][0]["context"], "CodeRabbit")
+        self.assertGreaterEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

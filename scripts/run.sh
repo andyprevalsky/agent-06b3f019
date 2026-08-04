@@ -994,7 +994,8 @@ ensure_ngrok_domain_reserved() {
     fi
     echo "🌐 Checking ngrok reserved domain $domain"
     local domains_json
-    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 1000 2>&1) || {
+    # ngrok API caps page size at 100 (ERR_NGROK_233 for anything larger).
+    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 2>&1) || {
         echo "$domains_json"
         echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
         [ "$failure_mode" = "soft" ] && return 1
