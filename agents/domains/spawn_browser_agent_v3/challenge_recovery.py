@@ -64,14 +64,8 @@ _CHALLENGE_TEXT_MARKERS = (
     "this site can't be reached",
     "too many requests",
     "unusual traffic from your computer network",
-    "verification required",
     "verify you are human",
 )
-# Soft Bing/Cloudflare gates often leave a lone Verify control while search
-# results remain hidden behind an overlay (innerText collapses to "Verify").
-_SOFT_VERIFY_BODY_RE = re.compile(r"^(?:verification(?:\s+required)?|verify)[.!]?$", re.IGNORECASE)
-_SOFT_VERIFY_BUTTON_RE = re.compile(r"<button\b[^>]*>\s*Verify\s*</button>", re.IGNORECASE)
-_BING_RESULTS_MARKERS = ("b_algo", "b_results", "b_respl")
 
 
 @dataclass(frozen=True)
@@ -138,18 +132,9 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     content = f"{title}\n{body_text}".lower()
     if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
         return True
-    collapsed_body = re.sub(r"\s+", " ", body_text).strip()
-    if collapsed_body and _SOFT_VERIFY_BODY_RE.fullmatch(collapsed_body):
-        # Bing/Cloudflare soft gates hide organic content from the accessibility
-        # tree; the only visible text is a Verify CTA.
-        return True
     normalized_html = html.lower()
     visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
-        return True
-    if _SOFT_VERIFY_BUTTON_RE.search(html) and any(marker in normalized_html for marker in _BING_RESULTS_MARKERS):
-        # Organic Bing results exist in the DOM, but a Verify overlay still gates
-        # the visible page — cookie probes must not treat this as clean.
         return True
     return any(
         marker in normalized_html
