@@ -51,6 +51,12 @@ import {
   responseModel,
   type CompletionChunk,
 } from '../../providers/rose';
+import { buildAnthropicBody } from '../../providers/rose/claudeAuth';
+import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
+import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
+import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
+import { buildOpenRouterBody } from '../../providers/rose/waterfall';
+import { buildEnvironmentToolMessages } from '../../providers/smsSupervisor/environmentMessages';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
 import {
   parseAnthropicSSE,
@@ -64,7 +70,7 @@ import {
   transformMessagesForAnthropic,
   transformSchemaForAnthropic,
 } from '../../providers/rose/transforms';
-import type { RoseStreamChunk } from '../../providers/rose/types';
+import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
   CODEX_API_URL,
@@ -627,6 +633,221 @@ async function testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses() {
     looseObjects.join(', '),
     '',
     'SMS supervisor schema must not contain open object shapes rejected by Codex'
+  );
+}
+
+/**
+ * Anthropic rejects a request declaring more than 16 union-typed parameters.
+ * `z.discriminatedUnion` spells its discriminator as `enum: ["name"]`, so a
+ * `const`-only extractor sent the whole envelope down the legacy single-schema
+ * path — 27 nullable unions — and every claudeAuth SMS round 400'd into the
+ * paid waterfall.
+ */
+async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
+  const extracted = extractToolsFromResponseFormat(SUPERVISOR_RESPONSE_SCHEMA);
+  assert(extracted !== null, 'discriminated-union envelope must lift to native tools');
+
+  const names = extracted.tools.map((tool) => tool.name as string);
+  assert(names.includes('start_new_agent'), `expected start_new_agent, got ${names.join(',')}`);
+  assert(names.includes('grep'), `expected grep, got ${names.join(',')}`);
+
+  for (const tool of extracted.tools) {
+    const serialized = JSON.stringify(tool.input_schema);
+    const unions = (serialized.match(/"type":"null"/g) ?? []).length;
+    assertEqual(String(unions), '0', `${tool.name as string} must declare no nullable unions`);
+  }
+
+  // Collapsing the union must not drop the model-facing field documentation.
+  const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
+  const budget = (
+    ((startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>)
+      .arguments as Record<string, unknown>
+  ).properties as Record<string, Record<string, unknown>>;
+  assert(
+    typeof budget.budget_dollars.description === 'string' &&
+      budget.budget_dollars.description.length > 0,
+    'budget_dollars description must survive the Anthropic transform'
+  );
+}
+
+/**
+ * Every OpenAI-dialect request must stamp `type: "function"` on assistant
+ * tool_calls. Google (via OpenRouter) rejects a transcript without it —
+ * 400 "Tool-call assistant message produced no valid function calls but is
+ * followed by tool result messages. The conversation transcript is malformed."
+ * — which failed the strongest waterfall leg on every SMS round and silently
+ * demoted production to the last leg in the pool.
+ */
+async function testWaterfall_openAiToolCallsCarryFunctionType() {
+  // The producer must be correct at the source...
+  const injected = buildEnvironmentToolMessages('ctx', 7);
+  assertEqual(
+    String(injected[0].tool_calls?.[0].type),
+    'function',
+    'SMS environment injection must emit an OpenAI-valid tool_call'
+  );
+
+  // ...and EVERY OpenAI-dialect builder must guarantee it, for every tool_call
+  // shape `CompletionMessage` permits. A builder omitted from this table is a
+  // live path back to the Google 400 that demoted production.
+  const shapes: Array<{ label: string; toolCall: Record<string, unknown> }> = [
+    { label: 'nested without discriminator', toolCall: { id: 'x', function: { name: 'f' } } },
+    { label: 'flat name/arguments', toolCall: { id: 'y', name: 'g', arguments: '{}' } },
+    // The Responses dialect names the identifier `call_id`. Chat-dialect tool
+    // results are matched by `id`, so a call carrying only `call_id` must be
+    // mapped, not passed through unidentified.
+    {
+      label: 'responses-style call_id only',
+      toolCall: { call_id: 'z', name: 'h', arguments: '{}' },
+    },
+  ];
+  const builders: Array<{ label: string; build: (messages: CompletionMessage[]) => unknown }> = [
+    {
+      label: 'buildOpenRouterBody',
+      build: (messages) => buildOpenRouterBody({ model: 'google/gemini-3.5-flash', messages }),
+    },
+    { label: 'buildCerebrasChatBody', build: (messages) => buildCerebrasChatBody({ messages }) },
+    {
+      label: 'buildOpenRouterCerebrasBody',
+      build: (messages) => buildOpenRouterCerebrasBody({ messages }),
+    },
+    {
+      label: 'buildOpenRouterFastChatBody',
+      build: (messages) => buildOpenRouterFastChatBody({ messages }),
+    },
+  ];
+
+  for (const { label: builderLabel, build } of builders) {
+    for (const { label: shapeLabel, toolCall } of shapes) {
+      const body = build([
+        { role: 'assistant', content: '', tool_calls: [toolCall] },
+      ] as CompletionMessage[]) as {
+        messages: Array<{ tool_calls?: Array<Record<string, unknown>> }>;
+      };
+      const sent = body.messages[0].tool_calls?.[0];
+      assertEqual(
+        String(sent?.type),
+        'function',
+        `${builderLabel} must stamp the discriminator on a ${shapeLabel} tool_call`
+      );
+      const fn = sent?.function as { name?: string } | undefined;
+      assert(
+        typeof fn?.name === 'string' && fn.name.length > 0,
+        `${builderLabel} must emit function.name for a ${shapeLabel} tool_call (got ${JSON.stringify(sent)})`
+      );
+      assert(
+        typeof sent?.id === 'string' && (sent.id as string).length > 0,
+        `${builderLabel} must carry a chat-dialect id for a ${shapeLabel} tool_call (got ${JSON.stringify(sent)})`
+      );
+    }
+  }
+}
+
+/**
+ * The Anthropic union relaxation collapses `T | null` to `T` and drops the key
+ * from `required`, because Anthropic expresses optionality through `required`
+ * and rejects a body carrying more than 16 union-typed parameters.
+ *
+ * That is a deliberate contract change for one provider dialect: a
+ * required-nullable field becomes an absent-or-`T` field, and consumers read
+ * absence as null (`supervisorTools.ts` defaults `budget_dollars` to $1). Pin
+ * both halves so neither the collapse nor the consumer default drifts.
+ */
+interface JsonSchemaNode {
+  properties?: Record<string, JsonSchemaNode>;
+  additionalProperties?: JsonSchemaNode;
+  required?: string[];
+}
+
+async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
+  const extracted = extractToolsFromResponseFormat({
+    type: 'json_schema',
+    json_schema: {
+      name: 'probe',
+      schema: {
+        type: 'object',
+        properties: {
+          tool_calls: {
+            type: 'array',
+            items: {
+              anyOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    tool: { const: 'probe' },
+                    arguments: {
+                      type: 'object',
+                      properties: {
+                        goal: { type: 'string' },
+                        budget_dollars: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+                        meta: {
+                          type: 'object',
+                          additionalProperties: {
+                            anyOf: [{ type: 'string' }, { type: 'null' }],
+                          },
+                        },
+                      },
+                      required: ['goal', 'budget_dollars', 'meta'],
+                    },
+                  },
+                  required: ['tool', 'arguments'],
+                },
+              ],
+            },
+          },
+        },
+        required: ['tool_calls'],
+      },
+    },
+  } as Parameters<typeof extractToolsFromResponseFormat>[0]);
+  assert(extracted !== null, 'probe envelope must lift to a native tool');
+
+  const root = extracted.tools[0].input_schema as JsonSchemaNode;
+  const schema = root.properties?.arguments as JsonSchemaNode;
+  assertEqual(
+    JSON.stringify(schema.properties?.budget_dollars),
+    '{"type":"number"}',
+    'nullable union must collapse to its value branch'
+  );
+  assert(
+    !(schema.required ?? []).includes('budget_dollars'),
+    'collapsed nullable must leave required so absence can encode null'
+  );
+  assert(
+    (schema.required ?? []).includes('goal'),
+    'a non-nullable required field must stay required'
+  );
+  assertEqual(
+    JSON.stringify(schema.properties?.meta?.additionalProperties),
+    '{"type":"string"}',
+    'typed map values must be relaxed too, or they keep counting against the cap'
+  );
+}
+
+/** Anthropic caps a request at four `cache_control` blocks. */
+async function testClaudeAuth_bodyStaysWithinCacheBlockBudget() {
+  const system = ['universal static', 'stable user block', 'third section', 'fourth section'].join(
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+  );
+  const body = buildAnthropicBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: 'hi from sms' },
+    ],
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+  });
+
+  const blocks = (JSON.stringify(body).match(/cache_control/g) ?? []).length;
+  assert(blocks <= 4, `expected at most 4 cache_control blocks, got ${blocks}`);
+
+  const systemBlocks = body.system as Array<Record<string, unknown>>;
+  const marked = systemBlocks.filter((block) => 'cache_control' in block);
+  assert(marked.length > 0, 'the longest system prefix must stay cached');
+  assertEqual(
+    JSON.stringify(marked[marked.length - 1]),
+    JSON.stringify(systemBlocks.filter((b) => 'cache_control' in b).slice(-1)[0]),
+    'the last system breakpoint is the one retained'
   );
 }
 
@@ -2860,6 +3081,22 @@ async function main(): Promise<void> {
     {
       name: 'gptAuth / SMS supervisor schema is strict for Codex Responses',
       fn: testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses,
+    },
+    {
+      name: 'waterfall / OpenAI tool_calls carry the function type discriminator',
+      fn: testWaterfall_openAiToolCallsCarryFunctionType,
+    },
+    {
+      name: 'claudeAuth / SMS supervisor lifts native tools without unions',
+      fn: testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions,
+    },
+    {
+      name: 'claudeAuth / body stays within the cache_control block budget',
+      fn: testClaudeAuth_bodyStaysWithinCacheBlockBudget,
+    },
+    {
+      name: 'claudeAuth / nullable relaxation keeps non-nullable fields required',
+      fn: testAnthropic_nullableRelaxationPreservesNonNullableRequired,
     },
     {
       name: 'schema / Zod response_model builds strict OpenAI schema',

@@ -878,6 +878,47 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert msgs[0]["content"] == "you are helpful"
 
 
+def test_transform_messages_for_openai_stamps_tool_call_type():
+    """Google (via OpenRouter) rejects an assistant tool_call without OpenAI's
+    ``type: "function"`` with 400 "The conversation transcript is malformed",
+    which silently demotes the pool to its weakest leg. Producers currently
+    hand-write the field; this keeps the invariant enforced, not conventional.
+    See back-end sibling: rose.blackbox.ts "OpenAI tool_calls carry the function
+    type discriminator".
+    """
+    msgs = [
+        {"role": "system", "content": "s"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "a", "function": {"name": "f", "arguments": "{}"}}],
+        },
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "b", "name": "g"}]},
+        # Responses-dialect calls carry `call_id`; chat-dialect tool results are
+        # matched by `id`, so it has to be mapped across.
+        {"role": "assistant", "content": "", "tool_calls": [{"call_id": "c", "name": "h"}]},
+        {"role": "tool", "tool_call_id": "c", "content": "done"},
+    ]
+    out = transform_messages_for_openai(msgs)
+
+    nested = out[1]["tool_calls"][0]
+    assert nested["type"] == "function", nested
+    assert nested["function"]["name"] == "f", nested
+
+    # The flat {id, name} shape our own transforms accept is not valid OpenAI
+    # dialect; it must be lifted, not passed through.
+    flat = out[2]["tool_calls"][0]
+    assert flat["type"] == "function", flat
+    assert flat["function"]["name"] == "g", flat
+
+    mapped = out[3]["tool_calls"][0]
+    assert mapped["type"] == "function", mapped
+    assert mapped["id"] == "c", f"call_id must map to the chat-dialect id: {mapped}"
+
+    # Callers' message objects must not be mutated.
+    assert "type" not in msgs[1]["tool_calls"][0], msgs[1]
+
+
 def test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached():
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
@@ -5428,6 +5469,10 @@ async def run_all_tests():
     r.record("reconstruct_envelope", test_reconstruct_agent_response_envelope)
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
+    r.record(
+        "openai_messages_tool_call_type_discriminator",
+        test_transform_messages_for_openai_stamps_tool_call_type,
+    )
     r.record(
         "openai_messages_multi_boundary_cached",
         test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached,
