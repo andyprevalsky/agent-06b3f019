@@ -2123,3 +2123,6 @@
 {"task": "spawn-sub-agents", "duration_seconds": 159.6, "cost_cents": 2.0, "timestamp": "2026-08-04T18:53:29.328502+00:00", "agent_id": "b94eddd6-ffed-4d7d-a9cc-3b12264afcba"}
 {"task": "parallel-tool-calls", "duration_seconds": 193.9, "cost_cents": 11.0, "timestamp": "2026-08-04T18:53:29.328502+00:00", "agent_id": "99b4ccfb-43d5-413c-a6a4-59377d132c67"}
 {"task": "browser-biometrics-webdecoy", "duration_seconds": 227.6, "cost_cents": 59.0, "timestamp": "2026-08-04T18:53:29.328502+00:00", "agent_id": "c07187bf-b8f3-471f-9ae9-4defb909c051"}
+{"task": "agent-payment-test-shop", "duration_seconds": 218.2, "cost_cents": 13.0, "timestamp": "2026-08-04T19:46:48.801334+00:00", "agent_id": "f3e3fdd2-ad32-4d89-b196-3911686df5a5"}
+{"task": "agent-payment-setup-resume", "duration_seconds": 219.7, "cost_cents": 9.0, "timestamp": "2026-08-04T19:46:48.801334+00:00", "agent_id": "1a7f5461-93e7-4d84-9105-aa05b5e3882a"}
+{"task": "agent-payment-idempotent-abandonment", "duration_seconds": 298.8, "cost_cents": 13.0, "timestamp": "2026-08-04T19:46:48.801334+00:00", "agent_id": "0dec5cfd-c6b1-4295-9af3-69400e655289"}
