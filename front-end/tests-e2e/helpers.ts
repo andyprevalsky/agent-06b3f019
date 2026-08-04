@@ -285,7 +285,10 @@ export async function waitForTemporalWorkflow(agentId: string, timeoutMs: number
   // A stall or transient 404 is retried — the backend persists
   // temporal_workflow_id within a few seconds, so any healthy poll in the
   // window resolves it.
-  const PER_REQUEST_TIMEOUT_MS = 2_500;
+  // Production edge stalls have reached ~2.5s while the persisted workflow was already running.
+  // Keep one stalled socket from consuming half of the five-second lifecycle SLA; healthy reads
+  // complete in well under this bound and the outer deadline still permits bounded retries.
+  const PER_REQUEST_TIMEOUT_MS = 500;
   const POLL_INTERVAL_MS = 150;
 
   while (Date.now() < deadline) {

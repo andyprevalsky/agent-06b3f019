@@ -59,7 +59,7 @@ const RECLAIM_IN_PROGRESS_FUNDING_STATUSES = new Set<PurchaseWalletFundingStatus
  */
 async function purchaseCardWasSpent(
   purchaseId: string,
-  details: CardProviderDetailsResult
+  details: Pick<CardProviderDetailsResult, 'status' | 'balanceCents'>
 ): Promise<boolean> {
   if (isCardLive(details)) return false;
   const funding = await findWalletFundingByPurchaseId(purchaseId);
@@ -67,6 +67,34 @@ async function purchaseCardWasSpent(
     return false;
   }
   return true;
+}
+
+/**
+ * AgentCard deliberately stops returning credentials after a card is closed. The literal
+ * `card_closed` provider code is therefore an authoritative closed/zero-balance card state, not
+ * an unreadable-card outage. Both the typed code and the wrapped MCP message are accepted because
+ * the MCP SDK can surface tool errors through either path.
+ */
+function isClosedCardDetailsError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && code.toLowerCase() === 'card_closed') return true;
+  return /\bcard_closed\b/i.test(error instanceof Error ? error.message : String(error));
+}
+
+async function closeCardForReclaim(
+  cardProvider: CardProvider,
+  cardId: string,
+  purchaseId: string
+): Promise<void> {
+  try {
+    await cardProvider.closeCard(cardId);
+  } catch (error) {
+    if (!isClosedCardDetailsError(error)) throw error;
+    log.info('Purchase card was already closed while reclaiming funding', {
+      purchase_id: purchaseId,
+      card_id: cardId,
+    });
+  }
 }
 
 /**
@@ -116,6 +144,10 @@ export async function cleanupAgentPurchaseCards(
   // immediately so the user's Stripe hold is released without waiting for the stale cron window.
   await abandonAgentFundingPending(agentId);
   await reconcileAbandonedPurchaseFunding(cardProvider, walletFundingProvider, { agentId });
+  // A previous close may have committed at AgentCard while its release observation timed out.
+  // Retry stale leases here as well as in the minute cron so an explicit abandonment request is
+  // sufficient to finish both charged and admin no-charge purchases.
+  await reconcileFailedPurchaseFundingReclaims(walletFundingProvider, { agentId }, cardProvider);
 
   const openPurchases = await prisma.purchaseSpend.findMany({
     where: {
@@ -148,15 +180,22 @@ export async function cleanupAgentPurchaseCards(
         const details = await activeCardProvider.getDetails(cardId);
         cardWasUsed = await purchaseCardWasSpent(purchase.id, details);
       } catch (readError) {
-        // Can't confirm whether the card was used — don't guess with the user's money. Leave the
-        // hold for the transaction webhook / Stripe auto-release.
-        log.warn('Cleanup could not read card; leaving hold for webhook/auto-release', {
-          agent_id: agentId,
-          purchase_id: purchase.id,
-          card_id: cardId,
-          error: readError instanceof Error ? readError.message : String(readError),
-        });
-        continue;
+        if (isClosedCardDetailsError(readError)) {
+          cardWasUsed = await purchaseCardWasSpent(purchase.id, {
+            status: 'CLOSED',
+            balanceCents: 0,
+          });
+        } else {
+          // Can't confirm whether the card was used — don't guess with the user's money. Leave the
+          // hold for the transaction webhook / Stripe auto-release.
+          log.warn('Cleanup could not read card; leaving hold for webhook/auto-release', {
+            agent_id: agentId,
+            purchase_id: purchase.id,
+            card_id: cardId,
+            error: readError instanceof Error ? readError.message : String(readError),
+          });
+          continue;
+        }
       }
 
       if (cardWasUsed) {
@@ -177,7 +216,7 @@ export async function cleanupAgentPurchaseCards(
           });
           continue;
         }
-        await activeCardProvider.closeCard(cardId);
+        await closeCardForReclaim(activeCardProvider, cardId, purchase.id);
         try {
           await reclaimPurchaseWalletFunding(
             purchase,
@@ -298,7 +337,6 @@ export async function reconcileFailedPurchaseFundingReclaims(
           },
         },
       ],
-      stripePaymentIntentId: { not: null },
     },
     select: {
       id: true,
@@ -318,7 +356,7 @@ export async function reconcileFailedPurchaseFundingReclaims(
           cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
         // close_card is provider-idempotent. Retrying it closes the crash window where a reclaim
         // lease committed but the worker died before the original close call.
-        await activeCardProvider.closeCard(purchase.cardId);
+        await closeCardForReclaim(activeCardProvider, purchase.cardId, purchase.id);
       }
       const funding = await findWalletFundingByPurchaseId(purchase.id);
       let reclaimLeaseToken: string | undefined;
