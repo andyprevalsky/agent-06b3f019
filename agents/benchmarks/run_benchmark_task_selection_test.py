@@ -51,6 +51,7 @@ def test_agent_payment_tasks_use_a_dedicated_non_admin_user():
 
 def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch):
     monkeypatch.delenv("BENCHMARK_AGENT_PAYMENT_USER_ID", raising=False)
+    monkeypatch.delenv("BENCHMARK_ISOLATED_RUN", raising=False)
     monkeypatch.delenv("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", raising=False)
     local_runner.configure_task_environment(
         ["agent-payment-test-shop"], isolated=True
@@ -68,6 +69,7 @@ def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch)
         local_runner.os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"]
         == "1"
     )
+    assert local_runner.os.environ["BENCHMARK_ISOLATED_RUN"] == "true"
 
     calls = []
     monkeypatch.setattr(local_runner.subprocess, "run", lambda *args, **kwargs: calls.append((args, kwargs)))
@@ -81,6 +83,7 @@ def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch)
 
 
 def test_payment_compute_pool_requires_an_isolated_stack(monkeypatch):
+    monkeypatch.setenv("BENCHMARK_ISOLATED_RUN", "true")
     monkeypatch.setenv("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", "1")
 
     local_runner.configure_task_environment(
@@ -88,6 +91,7 @@ def test_payment_compute_pool_requires_an_isolated_stack(monkeypatch):
     )
 
     assert "SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS" not in os.environ
+    assert "BENCHMARK_ISOLATED_RUN" not in os.environ
 
 
 def test_payment_fixture_guards_identity_and_funds_non_admin_credit():
