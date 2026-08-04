@@ -20,14 +20,33 @@ export function parseCookieDomains(raw: string | undefined): string[] {
 
 type WhereClause = Record<string, unknown>;
 
-function domainFieldClauses(field: string, domains: string[]): WhereClause[] {
-  const clauses: WhereClause[] = [];
+export type DomainFieldMatch = {
+  mode: 'equals' | 'endsWith';
+  value: string;
+};
+
+/**
+ * The single description of "this host-shaped column belongs to this domain".
+ *
+ * Both the Prisma read path and the SQL COPY-stream read path are derived from
+ * this list, so the two can never drift apart on the suffix-safety rule: the
+ * REQUIRED leading dot on the endsWith clause is what stops "evil-doordash.com"
+ * from being pulled into a "doordash.com" benchmark fixture.
+ */
+export function domainFieldMatches(domains: string[]): DomainFieldMatch[] {
+  const matches: DomainFieldMatch[] = [];
   for (const domain of domains) {
-    clauses.push({ [field]: domain });
-    clauses.push({ [field]: `.${domain}` });
-    clauses.push({ [field]: { endsWith: `.${domain}` } });
+    matches.push({ mode: 'equals', value: domain });
+    matches.push({ mode: 'equals', value: `.${domain}` });
+    matches.push({ mode: 'endsWith', value: `.${domain}` });
   }
-  return clauses;
+  return matches;
+}
+
+function domainFieldClauses(field: string, domains: string[]): WhereClause[] {
+  return domainFieldMatches(domains).map(({ mode, value }) =>
+    mode === 'equals' ? { [field]: value } : { [field]: { endsWith: value } }
+  );
 }
 
 export type OriginDomainMatch = {
@@ -108,12 +127,17 @@ export type BrowserAuthRowTypes = {
  */
 export type BrowserAuthPage = { skip: number; take: number };
 
-// A complete developer account currently carries roughly 22k cookies. At 25
-// rows per page the warm-stack credential refresh needed about 880 production
-// round trips and could not satisfy the deploy stack's 120-second readiness
-// contract. Five hundred rows keeps residency bounded to a small fraction of
-// the full table while reducing that startup path to roughly 44 round trips.
-export const DEFAULT_COOKIE_PAGE_SIZE = 500;
+// The bounded default for any PAGED cookie read through these selectors.
+//
+// This is deliberately small. It used to be inflated to 500 to buy back
+// production round trips, because the seed pulled a ~22k-cookie account through
+// Prisma page by page: 25 rows per page cost ~880 round trips (too slow for the
+// deploy stack's 120s readiness contract) while 500 rows per page pushed peak
+// RSS past the seed ratchet. That tradeoff no longer exists — seed-local streams
+// the Cookie table Postgres-to-Postgres with COPY (see seed-jsonb-stream.ts), so
+// the seed pays ONE round trip and holds no rows in the V8 heap. Page size is
+// once again purely a residency bound for callers that page.
+export const DEFAULT_COOKIE_PAGE_SIZE = 50;
 
 export type BrowserAuthReaders<Rows extends BrowserAuthRowTypes> = {
   [Table in keyof Rows]: (

@@ -2,9 +2,73 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
-import { originDomainMatches } from './cookie-domain-scope';
+import { domainFieldMatches, originDomainMatches } from './cookie-domain-scope';
 
 export type JsonbOriginTable = 'LocalStorageOrigin' | 'IndexedDBOrigin' | 'CacheStorageOrigin';
+
+/**
+ * Every Cookie column, in schema order. The seed must reproduce the source row
+ * byte for byte — measure-seed-memory.sh fingerprints `to_jsonb(row) - 'id'` on
+ * both sides — so a column added to the model and not added here is silently
+ * dropped user data, not a cosmetic omission.
+ */
+const COOKIE_COLUMNS = [
+  'id',
+  'userId',
+  'domain',
+  'name',
+  'path',
+  'value',
+  'expiresUtc',
+  'isSecure',
+  'isHttpOnly',
+  'browserSource',
+  'syncedAt',
+  'creationUtc',
+  'hasExpires',
+  'isPersistent',
+  'lastAccessUtc',
+  'lastUpdateUtc',
+  'priority',
+  'sameSite',
+  'sourcePort',
+  'sourceScheme',
+  'topFrameSiteKey',
+  'browserProfile',
+] as const;
+
+/** Cookie's natural identity: @@unique on the Prisma model. */
+const COOKIE_IDENTITY_COLUMNS = [
+  'userId',
+  'domain',
+  'name',
+  'path',
+  'topFrameSiteKey',
+  'browserSource',
+  'browserProfile',
+] as const;
+
+/**
+ * The columns `cookieContent()` in seed-local-credentials.ts hashes, in the same
+ * order. That signature is a pure passthrough over these values — no encryption,
+ * no derivation — so comparing them directly in SQL is exactly the Prisma warm
+ * path's "only touch rows whose content actually changed" rule.
+ */
+const COOKIE_CONTENT_COLUMNS = [
+  'value',
+  'expiresUtc',
+  'isSecure',
+  'isHttpOnly',
+  'creationUtc',
+  'hasExpires',
+  'isPersistent',
+  'lastAccessUtc',
+  'lastUpdateUtc',
+  'priority',
+  'sameSite',
+  'sourcePort',
+  'sourceScheme',
+] as const;
 
 const PAYLOAD_COLUMN: Record<JsonbOriginTable, 'entries' | 'databases' | 'caches'> = {
   LocalStorageOrigin: 'entries',
@@ -97,6 +161,73 @@ export function jsonbOriginTargetCopySql(table: JsonbOriginTable): string {
   `;
 }
 
+function quoteColumns(columns: readonly string[]): string {
+  return columns.map((column) => `"${column}"`).join(', ');
+}
+
+/**
+ * Scope the cookie read to a benchmark's domains using the SAME three clauses
+ * the Prisma selector emits (host cookie, domain cookie, subdomain cookie), read
+ * from the shared `domainFieldMatches` description so the two paths cannot
+ * diverge. The leading dot on the LIKE clause is the suffix guard:
+ * "evil-doordash.com" must never be pulled into a "doordash.com" fixture.
+ */
+export function cookieSourceCopySql(userId: string, domains: string[]): string {
+  const matches = domainFieldMatches(domains);
+  const domainSql =
+    matches.length === 0
+      ? ''
+      : ` AND (${matches
+          .map(({ mode, value }) =>
+            mode === 'equals'
+              ? `"domain" = ${quoteSqlLiteral(value)}`
+              : `"domain" LIKE ${quoteLikePattern(value, 'endsWith')} ESCAPE ${quoteSqlLiteral(
+                  '\\'
+                )}`
+          )
+          .join(' OR ')})`;
+
+  return `
+    COPY (
+      SELECT ${quoteColumns(COOKIE_COLUMNS)}
+      FROM "Cookie"
+      WHERE "userId" = ${quoteSqlLiteral(userId)}${domainSql}
+      ORDER BY "id" ASC
+    ) TO STDOUT WITH (FORMAT csv)
+  `;
+}
+
+/**
+ * Merge the streamed cookies by their natural identity.
+ *
+ * `syncedAt` rides along with a content change (mirroring the Prisma upsert's
+ * update payload) but is deliberately absent from the WHERE guard, so a row
+ * whose only difference is its sync timestamp is left untouched — the same rows
+ * the `cookieContent()` diff skips.
+ */
+export function cookieTargetCopySql(): string {
+  const columns = quoteColumns(COOKIE_COLUMNS);
+  const stage = '_SeedCookie';
+  const updates = [...COOKIE_CONTENT_COLUMNS, 'syncedAt']
+    .map((column) => `"${column}" = EXCLUDED."${column}"`)
+    .join(',\n        ');
+  const existingContent = COOKIE_CONTENT_COLUMNS.map((column) => `existing."${column}"`).join(', ');
+  const incomingContent = COOKIE_CONTENT_COLUMNS.map((column) => `EXCLUDED."${column}"`).join(', ');
+
+  return `
+    BEGIN;
+    CREATE TEMP TABLE "${stage}" (LIKE "Cookie" INCLUDING DEFAULTS) ON COMMIT DROP;
+    COPY "${stage}" (${columns}) FROM STDIN WITH (FORMAT csv);
+    INSERT INTO "Cookie" AS existing (${columns})
+      SELECT ${columns} FROM "${stage}"
+      ON CONFLICT (${quoteColumns(COOKIE_IDENTITY_COLUMNS)}) DO UPDATE SET
+        ${updates}
+      WHERE (${existingContent}) IS DISTINCT FROM (${incomingContent});
+    SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "${stage}";
+    COMMIT;
+  `;
+}
+
 type ProcessExit = { code: number | null; signal: NodeJS.Signals | null };
 
 function waitForExit(child: ChildProcess): Promise<ProcessExit> {
@@ -120,51 +251,38 @@ function captureOutput(
   return { read: () => output };
 }
 
-export interface StreamJsonbOriginsOptions {
+interface CopyStreamOptions {
+  label: string;
   remoteUrl: string;
   localUrl: string;
-  userId: string;
-  domains: string[];
-  table: JsonbOriginTable;
+  sourceSql: string;
+  targetSql: string;
 }
 
 /**
- * Stream one JSONB-bearing origin table directly from source Postgres into a
- * target-side temporary table, then merge it by the table's natural identity.
+ * Run one source-COPY → target-COPY pipe and return the streamed row count.
  *
  * Both COPY commands use CSV framing, so newlines, quotes, delimiters, and
- * arbitrarily large JSON values retain exact Postgres JSONB semantics. The
- * target merge preserves an existing local primary key and local-only rows,
- * matching the prior Prisma upsert behavior.
+ * arbitrarily large values retain exact Postgres semantics. Node never holds a
+ * row: it only forwards pipe chunks, and `pipeline` propagates the target's
+ * backpressure back to the source process.
  */
-export async function streamJsonbOrigins({
+async function runCopyStream({
+  label,
   remoteUrl,
   localUrl,
-  userId,
-  domains,
-  table,
-}: StreamJsonbOriginsOptions): Promise<number> {
+  sourceSql,
+  targetSql,
+}: CopyStreamOptions): Promise<number> {
   const commonArgs = ['-X', '-q', '-A', '-t', '-v', 'ON_ERROR_STOP=1'];
   const source = spawn(
     'psql',
-    [
-      ...commonArgs,
-      '--dbname',
-      psqlDatabaseUrl(remoteUrl),
-      '--command',
-      jsonbOriginSourceCopySql(table, userId, domains),
-    ],
+    [...commonArgs, '--dbname', psqlDatabaseUrl(remoteUrl), '--command', sourceSql],
     { stdio: ['ignore', 'pipe', 'pipe'] }
   );
   const target = spawn(
     'psql',
-    [
-      ...commonArgs,
-      '--dbname',
-      psqlDatabaseUrl(localUrl),
-      '--command',
-      jsonbOriginTargetCopySql(table),
-    ],
+    [...commonArgs, '--dbname', psqlDatabaseUrl(localUrl), '--command', targetSql],
     { stdio: ['pipe', 'pipe', 'pipe'] }
   );
 
@@ -184,14 +302,14 @@ export async function streamJsonbOrigins({
 
   if (sourceExit.code !== 0) {
     throw new Error(
-      `${table} source COPY failed (${sourceExit.signal ?? `exit ${sourceExit.code}`}): ${
+      `${label} source COPY failed (${sourceExit.signal ?? `exit ${sourceExit.code}`}): ${
         sourceError.read().trim() || 'psql returned no diagnostic'
       }`
     );
   }
   if (targetExit.code !== 0) {
     throw new Error(
-      `${table} target COPY failed (${targetExit.signal ?? `exit ${targetExit.code}`}): ${
+      `${label} target COPY failed (${targetExit.signal ?? `exit ${targetExit.code}`}): ${
         targetError.read().trim() || 'psql returned no diagnostic'
       }`
     );
@@ -202,7 +320,69 @@ export async function streamJsonbOrigins({
 
   const match = targetOutput.read().match(/SEED_STREAM_COUNT=(\d+)/);
   if (!match) {
-    throw new Error(`${table} target COPY completed without a row-count marker`);
+    throw new Error(`${label} target COPY completed without a row-count marker`);
   }
   return Number(match[1]);
+}
+
+export interface StreamJsonbOriginsOptions {
+  remoteUrl: string;
+  localUrl: string;
+  userId: string;
+  domains: string[];
+  table: JsonbOriginTable;
+}
+
+/**
+ * Stream one JSONB-bearing origin table directly from source Postgres into a
+ * target-side temporary table, then merge it by the table's natural identity.
+ *
+ * The target merge preserves an existing local primary key and local-only rows,
+ * matching the prior Prisma upsert behavior.
+ */
+export async function streamJsonbOrigins({
+  remoteUrl,
+  localUrl,
+  userId,
+  domains,
+  table,
+}: StreamJsonbOriginsOptions): Promise<number> {
+  return runCopyStream({
+    label: table,
+    remoteUrl,
+    localUrl,
+    sourceSql: jsonbOriginSourceCopySql(table, userId, domains),
+    targetSql: jsonbOriginTargetCopySql(table),
+  });
+}
+
+export interface StreamCookiesOptions {
+  remoteUrl: string;
+  localUrl: string;
+  userId: string;
+  domains: string[];
+}
+
+/**
+ * Stream the Cookie table Postgres-to-Postgres.
+ *
+ * A developer account carries ~22k cookies. Paging that through Prisma forced a
+ * choice between round trips and heap: 25 rows/page needed ~880 production round
+ * trips (over the deploy stack's 120s readiness contract) while 500 rows/page
+ * pushed the seed's peak RSS past its ratchet. COPY removes the tradeoff — one
+ * round trip, and no cookie row ever enters the V8 heap.
+ */
+export async function streamCookies({
+  remoteUrl,
+  localUrl,
+  userId,
+  domains,
+}: StreamCookiesOptions): Promise<number> {
+  return runCopyStream({
+    label: 'Cookie',
+    remoteUrl,
+    localUrl,
+    sourceSql: cookieSourceCopySql(userId, domains),
+    targetSql: cookieTargetCopySql(),
+  });
 }

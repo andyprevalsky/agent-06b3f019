@@ -162,7 +162,6 @@ test('seed-local consumes every scoped reader or streamed equivalent exactly onc
   );
   const occurrences = (needle: string): number => source.split(needle).length - 1;
   for (const table of [
-    'cookie',
     'cookieBundle',
     'steelSessionAuth',
     'browserPermission',
@@ -199,6 +198,26 @@ test('seed-local consumes every scoped reader or streamed equivalent exactly onc
   assert(
     streamSource.includes('originDomainMatches(domains)'),
     'streamed origin tables must share the exact domain matcher used by the scoped Prisma readers'
+  );
+
+  // Cookies stream too. Paging ~22k cookies through Prisma cost either ~880
+  // production round trips (past the deploy stack's 120s readiness contract) or
+  // a 239MB peak against the 230MB seed ratchet; COPY costs one round trip and
+  // no V8 heap. The scoped Prisma reader must therefore NOT be the seed's cookie
+  // path, and the streamed path must reuse the same domain matcher.
+  assert.equal(
+    occurrences('scopedRemoteBrowserAuth.cookie('),
+    0,
+    'cookies must not be paged back through Prisma'
+  );
+  assert.equal(
+    occurrences('streamCookies({'),
+    1,
+    'Cookie must execute exactly once through the streamed boundary'
+  );
+  assert(
+    streamSource.includes('domainFieldMatches(domains)'),
+    'the streamed cookie read must share the exact domain matcher used by cookieSyncWhere'
   );
 });
 

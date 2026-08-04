@@ -24,6 +24,13 @@
  *            snapshot re-materializes the whole table and re-breaks the fix).
  *   case 5 — a short final page terminates the loop.
  *   case 6 — an invalid page size is rejected rather than silently unpaged.
+ *
+ * The Cookie table hit the same wall from the other side. A ~22k-cookie account
+ * paged through Prisma forced a choice between ~880 production round trips (over
+ * the deploy stack's 120s readiness contract) and a 239MB peak against the 230MB
+ * seed ratchet. It now streams Postgres-to-Postgres with COPY, so the remaining
+ * cases pin what that SQL must guarantee: suffix-safe domain scoping, escaped
+ * literals, full-column fidelity, a natural-key merge, and a content-only diff.
  */
 
 import {
@@ -35,6 +42,8 @@ import {
 import { createHash } from 'node:crypto';
 import { Readable, Writable } from 'node:stream';
 import {
+  cookieSourceCopySql,
+  cookieTargetCopySql,
   jsonbOriginSourceCopySql,
   jsonbOriginTargetCopySql,
   pipeJsonbCopy,
@@ -285,16 +294,224 @@ test('an invalid page size is rejected instead of silently reading unpaged', asy
   assert(threw, 'page size 0 must throw — silently falling back to an unpaged read is the bug');
 });
 
-test('the default cookie page stays bounded without exceeding the deploy startup round-trip budget', () => {
-  const productionCookieCount = 22_000;
-  const maximumStartupPages = 50;
-  const pages = Math.ceil(productionCookieCount / DEFAULT_COOKIE_PAGE_SIZE);
+/**
+ * Interpret the generated domain predicate the way Postgres would.
+ *
+ * Asserting on substrings alone cannot prove suffix-safety — only evaluating the
+ * whole OR-clause against a look-alike host can. Each clause is parsed back out
+ * of the SQL and applied to a candidate domain.
+ */
+function cookieDomainPredicate(sql: string): (domain: string) => boolean {
+  const clause = sql.match(/AND \((.*)\)\n/)?.[1];
+  assert(clause !== undefined, 'expected a parenthesised domain clause in the cookie source SQL');
+  const unquote = (literal: string) => literal.replaceAll("''", "'");
+  const tests: Array<(domain: string) => boolean> = [];
+
+  for (const part of clause.split(' OR ')) {
+    const equals = part.match(/^"domain" = '((?:[^']|'')*)'$/);
+    if (equals) {
+      const expected = unquote(equals[1]);
+      tests.push((domain) => domain === expected);
+      continue;
+    }
+    const like = part.match(/^"domain" LIKE '((?:[^']|'')*)' ESCAPE '\\'$/);
+    assert(like !== null, `unrecognised cookie domain clause: ${part}`);
+    // Translate the LIKE pattern (with ESCAPE '\') into an equivalent regex.
+    const pattern = unquote(like[1]);
+    let regex = '';
+    for (let index = 0; index < pattern.length; index += 1) {
+      const character = pattern[index];
+      if (character === '\\') {
+        index += 1;
+        regex += pattern[index].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      } else if (character === '%') regex += '[\\s\\S]*';
+      else if (character === '_') regex += '[\\s\\S]';
+      else regex += character.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+    const compiled = new RegExp(`^${regex}$`);
+    tests.push((domain) => compiled.test(domain));
+  }
+
+  assert(tests.length > 0, 'expected at least one cookie domain clause');
+  return (domain) => tests.some((matches) => matches(domain));
+}
+
+test('streamed cookie copy scopes domains suffix-safely', () => {
+  const sql = cookieSourceCopySql('dev-user', ['doordash.com']);
+
+  assert(sql.includes(`"userId" = 'dev-user'`), 'cookie COPY must scope the read to one user');
+  assert(sql.includes(`FROM "Cookie"`), 'cookie COPY must read the Cookie table');
+
+  const matches = cookieDomainPredicate(sql);
+  for (const domain of ['doordash.com', '.doordash.com', 'www.doordash.com', 'a.b.doordash.com']) {
+    assert(matches(domain), `cookie scope must include ${domain}`);
+  }
+  for (const domain of [
+    'evil-doordash.com',
+    'evildoordash.com',
+    'doordash.com.evil.com',
+    'amazon.com',
+  ]) {
+    assert(
+      !matches(domain),
+      `cookie scope must NOT include the look-alike ${domain} — a benchmark fixture would ` +
+        'receive another site’s live session cookies'
+    );
+  }
+});
+
+test('streamed cookie copy escapes SQL literals and LIKE wildcards', () => {
+  const sql = cookieSourceCopySql("user'quoted", ["o'reilly%_.com"]);
+
+  assert(sql.includes(`"userId" = 'user''quoted'`), 'cookie COPY must quote the user id');
   assert(
-    pages <= maximumStartupPages,
-    `default cookie page requires ${pages} production round trips; expected at most ${maximumStartupPages}`
+    sql.includes(`"domain" = 'o''reilly%_.com'`),
+    'an equality clause must carry the domain verbatim with quotes doubled'
   );
   assert(
-    DEFAULT_COOKIE_PAGE_SIZE <= 1_000,
+    sql.includes(`"domain" LIKE '%.o''reilly\\%\\_.com' ESCAPE '\\'`),
+    'a LIKE clause must escape % and _ so a wildcard in the domain cannot widen the scope'
+  );
+  // The literal domain still matches itself once escaped; a wildcard expansion would not.
+  const matches = cookieDomainPredicate(sql);
+  assert(matches("www.o'reilly%_.com"), 'the escaped pattern must still match the literal domain');
+  assert(!matches("www.o'reillyXY.com"), 'an escaped % must not be interpreted as a LIKE wildcard');
+});
+
+test('an unscoped cookie stream reads the whole user table in one round trip', () => {
+  const sql = cookieSourceCopySql('dev-user', []);
+  assert(!sql.includes('AND ('), 'no declared domains must not narrow the cookie read');
+  assert(
+    !/LIMIT|OFFSET/i.test(sql),
+    'the cookie stream must not page — paging a 22k-cookie account is the ~880 round trips ' +
+      'that broke the deploy stack’s 120s readiness contract'
+  );
+  assert(
+    sql.includes('TO STDOUT WITH (FORMAT csv)'),
+    'cookies must leave the source as a CSV COPY stream so no row enters the V8 heap'
+  );
+});
+
+test('streamed cookie copy carries every column so the seed stays byte-faithful', () => {
+  const sql = cookieSourceCopySql('dev-user', []);
+  // Every Cookie column in the Prisma model. measure-seed-memory.sh fingerprints
+  // `to_jsonb(row) - 'id'` on both sides, so an omitted column is lost user data.
+  for (const column of [
+    'id',
+    'userId',
+    'domain',
+    'name',
+    'path',
+    'value',
+    'expiresUtc',
+    'isSecure',
+    'isHttpOnly',
+    'browserSource',
+    'syncedAt',
+    'creationUtc',
+    'hasExpires',
+    'isPersistent',
+    'lastAccessUtc',
+    'lastUpdateUtc',
+    'priority',
+    'sameSite',
+    'sourcePort',
+    'sourceScheme',
+    'topFrameSiteKey',
+    'browserProfile',
+  ]) {
+    assert(sql.includes(`"${column}"`), `cookie COPY must carry the "${column}" column`);
+  }
+});
+
+test('streamed cookie copy merges on the natural key and only rewrites changed content', () => {
+  const sql = cookieTargetCopySql();
+
+  assert(
+    sql.includes(
+      'CREATE TEMP TABLE "_SeedCookie" (LIKE "Cookie" INCLUDING DEFAULTS) ON COMMIT DROP'
+    )
+  );
+  assert(
+    sql.includes('COPY "_SeedCookie"') && sql.includes('FROM STDIN WITH (FORMAT csv)'),
+    'cookies must land in a temp stage table via COPY FROM STDIN'
+  );
+  assert(
+    sql.includes(
+      'ON CONFLICT ("userId", "domain", "name", "path", "topFrameSiteKey", "browserSource", ' +
+        '"browserProfile") DO UPDATE SET'
+    ),
+    'target COPY must merge by the Cookie model’s natural @@unique identity, matching the ' +
+      'Prisma upsert it replaces'
+  );
+  assert(
+    sql.includes(`SELECT 'SEED_STREAM_COUNT=' || count(*) FROM "_SeedCookie"`),
+    'target COPY must report the streamed row count the caller parses'
+  );
+
+  const update = sql.match(/DO UPDATE SET([\s\S]*?)WHERE \(/)?.[1];
+  assert(update !== undefined, 'expected a DO UPDATE SET body');
+  assert(!/"id"\s*=/.test(update), 'target COPY must preserve a pre-existing local primary id');
+  for (const identity of [
+    'userId',
+    'domain',
+    'name',
+    'path',
+    'topFrameSiteKey',
+    'browserSource',
+    'browserProfile',
+  ]) {
+    assert(
+      !update.includes(`"${identity}" =`),
+      `target COPY must not rewrite the conflict key column "${identity}"`
+    );
+  }
+
+  const guard = sql.match(/WHERE \(([\s\S]*?)\);/)?.[1];
+  assert(guard !== undefined, 'expected an IS DISTINCT FROM guard on the merge');
+  assert(
+    sql.includes('IS DISTINCT FROM'),
+    'the merge must skip rows whose content is unchanged — rewriting all 22k rows on every ' +
+      'warm sync is the behavior cookieContent() exists to avoid'
+  );
+  // Exactly the columns cookieContent() hashes in seed-local-credentials.ts.
+  for (const column of [
+    'value',
+    'expiresUtc',
+    'isSecure',
+    'isHttpOnly',
+    'creationUtc',
+    'hasExpires',
+    'isPersistent',
+    'lastAccessUtc',
+    'lastUpdateUtc',
+    'priority',
+    'sameSite',
+    'sourcePort',
+    'sourceScheme',
+  ]) {
+    assert(
+      guard.includes(`existing."${column}"`) && guard.includes(`EXCLUDED."${column}"`),
+      `the content diff must compare "${column}", exactly as cookieContent() does`
+    );
+    assert(
+      update.includes(`"${column}" = EXCLUDED."${column}"`),
+      `a changed "${column}" must sync`
+    );
+  }
+  assert(
+    !guard.includes('syncedAt'),
+    'syncedAt must not trigger a rewrite on its own — cookieContent() excludes it'
+  );
+});
+
+test('the default cookie page stays bounded now that cookies stream', () => {
+  // The seed no longer pages cookies at all (COPY streams them in one round
+  // trip), so this default is once again purely a residency bound. It was
+  // inflated to 500 only to buy back round trips, which cost 239MB peak RSS
+  // against a 230MB ratchet.
+  assert(
+    DEFAULT_COOKIE_PAGE_SIZE <= 100,
     `default cookie page must remain memory-bounded, got ${DEFAULT_COOKIE_PAGE_SIZE}`
   );
 });

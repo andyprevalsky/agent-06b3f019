@@ -18,7 +18,6 @@ import {
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
   syncCookieBundleCredentials,
-  syncCookieCredentials,
   syncIntegrationCredentials,
   syncPagedCredentials,
   syncPasskeyCredentialRows,
@@ -33,12 +32,11 @@ import {
 } from './seed-local-helpers';
 import {
   createScopedBrowserAuthReaders,
-  DEFAULT_COOKIE_PAGE_SIZE,
   parseCookieDomains,
   passkeySyncWhere,
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
-import { streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
+import { streamCookies, streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
 import {
   SEED_PEAK_RSS_BUDGET_MB,
   SEED_RSS_REPORT_ENV,
@@ -124,7 +122,9 @@ function positivePageSize(name: string, fallback: number): number {
   return value;
 }
 
-const COOKIE_PAGE_SIZE = positivePageSize('SEED_COOKIE_PAGE_SIZE', DEFAULT_COOKIE_PAGE_SIZE);
+// Cookies are streamed with COPY rather than paged through Prisma, so there is
+// no SEED_COOKIE_PAGE_SIZE knob to honour here; DEFAULT_COOKIE_PAGE_SIZE remains
+// the bounded default for callers that page the cookie selector directly.
 const PERSON_PAGE_SIZE = positivePageSize('SEED_PERSON_PAGE_SIZE', 50);
 const MESSAGE_PAGE_SIZE = positivePageSize('SEED_MESSAGE_PAGE_SIZE', 50);
 const CREDENTIAL_PAGE_SIZE = positivePageSize('SEED_CREDENTIAL_PAGE_SIZE', 50);
@@ -405,41 +405,31 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   );
 
   // ── Cookies ──
+  // Streamed directly between Postgres processes, like the JSONB origin tables.
+  // A 22k-cookie account made Prisma paging a false choice: small pages needed
+  // ~880 production round trips (over the deploy stack's 120s readiness
+  // contract) and large pages pushed peak RSS past the seed ratchet. One COPY
+  // pays a single round trip and holds no cookie row in the V8 heap. The
+  // target-side merge keeps local-only rows and pre-existing local ids, and only
+  // rewrites rows whose content actually changed — the same rule the Prisma warm
+  // path applied via cookieContent().
   await syncRequiredTable(
     'Cookies',
     async () => {
-      // Fresh local table (the benchmark cold path): one bulk createMany instead of
-      // ~N per-row upsert round-trips (the ~780s bottleneck). On an already-populated
-      // table (warm restore / re-sync) fall back to upsert so refreshed cookie values
-      // overwrite stale rows. skipDuplicates makes the bulk path idempotent against
-      // the natural-key unique constraint. The remote side is always paged: a
-      // 22k-cookie account previously retained the whole result array and added
-      // ~340MB to the seed's cold peak.
-      const existingLocal = await local.cookie.count({ where: { userId: DEV_USER_ID } });
-      let synced = 0;
-      synced = await syncPagedCredentials(
-        (page) => scopedRemoteBrowserAuth.cookie(page),
-        async (cookies) => {
-          if (existingLocal === 0) {
-            await local.cookie.createMany({
-              data: cookies as never,
-              skipDuplicates: true,
-            });
-          } else {
-            await syncCookieCredentials(local.cookie, cookies);
-          }
-          return cookies.length;
-        },
-        COOKIE_PAGE_SIZE
-      );
+      const synced = await streamCookies({
+        remoteUrl: REMOTE_URL!,
+        localUrl: LOCAL_URL!,
+        userId: DEV_USER_ID,
+        domains: SEED_COOKIE_DOMAINS,
+      });
       if (SEED_COOKIE_DOMAINS.length > 0) {
         process.stdout.write(
           `     scoped to ${SEED_COOKIE_DOMAINS.length} domain(s) [${SEED_COOKIE_DOMAINS.join(
             ', '
           )}] → ${synced} cookies\n`
         );
-      } else if (synced > COOKIE_PAGE_SIZE) {
-        process.stdout.write(`     ${synced} cookies copied in bounded pages\n`);
+      } else if (synced > 0) {
+        process.stdout.write(`     ${synced} cookies streamed in one COPY round trip\n`);
       }
       return synced;
     },

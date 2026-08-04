@@ -59,6 +59,18 @@ test('large JSONB never materializes in the Node process', () => {
   assert.ok(!SEED_SOURCE.includes('scopedRemoteBrowserAuth.cacheStorageOrigin('));
 });
 
+test('cookies stream between databases instead of paging through Prisma', () => {
+  // A ~22k-cookie account made paging a false choice: 25 rows/page cost ~880
+  // production round trips (past the deploy stack's 120s readiness contract)
+  // and 500 rows/page measured a 239MB peak against this 230MB budget. COPY
+  // pays one round trip and keeps every cookie row out of the V8 heap, so the
+  // budget never has to move.
+  assert.ok(SEED_SOURCE.includes('streamCookies({'));
+  assert.ok(!SEED_SOURCE.includes('scopedRemoteBrowserAuth.cookie('));
+  assert.ok(!SEED_SOURCE.includes('local.cookie.createMany'));
+  assert.ok(!SEED_SOURCE.includes('syncCookieCredentials('));
+});
+
 test('no growth table is loaded whole — paging preserves every row', () => {
   // "Hyper efficient" here means STREAMED, not sampled: paging changes peak
   // heap, never row count, so there is no fidelity loss. These tables grow
