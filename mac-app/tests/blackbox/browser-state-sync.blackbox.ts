@@ -127,6 +127,19 @@ const ENDPOINT_PATHS = {
   passwords: '/api/integrations/passwords/upload',
 } as const;
 
+const encodeJwtPart = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value)).toString('base64url');
+
+const impersonatedSession = {
+  access_token: `${encodeJwtPart({ alg: 'HS256' })}.${encodeJwtPart({
+    sub: 'target-user',
+    act: { sub: 'operator-user' },
+  })}.sig`,
+  refresh_token: 'impersonated-refresh',
+  expires_at: Date.now() + 3_600_000,
+  user: { id: 'target-user' },
+};
+
 function okResponder() {
   return new Response(JSON.stringify({ success: true }), {
     status: 200,
@@ -502,6 +515,17 @@ describe('browser-state-sync domain', () => {
 
       expect(result).toEqual({ success: true, message: 'No data to sync' });
       expect(fetchCaptures).toHaveLength(0);
+      expect(BatchUploader.uploadInBatches).not.toHaveBeenCalled();
+    });
+
+    it('never reads or uploads local browser state into an impersonated account', async () => {
+      vi.mocked(AuthService.getSession).mockResolvedValue(impersonatedSession as never);
+
+      await BrowserStateSync.sync();
+
+      expect(IntegrationCache.getConnected).not.toHaveBeenCalled();
+      expect(BrowserCookieReader.readCookies).not.toHaveBeenCalled();
+      expect(LocalStorageReader.readLocalStorage).not.toHaveBeenCalled();
       expect(BatchUploader.uploadInBatches).not.toHaveBeenCalled();
     });
   });

@@ -12,7 +12,7 @@
  * exercise the component-under-test's branches without pulling in canvas / WebGL
  * / realtime subscriptions.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderWithProviders } from './test-wrapper';

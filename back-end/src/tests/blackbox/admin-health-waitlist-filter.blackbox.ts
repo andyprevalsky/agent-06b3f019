@@ -28,22 +28,12 @@ import { Prisma } from '@prisma/client';
 import { findWaitlistPeople, findWaitlistPersonById } from '../../domains/admin-health/repo';
 import { prisma } from '../../providers/database';
 import { isRealWaitlistPerson, realWaitlistPersonSql } from '../../providers/waitlistIdentity';
+import { uniqueRealWaitlistPhone } from './waitlistTestPhone';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
 import './assertLocalDatabase';
 config();
-
-/**
- * A number that reads as a real signup but can never route to a handset: NANP
- * 555-0100..555-0199 is the officially fictional subscriber range. It avoids
- * the +1555/+1999 prefixes, which the real-person filter treats as fixtures.
- */
-function uniquePhone(): string {
-  const areaCode = randomInt(200, 990);
-  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
-}
-
 /** An identity the real-people filter must reject, for exclusion assertions. */
 function fixtureEmail(marker: string): string {
   return `${marker}@blackbox-test.dev`;
@@ -124,15 +114,15 @@ async function testList_totalMatchesFilteredRows() {
 async function testRealPersonRule_sqlMatchesTypescript() {
   const marker = `wlcase-parity-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const seeds = [
-    { label: 'phone-only', email: null, phone: uniquePhone() },
+    { label: 'phone-only', email: null, phone: uniqueRealWaitlistPhone() },
     { label: 'email-only', email: `${marker}-a@waitlist-case.dev`, phone: null },
-    { label: 'both', email: `${marker}-b@waitlist-case.dev`, phone: uniquePhone() },
+    { label: 'both', email: `${marker}-b@waitlist-case.dev`, phone: uniqueRealWaitlistPhone() },
     { label: 'blank-phone', email: `${marker}-c@waitlist-case.dev`, phone: '   ' },
     { label: 'fixture-domain', email: fixtureEmail(`${marker}-d`), phone: null },
     {
       label: 'fixture-domain-with-phone',
       email: fixtureEmail(`${marker}-e`),
-      phone: uniquePhone(),
+      phone: uniqueRealWaitlistPhone(),
     },
     { label: 'reserved-domain', email: `${marker}-f@example.com`, phone: null },
     { label: 'dotted-test-domain', email: `${marker}-g@something.test`, phone: null },

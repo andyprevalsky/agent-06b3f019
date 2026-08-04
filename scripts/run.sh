@@ -1035,6 +1035,7 @@ CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECON
 
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
+    local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
     while [ "$SECONDS" -lt "$deadline" ]; do
         # --noproxy '*': this probe must measure the Cloudflare edge itself, not
         # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
@@ -1045,7 +1046,7 @@ cloudflare_tunnel_edge_is_routing() {
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0
         fi
-        sleep 2
+        sleep "$retry_seconds"
     done
     return 1
 }

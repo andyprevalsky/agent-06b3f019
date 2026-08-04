@@ -1,8 +1,6 @@
 #!/usr/bin/env tsx
 /** Black-box coverage for retry-safe waitlist delivery and Gmail boundaries. */
 
-import { randomInt } from 'node:crypto';
-
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 
@@ -27,6 +25,7 @@ import {
   TransactionalEmailDefinitiveError,
   TransactionalEmailError,
 } from '../../providers/transactionalEmail';
+import { uniqueRealWaitlistPhone } from './waitlistTestPhone';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
@@ -37,20 +36,9 @@ config();
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const ANDY_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
-/**
- * A number that reads as a real signup but can never route to a handset: NANP
- * 555-0100..555-0199 is the officially fictional subscriber range. The +1999
- * prefix is classified as a waitlist fixture and would be filtered out of the
- * real-people surfaces this suite drives.
- */
-function uniquePhone(): string {
-  const areaCode = randomInt(200, 990);
-  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
-}
-
 async function seedPerson(prefix: string) {
   const marker = `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   const email = `${marker}@waitlist-case.dev`;
   await prisma.user.create({ data: { userId: marker, phone, email, usedInviteCode: null } });
   const waitlist = await prisma.waitlist.create({ data: { name: marker, phone } });
@@ -424,7 +412,7 @@ async function testHttpConflictForStartedAttempt() {
   const marker = `wlcase-http-conflict-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const idempotencyKey = `${marker}-attempt`;
   const waitlist = await prisma.waitlist.create({
-    data: { name: marker, phone: uniquePhone() },
+    data: { name: marker, phone: uniqueRealWaitlistPhone() },
   });
   const operationKey = waitlistInviteFinalOperationKey(waitlist.id, idempotencyKey);
   await prisma.toolSideEffect.create({
