@@ -33,35 +33,133 @@ process_start_time() {
     python3 "$PROCESS_IDENTITY_HELPER" "$1" 2>/dev/null
 }
 
+# Sentinel written in place of a real identity when discovery observed a PID
+# mutate mid-walk. It can never equal an identity the helper emits, so
+# `reduce_stable_identities` always drops the PID it is attached to.
+IDENTITY_CONFLICT='conflict:identity-changed-during-discovery'
+IDENTITY_SEP=$'\t'
+
+# Append one `pid<TAB>identity` observation. When `expected_start` is supplied,
+# the identity read here must still equal it — a PID recycled between the
+# caller's validation and this write is discarded rather than recorded under a
+# stranger's identity.
 record_pid() {
-    local file=$1 pid=$2 start_time
-    start_time=$(process_start_time "$pid")
+    local file=$1 pid=$2 expected_start=${3:-} start_time
+    start_time=$(process_start_time "$pid") || start_time=""
     [[ -n "$start_time" ]] || return 1
+    if [[ -n "$expected_start" && "$start_time" != "$expected_start" ]]; then
+        return 1
+    fi
     printf '%s\t%s\n' "$pid" "$start_time" >> "$file"
 }
 
 identity_matches() {
     local pid=$1 expected_start=$2 current_start
-    current_start=$(process_start_time "$pid")
+    current_start=$(process_start_time "$pid") || current_start=""
     [[ -n "$expected_start" && "$current_start" == "$expected_start" ]]
 }
 
+# Validate the identity and deliver the signal inside ONE helper process, so the
+# identity read and the kill(2) are adjacent syscalls instead of separate shell
+# steps with a command substitution, a fork/exec teardown, and a builtin
+# dispatch in between.
+#
+# RESIDUAL RACE — NOT closed, and not closable here. POSIX kill(2) addresses a
+# PID, never a process instance. Linux pidfd_send_signal(2) and Darwin's
+# dispatch process sources would make check-and-signal atomic, but bash exposes
+# neither and `kill` is a builtin over the raw PID. The target can therefore
+# still exit and have its PID reused between the helper's identity read and its
+# kill(2). What this buys is width, not atomicity: a microsecond window inside a
+# single process rather than a multi-millisecond window across a shell round
+# trip. Skipping the signal instead is not an option — that would leave every
+# service running and break teardown outright — so we minimize the window and
+# fail closed on every mismatch we can actually observe.
 signal_if_same_identity() {
-    local pid=$1 expected_start=$2 signal=$3
-    if ! identity_matches "$pid" "$expected_start"; then
-        echo "🛡️  Refusing SIG${signal} for gone or recycled PID $pid" >&2
+    local pid=$1 expected_start=$2 signal=$3 status=0
+    if [[ -z "$expected_start" ]]; then
+        echo "🛡️  Refusing SIG${signal} for PID $pid with no captured identity" >&2
         return 1
     fi
-    kill "-$signal" "$pid" 2>/dev/null
+    python3 "$PROCESS_IDENTITY_HELPER" \
+        --expect "$expected_start" --signal "$signal" "$pid" 2>/dev/null || status=$?
+    case $status in
+        0) return 0 ;;
+        # 4 = identity matched but kill(2) failed (already reaped / EPERM).
+        # Nothing was signaled and nothing else can be done about it here.
+        4) return 1 ;;
+        *)
+            echo "🛡️  Refusing SIG${signal} for gone or recycled PID $pid" >&2
+            return 1
+            ;;
+    esac
 }
 
-# Record this pid + all descendants with their identity at discovery time.
+# Record this pid + all descendants with the identity validated at discovery
+# time. `expected_start` is threaded in by the caller so the identity that was
+# vetted is the identity that gets persisted: without it, a root that exits
+# after validation and whose PID is reused would be recorded under the
+# replacement's identity, and the later signal check would happily validate —
+# and kill — that stranger.
 pid_tree() {
-    local root=$1
-    record_pid "$ALL_FILE" "$root" || return
-    for child in $(pgrep -P "$root" 2>/dev/null); do
+    local root=$1 expected_start=${2:-} start_time children child
+
+    if [[ -n "$expected_start" ]]; then
+        start_time=$expected_start
+    else
+        start_time=$(process_start_time "$root") || start_time=""
+        [[ -n "$start_time" ]] || return
+    fi
+    identity_matches "$root" "$start_time" || return
+
+    children=$(pgrep -P "$root" 2>/dev/null) || children=""
+
+    # Re-validate AFTER enumerating children. If the root exited and its PID was
+    # reused during the pgrep, `children` describes a stranger's subtree. Poison
+    # the root record so the identity-aware reducer drops it, and abandon the
+    # subtree rather than adopting processes we never vetted.
+    if ! identity_matches "$root" "$start_time"; then
+        printf '%s%s%s\n' "$root" "$IDENTITY_SEP" "$IDENTITY_CONFLICT" >> "$ALL_FILE"
+        return
+    fi
+
+    printf '%s%s%s\n' "$root" "$IDENTITY_SEP" "$start_time" >> "$ALL_FILE"
+
+    for child in $children; do
         pid_tree "$child"
     done
+}
+
+# Read a parent PID only when the child's identity is unchanged both before and
+# after the read, so a recycled child can never graft a stranger's ancestor
+# chain into the kill set.
+verified_ppid_of() {
+    local pid=$1 expected_start=$2 ppid
+    identity_matches "$pid" "$expected_start" || return 1
+    ppid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || ppid=""
+    [[ -n "$ppid" ]] || return 1
+    identity_matches "$pid" "$expected_start" || return 1
+    printf '%s\n' "$ppid"
+}
+
+# Collapse repeated observations of one PID into at most one record. Sorting is
+# keyed on the pid AND the identity so distinct identities for a single pid both
+# survive into the reducer — a `sort -n -u` on the pid alone would keep one
+# arbitrary record and hide the conflict entirely. A pid is emitted only when
+# every observation of it agrees; conflicting or poisoned observations drop it
+# (fail closed), and self/parent are never emitted at all.
+reduce_stable_identities() {
+    sort -t "$IDENTITY_SEP" -k1,1n -k2,2 -u "$1" | awk -F '\t' \
+        -v self="$SELF" -v parent="$SELF_PPID" -v conflict="$IDENTITY_CONFLICT" '
+        $1 == self || $1 == parent { next }
+        !($1 in first) { first[$1] = $2; order[++count] = $1 }
+        $2 == conflict || first[$1] != $2 { unstable[$1] = 1 }
+        END {
+            for (i = 1; i <= count; i++) {
+                pid = order[i]
+                if (!(pid in unstable)) print pid "\t" first[pid]
+            }
+        }
+    '
 }
 
 cwd_of() {
@@ -210,20 +308,29 @@ add_pid_with_tree_and_ancestors() {
     is_protected_process "$pid" && return
     kill -0 "$pid" 2>/dev/null || return
 
-    pid_tree "$pid"
+    # The protection probes above each shell out to ps/lsof; re-confirm the
+    # instance before its identity is threaded into the tree/ancestor walk.
+    identity_matches "$pid" "$expected_start" || return
 
-    local current=$pid
+    pid_tree "$pid" "$expected_start"
+
+    local current=$pid current_start=$expected_start
     while true; do
-        local ppid
-        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return
-        is_protected_process "$ppid" && return
-        if cwd_matches "$ppid"; then
-            record_pid "$ALL_FILE" "$ppid" || return
-            current="$ppid"
-            continue
+        local ppid ppid_start
+        ppid=$(verified_ppid_of "$current" "$current_start") || return
+        if [ "$ppid" = "0" ] || [ "$ppid" = "1" ]; then
+            return
         fi
-        return
+        # Capture the ancestor's identity BEFORE the vetting probes and require
+        # it to still hold when the record is written, so an ancestor that exits
+        # mid-vetting cannot hand its PID to an unrelated process we then kill.
+        ppid_start=$(process_start_time "$ppid") || ppid_start=""
+        [ -n "$ppid_start" ] || return
+        is_protected_process "$ppid" && return
+        cwd_matches "$ppid" || return
+        record_pid "$ALL_FILE" "$ppid" "$ppid_start" || return
+        current="$ppid"
+        current_start="$ppid_start"
     done
 }
 
@@ -237,8 +344,9 @@ ROOTS_FILE=$(mktemp)
 ALL_FILE=$(mktemp)
 TARGETS_FILE=$(mktemp)
 KEPT_FILE=$(mktemp)
+SCRATCH_FILE=$(mktemp)
 SURVIVORS_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SURVIVORS_FILE"' EXIT
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$TARGETS_FILE" "$KEPT_FILE" "$SCRATCH_FILE" "$SURVIVORS_FILE"' EXIT
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory. Capture identity at the
@@ -259,17 +367,23 @@ for pattern in \
     "$WORKTREE_DIR/front-end.*vite" \
     "$WORKTREE_DIR/mac-app/node_modules"; do
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+        # Capture identity before the vetting probes (each of which is a
+        # subprocess) and require it to still hold at record time.
+        root_start=$(process_start_time "$pid") || root_start=""
+        [[ -n "$root_start" ]] || continue
         is_protected_process "$pid" && continue
         cwd_matches "$pid" || echo "$(cmd_of "$pid")" | grep -Fq "$WORKTREE_DIR" || continue
-        record_pid "$ROOTS_FILE" "$pid" || true
+        record_pid "$ROOTS_FILE" "$pid" "$root_start" || true
     done
 done
 
 for port in $(service_ports); do
     for pid in $(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null); do
+        root_start=$(process_start_time "$pid") || root_start=""
+        [[ -n "$root_start" ]] || continue
         is_protected_process "$pid" && continue
         cwd_matches "$pid" || continue
-        record_pid "$ROOTS_FILE" "$pid" || true
+        record_pid "$ROOTS_FILE" "$pid" "$root_start" || true
     done
 done
 
@@ -278,31 +392,32 @@ done
 # the absolute worktree path and whose original run.sh parent is gone.
 while read -r pid; do
     [ -n "$pid" ] || continue
+    root_start=$(process_start_time "$pid") || root_start=""
+    [ -n "$root_start" ] || continue
     is_protected_process "$pid" && continue
     service_like_process "$pid" || continue
-    record_pid "$ROOTS_FILE" "$pid" || true
+    record_pid "$ROOTS_FILE" "$pid" "$root_start" || true
 done < <(service_dir_cwd_pids | sort -un)
 
-sort -n -u "$ROOTS_FILE" -o "$ROOTS_FILE"
+# Reduce roots BEFORE expansion. Discovery runs four independent sweeps, so one
+# PID is routinely observed several times; if it was recycled between two of
+# those sweeps we hold two different identities for it and cannot tell which is
+# the service. Emitting either would risk killing a stranger, so the reducer
+# drops the PID. (The previous `sort -n -u` collapsed those observations on the
+# numeric PID alone, which silently discarded the evidence of the conflict.)
+reduce_stable_identities "$ROOTS_FILE" > "$SCRATCH_FILE"
+mv "$SCRATCH_FILE" "$ROOTS_FILE"
+SCRATCH_FILE=$(mktemp)
 
 while IFS=$'\t' read -r pid start_time; do
     [[ -z "$pid" ]] && continue
     add_pid_with_tree_and_ancestors "$pid" "$start_time"
 done < "$ROOTS_FILE"
 
-# Keep one identity only when every observation of a numeric PID agrees. If a
-# PID was recycled while the tree was being collected, drop it fail-closed.
-awk -F '\t' -v self="$SELF" -v parent="$SELF_PPID" '
-    $1 == self || $1 == parent { next }
-    !($1 in first) { first[$1] = $2; order[++count] = $1; next }
-    first[$1] != $2 { unstable[$1] = 1 }
-    END {
-        for (i = 1; i <= count; i++) {
-            pid = order[i]
-            if (!(pid in unstable)) print pid "\t" first[pid]
-        }
-    }
-' "$ALL_FILE" > "$TARGETS_FILE"
+# Same fail-closed reduction over the expanded tree: keep one identity only when
+# every observation of a PID agrees, and never keep a PID poisoned by
+# `IDENTITY_CONFLICT` during the walk.
+reduce_stable_identities "$ALL_FILE" > "$TARGETS_FILE"
 
 # Final backstop: drop any benchmark controller that entered the set as a
 # descendant. `pid_tree` walks downward and does not consult

@@ -54,15 +54,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Node stores a timer delay in a signed 32-bit int. Anything larger (or NaN, or
+ * non-finite) silently collapses to a 1ms timer, which would turn a long
+ * rate-limit backoff into a hot retry loop.
+ */
+export const MAX_BACKOFF_DELAY_MS = 2_147_483_647;
+
+/** Bound a candidate delay to a finite, non-negative, timer-safe value. `null` if unusable. */
+function normalizeDelayMs(value: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(Math.max(0, value), MAX_BACKOFF_DELAY_MS);
+}
+
 function getBackoffDelay(error: unknown, attempt: number, opts: RetryOptions): number {
   if (opts.getBackoffDelayMs) {
-    return Math.max(0, opts.getBackoffDelayMs(error, attempt));
+    const dynamic = normalizeDelayMs(opts.getBackoffDelayMs(error, attempt));
+    if (dynamic !== null) return dynamic;
+    log.warn(
+      `${opts.component ?? 'Retry'}: discarding non-finite dynamic backoff delay on attempt ${attempt}, falling back to exponential backoff`
+    );
+  } else if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+    const fixed = normalizeDelayMs(opts.fixedDelays[attempt - 1]);
+    if (fixed !== null) return fixed;
   }
-  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
-    return opts.fixedDelays[attempt - 1];
-  }
-  const base = opts.initialBackoffMs ?? 1000;
-  return base * Math.pow(2, attempt - 1);
+  const base = normalizeDelayMs(opts.initialBackoffMs ?? 1000) ?? 1000;
+  return Math.min(base * Math.pow(2, attempt - 1), MAX_BACKOFF_DELAY_MS);
 }
 
 function defaultIsRetryable(error: unknown): boolean {

@@ -135,6 +135,122 @@ assert_alive() {
     trap - EXIT
 )
 
+# ── Regression: an identity validated at discovery must be THREADED THROUGH the
+#    PID-tree and ancestor expansion. Previously `pid_tree` re-read the identity
+#    itself, so a root that exited after validation and whose PID was reused was
+#    recorded under the replacement's identity — and the later signal check then
+#    validated, and killed, that innocent replacement.
+#
+#    A supplied-but-stale identity models the recycled PID deterministically:
+#    every stage must refuse it, and the live process must survive.
+(
+    source "$ROOT_DIR/scripts/kill-services.sh"
+    ALL_FILE="$TMP_ROOT/recycled-observations"
+    : > "$ALL_FILE"
+
+    sleep 1000 &
+    recycled_pid=$!
+    trap 'kill "$recycled_pid" 2>/dev/null || true' EXIT
+    live_identity="$(process_start_time "$recycled_pid")"
+    [ -n "$live_identity" ] || {
+        echo "FAIL: could not capture identity for the recycled-PID probe" >&2
+        exit 1
+    }
+    stale_identity='darwin:1:000001'
+
+    assert_no_observations() {
+        if [ -s "$ALL_FILE" ]; then
+            echo "FAIL: $1" >&2
+            cat "$ALL_FILE" >&2
+            exit 1
+        fi
+    }
+
+    if record_pid "$ALL_FILE" "$recycled_pid" "$stale_identity"; then
+        echo "FAIL: record_pid accepted a PID whose identity changed" >&2
+        exit 1
+    fi
+    assert_no_observations "record_pid persisted a recycled PID's identity"
+
+    # Both refuse by returning early with the failed check's status; the binding
+    # assertion is that they wrote nothing.
+    pid_tree "$recycled_pid" "$stale_identity" || true
+    assert_no_observations "pid_tree recorded a PID whose identity changed"
+
+    add_pid_with_tree_and_ancestors "$recycled_pid" "$stale_identity" || true
+    assert_no_observations "ancestor walk recorded a PID whose identity changed"
+
+    if signal_if_same_identity "$recycled_pid" "$stale_identity" TERM >/dev/null 2>&1; then
+        echo "FAIL: signaled a PID whose identity changed since discovery" >&2
+        exit 1
+    fi
+    assert_alive "$recycled_pid" "process holding a recycled PID"
+
+    # Positive control: the validated identity IS the one persisted, so the tree
+    # walk cannot silently substitute a freshly-read one.
+    pid_tree "$recycled_pid" "$live_identity"
+    if ! grep -Fqx "$recycled_pid$(printf '\t')$live_identity" "$ALL_FILE"; then
+        echo "FAIL: pid_tree did not persist the caller-validated root identity" >&2
+        cat "$ALL_FILE" >&2
+        exit 1
+    fi
+
+    kill "$recycled_pid" 2>/dev/null || true
+    trap - EXIT
+)
+
+# ── Regression: conflicting identity observations for ONE PID must drop that
+#    PID (fail closed). The root set was previously deduped with `sort -n -u`,
+#    which collapsed every record for a repeated PID on the numeric key alone —
+#    so when discovery observed both the original and a recycled process on one
+#    PID, the evidence of the conflict was destroyed before the reducer ran and
+#    an arbitrary one of the two was killed.
+(
+    source "$ROOT_DIR/scripts/kill-services.sh"
+    SELF=424242
+    SELF_PPID=424243
+    TAB="$(printf '\t')"
+    observations="$TMP_ROOT/conflicting-observations"
+
+    {
+        # Repeated PID, two different identities => must be dropped. Recorded
+        # out of numeric order to prove the sort cannot collapse them.
+        printf '900%sdarwin:100:000001\n' "$TAB"
+        printf '800%sdarwin:200:000002\n' "$TAB"
+        printf '900%sdarwin:999:000009\n' "$TAB"
+        # Repeated PID, identical identity => stable, emitted exactly once.
+        printf '800%sdarwin:200:000002\n' "$TAB"
+        # Poisoned by pid_tree when the root mutated mid-walk => must be dropped.
+        printf '700%sdarwin:300:000003\n' "$TAB"
+        printf '700%s%s\n' "$TAB" "$IDENTITY_CONFLICT"
+        # Self and parent are never targets.
+        printf '424242%sdarwin:400:000004\n' "$TAB"
+        printf '424243%sdarwin:500:000005\n' "$TAB"
+    } > "$observations"
+
+    reduced="$(reduce_stable_identities "$observations")"
+
+    if printf '%s\n' "$reduced" | grep -q "^900${TAB}"; then
+        echo "FAIL: PID with conflicting identity observations was not dropped" >&2
+        printf '%s\n' "$reduced" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$reduced" | grep -q "^700${TAB}"; then
+        echo "FAIL: PID poisoned during tree expansion was not dropped" >&2
+        printf '%s\n' "$reduced" >&2
+        exit 1
+    fi
+    if printf '%s\n' "$reduced" | grep -q "^42424[23]${TAB}"; then
+        echo "FAIL: reducer emitted self or parent as a target" >&2
+        printf '%s\n' "$reduced" >&2
+        exit 1
+    fi
+    if [ "$reduced" != "800${TAB}darwin:200:000002" ]; then
+        echo "FAIL: reducer did not emit the one stable PID exactly once, got: $reduced" >&2
+        exit 1
+    fi
+)
+
 WORKTREE="$TMP_ROOT/worktree"
 mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/back-end" "$TMP_ROOT/foreign"
 cp "$ROOT_DIR/scripts/kill-services.sh" "$WORKTREE/scripts/kill-services.sh"

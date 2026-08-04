@@ -82,6 +82,12 @@ function parseCharacterClass(
 
   const characters = emptyCharacterSet();
   const body = source.slice(start + 1, close);
+  // Postgres resolves a bracket range like `0-9` against the active collation
+  // rather than against ASCII code points, and no regex sink pins `COLLATE "C"`.
+  // A range's true membership is therefore unprovable here, so fail closed by
+  // marking it unknown: `setsAreProvablyDisjoint` then refuses to separate two
+  // repetition frontiers on the strength of a range.
+  const isCollationDependentRange = body.includes('-');
   if (body === '0-9' || body === '0-9,') {
     for (let code = 48; code <= 57; code += 1) addAscii(characters, code, caseInsensitive);
     if (body.endsWith(',')) addAscii(characters, 44, caseInsensitive);
@@ -93,6 +99,7 @@ function parseCharacterClass(
   } else {
     return null;
   }
+  if (isCollationDependentRange) characters.unknown = true;
   return { end: close, characters, mayRepeatWithoutAnalyzer: true };
 }
 

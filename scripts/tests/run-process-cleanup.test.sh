@@ -5,10 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
 
+# Each fixture is spawned as `( cd ...; python3 ... ) &`, so $! is the SUBSHELL,
+# not the python process it forks. Signalling only the recorded PID orphaned every
+# surviving fixture to init, where it kept this test's inherited stdout open: a
+# `bash this-test.sh | tail` pipeline never saw EOF and hung indefinitely, and the
+# stubs accumulated across runs (observed: pairs still alive 13h later). Always
+# reap descendants before the recorded PID.
+kill_pid_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_pid_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
 cleanup() {
   local pid
   for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    kill_pid_tree "$pid"
   done
   for pid in "${PIDS[@]:-}"; do
     wait "$pid" 2>/dev/null || true
