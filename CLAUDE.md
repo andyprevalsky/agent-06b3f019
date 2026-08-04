@@ -128,9 +128,18 @@ skills by default — the `.claude/commands/*` slash-commands (`/deploy`, `/RCA`
 `docs/root-cause-analysis.md`, testing → `docs/testing.md`). These are the source
 of truth; do not duplicate them into other files.
 
-- **Setup / refresh:** run `bash scripts/cloud-build.sh` — the repo's designated
-  cloud build command (idempotent: root `npm install` + `prisma generate`, the
-  `agents/venv`, and a local Postgres). No bespoke setup script is needed.
+- **Setup / refresh (run at the START of every cloud session):** `bash scripts/cloud-init.sh`.
+  It is idempotent and reuses the battle-tested Fly-cloudbench pattern
+  (`scripts/cloudbench-entrypoint.sh`): (1) decode the injected
+  `AGENTS_ENV_B64` / `BACKEND_ENV_B64` secrets into `agents/.env` / `back-end/.env`
+  (whole-file base64, optional `*_ENV_SHA256` check — no per-key drift), (2) run
+  `scripts/cloud-build.sh` (root `npm install` + `prisma generate` + `agents/venv`
+  + local Postgres), and (3) **seed the local DB from prod** via
+  `back-end/scripts/seed-local.ts` so a cloud agent never starts against an empty
+  database. Missing secrets / a failed seed WARN and continue (never abort). The
+  seed is skipped when the dev user already exists.
+  `scripts/cloud-build.sh` alone remains the minimal deps-only provisioner if you
+  do not need `.env`/data materialized.
 - **Database:** Docker is typically unavailable on the Cloud VM, so the stack uses
   **system PostgreSQL** at `localhost:5432` (`postgres`/`postgres`, db `victoria`);
   `scripts/run.sh` and the blackbox runner auto-fall back to it. Start it with
