@@ -16,8 +16,8 @@
  *   Current account · quick-switch admin chips (always visible, one click back
  *   to Andy or Tamy) · search box that expands into selectable results.
  *
- * Rendered fixed at the top-right above everything so it is reachable from any
- * view, including views the impersonated account cannot otherwise leave.
+ * Rendered inside the app shell's fixed top-right control rail so it is reachable
+ * from any view without colliding with sibling global controls.
  */
 
 import { ArrowLeftRight, Loader2, Search, ShieldCheck, X } from 'lucide-react';
@@ -68,12 +68,12 @@ export function AdminAccountSwitcher({ isAdmin, ownAccountLabel }: AdminAccountS
   return (
     <div
       ref={containerRef}
-      className="fixed right-4 top-4 z-[100] flex flex-col items-end"
+      className="relative flex max-w-full min-w-0 flex-col items-end"
       data-testid="admin-account-switcher"
     >
       <div
         className={cn(
-          'flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-colors',
+          'flex max-w-full min-w-0 items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-medium shadow-lg backdrop-blur-md transition-colors',
           away
             ? 'border-purple-400/60 bg-purple-600/95 text-white'
             : 'border-border/60 bg-background/90 text-foreground',
@@ -84,17 +84,17 @@ export function AdminAccountSwitcher({ isAdmin, ownAccountLabel }: AdminAccountS
         <button
           type="button"
           onClick={() => setOpen(!open)}
-          className="flex items-center gap-1.5 whitespace-nowrap"
+          className="flex min-w-0 items-center gap-1.5 whitespace-nowrap"
           aria-expanded={open}
           aria-haspopup="dialog"
           aria-label="Switch account"
         >
           {away ? (
-            <ArrowLeftRight className="h-3.5 w-3.5" />
+            <ArrowLeftRight className="h-3.5 w-3.5 shrink-0" />
           ) : (
-            <ShieldCheck className="h-3.5 w-3.5" />
+            <ShieldCheck className="h-3.5 w-3.5 shrink-0" />
           )}
-          <span className="max-w-[16rem] truncate">{pillLabel}</span>
+          <span className="min-w-0 max-w-[16rem] truncate">{pillLabel}</span>
         </button>
         {away && (
           <button
@@ -124,7 +124,7 @@ function SwitcherPanel({
 
   return (
     <div
-      className="mt-2 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-background/98 shadow-2xl backdrop-blur-md"
+      className="absolute right-0 top-full mt-2 w-[22rem] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border/60 bg-background/98 shadow-2xl backdrop-blur-md"
       role="dialog"
       aria-label="Account switcher"
     >

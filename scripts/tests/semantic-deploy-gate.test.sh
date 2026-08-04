@@ -78,6 +78,7 @@ require_text "$LIFECYCLE_SPEC" "const FULL_LIFECYCLE_RATCHET_MS = 5_000;" "lifec
 require_text "$LIFECYCLE_SPEC" "mode: 'parallel'" "chat paths must run concurrently"
 require_text "$LIFECYCLE_SPEC" "test.use({ trace: 'off', video: 'off' });" "latency measurements must exclude Playwright recording overhead"
 require_text "$ROOT_DIR/front-end/tests-e2e/helpers.ts" "waitForTemporalWorkflow" "agent lifecycle ratchet must expose an authoritative Temporal-start helper"
+require_text "$HELPERS" "const PER_REQUEST_TIMEOUT_MS = 500;" "one stalled lifecycle poll must not consume half of the five-second ratchet"
 require_text "$LIFECYCLE_SPEC" "waitForTemporalWorkflow" "agent lifecycle terminal must wait for persisted Temporal startup"
 
 # CI runs UI semantics and the latency ratchet as concurrent jobs. The ratchet

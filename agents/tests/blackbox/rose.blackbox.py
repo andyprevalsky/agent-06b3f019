@@ -2809,6 +2809,66 @@ async def test_waterfall_skips_anthropic_for_response_format():
     assert any(c.kind == "content" for c in chunks)
 
 
+async def test_waterfall_uses_anthropic_with_native_tools():
+    """Native tools avoid the Anthropic response_format incompatibility."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-complete",
+                                        "type": "function",
+                                        "function": {"name": "attempt_completion", "arguments": "{}"},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    bodies: list[dict] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        bodies.append(body)
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "finish"}],
+            tools=[
+                {
+                    "name": "attempt_completion",
+                    "description": "Finish the task",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice={"name": "attempt_completion"},
+            openrouter_key="ork-test",
+            request_id="r-anthropic-native-tools",
+        )
+    )
+
+    assert [body["model"] for body in bodies] == ["anthropic/claude-opus-4.8"]
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "attempt_completion"},
+    }
+    assert any(c.kind == "tool_call" for c in chunks)
+
+
 async def test_waterfall_excludes_anthropic_family_when_requested():
     sse_ok = "\n".join(
         _openai_sse(
@@ -5291,6 +5351,65 @@ async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth(
     }
 
 
+async def test_rose_client_preserves_native_tools_for_waterfall():
+    """The final OpenRouter fallback must keep AgentAction as native tools.
+
+    Anthropic OpenRouter models reject the equivalent response_format request,
+    so dropping this projection makes an exhausted funded key skip a healthy
+    fallback provider.
+    """
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _WebFetchTool(BaseModel):
+        tool: Literal["web_fetch"]
+        url: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _ExploreAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_WebFetchTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_waterfall(**kwargs):
+        captured.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "anthropic/claude-opus-4.8"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": "{}", "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    previous_gpt = os.environ.pop("GPT_API_KEY", None)
+    previous_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        with patch("providers.rose.client.waterfall_complete", _fake_waterfall):
+            await _drain(
+                RoseClient(openrouter_key="ork-test").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "browse"}],
+                    response_model=_ExploreAction,
+                )
+            )
+    finally:
+        if previous_gpt is not None:
+            os.environ["GPT_API_KEY"] = previous_gpt
+        if previous_anthropic is not None:
+            os.environ["ANTHROPIC_API_KEY"] = previous_anthropic
+
+    assert captured.get("tool_choice") == "any"
+    assert captured.get("response_format") is None
+    tool_names = {tool["name"] for tool in (captured.get("tools") or [])}
+    assert tool_names == {"web_fetch", "attempt_completion"}
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -5463,6 +5582,7 @@ async def run_all_tests():
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
+    await r.record_async("waterfall_uses_anthropic_native_tools", test_waterfall_uses_anthropic_with_native_tools)
     await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
@@ -5611,6 +5731,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_waterfall_tools_without_oauth",
         test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth,
+    )
+    await r.record_async(
+        "rose_client_preserves_native_tools_for_waterfall",
+        test_rose_client_preserves_native_tools_for_waterfall,
     )
 
     teardown_mock()

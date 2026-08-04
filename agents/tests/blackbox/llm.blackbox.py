@@ -3327,6 +3327,38 @@ async def test_call_llm_activity_rejects_wrong_required_tool_non_retryably():
     assert completion_calls == 1
 
 
+async def test_call_llm_activity_forces_required_tool_at_provider():
+    """Completion-only handoffs should constrain generation, not just reject it later."""
+    from helpers.llm import call_llm_activity
+
+    captured: dict = {}
+
+    async def fake_structured_streaming(**kwargs):
+        captured.update(kwargs)
+        response_model = kwargs["response_model"]
+        return (
+            response_model(response="", tool_calls=[{"tool": "attempt_completion"}]),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    with (
+        patch("helpers.llm.call_llm_structured_streaming", fake_structured_streaming),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        result = await call_llm_activity(
+            messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
+            model="rose-labs/rose-1-lite",
+            tool_names=["web_search", "attempt_completion"],
+            reasoning_max_tokens=0,
+            call_site="required-tool-provider-contract-test",
+            required_tool="attempt_completion",
+        )
+
+    assert captured.get("tool_choice") == {"name": "attempt_completion"}
+    assert result["tool_calls"][0]["tool"] == "attempt_completion"
+
+
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
     """When agent_id is passed, activity reads context from _pending_llm_context."""
     import httpx
@@ -4874,6 +4906,36 @@ async def test_call_llm_structured_streaming_openrouter_path():
     assert len(chunks_received) >= 1
 
 
+async def test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice():
+    """Missing or alternate direct-OpenRouter tools cannot bypass a required tool."""
+    import pytest
+    from unittest.mock import MagicMock, patch
+    from helpers.llm import LLMStructuredOutputError, call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model(["web_search", "attempt_completion"])
+    from_openai = MagicMock()
+
+    async def on_chunk(_text: str, _tokens: int):
+        raise AssertionError("a rejected direct OpenRouter request must not stream")
+
+    with patch("helpers.llm.AsyncOpenAI") as async_openai, patch("helpers.llm.instructor.from_openai", from_openai):
+        with pytest.raises(LLMStructuredOutputError, match="unsupported for direct OpenRouter"):
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Finish from the completed child"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="openrouter-required-tool-contract",
+                tool_choice={"name": "attempt_completion"},
+            )
+
+    async_openai.assert_not_called()
+    from_openai.assert_not_called()
+
+
 async def test_call_llm_structured_streaming_openrouter_exception_raises():
     """OpenRouter streaming propagates exceptions from instructor."""
     from unittest.mock import MagicMock, patch
@@ -6278,10 +6340,18 @@ async def run_all_tests():
         "call_llm_activity_required_tool_non_retryable",
         test_call_llm_activity_rejects_wrong_required_tool_non_retryably,
     )
+    await r.record_async(
+        "call_llm_activity_required_tool_forced_at_provider",
+        test_call_llm_activity_forces_required_tool_at_provider,
+    )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
+    await r.record_async(
+        "stream_openrouter_required_tool_fails_closed",
+        test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice,
+    )
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
     await r.record_async(
         "stream_rose_cancelled_propagates",

@@ -20,8 +20,16 @@ case "$1" in
   ls) exit 0 ;;
   install)
     printf '%s\n' "$*" >> .install-calls
+    if [ "${FAIL_WORKSPACE_INSTALL:-0}" = 1 ]; then
+      exit 1
+    fi
     mkdir -p front-end/node_modules/react
     printf '{"name":"react","version":"1.0.0"}\n' > front-end/node_modules/react/package.json
+    ;;
+  ci)
+    printf '%s::%s\n' "$(pwd -P)" "$*" >> "$TEMP_ROOT/.ci-calls"
+    mkdir -p node_modules/react
+    printf '{"name":"react","version":"1.0.0"}\n' > node_modules/react/package.json
     ;;
   *) exit 2 ;;
 esac
@@ -40,6 +48,27 @@ chmod +x "$TEMP_ROOT/bin/npm"
 }
 grep -Fq -- '--workspace=front-end' "$TEMP_ROOT/.install-calls" || {
   echo "FAIL: install must target the incomplete workspace" >&2
+  exit 1
+}
+
+rm -rf "$TEMP_ROOT/front-end/node_modules"
+printf '{}\n' > "$TEMP_ROOT/front-end/package-lock.json"
+: > "$TEMP_ROOT/.install-calls"
+: > "$TEMP_ROOT/.ci-calls"
+(
+  cd "$TEMP_ROOT"
+  FAIL_WORKSPACE_INSTALL=1 TEMP_ROOT="$TEMP_ROOT" PATH="$TEMP_ROOT/bin:$PATH" \
+    bash "$ROOT_DIR/scripts/ensure-workspace-dependencies.sh" front-end
+)
+
+grep -Fq -- '--workspace=front-end' "$TEMP_ROOT/.install-calls" || {
+  echo "FAIL: fallback must follow a failed workspace-scoped install" >&2
+  exit 1
+}
+FRONT_END_REALPATH="$(cd "$TEMP_ROOT/front-end" && pwd -P)"
+grep -Fq -- "$FRONT_END_REALPATH::ci --workspaces=false --no-audit --no-fund" \
+  "$TEMP_ROOT/.ci-calls" || {
+  echo "FAIL: a workspace install crash must fall back to isolated npm ci" >&2
   exit 1
 }
 
