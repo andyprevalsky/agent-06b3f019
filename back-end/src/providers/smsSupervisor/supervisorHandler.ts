@@ -732,14 +732,27 @@ export function finalizeSupervisorResponse(
   }
 
   const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
-  const toolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+  // Entries come from provider JSON, so an array is no guarantee its members are
+  // objects with a `tool`. Drop malformed entries here rather than letting them
+  // reach the dispatcher (or throw inside this log call).
+  const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+  const toolCalls = rawToolCalls.filter(
+    (tc): tc is (typeof rawToolCalls)[number] =>
+      tc !== null && typeof tc === 'object' && typeof (tc as { tool?: unknown }).tool === 'string'
+  );
+  if (toolCalls.length !== rawToolCalls.length) {
+    log.warn('[SmsSupervisorLLM] Discarded malformed tool_call entries', {
+      received: rawToolCalls.length,
+      usable: toolCalls.length,
+    });
+  }
 
   log.info('[SmsSupervisorLLM] Parsed response', {
     reasoning: reasoning.substring(0, 300),
     toolCallCount: toolCalls.length,
     toolCalls: toolCalls.map((tc) => ({
       tool: tc.tool,
-      args: JSON.stringify(tc.arguments).substring(0, 100),
+      args: JSON.stringify(tc.arguments ?? {}).substring(0, 100),
     })),
   });
 

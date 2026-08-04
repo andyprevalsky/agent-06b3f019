@@ -145,6 +145,29 @@ function enforceCacheBlockBudget(body: Record<string, unknown>): void {
       total--;
     }
   }
+
+  // System markers alone may not be enough: a caller-supplied transcript can
+  // carry its own breakpoints. Anthropic rejects the whole request over the
+  // limit, so strip from the oldest message blocks — the least valuable prefix —
+  // until the request is legal.
+  if (total > ANTHROPIC_MAX_CACHE_BLOCKS && Array.isArray(body.messages)) {
+    for (const message of body.messages as Record<string, unknown>[]) {
+      if (total <= ANTHROPIC_MAX_CACHE_BLOCKS) break;
+      if (!message || typeof message !== 'object') continue;
+      if ('cache_control' in message) {
+        delete message.cache_control;
+        total--;
+      }
+      if (!Array.isArray(message.content)) continue;
+      for (const block of message.content as Record<string, unknown>[]) {
+        if (total <= ANTHROPIC_MAX_CACHE_BLOCKS) break;
+        if (block && typeof block === 'object' && 'cache_control' in block) {
+          delete block.cache_control;
+          total--;
+        }
+      }
+    }
+  }
 }
 
 export function buildAnthropicBody(opts: BuildBodyOptions): Record<string, unknown> {

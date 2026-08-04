@@ -11,11 +11,19 @@
  * exports it; explicit process env always wins, so a caller can still point the
  * seed at a different database than the .env default.
  */
-import 'dotenv/config';
-
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';
+import * as path from 'path';
+
+import * as dotenv from 'dotenv';
+
+// Load back-end/.env regardless of the caller's working directory: the
+// documented invocation runs from the repository root, where `dotenv/config`
+// would look at the root .env and miss CLAUDE_CREDENTIAL_DECRYPTION_KEY.
+// `dotenv` never overrides an already-set process variable, so an explicit
+// DATABASE_URL/DIRECT_URL from the caller still wins.
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const DEFAULT_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const prisma = new PrismaClient();

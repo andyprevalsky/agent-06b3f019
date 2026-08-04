@@ -48,7 +48,9 @@ CHANGED_FILES="$(
 PROMPT_FILES=""
 is_zod_description_file() {
   local file="$1"
-  local zod_import_pattern="from[[:space:]]+['\"]zod['\"]|require\\([[:space:]]*['\"]zod['\"]"
+  # Match subpath imports too (`zod/v4`, `zod/v4-mini`): a guard that only sees
+  # bare `zod` is bypassed by any file importing the versioned entrypoint.
+  local zod_import_pattern="from[[:space:]]+['\"]zod(/[^'\"]*)?['\"]|require\\([[:space:]]*['\"]zod(/[^'\"]*)?['\"]"
   local describe_pattern='\.[[:space:]]*describe[[:space:]]*\('
 
   if [ -f "$file" ] && grep -Eq "$zod_import_pattern" "$file" && grep -Eq "$describe_pattern" "$file"; then
@@ -70,7 +72,7 @@ while IFS= read -r file; do
       ;;
   esac
   case "$file" in
-    *.ts|*.tsx|*.js|*.jsx)
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
       if is_zod_description_file "$file"; then
         # Zod `.describe(...)` strings are serialized into model-facing JSON
         # schemas. Classify the containing file so content-only edits inside an

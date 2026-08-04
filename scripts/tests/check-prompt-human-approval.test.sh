@@ -227,6 +227,21 @@ git -C "$zod_description_repo" add back-end/src/providers/smsSupervisor/schema.t
 expect_fail "$zod_description_repo" "Zod schema description requires approval"
 expect_flag_pass "$zod_description_repo" "approval flag permits a Zod schema description"
 
+# A guard that only matches the bare `zod` specifier is bypassed by the
+# versioned entrypoint, and one that only scans .ts/.js is bypassed by .mjs.
+zod_subpath_repo="$(new_repo zod-subpath)"
+mkdir -p "$zod_subpath_repo/back-end/src/providers/tools"
+cat >"$zod_subpath_repo/back-end/src/providers/tools/schema.mjs" <<'MJS'
+import { z } from 'zod/v4';
+
+export const query = z
+  .string()
+  .describe('Search the user local data. Prefer this over the public web.');
+MJS
+git -C "$zod_subpath_repo" add back-end/src/providers/tools/schema.mjs
+expect_fail "$zod_subpath_repo" "Zod subpath import in .mjs requires approval"
+expect_flag_pass "$zod_subpath_repo" "approval flag permits a zod subpath .mjs description"
+
 zod_description_edit_repo="$(new_repo zod-description-edit)"
 mkdir -p "$zod_description_edit_repo/src"
 cat >"$zod_description_edit_repo/src/schema.ts" <<'TS'
