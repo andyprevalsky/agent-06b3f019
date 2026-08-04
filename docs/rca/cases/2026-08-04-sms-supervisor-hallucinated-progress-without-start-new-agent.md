@@ -59,7 +59,7 @@ Harness gate in `messageGrounding.ts`, enforced before every `send_user_message`
 - Reject agent-start / agent-kill claims unless this run queued or committed `start_new_agent` / `kill_agent`.
 - Clearer `spawn_agent` unknown-tool error + SMS overlay / schema text naming `start_new_agent`.
 
-Exact-state fixture under `back-end/src/tests/fixtures/sms-bluebottle-hallucination/` (130 prior SmsSession messages + agent tree at inbound). Cemented by unit grounding tests and sms-supervisor blackbox (`bluebottle -- ungrounded…`, `bluebottle -- grounded…`, opt-in real-LLM recreation). Catalog entry `sms-supervisor-bluebottle-no-hallucinate` (incomplete until an SMS-supervisor runner exists).
+Exact-state fixture under `back-end/src/tests/fixtures/sms-bluebottle-hallucination/` (130 prior SmsSession messages + agent tree at inbound). Cemented by unit grounding tests and sms-supervisor blackbox (`bluebottle -- ungrounded…`, `bluebottle -- grounded…`, opt-in real-LLM recreation). Benchmark catalog entry deferred (no SMS-supervisor Temporal runner yet; blackbox is the durable gate).
 
 10k-agent behavior: O(1) regex check per outbound SMS on the per-user supervisor run; no shared fan-in.
 
