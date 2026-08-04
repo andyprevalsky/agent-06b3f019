@@ -1512,8 +1512,8 @@
   {
     "name": "browser-opentable-reservation",
     "title": "OpenTable Restaurant Reservation",
-    "description": "Complete a flexible Sunday dinner reservation through OpenTable.",
-    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
+    "description": "Complete a flexible Friday dinner reservation through OpenTable.",
+    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Friday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1530,7 +1530,7 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
     "expected_attention_kinds": [
       "write_lock"
@@ -1603,11 +1603,11 @@
         "id": "opentable-reservation-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The trajectory shows the agent completed the reservation and reached a grounded confirmation state",
-          "The reservation is for Prospect, two people, this Sunday, between 6:00 PM and 8:00 PM",
+          "The trajectory reaches exactly one unresolved write lock for the reservation and stops there; the harness does not approve it and a completed booking is not required",
+          "The reservation is for Prospect, two people, this Friday, between 6:00 PM and 8:00 PM",
           "The selected time is 7:00 PM when available; otherwise it is the closest evidenced available time to 7:00 PM within the allowed window"
         ],
-        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a completed Prospect reservation for two on the correct Sunday, with the required time-selection behavior and a final confirmation. Do not treat the task prompt or an approval request alone as proof of completion."
+        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a Prospect reservation for two staged for the correct Friday with the required time-selection behavior, and the run stops at exactly one unresolved write lock. Do not require or accept a completed booking or confirmation page, and do not treat the task prompt alone as proof."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1637,8 +1637,7 @@
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kinds": [
-      "payment_approval",
-      "write_lock"
+      "payment_approval"
     ],
     "start_phase": "execute",
     "status": "ready",
@@ -2173,11 +2172,8 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
-      "write_lock"
-    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -2239,12 +2235,12 @@
         "id": "imax-group-ticket-adjacency-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The completed purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
+          "The staged purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
           "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
           "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
-          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory reaches a grounded final confirmation or receipt showing all 3 tickets purchased after approval; checkout, an approval request, or a write-lock alone is not completion"
+          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory stops at exactly one unresolved payment approval grounded to the AMC checkout"
         ],
-        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are purchased with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, the single approval is complete, and a final confirmed receipt for all 3 tickets is reached after approval. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
+        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are staged with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, and the run stops at exactly one unresolved payment approval that identifies the venue, date, showtime, all three seats, and total amount. Do not require or accept an approved charge or completed purchase. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2252,7 +2248,9 @@
       "user:ecommerce-v1-2026-07-19",
       "agent:d29e631e-b78a-40dd-8f0b-732d1143a854",
       "coverage-gap:group-ticketing-adjacent-seats"
-    ]
+    ],
+    "expected_attention_kind": "payment_approval",
+    "success_on_payment_card_request": true
   },
   {
     "name": "browser-amazon-return",

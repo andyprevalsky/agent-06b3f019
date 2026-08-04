@@ -2528,7 +2528,9 @@ def test_opentable_catalog_uses_auto_approved_mixed_evaluators():
     task = get_task_by_name("browser-opentable-reservation")
     assert "prepaid experience" not in task.prompt.lower()
     assert "stop at the final write-lock" not in task.prompt.lower()
-    assert task.approval_handling == "auto_approve"
+    # The run stops at the write lock rather than auto-approving it, so the
+    # benchmark never books a real table at Prospect.
+    assert task.approval_handling == "ignore"
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
@@ -2550,31 +2552,16 @@ def test_opentable_catalog_uses_auto_approved_mixed_evaluators():
 
 
 def test_opentable_proposed_weekday_matches_prospect_service_contract():
-    """Prospect's weekday-only service makes the Sunday contract unsatisfiable."""
-    from copy import deepcopy
-    from dataclasses import replace
+    """The reservation day must fall on a day Prospect actually serves.
 
+    Prospect is closed Sundays, so the original "this Sunday" contract was
+    unsatisfiable no matter how the agent behaved. The task now asks for Friday,
+    and every dated surface — description, prompt, judge criterion, judge prompt
+    — has to agree, or the agent and the judge are chasing different days.
+    """
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-opentable-reservation")
-    failing_prompt = (
-        "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, "
-        "San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose "
-        "the closest standard table between 6:00 PM and 8:00 PM. Complete the "
-        "reservation using the saved guest details."
-    )
-    assert task.prompt == failing_prompt
-    proposed_evaluators = deepcopy(task.evaluators)
-    proposed_evaluators[1]["criteria"] = [
-        criterion.replace("Sunday", "Friday") for criterion in proposed_evaluators[1]["criteria"]
-    ]
-    proposed_evaluators[1]["judge_prompt"] = proposed_evaluators[1]["judge_prompt"].replace("Sunday", "Friday")
-    proposed = replace(
-        task,
-        description=task.description.replace("Sunday", "Friday"),
-        prompt=failing_prompt.replace("Sunday", "Friday"),
-        evaluators=proposed_evaluators,
-    )
 
     def requested_service_day(candidate_prompt: str) -> str:
         for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
@@ -2583,16 +2570,14 @@ def test_opentable_proposed_weekday_matches_prospect_service_contract():
         raise AssertionError("reservation prompt has no relative weekday")
 
     prospect_service_days = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday"}
-    assert requested_service_day(failing_prompt) not in prospect_service_days
-    assert requested_service_day(proposed.prompt) in prospect_service_days
+    assert requested_service_day(task.prompt) in prospect_service_days
 
     def dated_contract_text(candidate) -> list[str]:
         semantic = candidate.evaluators[1]
         dated_criterion = next(criterion for criterion in semantic["criteria"] if "reservation is for" in criterion)
         return [candidate.description, candidate.prompt, dated_criterion, semantic["judge_prompt"]]
 
-    assert all("Sunday" in text and "Friday" not in text for text in dated_contract_text(task))
-    assert all("Friday" in text and "Sunday" not in text for text in dated_contract_text(proposed))
+    assert all("Friday" in text and "Sunday" not in text for text in dated_contract_text(task))
 
 
 def test_instacart_catalog_uses_complete_weekly_grocery_basket():
@@ -3496,211 +3481,36 @@ async def test_instacart_proposed_checkout_boundary_accepts_exactly_one_supporte
 
 
 async def test_imax_poll_requires_payment_then_purchase_write_lock():
-    """AMC completion crosses the card boundary before the final purchase boundary."""
-    from dataclasses import replace
-    from copy import deepcopy
+    """IMAX stops at the payment-card approval; it never buys the tickets.
 
+    AMC puts the card boundary before the purchase write lock, so a contract
+    expecting a bare write_lock could never be satisfied. Rather than requiring
+    both approvals in order — which would mean the benchmark actually buys three
+    tickets every run — the task now terminates at exactly one unresolved
+    payment approval, and the judge owns what that approval must say.
+    """
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _run_declared_static_check, evaluate_task
 
-    base = get_task_by_name("browser-imax-group-tickets")
-    common = {
-        "expected_tools": [],
-        "expected_tool_counts": None,
-        "enforce_declared_evaluators": False,
-        "evaluators": [],
-        "timeout_seconds": 5,
-    }
-    legacy = replace(
-        base,
-        **common,
-        expected_approval_count=1,
-        expected_attention_kinds=["write_lock"],
-    )
-    proposed = replace(
-        base,
-        **common,
-        expected_approval_count=2,
-        expected_attention_kinds=["payment_approval", "write_lock"],
-        expected_payment_receipt={
-            "merchant": "AMC Theatres (direct - amctheatres.com)",
-            "currency": "USD",
-            "requiredFields": [
-                "merchant",
-                "currency",
-                "lineItems",
-                "fees",
-                "subtotalCents",
-                "totalCents",
-                "fingerprint",
-                "userId",
-                "agentId",
-            ],
-            "requiredLineItemFields": [
-                "name",
-                "imageUrl",
-                "productUrl",
-                "rating",
-                "reviewCount",
-                "unitPriceCents",
-                "quantity",
-                "lineTotalCents",
-            ],
-            "requiredFeeFields": ["label", "amountCents"],
-        },
-    )
-    payment_receipt = {
-        "merchant": "AMC Theatres",
-        "currency": "USD",
-        "lineItems": [
-            {
-                "name": (
-                    "3 Adult IMAX Tickets, AMC Metreon 16, August 3 2026 8:00 PM, "
-                    "Seats A9, A10, A11"
-                ),
-                "imageUrl": None,
-                "productUrl": "https://www.amctheatres.com/showtimes/order-123",
-                "rating": "0 stars",
-                "reviewCount": "0 reviews",
-                "unitPriceCents": 3198,
-                "quantity": 3,
-                "lineTotalCents": 9594,
-            }
-        ],
-        "fees": [],
-        "subtotalCents": 9594,
-        "totalCents": 9594,
-        "fingerprint": "c" * 64,
-        "userId": "user-imax",
-        "agentId": "agent-imax",
-    }
-    payment = {
-        "id": "imax-payment",
-        "agentId": "agent-imax",
-        "question": (
-            "Approve $95.94 for 3 Adult IMAX Tickets at AMC Metreon 16 on "
-            "August 3, 2026 at 8:00 PM in seats A9, A10, A11?"
-        ),
-        "metadata": {"requestPaymentCard": payment_receipt, "writePermission": True},
-    }
-    write_lock = {
-        "id": "imax-write-lock",
-        "agentId": "agent-imax",
-        "question": (
-            "Purchase 3 Adult IMAX Tickets at AMC Metreon 16 on August 3, 2026 "
-            "at 8:00 PM in seats A9, A10, A11 for $95.94?"
-        ),
-        "metadata": {"requestUserApproval": {"writePermission": True}},
-    }
+    task = get_task_by_name("browser-imax-group-tickets")
 
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        legacy,
-        [payment, write_lock],
-    )
-    assert failure == "Expected attention kind write_lock, observed payment_approval"
-    assert (triggered, resolved) == (0, 0)
-    assert responses == []
+    assert task.expected_attention_kind == "payment_approval"
+    assert task.expected_approval_count == 1
+    # "ignore" leaves the approval unresolved, so no real purchase is made.
+    assert task.approval_handling == "ignore"
+    assert task.success_on_payment_card_request is True
+    assert getattr(task, "expected_attention_kinds", None) in (None, [], ["payment_approval"])
 
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        proposed,
-        [payment, write_lock],
-    )
-    assert failure is None, failure
-    assert (triggered, resolved) == (2, 2)
-    assert responses == [("imax-payment", "approved"), ("imax-write-lock", "approved")]
-    assert data["_benchmark"]["expected_attention_kinds_seen"] == [
-        "payment_approval",
-        "write_lock",
-    ]
-    assert evaluate_task(proposed, data, triggered) == (True, None)
-    valid_attention_data = deepcopy(data)
-    detail_evaluator = {
-        "checks": [
-            {
-                "type": "approval_request_details_by_kind",
-                "details_by_kind": {
-                    "payment_approval": {
-                        "required_strings": ["AMC Metreon 16", "3 Adult"],
-                        "require_date": True,
-                        "require_time": True,
-                        "require_amount": True,
-                        "minimum_seat_count": 3,
-                    },
-                    "write_lock": {
-                        "required_strings": ["AMC Metreon 16", "3 Adult"],
-                        "require_date": True,
-                        "require_time": True,
-                        "require_amount": True,
-                        "minimum_seat_count": 3,
-                    },
-                },
-            }
-        ]
-    }
-    assert _run_declared_static_check(detail_evaluator, valid_attention_data)[0] is True
-    incomplete_details = deepcopy(valid_attention_data)
-    incomplete_details["_benchmark"]["attention_requests_seen"][1]["id"] = "write-a12-c34"
-    incomplete_details["_benchmark"]["attention_requests_seen"][1]["agentId"] = "agent-b23"
-    incomplete_details["_benchmark"]["attention_requests_seen"][1]["question"] = (
-        "Purchase 3 Adult IMAX Tickets at AMC Metreon 16 on August 3, 2026 "
-        "at 8:00 PM in seat A9 for $95.94?"
-    )
-    passed, reason = _run_declared_static_check(detail_evaluator, incomplete_details)
-    assert passed is False
-    assert reason is not None and "3 distinct seat assignments" in reason
-    opaque_details = deepcopy(valid_attention_data)
-    opaque_write = opaque_details["_benchmark"]["attention_requests_seen"][1]
-    opaque_write["question"] = "Purchase these tickets?"
-    opaque_write["id"] = (
-        "AMC Metreon 16 3 Adult IMAX August 3 2026 8:00 PM $95.94 "
-        "A9 A10 A11"
-    )
-    passed, reason = _run_declared_static_check(detail_evaluator, opaque_details)
-    assert passed is False
-    assert reason is not None and "AMC Metreon 16" in reason
+    semantic = next(e for e in task.evaluators if e["method"] != "static_check")
+    criteria = " ".join(semantic["criteria"]).lower()
+    # Approval contents stay judge-owned, never substring-matched.
+    static_types = {c["type"] for e in task.evaluators if e["method"] == "static_check" for c in e["checks"]}
+    assert "approval_request_details" not in static_types
+    for required in ("venue", "date", "showtime", "seat", "total amount"):
+        assert required in criteria
+    assert "unresolved payment approval" in criteria
 
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        proposed,
-        [payment],
-    )
-    assert failure is None
-    assert (triggered, resolved) == (1, 1)
-    passed, reason = evaluate_task(proposed, data, triggered)
-    assert passed is False
-    assert reason is not None and "expected exactly 2 approval" in reason.lower()
-
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        proposed,
-        [write_lock, payment],
-    )
-    assert failure == "Expected attention kind payment_approval, observed write_lock"
-    assert (triggered, resolved) == (0, 0)
-    assert responses == []
-
-    extra_auth = {
-        "id": "imax-extra-auth",
-        "agentId": "agent-imax",
-        "metadata": {"attentionKind": "auth_assistance"},
-    }
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        proposed,
-        [payment, write_lock, extra_auth],
-    )
-    assert failure == "Expected attention kind no further attention request, observed auth_assistance"
-    assert (triggered, resolved) == (2, 2)
-    assert responses == [("imax-payment", "approved"), ("imax-write-lock", "approved")]
-
-    malformed_payment = deepcopy(payment)
-    malformed_payment["id"] = "imax-malformed-payment"
-    malformed_payment["metadata"]["requestPaymentCard"].pop("lineItems")
-    (data, triggered, resolved, failure), responses = await _run_attention_poll(
-        proposed,
-        [malformed_payment],
-    )
-    assert failure == "missing required payment receipt field: lineItems"
-    assert (triggered, resolved) == (1, 0)
-    assert responses == []
-
+    prompt = semantic["judge_prompt"].lower()
+    assert "do not require or accept an approved charge or completed purchase" in prompt
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
     """Receipt validation failures must retain the payment attention that carried them."""
