@@ -3,7 +3,7 @@
  * [READY] -> GMV summary + area chart from admin-health series.gmvCents
  *
  * SYSTEM CONTEXT:
- * PurchaseSpend CLEARED (AgentCard mint + merchant_saved card-on-file)
+ * PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
  *   -> admin-health series.gmvCents / summary.gmvCents
  *   -> secondary GMV chart on Company Health
  */
@@ -63,14 +63,14 @@ function SectionPanel({
 
 export default function GmvSection({ data }: { data: AdminHealthData }) {
   return (
-    <SectionPanel title="GMV" eyebrow="Platform commerce · AgentCard + card-on-file">
+    <SectionPanel title="GMV" eyebrow="Platform commerce · AgentCard + confirmed orders">
       <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
         <div>
           <p className="text-3xl font-semibold tabular-nums">
             {formatCurrency(data.summary.gmvCents)}
           </p>
           <p className="mt-1 text-xs text-muted-foreground">
-            Cleared purchase spend through Rose for the selected period.
+            Cleared AgentCard spend plus paid orders confirmed in agent outputs.
           </p>
         </div>
         <MetricChange value={seriesMetricChange(data, 'gmvCents')} timeSlice={data.timeSlice} />

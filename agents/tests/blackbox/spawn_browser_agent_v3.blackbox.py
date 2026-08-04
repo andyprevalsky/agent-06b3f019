@@ -12516,21 +12516,11 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
         start_calls.append((args, kwargs))
         return [first, second][len(start_calls) - 1]
 
-    execute_activity_calls = []
-
-    async def fake_execute_activity(activity_name, *args, **kwargs):
-        execute_activity_calls.append((activity_name, kwargs.get("args")))
-        return {"status": "recorded", "purchaseId": "gmv-1", "created": True}
-
     manager = SpawnBrowserAgentManagerV3()
     with (
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.start_activity",
             side_effect=fake_start_activity,
-        ),
-        patch(
-            "domains.spawn_browser_agent_v3.handler.workflow.execute_activity",
-            side_effect=fake_execute_activity,
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.workflow.wait_condition",
@@ -12557,12 +12547,8 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert approval_calls[0]["question"] == "Approve checkout?"
     assert approval_calls[0]["metadata"]["url"] == "https://www.dickblick.com/cart/"
     assert len(start_calls) == 2
-    assert len(execute_activity_calls) == 1
-    assert execute_activity_calls[0][0] == "record_facilitated_gmv_activity"
-    gmv_args = execute_activity_calls[0][1]
-    assert gmv_args[0] == "user-1"
-    assert gmv_args[1]["agentId"] == "agent-1"
-    assert gmv_args[1]["notification"] == purchase_notification
+    # Write-lock approval alone is not GMV — paid-order capture requires
+    # structured_response with amount + confirmation id (backend path).
 
     resumed_args = start_calls[1][1]["args"]
     assert resumed_args[4] == "task-1"

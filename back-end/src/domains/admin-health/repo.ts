@@ -26,7 +26,7 @@ export interface WaitlistSignupRecord {
   createdAt: Date;
 }
 
-/** Cleared platform commerce (AgentCard + merchant card-on-file). */
+/** Cleared platform commerce (AgentCard + confirmed structured-output orders). */
 export interface GmvRecord {
   userId: string;
   agentId: string | null;
@@ -151,8 +151,9 @@ export async function findSubscriptionUsersByCustomerIds(
 
 /**
  * Platform GMV ledger rows: every CLEARED PurchaseSpend in the window.
- * Includes AgentCard mint clearances and merchant card-on-file facilitated rows.
- * Attribution uses createdAt (order initiation / facilitated capture time).
+ * Includes AgentCard mint clearances and order_confirmation rows harvested from
+ * agent/browser structured outputs (amount + confirmation id).
+ * Attribution uses createdAt (order initiation / confirmation capture time).
  */
 export async function findClearedGmvBetween(start: Date, end: Date): Promise<GmvRecord[]> {
   return prisma.purchaseSpend.findMany({

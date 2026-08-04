@@ -2,7 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { recordFacilitatedGmv } from './facilitatedGmv';
+import { recordStructuredGmv } from './structuredGmv';
 import * as service from './service';
 import type { AgentCardWebhookEvent, MintPurchaseInput } from './types';
 
@@ -87,11 +87,12 @@ router.post(
 );
 
 /**
- * Record merchant card-on-file (facilitated) GMV. Must be registered before
- * `/:cardId/close` so "record-facilitated-gmv" is not parsed as a card id.
+ * Record paid-order GMV from a structured agent/browser completion.
+ * Requires amount + confirmation id inside `structured`. Registered before
+ * `/:cardId/close` so the path is not parsed as a card id.
  */
 router.post(
-  '/record-facilitated-gmv',
+  '/record-structured-gmv',
   asyncHandler(hybridAuth),
   asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
     const userId = getAuthenticatedUserId(req);
@@ -101,20 +102,11 @@ router.post(
     }
 
     const body = req.body as Record<string, unknown>;
-    const result = await recordFacilitatedGmv({
+    const result = await recordStructuredGmv({
       userId,
       agentId: asString(body.agentId),
-      merchant: asString(body.merchant) ?? '',
-      totalCents: asNumber(body.totalCents) ?? 0,
-      currency: asString(body.currency) ?? 'USD',
-      paymentMethod: asString(body.paymentMethod),
-      domain: asString(body.domain),
-      approvedAt: asNumber(body.approvedAt),
-      lineItems: Array.isArray(body.lineItems) ? body.lineItems : [],
-      totals:
-        body.totals !== null && typeof body.totals === 'object' && !Array.isArray(body.totals)
-          ? (body.totals as Record<string, unknown>)
-          : undefined,
+      structured: body.structured ?? body,
+      source: asString(body.source) ?? 'api.record-structured-gmv',
     });
     res.json(result);
   })

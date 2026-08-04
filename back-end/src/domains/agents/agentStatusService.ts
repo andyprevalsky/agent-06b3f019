@@ -3,6 +3,7 @@ import { classifyAgentFailureForSurface } from '../../providers/credentialPropag
 import { createLogger } from '../../providers/logger';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { finalizeAgent } from '../../providers/traceArchiveLifecycle';
+import { maybeRecordStructuredGmv } from '../purchases/structuredGmv';
 import type { Prisma, UpdateStatusBody } from './types';
 import * as repo from './repo';
 
@@ -124,6 +125,16 @@ export async function updateAgentStatus(
   const result = await persistStatus(agentId, body, workflowGeneration);
   if (result.agent === null || !result.accepted) return result.agent;
   await broadcastStatus(agentId, body);
+  // Platform GMV: any agent (root or child) that completes with a structured
+  // output containing BOTH a USD amount and an order/confirmation id.
+  if (body.status === 'COMPLETED' && body.structuredResponse !== undefined) {
+    void maybeRecordStructuredGmv({
+      userId: before.userId,
+      agentId,
+      structured: body.structuredResponse,
+      source: 'agent.structuredResponse',
+    });
+  }
   const firstRootTerminal =
     TERMINAL_STATUSES.has(body.status) &&
     before.parentAgentId === null &&

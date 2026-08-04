@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 
 /**
- * Facilitated GMV ledger: merchant card-on-file purchases must land in
- * PurchaseSpend without double-counting AgentCard mint rows.
+ * Structured-output GMV ledger: paid orders with amount + confirmation id
+ * land in PurchaseSpend without double-counting AgentCard mint rows.
  */
 
 import assert from 'node:assert/strict';
@@ -11,13 +11,13 @@ import { PurchaseSpendStatus } from '@prisma/client';
 import 'dotenv/config';
 
 import {
-  MERCHANT_SAVED_PROVIDER,
-  recordFacilitatedGmv,
-} from '../../domains/purchases/facilitatedGmv';
+  ORDER_CONFIRMATION_PROVIDER,
+  recordStructuredGmv,
+} from '../../domains/purchases/structuredGmv';
 import { prisma } from '../../providers/database';
 
 async function withUser(run: (userId: string) => Promise<void>): Promise<void> {
-  const userId = `facilitated-gmv-unit-${randomUUID()}`;
+  const userId = `structured-gmv-unit-${randomUUID()}`;
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   try {
     await run(userId);
@@ -30,7 +30,7 @@ async function withUser(run: (userId: string) => Promise<void>): Promise<void> {
 
 async function seedAgent(userId: string): Promise<string> {
   const agent = await prisma.agent.create({
-    data: { userId, goal: 'facilitated gmv unit test' },
+    data: { userId, goal: 'structured gmv unit test' },
   });
   return agent.id;
 }
@@ -38,34 +38,34 @@ async function seedAgent(userId: string): Promise<string> {
 async function main(): Promise<void> {
   await withUser(async (userId) => {
     const agentId = await seedAgent(userId);
-    const first = await recordFacilitatedGmv({
+    const first = await recordStructuredGmv({
       userId,
       agentId,
-      merchant: 'Blue Bottle Coffee',
-      totalCents: 1850,
-      paymentMethod: 'Visa ending in 4242',
-      domain: 'order.online',
-      approvedAt: 1_720_000_000,
-      lineItems: [{ title: 'Cortado' }],
-      totals: { total: '$18.50' },
+      structured: {
+        merchant: 'Blue Bottle Coffee',
+        checkout_total: '$18.50',
+        order_confirmation_id: 'BB-UNIT-001',
+      },
+      source: 'unit.test',
     });
     assert.equal(first.status, 'recorded');
     if (first.status !== 'recorded') throw new Error('expected recorded');
     assert.equal(first.created, true);
 
     const row = await prisma.purchaseSpend.findUniqueOrThrow({ where: { id: first.purchaseId } });
-    assert.equal(row.provider, MERCHANT_SAVED_PROVIDER);
+    assert.equal(row.provider, ORDER_CONFIRMATION_PROVIDER);
     assert.equal(row.status, PurchaseSpendStatus.CLEARED);
     assert.equal(row.totalCents, 1850);
     assert.equal(row.merchant, 'Blue Bottle Coffee');
 
-    const second = await recordFacilitatedGmv({
+    const second = await recordStructuredGmv({
       userId,
       agentId,
-      merchant: 'Blue Bottle Coffee',
-      totalCents: 1850,
-      domain: 'order.online',
-      approvedAt: 1_720_000_000,
+      structured: {
+        merchant: 'Blue Bottle Coffee',
+        checkout_total: '$18.50',
+        order_confirmation_id: 'BB-UNIT-001',
+      },
     });
     assert.equal(second.status, 'recorded');
     if (second.status !== 'recorded') throw new Error('expected recorded');
@@ -88,13 +88,14 @@ async function main(): Promise<void> {
       },
     });
 
-    const skipped = await recordFacilitatedGmv({
+    const skipped = await recordStructuredGmv({
       userId,
       agentId,
-      merchant: 'Blick',
-      totalCents: 1200,
-      domain: 'dickblick.com',
-      approvedAt: 1_720_000_100,
+      structured: {
+        merchant: 'Blick',
+        total_cents: 1200,
+        order_id: 'BLICK-CONF-99',
+      },
     });
     assert.deepEqual(skipped, {
       status: 'skipped',
@@ -103,22 +104,30 @@ async function main(): Promise<void> {
   });
 
   await withUser(async (userId) => {
-    const skipped = await recordFacilitatedGmv({
+    const skipped = await recordStructuredGmv({
       userId,
-      merchant: '',
-      totalCents: 100,
+      structured: { checkout_total: '$10.00' },
     });
-    assert.deepEqual(skipped, { status: 'skipped', reason: 'missing_merchant' });
+    assert.deepEqual(skipped, {
+      status: 'skipped',
+      reason: 'missing_amount_or_confirmation',
+    });
 
-    const invalid = await recordFacilitatedGmv({
+    const boundary = await recordStructuredGmv({
       userId,
-      merchant: 'Shop',
-      totalCents: -5,
+      structured: {
+        checkout_total: 10,
+        order_id: 'ORD-BOUNDARY',
+        order_placed: false,
+      },
     });
-    assert.deepEqual(invalid, { status: 'skipped', reason: 'invalid_total_cents' });
+    assert.deepEqual(boundary, {
+      status: 'skipped',
+      reason: 'missing_amount_or_confirmation',
+    });
   });
 
-  process.stdout.write('purchases facilitated gmv: passed\n');
+  process.stdout.write('purchases structured gmv: passed\n');
 }
 
 main().catch((error) => {

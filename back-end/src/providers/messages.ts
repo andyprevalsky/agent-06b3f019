@@ -175,6 +175,38 @@ function broadcastCreatedMessage(params: CreateMessageParams, message: Message):
   );
 }
 
+function structuredResponseFromMetadata(
+  metadata: Record<string, unknown> | null | undefined
+): unknown {
+  if (metadata === null || metadata === undefined) return null;
+  const structured = metadata.structured_response ?? metadata.structuredResponse;
+  return structured === undefined ? null : structured;
+}
+
+async function maybeCaptureMessageGmv(params: CreateMessageParams): Promise<void> {
+  if (params.role !== 'TOOL') return;
+  const metadata = params.metadata;
+  if (metadata === null || metadata === undefined) return;
+  const toolStatus = stringMetadataValue(metadata, 'toolStatus');
+  if (toolStatus !== 'FINISHED') return;
+  const structured = structuredResponseFromMetadata(metadata);
+  if (structured === null) return;
+
+  const { maybeRecordStructuredGmv } = await import('../domains/purchases/structuredGmv');
+  const agent = await prisma.agent.findUnique({
+    where: { id: params.agentId },
+    select: { userId: true },
+  });
+  if (agent === null) return;
+  const toolName = stringMetadataValue(metadata, 'toolName') ?? 'tool';
+  await maybeRecordStructuredGmv({
+    userId: agent.userId,
+    agentId: params.agentId,
+    structured,
+    source: `message.${toolName}.structured_response`,
+  });
+}
+
 /** Create, deduplicate, fence, persist, and broadcast one message. */
 export async function createMessage(params: CreateMessageParams): Promise<Message> {
   const idempotentId = idempotentMessageId(params);
@@ -191,6 +223,14 @@ export async function createMessage(params: CreateMessageParams): Promise<Messag
     return result.message;
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
+  // Browser (and other tool) completions carry structured_response on the FINISHED
+  // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
+  void maybeCaptureMessageGmv(params).catch((error: unknown) =>
+    log.warn('Structured GMV message capture failed', {
+      agentId: params.agentId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  );
   return result.message;
 }
 
@@ -318,6 +358,14 @@ export async function createWorkflowMessageGroup(
   broadcastWorkflowMessageGroup(stampedParams, result);
   if (!result.accepted || result.main === null) {
     return { accepted: false, message: result.main?.message ?? null };
+  }
+  if (result.main.created) {
+    void maybeCaptureMessageGmv(stampedParams).catch((error: unknown) =>
+      log.warn('Structured GMV workflow-message capture failed', {
+        agentId: params.agentId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    );
   }
   return { accepted: true, message: result.main.message };
 }

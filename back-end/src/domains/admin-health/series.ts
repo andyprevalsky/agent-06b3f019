@@ -41,8 +41,8 @@ export function buildSeries(
       tasksByPeriod[index].filter((task) => subscriberPoint.userIds.has(task.userId))
     );
     // Platform GMV is total facilitated commerce (not cohort-filtered): AgentCard
-    // clearances + merchant card-on-file rows. Per-task efficiency uses the same
-    // subscriber task denominator as outputTokensPerTask.
+    // clearances + structured-output order confirmations. Per-task efficiency uses
+    // the same subscriber task denominator as outputTokensPerTask.
     const gmvCents = sumGmvCents(gmvByPeriod[index]);
     return {
       ...period,

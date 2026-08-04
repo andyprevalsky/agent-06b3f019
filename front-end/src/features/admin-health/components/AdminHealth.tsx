@@ -16,7 +16,7 @@
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *
  * GMV SOURCES:
- *   PurchaseSpend CLEARED (AgentCard mint) + merchant_saved (card-on-file write-lock)
+ *   PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
  *
  * VIEW DATA:
  * [LOADING] <-- loading: true
@@ -426,7 +426,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
       <MetricPanel
         title="GMV / Task"
         value={formatCurrency(data.summary.gmvPerTask)}
-        detail="Cleared platform GMV (AgentCard + merchant card-on-file) / root tasks."
+        detail="Cleared platform GMV (AgentCard + confirmed orders) / root tasks."
         icon={<ShoppingBag className="h-5 w-5" />}
         change={
           <MetricChange value={seriesMetricChange(data, 'gmvPerTask')} timeSlice={data.timeSlice} />

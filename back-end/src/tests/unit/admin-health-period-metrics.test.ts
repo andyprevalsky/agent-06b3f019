@@ -79,7 +79,7 @@ const series = buildSeries(
   ],
   [
     gmvRecord(1000, '2026-05-04T00:00:00.000Z'),
-    gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'merchant_saved'),
+    gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'order_confirmation'),
     gmvRecord(3000, '2026-06-05T00:00:00.000Z'),
   ]
 );
@@ -102,7 +102,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   series.map((point) => point.gmvCents),
   [1500, 3000],
-  'GMV must sum CLEARED AgentCard + merchant_saved spend per period'
+  'GMV must sum CLEARED AgentCard + order_confirmation spend per period'
 );
 assert.deepStrictEqual(
   series.map((point) => point.gmvPerTask),
