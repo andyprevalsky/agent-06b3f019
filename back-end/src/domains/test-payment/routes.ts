@@ -12,10 +12,9 @@ import {
   getTestPaymentLifecycle,
   recordPhoneBenchmarkPaymentAudit,
   resolvePublicBaseUrl,
-  TestPaymentError,
 } from './service';
 import { checkoutRouter } from './routes.checkout';
-import { rejectWhenDisabled } from './routes.guards';
+import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
 
 const router = Router();
 
@@ -158,11 +157,7 @@ router.post(
       }
       res.json(await configureBenchmarkAgentCardSetup(body));
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to configure benchmark AgentCard setup' });
+      respondTestPaymentError(res, error, 'Failed to configure benchmark AgentCard setup');
     }
   })
 );
@@ -172,18 +167,14 @@ router.post(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    const body = req.body as Record<string, unknown>;
+    const agentId = typeof body.agentId === 'string' ? body.agentId : '';
     try {
-      const body = req.body as Record<string, unknown>;
-      const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
       const result = await abandonTestPayment(agentId);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to abandon test payment lifecycle' });
+      respondTestPaymentError(res, error, 'Failed to abandon test payment lifecycle', { agentId });
     }
   })
 );
@@ -203,17 +194,13 @@ router.get(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
     try {
-      const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
       const result = await getTestPaymentLifecycle(agentId);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to read test payment lifecycle' });
+      respondTestPaymentError(res, error, 'Failed to read test payment lifecycle', { agentId });
     }
   })
 );
@@ -226,11 +213,7 @@ router.post(
       const result = await confirmTestPayment(req.body);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to confirm test payment' });
+      respondTestPaymentError(res, error, 'Failed to confirm test payment');
     }
   })
 );

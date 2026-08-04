@@ -4,6 +4,20 @@ import { mcpCallTool } from './runtime';
 const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
 const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
 const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
+/**
+ * AgentCard throttles the organization MCP per fixed window (observed: 120 requests/minute, shared
+ * by EVERY org caller — card issuance, wallet reclaim polling, the minute cron reconciler and the
+ * payment-lifecycle fan-out). A throttled window therefore drains and refills within seconds, so a
+ * small bounded wait converts a hard failure into a successful call.
+ *
+ * Bounded by a TOTAL delay budget rather than a per-attempt delay: some callers (the wallet-funding
+ * release observer) already poll this runtime up to 20 times, and a per-attempt bound would let the
+ * nested waits multiply into a multi-minute request. The budget caps what one `callTool` can ever
+ * add, so the outer poll loop's own timing stays the dominant term.
+ */
+const RATE_LIMIT_RETRY_ATTEMPTS = 3;
+const RATE_LIMIT_BASE_DELAY_MS = 1_000;
+const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 10_000;
 
 function orgTokenTimeoutMs(): number {
   const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
@@ -67,6 +81,44 @@ function directAccessToken(): string | undefined {
   return token && !token.startsWith('sk_') ? token : undefined;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The MCP transport surfaces an AgentCard throttle as an opaque transport error whose text embeds
+ * the provider's JSON body, so match on the body's wording rather than a status field.
+ */
+function looksLikeRateLimitError(error: unknown): boolean {
+  return /too many requests|rate.?limit|\b429\b/i.test(errorMessage(error));
+}
+
+/**
+ * AgentCard reports `retryAfter` as an ABSOLUTE epoch-milliseconds window reset, not a duration.
+ * Honour it when it fits the remaining budget, otherwise fall back to exponential backoff. Returns
+ * null when no further wait fits, which ends the retry loop.
+ */
+function rateLimitDelayMs(
+  error: unknown,
+  attempt: number,
+  remainingBudgetMs: number
+): number | null {
+  if (remainingBudgetMs <= 0) return null;
+  const match = /"retryAfter"\s*:\s*(\d+)/.exec(errorMessage(error));
+  if (match !== null) {
+    // Clear the window boundary rather than racing it.
+    const waitMs = Number(match[1]) - Date.now() + 250;
+    if (Number.isFinite(waitMs) && waitMs > 0) {
+      return waitMs <= remainingBudgetMs ? waitMs : null;
+    }
+  }
+  return Math.min(RATE_LIMIT_BASE_DELAY_MS * 2 ** (attempt - 1), remainingBudgetMs);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export class AgentCardOrgRuntime {
   private cachedToken?: { accessToken: string; expiresAtMs: number };
   /**
@@ -84,7 +136,41 @@ export class AgentCardOrgRuntime {
     private readonly fetchImpl: FetchLike = fetch
   ) {}
 
+  /**
+   * Calls an organization MCP tool, transparently recovering from the two failure modes that are
+   * expected on a healthy provider: an expired token (refresh once) and a throttled request window
+   * (wait for the window to refill, bounded). Everything else propagates untouched.
+   *
+   * A throttle used to escape as a raw transport error, so every caller that lacked its own
+   * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
+   */
   async callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    let lastRateLimitError: unknown;
+    let remainingBudgetMs = RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
+    for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.callToolOnce(toolName, args);
+      } catch (error) {
+        if (!looksLikeRateLimitError(error)) throw error;
+        lastRateLimitError = error;
+        if (attempt === RATE_LIMIT_RETRY_ATTEMPTS) break;
+        const waitMs = rateLimitDelayMs(error, attempt, remainingBudgetMs);
+        if (waitMs === null) break;
+        remainingBudgetMs -= waitMs;
+        await delay(waitMs);
+      }
+    }
+    // Keep the words "rate limit" in the message: callers that already detect provider throttling
+    // by message text (the wallet-funding release observer) must keep recognising this outcome.
+    throw new AgentCardOrgRuntimeError(
+      `AgentCard Organization MCP rate limit exhausted for ${toolName}`,
+      429,
+      'agentcard_org_mcp_rate_limited',
+      { tool: toolName, error: errorMessage(lastRateLimitError) }
+    );
+  }
+
+  private async callToolOnce(toolName: string, args: Record<string, unknown>): Promise<unknown> {
     const accessToken = await this.getAccessToken();
     try {
       return await this.toolCaller(accessToken, toolName, args);

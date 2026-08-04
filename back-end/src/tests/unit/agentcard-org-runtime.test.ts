@@ -184,6 +184,83 @@ async function main(): Promise<void> {
         error.details.missingEnv === 'AGENTCARD_ORG_OAUTH_CLIENT_ID'
     );
 
+    // Regression: AgentCard throttles the organization MCP org-wide (observed: 120 req/min, shared
+    // by card issuance, the wallet-reclaim poll loop, the minute cron and the payment-lifecycle
+    // fan-out). The throttle arrives as a raw transport error, so `callTool` used to propagate it
+    // untouched and `POST /api/test-payment/lifecycle/abandon` collapsed it into an opaque 500 —
+    // failing `agent-payment-abandonment` on every concurrent run of the AgentCard gate even though
+    // the throttle window refilled seconds later.
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
+
+    const throttleBody = (retryAfterMs: number): string =>
+      `Streamable HTTP error: Error POSTing to endpoint: {"error":"Rate limit exceeded","message":"Too many requests. Limit: 120 requests per minute.","retryAfter":${retryAfterMs}}`;
+
+    let throttledCalls = 0;
+    const throttledRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      assert.equal(toolName, 'get_card');
+      throttledCalls += 1;
+      if (throttledCalls === 1) throw new Error(throttleBody(Date.now() + 50));
+      return { structuredContent: { card: { status: 'CLOSED', balanceCents: 0 } } };
+    });
+    assert.deepEqual(
+      await throttledRuntime.callTool('get_card', { card_id: 'card_1' }),
+      { structuredContent: { card: { status: 'CLOSED', balanceCents: 0 } } },
+      'a throttled org tool call must be retried once the window refills, not surfaced as a failure'
+    );
+    assert.equal(throttledCalls, 2);
+
+    // A throttle that never clears stays bounded and surfaces as a typed 429 rather than an opaque
+    // transport error, so callers can distinguish provider backpressure from a Rose defect.
+    let exhaustedCalls = 0;
+    const exhaustedRuntime = new AgentCardOrgRuntime(async () => {
+      exhaustedCalls += 1;
+      throw new Error(throttleBody(Date.now() + 50));
+    });
+    await assert.rejects(
+      () => exhaustedRuntime.callTool('list_transfers', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 429 &&
+        error.code === 'agentcard_org_mcp_rate_limited' &&
+        error.details.tool === 'list_transfers' &&
+        // The wallet-funding release observer detects provider throttling by message text, so an
+        // exhausted throttle must stay recognisable to it.
+        /too many requests|rate.?limit|\b429\b/i.test(error.message)
+    );
+    assert.equal(exhaustedCalls, 3, 'rate-limit retries must stay bounded');
+
+    // A window reset further out than the delay budget must fail fast rather than parking the
+    // request: nested callers (the 20-attempt release observer) would otherwise multiply the wait.
+    let unbudgetedCalls = 0;
+    const unbudgetedRuntime = new AgentCardOrgRuntime(async () => {
+      unbudgetedCalls += 1;
+      throw new Error(throttleBody(Date.now() + 60_000));
+    });
+    const unbudgetedStartedAt = Date.now();
+    await assert.rejects(
+      () => unbudgetedRuntime.callTool('list_cards', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+    );
+    assert.equal(unbudgetedCalls, 1, 'a reset beyond the delay budget must not be waited out');
+    assert.ok(
+      Date.now() - unbudgetedStartedAt < 5_000,
+      'exceeding the delay budget must fail fast, not sleep'
+    );
+
+    // Non-throttle failures must never be retried — retrying a real error would multiply load.
+    let hardFailureCalls = 0;
+    const hardFailureRuntime = new AgentCardOrgRuntime(async () => {
+      hardFailureCalls += 1;
+      throw new Error('card_closed: This card is closed and its credentials are unavailable');
+    });
+    await assert.rejects(
+      () => hardFailureRuntime.callTool('get_card_details', { card_id: 'card_1' }),
+      /card_closed/
+    );
+    assert.equal(hardFailureCalls, 1);
+
     process.stdout.write('AgentCard org runtime tests passed\n');
   } finally {
     for (const name of ENV_NAMES) {

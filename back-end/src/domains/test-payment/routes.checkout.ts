@@ -11,8 +11,7 @@
 import { Router } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { createTestPaymentCheckoutSession, settleTestPaymentCheckoutSession } from './checkout';
-import { rejectWhenDisabled } from './routes.guards';
-import { TestPaymentError } from './errors';
+import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
 import type { TestPaymentLineItem } from './types';
 
 export const checkoutRouter = Router();
@@ -31,11 +30,7 @@ checkoutRouter.post(
           : null;
       res.json(await createTestPaymentCheckoutSession(body));
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to create test payment checkout session' });
+      respondTestPaymentError(res, error, 'Failed to create test payment checkout session');
     }
   })
 );
@@ -52,11 +47,7 @@ checkoutRouter.post(
       const sessionId = typeof body.checkoutSessionId === 'string' ? body.checkoutSessionId : '';
       res.json(await settleTestPaymentCheckoutSession(sessionId));
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      res.status(500).json({ error: 'Failed to settle test payment checkout session' });
+      respondTestPaymentError(res, error, 'Failed to settle test payment checkout session');
     }
   })
 );
