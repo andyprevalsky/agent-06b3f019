@@ -4,7 +4,7 @@
  * three-block skeleton (agents/utils/prompts.py:build_system_prompt):
  *
  *   Block 1  ROSE_CORE            — universal, user-agnostic (shared w/ main)
- *   Block 2  # User Context       — per-user profile (name / phone / address)
+ *   Block 2  # User Context       — separate personal and delivery details
  *   Block 3  SMS_SURFACE_OVERLAY  — SMS-specific surface + response rules
  *
  * These assertions guard the cache contract (Block 1 must be byte-identical
@@ -45,7 +45,9 @@ function runCheck(name: string, ok: boolean, detail: string): void {
 const userA: UserProfileContext = {
   userId: 'user-a',
   name: 'Ann Alpha',
+  email: 'ann@example.com',
   phone: '+15550000001',
+  deliveryRecipientName: 'Alex Recipient',
   addressLine1: '1 First St',
   addressLine2: 'Apt 2',
   city: 'New York',
@@ -60,7 +62,9 @@ const userA: UserProfileContext = {
 const userB: UserProfileContext = {
   userId: 'user-b',
   name: 'Bob Beta',
+  email: 'bob@example.com',
   phone: '+15550000002',
+  deliveryRecipientName: 'Bea Recipient',
   addressLine1: '99 Ninth Ave',
   addressLine2: null,
   city: 'Austin',
@@ -114,7 +118,7 @@ const perUserTokens = [
   userB.phone!,
   userA.systemName!,
   userB.systemName!,
-  'Shipping address',
+  'Delivery Address',
   '{USER_NAME}',
   '{USER_ASSIGNED_ASSISTANT_NAME}',
 ];
@@ -133,9 +137,11 @@ runCheck(
   blocksA[1].slice(0, 40)
 );
 runCheck(
-  'block 2 contains the user name',
-  blocksA[1].includes('Ann Alpha'),
-  'user name missing from block 2'
+  'block 2 separates personal identity from the delivery recipient',
+  blocksA[1].includes('## Personal Information\nFull Name: Ann Alpha') &&
+    blocksA[1].includes('Email: ann@example.com') &&
+    blocksA[1].includes('## Delivery Address\nRecipient Name: Alex Recipient'),
+  'personal identity or delivery recipient missing from block 2'
 );
 runCheck(
   'block 2 contains the per-user assistant name',
@@ -143,9 +149,9 @@ runCheck(
   'assistant name not surfaced in block 2'
 );
 runCheck(
-  'block 2 renders the shipping address',
-  blocksA[1].includes('Shipping address: 1 First St, Apt 2, New York, NY, 10001, US'),
-  'shipping address format changed'
+  'block 2 renders the delivery address on separate lines',
+  blocksA[1].includes('Recipient Name: Alex Recipient\n1 First St\nApt 2\nNew York, NY, 10001\nUS'),
+  'delivery address format changed'
 );
 
 // Block 3 is the SMS overlay and is user-agnostic.

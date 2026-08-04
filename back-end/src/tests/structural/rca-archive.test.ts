@@ -23,7 +23,7 @@
  * What this test does NOT catch: whether a case's diagnosis is correct, or
  * whether an agent actually ran the search. Only that the mechanism is intact.
  */
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -110,7 +110,28 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The instructions must keep pointing at the archive in both directions:
+// 4. `new` must dispatch to the scaffold implementation. Point it at a known
+// existing case so the check is side-effect free while still distinguishing a
+// working dispatch ("already exists") from the old silent exit-code-2 bug.
+if (fs.existsSync(VALIDATOR)) {
+  const result = spawnSync(
+    'python3',
+    [VALIDATOR, 'new', 'network-capture-bodies-written-to-dev-only-file'],
+    {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      env: { ...process.env, RCA_ARCHIVE_DATE: '2026-07-28' },
+    }
+  );
+  if (result.status !== 1 || !result.stderr.includes('already exists')) {
+    failures.push(
+      `rca_archive.py new did not reach the scaffold implementation.\n` +
+        `    status=${String(result.status)} stderr=${result.stderr.trim()}`
+    );
+  }
+}
+
+// 5. The instructions must keep pointing at the archive in both directions:
 //    read it before diagnosing, write to it after.
 const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: string }> = [
   {

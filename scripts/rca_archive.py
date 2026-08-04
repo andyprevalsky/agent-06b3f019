@@ -550,6 +550,8 @@ def main() -> int:
         return list_cases()
     if args.command == "stats":
         return stats()
+    if args.command == "new":
+        return new_case(args.slug)
     if args.command == "reindex":
         INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
         INDEX_PATH.write_text(render_index(load_cases()), encoding="utf-8")
