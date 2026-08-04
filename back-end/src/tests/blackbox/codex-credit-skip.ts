@@ -22,8 +22,13 @@ export class CredentialExhaustionSkip extends Error {
 // match bare auth/OAuth-revocation errors (401 / "log out and sign in again"):
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
+// `no credits remaining` / `add credits to continue` are OpenAI's CURRENT
+// platform wording. The pattern already covered "out of credits" and "purchase
+// more credits" but not these, so a genuinely fundless account hard-failed the
+// deploy instead of skipping — the exact outcome this module exists to prevent.
+// Both phrases name credits explicitly, so neither can absorb an auth failure.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -90,6 +95,26 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
+  );
+  // VERBATIM production text that hard-failed a deploy on 2026-08-04: OpenAI's
+  // current platform wording was not covered by any existing alternative.
+  const liveExhaustionText =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    detectCodexCreditExhaustion(liveExhaustionText, []) !== null,
+    "OpenAI's live 'no credits remaining' wording must be detected as out of funds"
+  );
+  assert(
+    detectCodexCreditExhaustion('normal output', [
+      { type: 'error', message: liveExhaustionText },
+    ]) !== null,
+    'the live wording must also be detected inside a structured event'
+  );
+  assert(
+    codexSmokeCreditSkipReason(liveExhaustionText, []) !== null,
+    'the live wording without a success sentinel must yield a skip reason'
   );
 }
 
