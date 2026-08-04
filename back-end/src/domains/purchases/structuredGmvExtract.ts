@@ -24,6 +24,9 @@ const AMOUNT_KEY_RE =
   /^(total|amount|price|cost|paid|charged)$|(checkout|order|cart|grand|final|purchase).*(total|amount|price)|(.*price.*usd)|(.*_total)$|(total_usd|amount_usd)$/i;
 const CONFIRMATION_KEY_RE =
   /(order|payment|booking|reservation).*(id|number|confirmation)|(confirmation).*(id|code|number)|receipt_id|transaction_id/i;
+/** Card PANs / one-time card fields are payment instruments, not order ids. */
+const CONFIRMATION_KEY_BLOCK_RE =
+  /(card|pan|cvv|cvc|expiry|exp_).*number|one_time_payment|payment_card_number|card_number|cardnumber/i;
 const MERCHANT_KEY_RE = /^(merchant|vendor|seller|store|shop|restaurant|brand)$/i;
 const NEGATIVE_COMPLETION_KEYS = new Set([
   'purchase_completed',
@@ -107,8 +110,23 @@ function parseMoneyToCents(value: unknown, treatAsCents: boolean): number | null
 function normalizeConfirmation(value: unknown): string | null {
   if (value === null || value === undefined || typeof value === 'boolean') return null;
   const text = String(value).trim();
-  if (text.length < 3) return null;
+  if (text.length < 3 || text.length > 80) return null;
   if (INVALID_CONFIRMATION.has(text.toLowerCase())) return null;
+  // Reject prose / negative completions masquerading as ids.
+  if (/\s/.test(text) && text.length > 40) return null;
+  if (
+    /\b(not\s+(placed|completed|evidenced|issued)|no\s+(order|purchase|confirmation)|unverified)\b/i.test(
+      text
+    )
+  ) {
+    return null;
+  }
+  // Reject raw card PANs (13–19 digits). Keep Amazon-style ###-#######-#######
+  // order ids, which become 17 digits only after stripping dashes.
+  const compactDigits = text.replace(/[\s-]/g, '');
+  if (/^\d{13,19}$/.test(compactDigits) && !/^\d{3}-\d{7}-\d{7}$/.test(text)) {
+    return null;
+  }
   return text;
 }
 
@@ -133,6 +151,7 @@ function scoreAmountKey(key: string): number {
 
 function scoreConfirmationKey(key: string): number {
   const leaf = leafKey(key).toLowerCase();
+  if (CONFIRMATION_KEY_BLOCK_RE.test(leaf)) return 0;
   if (leaf === 'order_confirmation_id' || leaf === 'orderconfirmationid') return 100;
   if (leaf === 'confirmation_code' || leaf === 'confirmationcode') return 95;
   if (leaf === 'order_id' || leaf === 'orderid') return 90;

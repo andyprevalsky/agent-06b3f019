@@ -28,6 +28,11 @@ _CONFIRMATION_KEY_RE = re.compile(
     r"(confirmation).*(id|code|number)|receipt_id|transaction_id",
     re.IGNORECASE,
 )
+_CONFIRMATION_KEY_BLOCK_RE = re.compile(
+    r"(card|pan|cvv|cvc|expiry|exp_).*number|one_time_payment|payment_card_number|"
+    r"card_number|cardnumber",
+    re.IGNORECASE,
+)
 _MERCHANT_KEY_RE = re.compile(r"^(merchant|vendor|seller|store|shop|restaurant|brand)$", re.IGNORECASE)
 _NEGATIVE_KEYS = {
     "purchase_completed",
@@ -116,6 +121,8 @@ def _amount_score(path: str) -> int:
 
 def _confirmation_score(path: str) -> int:
     leaf = _leaf(path).lower()
+    if _CONFIRMATION_KEY_BLOCK_RE.search(leaf):
+        return 0
     if leaf in {"order_confirmation_id", "orderconfirmationid"}:
         return 100
     if leaf in {"confirmation_code", "confirmationcode"}:
@@ -133,7 +140,19 @@ def _normalize_confirmation(value: Any) -> Optional[str]:
     if value is None or isinstance(value, bool):
         return None
     text = str(value).strip()
-    if len(text) < 3 or text.lower() in _INVALID_CONFIRMATION:
+    if len(text) < 3 or len(text) > 80 or text.lower() in _INVALID_CONFIRMATION:
+        return None
+    if re.search(r"\s", text) and len(text) > 40:
+        return None
+    if re.search(
+        r"\b(not\s+(placed|completed|evidenced|issued)|no\s+(order|purchase|confirmation)|unverified)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return None
+    digits = re.sub(r"[\s-]", "", text)
+    # Keep Amazon-style ###-#######-####### order ids; reject contiguous PANs.
+    if re.fullmatch(r"\d{13,19}", digits) and not re.fullmatch(r"\d{3}-\d{7}-\d{7}", text):
         return None
     return text
 

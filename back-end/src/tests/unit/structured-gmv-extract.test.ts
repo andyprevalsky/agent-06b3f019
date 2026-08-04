@@ -69,4 +69,32 @@ assert.equal(amazon.totalCents, 1499);
 assert.equal(amazon.confirmationId, '111-2222222-3333333');
 assert.equal(amazon.merchant, 'Amazon');
 
+const beanie = extractStructuredGmv({
+  purchase_completed: true,
+  order_confirmation_id: '106-8124526-2047424',
+  selected_beanie_price_usd: 19.99,
+  selected_beanie_title: 'Carhartt Mens Knit Cuffed Beanie Hat, Black',
+});
+assert.ok(beanie !== null);
+assert.equal(beanie.totalCents, 1999);
+assert.equal(beanie.confirmationId, '106-8124526-2047424');
+
+// Card PAN fields are payment instruments, not order confirmations.
+assert.equal(
+  extractStructuredGmv({
+    checkout_total: 43.96,
+    one_time_payment_card_number: '4242424242426755',
+  }),
+  null
+);
+
+// Prose "no confirmation" must not count as an order id.
+assert.equal(
+  extractStructuredGmv({
+    item_subtotal_usd: 42.44,
+    order_confirmation_id: 'No confirmation ID—order was not placed.',
+  }),
+  null
+);
+
 process.stdout.write('structured gmv extract: passed\n');

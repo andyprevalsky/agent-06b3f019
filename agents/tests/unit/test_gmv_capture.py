@@ -72,3 +72,40 @@ def test_extract_structured_gmv_key_agnostic_nested():
     assert capture is not None
     assert capture["totalCents"] == 2499
     assert capture["confirmationId"] == "tp_abcdef12"
+
+
+def test_extract_structured_gmv_beanie_amazon_shape():
+    capture = extract_structured_gmv(
+        {
+            "purchase_completed": True,
+            "order_confirmation_id": "106-8124526-2047424",
+            "selected_beanie_price_usd": 19.99,
+        }
+    )
+    assert capture is not None
+    assert capture["totalCents"] == 1999
+    assert capture["confirmationId"] == "106-8124526-2047424"
+
+
+def test_extract_structured_gmv_rejects_card_pan_as_confirmation():
+    assert (
+        extract_structured_gmv(
+            {
+                "checkout_total": 43.96,
+                "one_time_payment_card_number": "4242424242426755",
+            }
+        )
+        is None
+    )
+
+
+def test_extract_structured_gmv_rejects_prose_confirmation():
+    assert (
+        extract_structured_gmv(
+            {
+                "item_subtotal_usd": 42.44,
+                "order_confirmation_id": "No confirmation ID—order was not placed.",
+            }
+        )
+        is None
+    )
