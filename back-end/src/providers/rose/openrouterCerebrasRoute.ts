@@ -16,6 +16,7 @@ import {
 } from './errors';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
+import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
 export const OPENROUTER_CEREBRAS_MODEL = 'z-ai/glm-4.7';
@@ -27,7 +28,7 @@ export function buildOpenRouterCerebrasBody(
 ): Record<string, unknown> {
   return {
     model: OPENROUTER_CEREBRAS_MODEL,
-    messages: options.messages,
+    messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
     reasoning: { effort: 'none', exclude: true },

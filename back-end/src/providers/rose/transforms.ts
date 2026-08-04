@@ -397,6 +397,45 @@ export function extractToolsFromResponseFormat(
 }
 
 /**
+ * Stamp the OpenAI `type: "function"` discriminator onto every assistant
+ * tool_call before an OpenAI-dialect request goes out.
+ *
+ * Anthropic's transform reads `.function.name` directly and never needed it, so
+ * a constructor could omit it and still look correct everywhere we tested.
+ * Google validates strictly: without the discriminator it sees an assistant
+ * turn with no valid function calls followed by tool results, rejects the whole
+ * transcript with 400 "The conversation transcript is malformed", and the pool
+ * silently demotes to its weakest leg. Normalizing here means no current or
+ * future message constructor can reintroduce that failure.
+ */
+export function normalizeOpenAiToolCalls(messages: CompletionMessage[]): CompletionMessage[] {
+  return messages.map((message) => {
+    if (message.role !== 'assistant') return message;
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return message;
+    return {
+      ...message,
+      tool_calls: message.tool_calls.map((toolCall) => {
+        // `CompletionMessage` also permits the flat `{id, name, arguments}`
+        // shape that the Anthropic and Responses transforms read. OpenAI's
+        // chat dialect has no such form, so lift it rather than passing
+        // through something even more malformed than the original defect.
+        const name = toolCall.function?.name ?? toolCall.name;
+        const args = toolCall.function?.arguments ?? toolCall.arguments;
+        if (typeof name !== 'string' || name.length === 0) return toolCall;
+        return {
+          ...toolCall,
+          type: 'function' as const,
+          function: {
+            name,
+            arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
+          },
+        };
+      }),
+    };
+  });
+}
+
+/**
  * Configure an Anthropic request body for native tools / structured output.
  * Mirrors `apply_anthropic_tool_config` in agents/providers/rose/transforms.py.
  *

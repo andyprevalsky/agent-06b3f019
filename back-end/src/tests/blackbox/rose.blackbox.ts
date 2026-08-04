@@ -52,6 +52,11 @@ import {
   type CompletionChunk,
 } from '../../providers/rose';
 import { buildAnthropicBody } from '../../providers/rose/claudeAuth';
+import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
+import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
+import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
+import { buildOpenRouterBody } from '../../providers/rose/waterfall';
+import { buildEnvironmentToolMessages } from '../../providers/smsSupervisor/environmentMessages';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
 import {
   parseAnthropicSSE,
@@ -65,7 +70,7 @@ import {
   transformMessagesForAnthropic,
   transformSchemaForAnthropic,
 } from '../../providers/rose/transforms';
-import type { RoseStreamChunk } from '../../providers/rose/types';
+import type { CompletionMessage, RoseStreamChunk } from '../../providers/rose/types';
 import {
   ANTHROPIC_API_URL,
   CODEX_API_URL,
@@ -663,6 +668,68 @@ async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
       budget.budget_dollars.description.length > 0,
     'budget_dollars description must survive the Anthropic transform'
   );
+}
+
+/**
+ * Every OpenAI-dialect request must stamp `type: "function"` on assistant
+ * tool_calls. Google (via OpenRouter) rejects a transcript without it —
+ * 400 "Tool-call assistant message produced no valid function calls but is
+ * followed by tool result messages. The conversation transcript is malformed."
+ * — which failed the strongest waterfall leg on every SMS round and silently
+ * demoted production to the last leg in the pool.
+ */
+async function testWaterfall_openAiToolCallsCarryFunctionType() {
+  // The producer must be correct at the source...
+  const injected = buildEnvironmentToolMessages('ctx', 7);
+  assertEqual(
+    String(injected[0].tool_calls?.[0].type),
+    'function',
+    'SMS environment injection must emit an OpenAI-valid tool_call'
+  );
+
+  // ...and EVERY OpenAI-dialect builder must guarantee it, for every tool_call
+  // shape `CompletionMessage` permits. A builder omitted from this table is a
+  // live path back to the Google 400 that demoted production.
+  const shapes: Array<{ label: string; toolCall: Record<string, unknown> }> = [
+    { label: 'nested without discriminator', toolCall: { id: 'x', function: { name: 'f' } } },
+    { label: 'flat name/arguments', toolCall: { id: 'y', name: 'g', arguments: '{}' } },
+  ];
+  const builders: Array<{ label: string; build: (messages: CompletionMessage[]) => unknown }> = [
+    {
+      label: 'buildOpenRouterBody',
+      build: (messages) => buildOpenRouterBody({ model: 'google/gemini-3.5-flash', messages }),
+    },
+    { label: 'buildCerebrasChatBody', build: (messages) => buildCerebrasChatBody({ messages }) },
+    {
+      label: 'buildOpenRouterCerebrasBody',
+      build: (messages) => buildOpenRouterCerebrasBody({ messages }),
+    },
+    {
+      label: 'buildOpenRouterFastChatBody',
+      build: (messages) => buildOpenRouterFastChatBody({ messages }),
+    },
+  ];
+
+  for (const { label: builderLabel, build } of builders) {
+    for (const { label: shapeLabel, toolCall } of shapes) {
+      const body = build([
+        { role: 'assistant', content: '', tool_calls: [toolCall] },
+      ] as CompletionMessage[]) as {
+        messages: Array<{ tool_calls?: Array<Record<string, unknown>> }>;
+      };
+      const sent = body.messages[0].tool_calls?.[0];
+      assertEqual(
+        String(sent?.type),
+        'function',
+        `${builderLabel} must stamp the discriminator on a ${shapeLabel} tool_call`
+      );
+      const fn = sent?.function as { name?: string } | undefined;
+      assert(
+        typeof fn?.name === 'string' && fn.name.length > 0,
+        `${builderLabel} must emit function.name for a ${shapeLabel} tool_call (got ${JSON.stringify(sent)})`
+      );
+    }
+  }
 }
 
 /** Anthropic caps a request at four `cache_control` blocks. */
@@ -2922,6 +2989,10 @@ async function main(): Promise<void> {
     {
       name: 'gptAuth / SMS supervisor schema is strict for Codex Responses',
       fn: testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses,
+    },
+    {
+      name: 'waterfall / OpenAI tool_calls carry the function type discriminator',
+      fn: testWaterfall_openAiToolCallsCarryFunctionType,
     },
     {
       name: 'claudeAuth / SMS supervisor lifts native tools without unions',
