@@ -1096,13 +1096,31 @@ async function testRateLimitReset_extractionBranches() {
     retryDeltaMs > 55_000 && retryDeltaMs <= 65_000,
     `retry-after 60 → ~60s, got ${retryDeltaMs}ms`
   );
+  // With both signals present the credential must stay ineligible until the
+  // LATER of them. Here the 7d reset outlasts a 60s retry-after.
   assertEqual(
     extractRateLimitedUntil(
       h({ 'anthropic-ratelimit-unified-reset': iso, 'retry-after': '60' }),
       ''
     ),
     iso,
-    'reset header wins over retry-after'
+    'reset header wins when it is the later deadline'
+  );
+
+  // Regression: the inverse pairing. A near reset (T+2s) with `retry-after: 30`
+  // must persist ~T+30s, not T+2s. Persisting the earlier one frees the
+  // credential 28s before the provider allows it — a guaranteed second 429,
+  // because providerRequiredWaitMs() reads retry-after first and waits 30s.
+  const nearReset = new Date(Date.now() + 2_000).toISOString();
+  const bothHeaders = extractRateLimitedUntil(
+    h({ 'anthropic-ratelimit-unified-reset': nearReset, 'retry-after': '30' }),
+    ''
+  );
+  assert(bothHeaders !== null, 'reset + retry-after parsed');
+  const bothDeltaMs = new Date(bothHeaders!).getTime() - Date.now();
+  assert(
+    bothDeltaMs > 25_000 && bothDeltaMs <= 35_000,
+    `near reset + retry-after 30 → ~30s (the later), got ${bothDeltaMs}ms`
   );
 
   // Retry eligibility uses Retry-After before the longer credential reset. HTTP-date is a valid

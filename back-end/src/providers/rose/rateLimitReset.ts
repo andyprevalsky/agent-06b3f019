@@ -134,24 +134,54 @@ function parseRetryAfter(value: string | null | undefined): string | null {
 }
 
 /**
+ * Whichever of two parsed deadlines lands later. A credential must stay
+ * ineligible until the LAST moment any signal says the provider is still
+ * limiting it — releasing it at the earlier one guarantees a second 429.
+ */
+function laterOf(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  const aMs = Date.parse(a);
+  const bMs = Date.parse(b);
+  if (Number.isNaN(aMs)) return b;
+  if (Number.isNaN(bMs)) return a;
+  return bMs > aMs ? b : a;
+}
+
+/**
  * The provider's own reset time for this credential, or null when it gave none.
  * `headers` is anything with a case-insensitive `get()` (a `fetch` Headers).
+ *
+ * Reset headers keep their declared priority (the list is ordered narrowest
+ * window first, so we must NOT take a max across them — a 7d reset header is
+ * present even when only the 5h burst window is exhausted, and maxing would
+ * lock a healthy credential out for a week). But `retry-after` is a *separate*
+ * signal about the same credential, so the persisted deadline is the later of
+ * the chosen reset and `retry-after`. Otherwise a response carrying both
+ * (reset `T+2s` with `retry-after: 30`) would persist `T+2s` while
+ * `providerRequiredWaitMs()` — which reads `retry-after` first — waits 30s,
+ * and the credential would go eligible 28s before the provider allows it.
  */
 export function extractRateLimitedUntil(
   headers: Pick<Headers, 'get'> | null | undefined,
   errorBody: string
 ): string | null {
+  let fromReset: string | null = null;
   if (headers) {
     for (const name of RESET_HEADER_NAMES) {
       const parsed = parseResetValue(headers.get(name));
-      if (parsed !== null) return parsed;
+      if (parsed !== null) {
+        fromReset = parsed;
+        break;
+      }
     }
   }
 
-  const fromBody = parseBodyResetTime(errorBody);
-  if (fromBody !== null) return fromBody;
+  if (fromReset === null) {
+    fromReset = parseBodyResetTime(errorBody);
+  }
 
-  return parseRetryAfter(headers?.get('retry-after'));
+  return laterOf(fromReset, parseRetryAfter(headers?.get('retry-after')));
 }
 
 /**

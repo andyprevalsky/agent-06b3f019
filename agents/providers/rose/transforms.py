@@ -893,7 +893,11 @@ def flatten_tool_history_to_text(
                     call_names[call_id] = name
                 args = fn.get("arguments")
                 if not isinstance(args, str):
-                    args = json.dumps(args) if args is not None else ""
+                    # `default=str` keeps a non-JSON-native argument value from
+                    # raising TypeError here. This runs while flattening history
+                    # for a provider that declared no tools, so a single exotic
+                    # value must not abort the whole request.
+                    args = json.dumps(args, default=str) if args is not None else ""
                 summaries.append(f"[Called {name}({args})]")
             existing_text = _message_content_to_text(rewritten.get("content"))
             joined = "\n".join(summaries)

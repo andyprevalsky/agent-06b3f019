@@ -128,8 +128,15 @@ docker_available_for_cold_seed() {
         integer_part="${delay_seconds%%.*}"
         fractional_part=""
         [[ "$delay_seconds" == *.* ]] && fractional_part="${delay_seconds#*.}"
-        if (( 10#$integer_part > 5 )) || \
-           { (( 10#$integer_part == 5 )) && [[ "$fractional_part" =~ [1-9] ]]; }; then
+        # Strip leading zeros before any arithmetic. `10#$integer_part` errors
+        # out on a value wider than a machine integer ("value too great for
+        # base"), which skipped the cap entirely and left a nonsense delay in
+        # place — the retry loop would then sleep effectively forever. Anything
+        # left with more than one digit is >= 10, so it caps without arithmetic.
+        integer_part="${integer_part#"${integer_part%%[!0]*}"}"
+        [ -z "$integer_part" ] && integer_part=0
+        if (( ${#integer_part} > 1 )) || (( integer_part > 5 )) || \
+           { (( integer_part == 5 )) && [[ "$fractional_part" =~ [1-9] ]]; }; then
             delay_seconds=5
         elif [[ "$delay_seconds" =~ ^0+([.]0+)?$ ]]; then
             delay_seconds=0
