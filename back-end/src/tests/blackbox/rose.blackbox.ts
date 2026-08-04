@@ -693,6 +693,13 @@ async function testWaterfall_openAiToolCallsCarryFunctionType() {
   const shapes: Array<{ label: string; toolCall: Record<string, unknown> }> = [
     { label: 'nested without discriminator', toolCall: { id: 'x', function: { name: 'f' } } },
     { label: 'flat name/arguments', toolCall: { id: 'y', name: 'g', arguments: '{}' } },
+    // The Responses dialect names the identifier `call_id`. Chat-dialect tool
+    // results are matched by `id`, so a call carrying only `call_id` must be
+    // mapped, not passed through unidentified.
+    {
+      label: 'responses-style call_id only',
+      toolCall: { call_id: 'z', name: 'h', arguments: '{}' },
+    },
   ];
   const builders: Array<{ label: string; build: (messages: CompletionMessage[]) => unknown }> = [
     {
@@ -728,8 +735,93 @@ async function testWaterfall_openAiToolCallsCarryFunctionType() {
         typeof fn?.name === 'string' && fn.name.length > 0,
         `${builderLabel} must emit function.name for a ${shapeLabel} tool_call (got ${JSON.stringify(sent)})`
       );
+      assert(
+        typeof sent?.id === 'string' && (sent.id as string).length > 0,
+        `${builderLabel} must carry a chat-dialect id for a ${shapeLabel} tool_call (got ${JSON.stringify(sent)})`
+      );
     }
   }
+}
+
+/**
+ * The Anthropic union relaxation collapses `T | null` to `T` and drops the key
+ * from `required`, because Anthropic expresses optionality through `required`
+ * and rejects a body carrying more than 16 union-typed parameters.
+ *
+ * That is a deliberate contract change for one provider dialect: a
+ * required-nullable field becomes an absent-or-`T` field, and consumers read
+ * absence as null (`supervisorTools.ts` defaults `budget_dollars` to $1). Pin
+ * both halves so neither the collapse nor the consumer default drifts.
+ */
+interface JsonSchemaNode {
+  properties?: Record<string, JsonSchemaNode>;
+  additionalProperties?: JsonSchemaNode;
+  required?: string[];
+}
+
+async function testAnthropic_nullableRelaxationPreservesNonNullableRequired() {
+  const extracted = extractToolsFromResponseFormat({
+    type: 'json_schema',
+    json_schema: {
+      name: 'probe',
+      schema: {
+        type: 'object',
+        properties: {
+          tool_calls: {
+            type: 'array',
+            items: {
+              anyOf: [
+                {
+                  type: 'object',
+                  properties: {
+                    tool: { const: 'probe' },
+                    arguments: {
+                      type: 'object',
+                      properties: {
+                        goal: { type: 'string' },
+                        budget_dollars: { anyOf: [{ type: 'number' }, { type: 'null' }] },
+                        meta: {
+                          type: 'object',
+                          additionalProperties: {
+                            anyOf: [{ type: 'string' }, { type: 'null' }],
+                          },
+                        },
+                      },
+                      required: ['goal', 'budget_dollars', 'meta'],
+                    },
+                  },
+                  required: ['tool', 'arguments'],
+                },
+              ],
+            },
+          },
+        },
+        required: ['tool_calls'],
+      },
+    },
+  } as Parameters<typeof extractToolsFromResponseFormat>[0]);
+  assert(extracted !== null, 'probe envelope must lift to a native tool');
+
+  const root = extracted.tools[0].input_schema as JsonSchemaNode;
+  const schema = root.properties?.arguments as JsonSchemaNode;
+  assertEqual(
+    JSON.stringify(schema.properties?.budget_dollars),
+    '{"type":"number"}',
+    'nullable union must collapse to its value branch'
+  );
+  assert(
+    !(schema.required ?? []).includes('budget_dollars'),
+    'collapsed nullable must leave required so absence can encode null'
+  );
+  assert(
+    (schema.required ?? []).includes('goal'),
+    'a non-nullable required field must stay required'
+  );
+  assertEqual(
+    JSON.stringify(schema.properties?.meta?.additionalProperties),
+    '{"type":"string"}',
+    'typed map values must be relaxed too, or they keep counting against the cap'
+  );
 }
 
 /** Anthropic caps a request at four `cache_control` blocks. */
@@ -3001,6 +3093,10 @@ async function main(): Promise<void> {
     {
       name: 'claudeAuth / body stays within the cache_control block budget',
       fn: testClaudeAuth_bodyStaysWithinCacheBlockBudget,
+    },
+    {
+      name: 'claudeAuth / nullable relaxation keeps non-nullable fields required',
+      fn: testAnthropic_nullableRelaxationPreservesNonNullableRequired,
     },
     {
       name: 'schema / Zod response_model builds strict OpenAI schema',

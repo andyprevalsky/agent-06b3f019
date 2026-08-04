@@ -218,7 +218,14 @@ function testPrimitiveStructuredAnswerNudgesInsteadOfThrowing(): void {
   });
 
   const res = finalizeSupervisorResponse([], acc, 'identified the photo color');
-  assert.equal(res.reasoning, '', 'primitive output has no structured reasoning');
+  // A primitive envelope is a parse failure, and the parse-failure path
+  // deliberately preserves whatever reasoning already streamed rather than
+  // discarding it — the retry round is better off with that context.
+  assert.equal(
+    res.reasoning,
+    'identified the photo color',
+    'a primitive envelope must keep the streamed reasoning for the retry round'
+  );
   assertNudgeRetry(res, 'primitive structured photo answer');
 }
 

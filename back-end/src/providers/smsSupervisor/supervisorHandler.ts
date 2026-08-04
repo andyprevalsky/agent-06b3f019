@@ -721,7 +721,15 @@ export function finalizeSupervisorResponse(
   let parsed: SupervisorResponse;
   try {
     accumulatedContent = structuredOutput.finalText();
-    parsed = JSON.parse(accumulatedContent);
+    const candidate: unknown = JSON.parse(accumulatedContent);
+    // `JSON.parse` happily returns `null`, `"Red"`, or `3`. Reading
+    // `.reasoning` off those either throws or silently yields an empty turn,
+    // so treat any non-object envelope as a parse failure and take the
+    // existing nudge-retry path.
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
+    }
+    parsed = candidate as SupervisorResponse;
   } catch (error) {
     log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),

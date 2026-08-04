@@ -894,6 +894,10 @@ def test_transform_messages_for_openai_stamps_tool_call_type():
             "tool_calls": [{"id": "a", "function": {"name": "f", "arguments": "{}"}}],
         },
         {"role": "assistant", "content": "", "tool_calls": [{"id": "b", "name": "g"}]},
+        # Responses-dialect calls carry `call_id`; chat-dialect tool results are
+        # matched by `id`, so it has to be mapped across.
+        {"role": "assistant", "content": "", "tool_calls": [{"call_id": "c", "name": "h"}]},
+        {"role": "tool", "tool_call_id": "c", "content": "done"},
     ]
     out = transform_messages_for_openai(msgs)
 
@@ -906,6 +910,10 @@ def test_transform_messages_for_openai_stamps_tool_call_type():
     flat = out[2]["tool_calls"][0]
     assert flat["type"] == "function", flat
     assert flat["function"]["name"] == "g", flat
+
+    mapped = out[3]["tool_calls"][0]
+    assert mapped["type"] == "function", mapped
+    assert mapped["id"] == "c", f"call_id must map to the chat-dialect id: {mapped}"
 
     # Callers' message objects must not be mutated.
     assert "type" not in msgs[1]["tool_calls"][0], msgs[1]

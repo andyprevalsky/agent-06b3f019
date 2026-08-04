@@ -284,7 +284,16 @@ function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
     );
   }
 
-  if (out.items) out.items = relaxNullableUnionsForAnthropic(out.items);
+  // Array items and typed-map values carry their own nullable unions, which
+  // count against the same 16-union cap. Unlike a property there is no
+  // `required` list to express optionality here, so the union collapses to its
+  // value branch outright.
+  for (const keyword of ['items', 'additionalProperties'] as const) {
+    const child = out[keyword];
+    if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+    const relaxed = relaxNullableUnionsForAnthropic(child) as JsonSchema;
+    out[keyword] = unwrapNullableUnion(relaxed) ?? relaxed;
+  }
   if (out.$defs && typeof out.$defs === 'object') {
     const newDefs: JsonSchema = {};
     for (const [key, value] of Object.entries(out.$defs as JsonSchema)) {
@@ -422,8 +431,13 @@ export function normalizeOpenAiToolCalls(messages: CompletionMessage[]): Complet
         const name = toolCall.function?.name ?? toolCall.name;
         const args = toolCall.function?.arguments ?? toolCall.arguments;
         if (typeof name !== 'string' || name.length === 0) return toolCall;
+        // The Responses dialect names this `call_id`; OpenAI's chat dialect
+        // requires `id`, and a tool result cannot be matched back to its call
+        // without it. Only synthesize the key when an identifier exists.
+        const id = toolCall.id ?? toolCall.call_id;
         return {
           ...toolCall,
+          ...(id === undefined ? {} : { id }),
           type: 'function' as const,
           function: {
             name,

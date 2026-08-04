@@ -56,6 +56,9 @@ function isSensitive(key: string, value: unknown): boolean {
 const MAX_SERIALIZED_VALUE_CHARS = 2000;
 
 function redact(value: unknown, depth = 0): unknown {
+  // JSON.stringify throws on bigint, which would take down the production
+  // single-line JSON path for a value that is only ever telemetry.
+  if (typeof value === 'bigint') return value.toString();
   if (value === null || typeof value !== 'object') return value;
   if (depth >= 6) return '[depth-limit]';
   if (Array.isArray(value)) return value.map((entry) => redact(entry, depth + 1));

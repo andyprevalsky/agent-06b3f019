@@ -300,10 +300,12 @@ SQL
     if [[ "${BACKEND_CLAUDE_TOKEN_SYNC_SKIP:-0}" != "1" ]] &&
       security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1; then
       echo "Syncing local Claude Code credentials to local test database..."
+      # The seeder owns the pooling flag: its upsert is scoped to the single
+      # {userId, claude_code} row, so no follow-up SQL is needed here. Shelling
+      # out to psql would also have put the DB password in the process table.
       if DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
         npx tsx scripts/seed-claude-code-token-from-keychain.ts >/dev/null 2>&1; then
-        psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -c \
-          "UPDATE \"Integration\" SET \"poolingEnabled\"=true WHERE name='claude_code';" >/dev/null 2>&1 || true
+        :
       else
         echo "   Claude Code credential sync failed; claudeAuth paths will use the waterfall."
       fi

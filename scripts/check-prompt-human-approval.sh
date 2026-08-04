@@ -50,7 +50,8 @@ is_zod_description_file() {
   local file="$1"
   # Match subpath imports too (`zod/v4`, `zod/v4-mini`): a guard that only sees
   # bare `zod` is bypassed by any file importing the versioned entrypoint.
-  local zod_import_pattern="from[[:space:]]+['\"]zod(/[^'\"]*)?['\"]|require\\([[:space:]]*['\"]zod(/[^'\"]*)?['\"]"
+  # `require ("zod")` is legal JS; without the optional space the guard misses it.
+  local zod_import_pattern="from[[:space:]]+['\"]zod(/[^'\"]*)?['\"]|require[[:space:]]*\\([[:space:]]*['\"]zod(/[^'\"]*)?['\"]"
   local describe_pattern='\.[[:space:]]*describe[[:space:]]*\('
 
   if [ -f "$file" ] && grep -Eq "$zod_import_pattern" "$file" && grep -Eq "$describe_pattern" "$file"; then

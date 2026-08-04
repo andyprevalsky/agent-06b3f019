@@ -890,7 +890,15 @@ def _normalize_openai_tool_calls(message: Dict[str, Any]) -> None:
         arguments = function.get("arguments", tc.get("arguments"))
         if not isinstance(arguments, str):
             arguments = json.dumps(arguments if arguments is not None else {})
+        # The Responses dialect names this `call_id`; OpenAI's chat dialect
+        # requires `id` to match a tool result back to its call.
+        call_id = tc.get("id") or tc.get("call_id")
         normalized.append(
-            {**tc, "type": "function", "function": {"name": name, "arguments": arguments}}
+            {
+                **tc,
+                **({} if call_id is None else {"id": call_id}),
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
         )
     message["tool_calls"] = normalized

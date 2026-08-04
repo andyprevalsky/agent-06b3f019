@@ -105,8 +105,13 @@ async function main(): Promise<void> {
       config: { encryptedCredentials },
       rateLimitedUntil: null,
       failureReason: null,
+      // Provisioned test users have no Claude credential of their own, so the
+      // claudeAuth leg is only exercised when this seeded row is poolable.
+      // Setting it here keeps the write scoped to the single upserted row.
+      poolingEnabled: true,
     },
     update: {
+      poolingEnabled: true,
       type: IntegrationType.TOOL_SETUP,
       status: IntegrationStatus.CONNECTED,
       isActive: true,
