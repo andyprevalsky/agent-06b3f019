@@ -66,10 +66,17 @@ while IFS= read -r file; do
     */prompts/*|*/prompt/*|*prompt*.py|*prompt*.ts|*prompt*.tsx|*prompt*.js|*prompt*.jsx|*prompt*.md|*prompt*.mdc|*prompt*.txt|*system-prompt*|*system_prompt*|*strategy_override*.txt)
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
-    *tool_schemas*.py|*tool_schemas*.ts|*tool_schemas*.tsx|*toolSchemas*.ts|*toolSchemas*.tsx)
+    *tool_schemas*.py|*tool_schemas*.ts|*tool_schemas*.tsx|*toolSchemas*.ts|*toolSchemas*.tsx|*Tools.schemas.ts|*tools.schemas.ts)
       # Tool schemas ship class docstrings + Field descriptions to the LLM as
       # tool descriptions — count as prompt content even though they don't
-      # assign to a *_PROMPT symbol.
+      # assign to a *_PROMPT symbol. Include *Tools.schemas.ts (SMS supervisor
+      # catalog) where description strings often sit on the line after
+      # `description:` and would otherwise miss the content scanner.
+      PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+      ;;
+    *smsSupervisor/contextBuilder.ts|*SmsSupervisor/contextBuilder.ts)
+      # SMS surface overlay + system prompt composition — LLM-visible even when
+      # edits land mid-template without an assignment on the same hunk line.
       PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
       ;;
   esac
@@ -111,6 +118,16 @@ DIFF_PROMPT_FILES="$(
       # itself. Requires string content, so `description=None`, a variable
       # passthrough, or a bare mention stays quiet.
       if (code ~ /(^|[^A-Za-z0-9_])(description|Description)["'"'"']?[[:space:]]*[:=][[:space:]]*[`"'"'"'(]/) return 1
+
+      # Multi-line tool description string on its own line (common TS style:
+      # `description:\n  "Spawn…"`). The assignment line is unchanged so the
+      # pattern above misses. Limit to schema catalogs so ordinary validation
+      # error strings that mention "Call …" are not over-flagged.
+      if (file ~ /(^|\/)[^\/]*[Ss]chemas?\.(py|ts|tsx)$/ && code ~ /^[[:space:]]*["'"'"'].{40,}/ && code ~ /(Use for |Do not |Never |Spawn |Call |Must |Always )/) return 1
+
+      # Surface-overlay / system-prompt template continuations: bullet lines
+      # edited far below the SMS_SURFACE_OVERLAY / SYSTEM_PROMPT assignment.
+      if (file ~ /(contextBuilder|prompt|Prompt)\.(py|ts|tsx)$/ && code ~ /^[[:space:]]*-[[:space:]]+/ && code ~ /(tool|agent|spawn|message|completion|prompt)/ && code ~ /(Never |Do not |There is no |must |only\.|failure\.)/) return 1
 
       # Direct prompt text edits embedded in code. Do not flag generic
       # references to "system prompt"; normalization/cache code often talks
