@@ -5,10 +5,25 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
 
+# Fixtures spawn as `( cd ...; cmd ) &`, so $! is the SUBSHELL, not the command it
+# forks. Signalling only the recorded PID orphaned every fixture to init. That is
+# especially harmful here: this suite deliberately spawns fake `run-predeploy-local`
+# benchmark controllers to prove they are PROTECTED from cleanup, so nothing else
+# ever reaps them. Leaked copies then masquerade as real benchmark runs under
+# `pgrep -f run-predeploy-local` — exactly the signal used to decide whether
+# someone else's fleet is live (repo rule 27). Reap descendants before the PID.
+kill_pid_tree() {
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        kill_pid_tree "$child"
+    done
+    kill "$pid" 2>/dev/null || true
+}
+
 cleanup() {
     local pid
     for pid in "${PIDS[@]:-}"; do
-        kill "$pid" 2>/dev/null || true
+        kill_pid_tree "$pid"
         wait "$pid" 2>/dev/null || true
     done
     rm -rf "$TMP_ROOT"
@@ -381,7 +396,10 @@ if [ -n "$isolated_runsh_pid" ]; then
     assert_alive "$isolated_runsh_pid" "benchmark controller's isolated run.sh child"
 fi
 
-kill "$controller_pid" 2>/dev/null || true
-[ -n "$isolated_runsh_pid" ] && kill "$isolated_runsh_pid" 2>/dev/null || true
+# Reap the whole tree. Signalling only $controller_pid killed the subshell and
+# orphaned the real `run-predeploy-local` (and its isolated run.sh) to init, where
+# the EXIT trap could no longer reach them through pgrep -P.
+kill_pid_tree "$controller_pid"
+[ -n "$isolated_runsh_pid" ] && kill_pid_tree "$isolated_runsh_pid"
 
 echo "All kill-services tests passed."
