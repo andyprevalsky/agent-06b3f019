@@ -16,14 +16,22 @@ const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
  * caps what one `callTool` can ever add, so the outer poll loop's own timing stays the dominant
  * term.
  *
- * Retrying is the LAST line of defence, not the fix: the retry budget (10s) is far smaller than the
- * throttle window (60s), so the durable remedy is issuing fewer requests. See
- * `org-poll-schedule.ts` for the backoff that removed most of the volume, and `inFlightReads` below
- * for the coalescing that removes duplicate concurrent reads.
+ * Retrying is the LAST line of defence, not the fix: the budget is far smaller than the throttle
+ * window (60s), so the durable remedy is issuing fewer requests. See `org-poll-schedule.ts` for the
+ * backoff that removed most of the volume, and `inFlightReads` below for the coalescing that
+ * removes duplicate concurrent reads.
+ *
+ * The budget is sized off the provider's OWN advertised reset, not guessed. A measured throttle
+ * during the payment-lifecycle read advertised `retryAfter` 13.8s out; the previous 10s budget
+ * missed it by ~4s, so every throttle fell straight through to a hard failure having waited less
+ * than a millisecond. Honouring a documented Retry-After is the client's side of the rate-limit
+ * contract, so the budget covers half the 60s window: far enough to ride out a mid-refill window,
+ * while a reset more than half a window away still surrenders to the caller instead of parking the
+ * request behind a throttle that deep.
  */
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
-const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 10_000;
+const RATE_LIMIT_TOTAL_DELAY_BUDGET_MS = 30_000;
 
 function orgTokenTimeoutMs(): number {
   const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
@@ -94,15 +102,31 @@ function errorMessage(error: unknown): string {
 /**
  * The MCP transport surfaces an AgentCard throttle as an opaque transport error whose text embeds
  * the provider's JSON body, so match on the body's wording rather than a status field.
+ *
+ * Deliberately does NOT match a bare `429`: provider errors routinely carry unrelated numbers
+ * (transfer amounts in cents, record counts, id fragments), and misreading one as a throttle
+ * relabels the real failure as a rate limit and hides it. Only an explicit HTTP-status form or the
+ * provider's own wording counts.
  */
 function looksLikeRateLimitError(error: unknown): boolean {
-  return /too many requests|rate.?limit|\b429\b/i.test(errorMessage(error));
+  const message = errorMessage(error);
+  return (
+    /too many requests|rate.?limit/i.test(message) ||
+    /\b(?:status|code|http)\D{0,10}429\b/i.test(message)
+  );
 }
 
 /**
  * AgentCard reports `retryAfter` as an ABSOLUTE epoch-milliseconds window reset, not a duration.
- * Honour it when it fits the remaining budget, otherwise fall back to exponential backoff. Returns
- * null when no further wait fits, which ends the retry loop.
+ *
+ * Honour it when it fits the remaining budget, otherwise fail fast. Returns null when no further
+ * wait fits, which ends the retry loop.
+ *
+ * Failing fast is deliberate, and is NOT the same as giving up cheaply: when the provider advertises
+ * a reset minutes away, three more requests will not succeed, and issuing them adds load to a
+ * resource that is already refusing work. The caller gets a typed 429 instead, immediately. The
+ * cost of that choice is that a far window produces a sub-millisecond "exhausted" error, which
+ * reads like a bug in the retry — hence the upstream body is now embedded in the thrown message.
  */
 function rateLimitDelayMs(
   error: unknown,
@@ -227,8 +251,14 @@ export class AgentCardOrgRuntime {
     }
     // Keep the words "rate limit" in the message: callers that already detect provider throttling
     // by message text (the wallet-funding release observer) must keep recognising this outcome.
+    //
+    // Embed the provider's own text in the MESSAGE, not just `details`. Error logging prints the
+    // message and drops structured details, so keeping the upstream body out of it made every
+    // throttle look identical and unattributable — the failure that made this bug take three runs
+    // to characterise.
     throw new AgentCardOrgRuntimeError(
-      `AgentCard Organization MCP rate limit exhausted for ${toolName}`,
+      `AgentCard Organization MCP rate limit exhausted for ${toolName} ` +
+        `after ${RATE_LIMIT_RETRY_ATTEMPTS} attempts; upstream: ${errorMessage(lastRateLimitError)}`,
       429,
       'agentcard_org_mcp_rate_limited',
       { tool: toolName, error: errorMessage(lastRateLimitError) }

@@ -261,6 +261,50 @@ async function main(): Promise<void> {
     );
     assert.equal(hardFailureCalls, 1);
 
+    // A bare `429` inside an unrelated error is not a throttle. Provider errors routinely carry
+    // arbitrary numbers (amounts in cents, record counts, id fragments); matching one relabels the
+    // real failure as a rate limit, retries a request that can never succeed, and hides the cause.
+    let bareNumberCalls = 0;
+    const bareNumberRuntime = new AgentCardOrgRuntime(async () => {
+      bareNumberCalls += 1;
+      throw new Error('MCP error -32603: transfer amount 429 cents could not be settled');
+    });
+    await assert.rejects(
+      () => bareNumberRuntime.callTool('get_card', { card_id: 'card_bare' }),
+      /could not be settled/
+    );
+    assert.equal(bareNumberCalls, 1, 'a bare 429 in unrelated text must not be read as a throttle');
+
+    // The measured production throttle advertised a reset 13.8s out. The budget must cover it: at
+    // 10s this fell through instantly and failed the payment lifecycle on every contended run.
+    let measuredWindowCalls = 0;
+    const measuredWindowRuntime = new AgentCardOrgRuntime(async () => {
+      measuredWindowCalls += 1;
+      if (measuredWindowCalls === 1) throw new Error(throttleBody(Date.now() + 13_800));
+      return { structuredContent: { transfers: [] } };
+    });
+    const measuredStartedAt = Date.now();
+    assert.deepEqual(await measuredWindowRuntime.callTool('list_transfers', { limit: 100 }), {
+      structuredContent: { transfers: [] },
+    });
+    assert.equal(measuredWindowCalls, 2, 'the advertised reset must be waited out, not abandoned');
+    assert.ok(
+      Date.now() - measuredStartedAt >= 13_800,
+      'the wait must clear the provider-advertised window boundary'
+    );
+
+    // An exhausted throttle must name the upstream body. Error logging prints the message and drops
+    // structured details, so omitting it made every throttle unattributable.
+    const opaqueRuntime = new AgentCardOrgRuntime(async () => {
+      throw new Error(throttleBody(Date.now() + 50));
+    });
+    await assert.rejects(
+      () => opaqueRuntime.callTool('get_card', { card_id: 'card_opaque' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        /Limit: 120 requests per minute/.test(error.message)
+    );
+
     // The organization MCP throttle (120 requests/minute) is shared by EVERY org caller, so
     // identical idempotent reads that overlap must cost ONE request, not one per caller. Rose fans
     // these out constantly: concurrent payment-lifecycle reads issue the same `list_transfers`
