@@ -28,6 +28,7 @@ import {
   deleteAgentRecursive,
   resolveAgentPrefix,
   smsIntendsAgentReply,
+  unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 
@@ -184,7 +185,7 @@ export async function dispatchToolCall(
         result = { tool, success: false, result: '', error: 'Environment context unavailable' };
         break;
       default:
-        result = { tool, success: false, result: '', error: `Unknown tool: ${tool}` };
+        result = { tool, success: false, result: '', error: unknownSupervisorToolError(tool) };
     }
 
     log.info('Tool dispatch complete', {

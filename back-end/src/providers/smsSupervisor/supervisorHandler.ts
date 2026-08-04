@@ -32,6 +32,11 @@ import { appendOutboundSms } from './sessionStore';
 import * as environment from './environmentMessages';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
+import {
+  absorbPendingOpKind,
+  emptySmsRunSideEffectEvidence,
+  resolveSendUserMessage,
+} from './messageGrounding';
 
 const log = createLogger('SmsSupervisor');
 
@@ -204,6 +209,7 @@ export async function handleSmsSupervisorMessage(config: {
   const allToolsExecuted: string[] = [];
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
+  let sideEffectEvidence = emptySmsRunSideEffectEvidence();
   let completionAccepted = false;
   let inboundStoredForRun = inboundAlreadyPersisted;
 
@@ -376,11 +382,22 @@ export async function handleSmsSupervisorMessage(config: {
       });
     }
 
+    // Track write tools queued this round so send_user_message grounding can
+    // see start_new_agent / kill_agent even before the commit flush below.
+    for (const op of pendingWrites) {
+      sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, op.kind);
+    }
+
     const dispatchFailures = toolResults.filter((result) => !result.success);
     if (sendCalls.length > 0 && dispatchFailures.length === 0) {
       const commitResults = await flushPendingWrites();
       const commitFailures = commitResults.filter((result) => !result.success);
       toolResults.push(...commitResults);
+      for (const committed of commitResults) {
+        if (committed.success) {
+          sideEffectEvidence = absorbPendingOpKind(sideEffectEvidence, committed.tool);
+        }
+      }
       if (commitFailures.length > 0) {
         const delivery = await deliverUserMessage(
           buildToolFailureMessage(commitFailures, 'commit')
@@ -389,17 +406,22 @@ export async function handleSmsSupervisorMessage(config: {
         terminalFailureReported = delivery.success;
       } else {
         for (const toolCall of sendCalls) {
-          const message = toolCall.arguments?.message;
-          const result =
-            typeof message === 'string' && message.trim() !== ''
-              ? await deliverUserMessage(message)
-              : {
-                  tool: 'send_user_message',
-                  success: false,
-                  result: '',
-                  error: 'message must be a non-empty string',
-                };
-          toolResults.push(result);
+          const resolved = resolveSendUserMessage(toolCall.arguments?.message, sideEffectEvidence);
+          if (!resolved.ok) {
+            log.warn('[SmsSupervisor] Blocked ungrounded send_user_message', {
+              round,
+              error: resolved.error,
+              sideEffectEvidence,
+            });
+            toolResults.push({
+              tool: 'send_user_message',
+              success: false,
+              result: '',
+              error: resolved.error,
+            });
+          } else {
+            toolResults.push(await deliverUserMessage(resolved.text));
+          }
           allToolsExecuted.push(toolCall.tool);
         }
       }

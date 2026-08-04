@@ -14,6 +14,13 @@ import { createLogger } from '../logger';
 
 const log = createLogger('SmsSupervisorTools');
 
+export function unknownSupervisorToolError(tool: string): string {
+  if (tool === 'spawn_agent') {
+    return 'Unknown tool: spawn_agent. On the SMS surface use start_new_agent (and kill_agent) — spawn_agent is the main-agent tool, not available here.';
+  }
+  return `Unknown tool: ${tool}`;
+}
+
 const REPLY_INTENT_STOP_WORDS = new Set([
   'agent',
   'task',
