@@ -14,39 +14,31 @@
  */
 
 import { prisma } from '../database';
-import {
-  createStreamingCompletion,
-  CompletionMessage,
-  CompletionOptions,
-  ContentBlock,
-  markCacheable,
-} from '../rose';
-import { StructuredOutputAccumulator } from '../rose/structuredOutput';
+import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
 import {
   commitPendingWrites,
   dispatchToolCall,
   PendingOp,
-  ToolCall,
   ToolResult,
 } from './supervisorTools';
 import { createLogger } from '../logger';
-import { getComputeToken, type SupervisorComputeToken } from './supervisorComputeToken';
-import { SUPERVISOR_RESPONSE_MODEL } from './schema';
+import { getComputeToken } from './supervisorComputeToken';
 import { appendOutboundSms } from './sessionStore';
 import * as environment from './environmentMessages';
-import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
 import {
   absorbPendingOpKind,
   emptySmsRunSideEffectEvidence,
   resolveSendUserMessage,
 } from './messageGrounding';
+import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
+
+export type { SupervisorResponse } from './supervisorLlm';
+export { finalizeSupervisorResponse } from './supervisorLlm';
 
 const log = createLogger('SmsSupervisor');
-
-const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
 
 // A single supervisor round's LLM call is retried this many times when the
 // stream *throws* (network blip, peer-closed / [NO END] mid-stream, socket
@@ -94,11 +86,6 @@ async function withCommitLock<T>(userId: string, fn: () => Promise<T>): Promise<
       commitLocksByUser.delete(userId);
     }
   }
-}
-
-export interface SupervisorResponse {
-  reasoning: string;
-  tool_calls: ToolCall[];
 }
 
 export interface SmsSupervisorResult {
@@ -577,224 +564,5 @@ export async function handleSmsSupervisorMessage(config: {
     responseText,
     committed,
     toolsExecuted: allToolsExecuted,
-  };
-}
-
-// ============================================
-// LLM Call
-// ============================================
-
-async function callSupervisorLlm(
-  messages: CompletionMessage[],
-  computeToken: SupervisorComputeToken | null,
-  userId: string
-): Promise<SupervisorResponse> {
-  const startTime = Date.now();
-  const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
-  const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
-  const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
-
-  // Same provider path as chat: Cerebras GLM first, with that route's own
-  // failover (quota/rate → OpenRouter unpinned same-model → generic waterfall).
-  // Do not prefer claudeAuth here — SMS reliability must not depend on a user
-  // OAuth token / funded Anthropic key / Anthropic union-schema ceiling.
-  // BENCHMARK_SMS_SUPERVISOR_MODEL(+_ROUTE) overrides for eval isolation only.
-  const modelOverride = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
-  const activeModel =
-    modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
-  const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
-  const providerRoute: NonNullable<CompletionOptions['provider_route']> =
-    modelOverride !== undefined && modelOverride !== ''
-      ? routeOverride === 'direct-cerebras' ||
-        routeOverride === 'openrouter-cerebras' ||
-        routeOverride === 'shared-openai-priority' ||
-        routeOverride === 'openrouter-waterfall'
-        ? routeOverride
-        : 'openrouter-waterfall'
-      : 'direct-cerebras';
-
-  // Log the full request
-  log.info('[SmsSupervisorLLM] Request', {
-    model: activeModel,
-    providerRoute,
-    messageCount: messages.length,
-    hasClaudeToken: !!claudeToken && providerRoute !== 'direct-cerebras',
-    hasGptToken: !!gptToken && providerRoute !== 'direct-cerebras',
-    systemPromptLength: messages[0]?.content
-      ? typeof messages[0].content === 'string'
-        ? messages[0].content.length
-        : 0
-      : 0,
-    messages: messages.map((m, i) => ({
-      index: i,
-      role: m.role,
-      contentLength: typeof m.content === 'string' ? m.content.length : 0,
-      contentPreview: typeof m.content === 'string' ? m.content.substring(0, 100) : '[non-string]',
-    })),
-  });
-
-  const blackboxFixture = loadBlackboxSupervisorResponseFixture(userId);
-  if (blackboxFixture) {
-    if (blackboxFixture.delayMs > 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, blackboxFixture.delayMs));
-    }
-    log.info('[SmsSupervisorLLM] Using blackbox response fixture', {
-      toolCallCount: blackboxFixture.response.tool_calls.length,
-      delayMs: blackboxFixture.delayMs,
-      durationMs: Date.now() - startTime,
-    });
-    return blackboxFixture.response;
-  }
-
-  // Consume streaming response fully (no FE broadcast needed)
-  const stream = await createStreamingCompletion({
-    model: activeModel,
-    messages,
-    temperature: 0.3,
-    response_model: SUPERVISOR_RESPONSE_MODEL,
-    provider_route: providerRoute,
-    // Only attach OAuth passthrough when an eval explicitly leaves the Cerebras
-    // route; prod SMS stays on provider_route and ignores these tokens.
-    ...(providerRoute !== 'direct-cerebras' && claudeToken ? { claude_token: claudeToken } : {}),
-    ...(providerRoute !== 'direct-cerebras' && gptToken
-      ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
-      : {}),
-  });
-
-  let accumulatedContent = '';
-  const structuredOutput = new StructuredOutputAccumulator();
-  let accumulatedReasoning = '';
-  const accumulatedToolCalls: ToolCall[] = [];
-  let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
-  let actualModel = '';
-  let poolName = '';
-
-  for await (const chunk of stream) {
-    const choice = chunk.choices?.[0];
-    if (choice?.delta?.content) {
-      structuredOutput.addCompletionChunk(chunk);
-      accumulatedContent = structuredOutput.currentText();
-    }
-    if (choice?.delta?.reasoning) {
-      accumulatedReasoning += choice.delta.reasoning;
-    }
-    if (choice?.delta?.tool_calls) {
-      for (const tc of choice.delta.tool_calls) {
-        const name = tc.function?.name;
-        const argsStr = tc.function?.arguments ?? '';
-        if (!name) continue;
-        try {
-          const parsedInput = argsStr ? JSON.parse(argsStr) : {};
-          // Native-tool path: the response_format envelope nests real args under
-          // `arguments`, so the tool_use input is `{ arguments: {...} }` and we
-          // unwrap it; if the model emitted the args flat, take them as-is.
-          const innerArgs =
-            parsedInput && typeof parsedInput === 'object' && 'arguments' in parsedInput
-              ? (parsedInput as { arguments: Record<string, unknown> }).arguments
-              : (parsedInput as Record<string, unknown>);
-          accumulatedToolCalls.push({ tool: name, arguments: innerArgs ?? {} });
-        } catch (err) {
-          log.warn('[SmsSupervisorLLM] Failed to parse tool_use arguments', {
-            tool: name,
-            argsPreview: argsStr.substring(0, 200),
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-    }
-    if (chunk.usage) {
-      usage = chunk.usage;
-    }
-    if (chunk.actual_model) {
-      actualModel = chunk.actual_model;
-    }
-    if (chunk.pool_name) {
-      poolName = chunk.pool_name;
-    }
-  }
-
-  log.info('[SmsSupervisorLLM] Response stream consumed', {
-    contentLength: accumulatedContent.length,
-    reasoningLength: accumulatedReasoning.length,
-    toolCallCount: accumulatedToolCalls.length,
-    actualModel,
-    poolName,
-    usage,
-    durationMs: Date.now() - startTime,
-  });
-
-  return finalizeSupervisorResponse(accumulatedToolCalls, structuredOutput, accumulatedReasoning);
-}
-
-/**
- * Shape the consumed supervisor stream into a SupervisorResponse.
- *
- * Two response shapes are possible:
- *   - Native-tool path: the model emitted tool_use blocks → use them directly.
- *   - Content path: the structured-output JSON envelope arrived as content
- *     (Codex / waterfall, or claudeAuth when extraction didn't fit the schema).
- *
- * When the model emits NEITHER — a reasoning-only or empty stream — the
- * structured-output extractor cannot select a single item. That extraction is
- * wrapped in the same try/catch as JSON parsing so a StructuredOutputCardinality
- * error degrades to the deliberate "never send raw garbage to the user" fallback
- * instead of throwing out of the supervisor turn.
- */
-export function finalizeSupervisorResponse(
-  accumulatedToolCalls: ToolCall[],
-  structuredOutput: StructuredOutputAccumulator,
-  accumulatedReasoning: string
-): SupervisorResponse {
-  // Native tool path (claudeAuth + response_model extracted to tools): each
-  // tool_use block came through as a tool_calls delta. Use those directly.
-  if (accumulatedToolCalls.length > 0) {
-    log.info('[SmsSupervisorLLM] Native tool calls received', {
-      tools: accumulatedToolCalls.map((tc) => tc.tool),
-    });
-    return {
-      reasoning: accumulatedReasoning,
-      tool_calls: accumulatedToolCalls,
-    };
-  }
-
-  // The structured-output JSON envelope arrived as content (Codex / waterfall
-  // path, or claudeAuth when extraction didn't fit the schema shape). finalText()
-  // is INSIDE the try: a reasoning-only / empty / ambiguous stream makes the
-  // extractor throw StructuredOutputCardinalityError — the same "the model gave
-  // us nothing actionable this round" condition as a JSON parse failure.
-  //
-  // On that failure we return NO tool calls rather than throwing (which crashed
-  // the whole turn) or injecting an apology (which gave up on the first empty
-  // round). An empty tool_calls response routes into the supervisor loop's
-  // existing nudge-and-retry ("No tool calls and no attempt_completion" →
-  // re-prompt), so a transient empty stream gets another round to actually
-  // answer. If every round stays empty, the loop's terminal net delivers one
-  // friendly apology. Bounded by MAX_TOOL_ROUNDS.
-  let accumulatedContent = '';
-  let parsed: SupervisorResponse;
-  try {
-    accumulatedContent = structuredOutput.finalText();
-    parsed = JSON.parse(accumulatedContent);
-  } catch (error) {
-    log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
-      error: error instanceof Error ? error.message : String(error),
-      rawContent: accumulatedContent.substring(0, 500),
-      contentLength: accumulatedContent.length,
-    });
-    return { reasoning: accumulatedReasoning, tool_calls: [] };
-  }
-
-  log.info('[SmsSupervisorLLM] Parsed response', {
-    reasoning: parsed.reasoning.substring(0, 300),
-    toolCallCount: parsed.tool_calls?.length || 0,
-    toolCalls: parsed.tool_calls?.map((tc) => ({
-      tool: tc.tool,
-      args: JSON.stringify(tc.arguments).substring(0, 100),
-    })),
-  });
-
-  return {
-    reasoning: parsed.reasoning || '',
-    tool_calls: Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [],
   };
 }
