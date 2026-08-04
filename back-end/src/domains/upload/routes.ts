@@ -2,7 +2,7 @@ import { type Response, Router } from 'express';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, authenticateMachineUpload } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import {
   uploadFile,
@@ -27,7 +27,7 @@ const attachmentUpload = multer({
 // Files are stored under userId, allowing them to be reused across agents
 router.post(
   '/',
-  authenticate,
+  authenticateMachineUpload,
   attachmentUpload.single('file') as unknown as Parameters<typeof router.post>[1],
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
