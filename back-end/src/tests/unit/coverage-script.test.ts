@@ -15,6 +15,10 @@ const blackboxRunner = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'run.ts'),
   'utf8'
 );
+const gateResolutionProvider = readFileSync(
+  join(process.cwd(), 'src', 'providers', 'gateResolution.ts'),
+  'utf8'
+);
 const unitRunner = readFileSync(join(process.cwd(), 'scripts', 'run-unit-tests.ts'), 'utf8');
 const adminHealthBlackbox = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'admin-health.blackbox.ts'),
@@ -166,6 +170,11 @@ assert.match(
   blackboxRunner,
   /domainWeights[\s\S]*\.sort\(/,
   'parallel blackbox domains must schedule measured long poles first'
+);
+assert.match(
+  gateResolutionProvider,
+  /resolveAndSignal\([\s\S]*runTransactionWithRetry\(async \(tx\) =>/,
+  'gate resolution must use the resilient interactive-transaction budget under advisory-lock contention'
 );
 assert.match(
   blackboxRunner,
