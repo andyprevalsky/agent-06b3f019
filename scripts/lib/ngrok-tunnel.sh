@@ -91,7 +91,22 @@ ensure_ngrok_domain_reserved() {
         return 0
     fi
 
-    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
+    # Compare the reserved domain literally. A grep pattern treats the dots in a
+    # hostname as wildcards, so `rose-x.ngrok.app` would also match an unrelated
+    # reservation such as `rose-xyngrok.app` and skip a reserve we actually need.
+    if printf '%s\n' "$domains_json" | NGROK_WANT_DOMAIN="$domain" python3 -c '
+import json, os, sys
+
+want = os.environ["NGROK_WANT_DOMAIN"]
+try:
+    payload = json.load(sys.stdin)
+except ValueError:
+    sys.exit(1)
+entries = payload.get("reserved_domains", []) if isinstance(payload, dict) else payload
+if not isinstance(entries, list):
+    sys.exit(1)
+sys.exit(0 if any(isinstance(e, dict) and e.get("domain") == want for e in entries) else 1)
+'; then
         echo "🌐 Reserved domain already exists: $domain"
         return 0
     fi

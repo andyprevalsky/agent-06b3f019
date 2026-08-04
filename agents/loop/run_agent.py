@@ -1005,6 +1005,11 @@ async def run_agent(
         ) = _resolve_current_compute_credentials()
 
         # 7. Call LLM with structured streaming
+        # Only a failure BEFORE a usable response is a retry of this iteration.
+        # Once the provider returns and we accept the response, the turn has
+        # really been spent (tokens are charged in _account_llm_usage below), so
+        # a later failure in accounting/broadcast must NOT refund the iteration.
+        llm_response_accepted = False
         try:
             if is_inside_temporal_activity:
                 # Inside activity (browser agent) - call LLM directly with streaming callback
@@ -1309,6 +1314,10 @@ async def run_agent(
                 # Get detected tools for ID matching (from activity)
                 detected_tools_ordered = llm_result.get("detected_tools_ordered", [])
 
+            # The provider returned a usable response: this iteration is spent
+            # regardless of what fails after this point.
+            llm_response_accepted = True
+
             # Account the successful provider attempt. Semantically rejected
             # attempts were already accounted before their retries above.
             exclude_anthropic_family_on_llm_retry = False
@@ -1411,7 +1420,12 @@ async def run_agent(
             # without ever getting another chance to act. The retry budget
             # (consecutive_llm_failures, capped at 3 above) bounds this path;
             # max_iterations bounds productive work.
-            iteration -= 1
+            #
+            # Scoped to pre-acceptance failures only: once the provider returned
+            # a usable response the turn really was spent (tokens are charged),
+            # so a later accounting/broadcast error must not refund it.
+            if not llm_response_accepted:
+                iteration -= 1
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
