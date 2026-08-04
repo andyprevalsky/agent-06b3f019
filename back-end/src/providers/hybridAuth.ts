@@ -17,7 +17,7 @@ import { prisma } from './database';
 import { createInitialCredit } from './credits';
 import { syncJwtUser, type JwtUserStore } from './hybridAuthUser';
 import { createLogger } from './logger';
-import { verifySupabaseAccessToken } from './supabaseJwt';
+import { impersonatorFromPayload, verifySupabaseAccessToken } from './supabaseJwt';
 
 const log = createLogger('HybridAuth');
 
@@ -58,6 +58,8 @@ export interface HybridAuthRequest extends Request {
     id: string;
     email?: string;
     phone?: string;
+    /** Operator acting on behalf of `id` (RFC 8693 `act`), else undefined. */
+    impersonatedBy?: string;
   };
 }
 
@@ -183,6 +185,7 @@ async function handleJwtAuth(
     id: userId,
     email: payload.email,
     phone: payload.phone,
+    impersonatedBy: impersonatorFromPayload(payload),
   };
   req.isInternal = false;
   req.isX402 = false;
