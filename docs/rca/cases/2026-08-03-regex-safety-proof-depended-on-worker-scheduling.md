@@ -45,7 +45,8 @@ cause was coupling an easily provable safety decision to host scheduling.
 
 ## Solution
 
-`regexSafety.ts` now performs a conservative linear scan over a narrow grammar.
+`regexSafetyProof.ts`, called by `regexSafety.ts`, now performs a conservative
+linear scan over a narrow grammar.
 It locally permits unbounded repetition and at most two small variable-bounded
 repetitions (maximum 5) only for the explicit positive one-character class
 forms used by the realistic queries. All other bracket syntax, wider ranges,
