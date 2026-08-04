@@ -22,14 +22,15 @@ DRY=0
 SELF=$$
 SELF_PPID=$PPID
 MANIFEST="$WORKTREE_DIR/.context/services.json"
+PROCESS_IDENTITY_HELPER="$WORKTREE_DIR/scripts/process-identity.py"
 
-# Return a normalized process birth timestamp. The timestamp is captured when a
-# PID enters the target set and compared again immediately before every signal,
-# so a PID recycled during teardown is never treated as the original service.
+# Return an OS-native process birth identity: Linux boot ID + start ticks, or
+# Darwin proc_pidinfo start time with microsecond precision. Unsupported or
+# unreadable identities fail closed instead of falling back to second-precision
+# ps output. The identity is captured at discovery and rechecked immediately
+# before every signal so a recycled PID is never treated as the original service.
 process_start_time() {
-    ps -p "$1" -o lstart= 2>/dev/null \
-        | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]][[:space:]]*/ /g' \
-        | head -1
+    python3 "$PROCESS_IDENTITY_HELPER" "$1" 2>/dev/null
 }
 
 record_pid() {

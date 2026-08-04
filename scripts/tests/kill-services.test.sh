@@ -97,8 +97,8 @@ assert_alive() {
     assert_controller_match 0 'bash notrun-predeploy-local'
 )
 
-# A mismatched birth timestamp models PID reuse deterministically: the signal
-# helper must preserve that process, while the captured identity may be killed.
+# A mismatched OS-native birth identity models PID reuse deterministically: the
+# signal helper must preserve that process, while the captured identity may be killed.
 (
     source "$ROOT_DIR/scripts/kill-services.sh"
     sleep 1000 &
@@ -107,6 +107,19 @@ assert_alive() {
     identity_probe_start=$(process_start_time "$identity_probe_pid")
     [ -n "$identity_probe_start" ] || {
         echo "FAIL: could not capture identity probe start time" >&2
+        exit 1
+    }
+    case "$(uname -s):$identity_probe_start" in
+        Darwin:darwin:[0-9]*:[0-9]*) ;;
+        Linux:linux:*:[0-9]*) ;;
+        *)
+            echo "FAIL: identity probe was not an OS-native high-precision identity: $identity_probe_start" >&2
+            exit 1
+            ;;
+    esac
+    identity_probe_again=$(process_start_time "$identity_probe_pid")
+    [ "$identity_probe_again" = "$identity_probe_start" ] || {
+        echo "FAIL: identity changed for a live process" >&2
         exit 1
     }
 
@@ -126,6 +139,7 @@ WORKTREE="$TMP_ROOT/worktree"
 mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/back-end" "$TMP_ROOT/foreign"
 cp "$ROOT_DIR/scripts/kill-services.sh" "$WORKTREE/scripts/kill-services.sh"
 cp "$ROOT_DIR/scripts/list-services.sh" "$WORKTREE/scripts/list-services.sh"
+cp "$ROOT_DIR/scripts/process-identity.py" "$WORKTREE/scripts/process-identity.py"
 printf 'import time\ntime.sleep(1000)\n' > "$WORKTREE/agents/worker.py"
 
 worker_port="$(find_free_port)"

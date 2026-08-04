@@ -23,6 +23,8 @@ export interface RetryOptions {
   initialBackoffMs?: number;
   /** Fixed backoff delays per attempt. Overrides exponential if provided. */
   fixedDelays?: number[];
+  /** Dynamic delay for an error, such as an API-provided absolute retry timestamp. */
+  getBackoffDelayMs?: (error: unknown, attempt: number) => number;
   /** HTTP status codes that should trigger a retry (default: 408, 429, 502, 503, 504) */
   retryableStatusCodes?: Set<number>;
   /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
@@ -52,7 +54,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getBackoffDelay(attempt: number, opts: RetryOptions): number {
+function getBackoffDelay(error: unknown, attempt: number, opts: RetryOptions): number {
+  if (opts.getBackoffDelayMs) {
+    return Math.max(0, opts.getBackoffDelayMs(error, attempt));
+  }
   if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
     return opts.fixedDelays[attempt - 1];
   }
@@ -104,7 +109,7 @@ export async function retryWithBackoff<T>(
       lastError = error;
 
       if (attempt < maxRetries && isRetryable(error)) {
-        const delay = getBackoffDelay(attempt, opts);
+        const delay = getBackoffDelay(error, attempt, opts);
         log.warn(`${component}: attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`, {
           error: error instanceof Error ? error.message : String(error),
         });
