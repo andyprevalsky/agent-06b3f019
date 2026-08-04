@@ -10,9 +10,9 @@
  *   [155.271] Out of memory: Killed process 1507 (node) anon-rss:5946368kB   (8GB guest)
  *
  * Cause: `seed-local.ts` read whole blob-bearing tables with an unpaged
- * `findMany()` before writing a single row. LocalStorageOrigin.entries is 84MB
- * of JSON across ~3.7k prod rows and one IndexedDBOrigin.databases row is 38MB;
- * once Prisma parses that JSONB into V8 objects the residency is multiple GB.
+ * `findMany()` before writing a single row. LocalStorageOrigin.entries spans
+ * ~3.7k prod rows and the current largest IndexedDBOrigin value is only 13MB
+ * compressed; Prisma still expands its nested JSON into >3.8GB of V8 objects.
  * It only survived on a dev laptop, which has RAM to spare — memory usage grew
  * to fill whatever the box had, which is why the 8GB guests died too.
  *
@@ -27,10 +27,19 @@
  */
 
 import {
+  syncJsonTextOrigins,
   syncOriginCredentials,
   syncPagedCredentials,
   type OriginModel,
 } from '../../../scripts/seed-local-credentials';
+import { createHash } from 'node:crypto';
+import { Readable, Writable } from 'node:stream';
+import {
+  jsonbOriginSourceCopySql,
+  jsonbOriginTargetCopySql,
+  pipeJsonbCopy,
+  psqlDatabaseUrl,
+} from '../../../scripts/seed-jsonb-stream';
 import { createScopedBrowserAuthReaders } from '../../../scripts/cookie-domain-scope';
 import type { LocalStorageOrigin } from '@prisma/client';
 
@@ -271,6 +280,115 @@ test('an invalid page size is rejected instead of silently reading unpaged', asy
     threw = true;
   }
   assert(threw, 'page size 0 must throw — silently falling back to an unpaged read is the bug');
+});
+
+test('large JSONB origins cross the seed boundary as text without fidelity loss', async () => {
+  const payloads = [
+    JSON.stringify([{ database: 'small', records: [{ key: 1, value: 'one' }] }]),
+    JSON.stringify([
+      {
+        database: 'large',
+        records: [{ key: 2, value: 'x'.repeat(1024 * 1024) }],
+      },
+    ]),
+    JSON.stringify([{ database: 'last', records: [{ key: 3, value: 'three' }] }]),
+  ];
+  const rows = payloads.map((payload, index) => ({
+    id: `json-origin-${index}`,
+    userId: USER_ID,
+    origin: `https://json-origin-${index}.test`,
+    payload,
+    hash: `json-hash-${index}`,
+    updatedAt: new Date(index * 1000),
+  }));
+  const readSizes: number[] = [];
+  const written: typeof rows = [];
+
+  const synced = await syncJsonTextOrigins(
+    async ({ afterId, take }) => {
+      const start = afterId === undefined ? 0 : rows.findIndex((row) => row.id === afterId) + 1;
+      const page = rows.slice(start, start + take);
+      readSizes.push(page.length);
+      return page;
+    },
+    async () => null,
+    async (row) => {
+      written.push(row);
+    },
+    1
+  );
+
+  assert(synced === rows.length, `expected ${rows.length} rows synced, got ${synced}`);
+  assert(
+    Math.max(...readSizes) === 1,
+    `JSONB text transport must hold one payload at a time, saw page size ${Math.max(...readSizes)}`
+  );
+  assert(
+    written.every((row, index) => row.payload === payloads[index]),
+    'JSONB text transport must preserve every payload byte without parsing, sampling, or truncation'
+  );
+});
+
+test('oversized JSONB crosses the database boundary incrementally without fidelity loss', async () => {
+  const chunk = Buffer.alloc(64 * 1024, 'x');
+  const chunkCount = 1024;
+  const expected = createHash('sha256');
+  for (let index = 0; index < chunkCount; index += 1) expected.update(chunk);
+
+  let largestChunk = 0;
+  const actual = createHash('sha256');
+  const source = Readable.from(
+    (async function* streamPayload() {
+      for (let index = 0; index < chunkCount; index += 1) yield chunk;
+    })()
+  );
+  const target = new Writable({
+    write(data: Buffer, _encoding, callback) {
+      largestChunk = Math.max(largestChunk, data.byteLength);
+      actual.update(data);
+      callback();
+    },
+  });
+
+  await pipeJsonbCopy(source, target);
+
+  assert(
+    largestChunk <= chunk.byteLength,
+    `stream transport must not coalesce the 64MB payload; largest chunk was ${largestChunk} bytes`
+  );
+  assert(
+    actual.digest('hex') === expected.digest('hex'),
+    'stream transport must preserve every payload byte without parsing, sampling, or truncation'
+  );
+});
+
+test('streamed JSONB copy stays scoped and preserves local identities on merge', async () => {
+  const sourceSql = jsonbOriginSourceCopySql('IndexedDBOrigin', "user'quoted", ['amazon.com']);
+  const targetSql = jsonbOriginTargetCopySql('IndexedDBOrigin');
+
+  assert(sourceSql.includes(`"userId" = 'user''quoted'`), 'source COPY must quote the user id');
+  assert(
+    sourceSql.includes(`"origin" LIKE '%://amazon.com'`),
+    'source COPY must retain exact-host origin scoping'
+  );
+  assert(
+    sourceSql.includes(`"origin" LIKE '%.amazon.com/%'`),
+    'source COPY must retain subdomain/path origin scoping'
+  );
+  assert(
+    targetSql.includes('ON CONFLICT ("userId", "origin") DO UPDATE SET'),
+    'target COPY must merge by the same natural identity as the Prisma path'
+  );
+  assert(
+    !targetSql.match(/DO UPDATE SET[\s\S]*"id"\s*=/),
+    'target COPY must preserve a pre-existing local primary id'
+  );
+  assert(
+    psqlDatabaseUrl(
+      'postgresql://postgres:postgres@localhost:5432/victoria?connection_limit=50&pool_timeout=30&sslmode=require'
+    ) === 'postgresql://postgres:postgres@localhost:5432/victoria?sslmode=require',
+    'psql transport must strip Prisma-only URL parameters while preserving libpq parameters'
+  );
 });
 
 async function main(): Promise<void> {

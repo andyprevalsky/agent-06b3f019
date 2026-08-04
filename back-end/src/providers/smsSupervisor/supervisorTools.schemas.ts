@@ -223,7 +223,7 @@ Returns:
   {
     name: 'send_user_message',
     description:
-      'Send an SMS to the user now. This does not end the run: continue using tools if more work or a later result is needed, then call attempt_completion when the run is actually complete.',
+      'Deliver a real SMS to the user immediately. This is not a draft and cannot be undone. Sending does not end the run: continue using tools if more work or a later result is needed, then call attempt_completion when the run is actually complete. The runtime accepts at most two successful sends per run and rejects additional sends.',
     parameters: {
       type: 'object' as const,
       properties: {

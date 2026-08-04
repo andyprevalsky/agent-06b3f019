@@ -2073,3 +2073,8 @@
 {"task": "sms-supervisor-closed-no-spawn", "duration_seconds": 34.7, "cost_cents": 0.0, "timestamp": "2026-07-29T18:21:46.193347+00:00", "agent_id": ""}
 {"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 31.4, "cost_cents": 0.0, "timestamp": "2026-07-29T18:21:46.193347+00:00", "agent_id": ""}
 {"task": "sms-supervisor-closed-no-spawn", "duration_seconds": 39.5, "cost_cents": 0.0, "timestamp": "2026-07-29T18:23:29.384196+00:00", "agent_id": ""}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 30.6, "cost_cents": 0.0, "timestamp": "2026-08-02T21:39:44.942764+00:00", "agent_id": ""}
+{"task": "sms-supervisor-closed-no-spawn", "duration_seconds": 38.9, "cost_cents": 0.0, "timestamp": "2026-08-02T21:39:44.942764+00:00", "agent_id": ""}
+{"task": "sms-supervisor-closed-no-spawn", "duration_seconds": 33.4, "cost_cents": 0.0, "timestamp": "2026-08-03T15:56:49.277832+00:00", "agent_id": ""}
+{"task": "sms-supervisor-open-spawns-agent", "duration_seconds": 28.0, "cost_cents": 0.0, "timestamp": "2026-08-03T15:59:07.970733+00:00", "agent_id": ""}
+{"task": "sms-supervisor-closed-no-spawn", "duration_seconds": 33.1, "cost_cents": 0.0, "timestamp": "2026-08-03T15:59:07.970733+00:00", "agent_id": ""}

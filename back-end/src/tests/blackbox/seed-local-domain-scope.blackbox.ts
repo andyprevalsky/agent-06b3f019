@@ -154,17 +154,18 @@ test('the executed browser-auth read boundary scopes every domain-bearing table'
   assert.deepEqual(captured.get('passkeyCredential'), passkeySyncWhere('user-1', ['amazon.com']));
 });
 
-test('seed-local consumes each scoped reader exactly once in the live credential path', () => {
+test('seed-local consumes every scoped reader or streamed equivalent exactly once', () => {
   const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const streamSource = readFileSync(
+    resolve(__dirname, '../../../scripts/seed-jsonb-stream.ts'),
+    'utf8'
+  );
   const occurrences = (needle: string): number => source.split(needle).length - 1;
   for (const table of [
     'cookie',
     'cookieBundle',
     'steelSessionAuth',
-    'localStorageOrigin',
-    'indexedDBOrigin',
     'browserPermission',
-    'cacheStorageOrigin',
     'browserPassword',
     'passkeyCredential',
   ]) {
@@ -178,6 +179,27 @@ test('seed-local consumes each scoped reader exactly once in the live credential
       `${table} must execute through its scoped reader`
     );
   }
+
+  for (const [reader, table] of [
+    ['localStorageOrigin', 'LocalStorageOrigin'],
+    ['indexedDBOrigin', 'IndexedDBOrigin'],
+    ['cacheStorageOrigin', 'CacheStorageOrigin'],
+  ]) {
+    assert.equal(
+      occurrences(`scopedRemoteBrowserAuth.${reader}(`),
+      0,
+      `${reader} must not materialize JSONB through Prisma`
+    );
+    assert.equal(
+      occurrences(`syncJsonbOriginTable('${table}')`),
+      1,
+      `${table} must execute exactly once through the streamed origin boundary`
+    );
+  }
+  assert(
+    streamSource.includes('originDomainMatches(domains)'),
+    'streamed origin tables must share the exact domain matcher used by the scoped Prisma readers'
+  );
 });
 
 test('authoritative passkey reconciliation is limited to the selected domains', () => {

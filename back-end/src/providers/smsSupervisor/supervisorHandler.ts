@@ -17,7 +17,13 @@ import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
-import { commitPendingWrites, dispatchToolCall, PendingOp, ToolResult } from './supervisorTools';
+import {
+  commitPendingWrites,
+  dispatchToolCall,
+  PendingOp,
+  type ToolCall,
+  ToolResult,
+} from './supervisorTools';
 import { createLogger } from '../logger';
 import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
@@ -41,6 +47,19 @@ const SUPERVISOR_LLM_RETRY_BASE_DELAY_MS = 400;
 // the same place. Observed on the SMS bench: "Chill" burned all ten rounds and
 // still ended in the fallback apology.
 const MAX_CONSECUTIVE_EMPTY_ROUNDS = 2;
+const TOOL_TRACE_RESULT_LIMIT = 2_000;
+
+interface SupervisorToolTraceEntry {
+  sequence: number;
+  round: number;
+  phase: 'dispatch' | 'commit' | 'completion';
+  tool: string;
+  arguments: Record<string, unknown>;
+  success: boolean;
+  result: string;
+  resultTruncated: boolean;
+  error?: string;
+}
 
 // User-facing last-resort line when a run genuinely cannot produce a reply after
 // exhausting retries. Deliberately warmer + actionable than a bare "something
@@ -195,11 +214,31 @@ export async function handleSmsSupervisorMessage(config: {
   // 4. LLM call loop. Writes remain deferred behind the sequence gate. SMS
   // delivery is explicit and does not terminate the loop.
   const allToolsExecuted: string[] = [];
+  const toolTrace: SupervisorToolTraceEntry[] = [];
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
   let completionAccepted = false;
   let consecutiveEmptyRounds = 0;
   let inboundStoredForRun = inboundAlreadyPersisted;
+
+  const recordToolTrace = (
+    round: number,
+    toolCall: ToolCall,
+    result: ToolResult,
+    phase: SupervisorToolTraceEntry['phase']
+  ): void => {
+    toolTrace.push({
+      sequence: toolTrace.length,
+      round,
+      phase,
+      tool: toolCall.tool,
+      arguments: toolCall.arguments,
+      success: result.success,
+      result: result.result.substring(0, TOOL_TRACE_RESULT_LIMIT),
+      resultTruncated: result.result.length > TOOL_TRACE_RESULT_LIMIT,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    });
+  };
 
   const runStillOwnsReply = async (): Promise<boolean> => {
     if (abortSignal?.aborted) return false;
@@ -211,21 +250,34 @@ export async function handleSmsSupervisorMessage(config: {
     return commitGuard === undefined || (await commitGuard());
   };
 
-  const flushPendingWrites = async (): Promise<ToolResult[]> => {
+  const flushPendingWrites = async (round: number): Promise<ToolResult[]> => {
     if (pendingWrites.length === 0) return [];
     return withCommitLock(userId, async () => {
       if (!(await runStillOwnsReply())) {
-        return [
-          {
-            tool: 'pending_writes',
-            success: false,
-            result: '',
-            error: 'A newer inbound SMS superseded this run',
-          },
-        ];
+        const superseded: ToolResult = {
+          tool: 'pending_writes',
+          success: false,
+          result: '',
+          error: 'A newer inbound SMS superseded this run',
+        };
+        recordToolTrace(round, { tool: 'pending_writes', arguments: {} }, superseded, 'commit');
+        return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      return commitPendingWrites(queued, userId);
+      const results = await commitPendingWrites(queued, userId);
+      results.forEach((result, index) => {
+        const operation = queued[index];
+        recordToolTrace(
+          round,
+          {
+            tool: operation?.kind ?? result.tool,
+            arguments: (operation?.args as unknown as Record<string, unknown>) ?? {},
+          },
+          result,
+          'commit'
+        );
+      });
+      return results;
     });
   };
 
@@ -403,6 +455,7 @@ export async function handleSmsSupervisorMessage(config: {
       );
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
+      recordToolTrace(round, toolCall, result, 'dispatch');
 
       log.info('[SmsSupervisor] Tool dispatched', {
         round,
@@ -416,7 +469,7 @@ export async function handleSmsSupervisorMessage(config: {
 
     const dispatchFailures = toolResults.filter((result) => !result.success);
     if (sendCalls.length > 0 && dispatchFailures.length === 0) {
-      const commitResults = await flushPendingWrites();
+      const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       toolResults.push(...commitResults);
       if (commitFailures.length > 0) {
@@ -439,17 +492,20 @@ export async function handleSmsSupervisorMessage(config: {
                 };
           toolResults.push(result);
           allToolsExecuted.push(toolCall.tool);
+          recordToolTrace(round, toolCall, result, 'dispatch');
         }
       }
     } else if (sendCalls.length > 0) {
       for (const toolCall of sendCalls) {
-        toolResults.push({
+        const result: ToolResult = {
           tool: toolCall.tool,
           success: false,
           result: '',
           error: 'Not sent because another tool in this response failed',
-        });
+        };
+        toolResults.push(result);
         allToolsExecuted.push(toolCall.tool);
+        recordToolTrace(round, toolCall, result, 'dispatch');
       }
     }
 
@@ -466,6 +522,16 @@ export async function handleSmsSupervisorMessage(config: {
     if (completionCall) {
       if (terminalFailureReported) {
         completionAccepted = true;
+        recordToolTrace(
+          round,
+          completionCall,
+          {
+            tool: 'attempt_completion',
+            success: true,
+            result: 'Completion accepted after a terminal tool failure was reported to the user',
+          },
+          'completion'
+        );
         break;
       }
       if (sentMessages.length === 0 || blockingFailures.length > 0) {
@@ -479,6 +545,7 @@ export async function handleSmsSupervisorMessage(config: {
               : 'Rejected: at least one tool failed',
         };
         toolResults.push(completionFailure);
+        recordToolTrace(round, completionCall, completionFailure, 'completion');
         log.warn('[SmsSupervisor] attempt_completion rejected', {
           round,
           sentMessageCount: sentMessages.length,
@@ -507,12 +574,23 @@ export async function handleSmsSupervisorMessage(config: {
         continue;
       }
 
-      const commitResults = await flushPendingWrites();
+      const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       if (commitFailures.length > 0) {
         const failureMessage = buildToolFailureMessage(commitFailures, 'commit');
         const delivery = await deliverUserMessage(failureMessage);
         toolResults.push(...commitResults, delivery);
+        recordToolTrace(
+          round,
+          completionCall,
+          {
+            tool: 'attempt_completion',
+            success: false,
+            result: '',
+            error: 'Rejected: at least one pending write failed to commit',
+          },
+          'completion'
+        );
         messages.push(
           ...environment.buildToolFeedbackMessages({
             round,
@@ -529,6 +607,12 @@ export async function handleSmsSupervisorMessage(config: {
       }
 
       completionAccepted = true;
+      recordToolTrace(
+        round,
+        completionCall,
+        { tool: 'attempt_completion', success: true, result: 'Completion accepted' },
+        'completion'
+      );
       log.info('[SmsSupervisor] attempt_completion accepted', {
         round,
         sentMessageCount: sentMessages.length,
@@ -597,7 +681,7 @@ export async function handleSmsSupervisorMessage(config: {
     // only long enough to commit queued writes, then stop. Every extra round
     // past this point is pure cost with no observable effect.
     if (sentMessages.length >= environment.MAX_USER_MESSAGES_PER_RUN) {
-      const budgetCommitResults = await flushPendingWrites();
+      const budgetCommitResults = await flushPendingWrites(round);
       log.warn('[SmsSupervisor] Ending run early: per-run SMS budget exhausted', {
         round,
         sentMessageCount: sentMessages.length,
@@ -617,6 +701,16 @@ export async function handleSmsSupervisorMessage(config: {
 
   const committed = sentMessages.length > 0;
   const responseText = sentMessages.join('\n\n');
+
+  // Stable machine-readable audit consumed by the SMS benchmark runner. Keep
+  // the trace as a JSON string because the dev logger otherwise renders arrays
+  // as "[object Object]". The report can now prove whether web_search happened,
+  // with which arguments, and what result preceded an irreversible action.
+  log.info('[SmsSupervisor] TOOL_TRACE', {
+    userId,
+    mySeq,
+    toolTrace: JSON.stringify(toolTrace),
+  });
 
   log.info('[SmsSupervisor] === END ===', {
     userId,

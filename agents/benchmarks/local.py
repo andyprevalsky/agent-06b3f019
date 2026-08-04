@@ -965,6 +965,11 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # The benchmark owns a fresh isolated Postgres. Its Fast Mode cache is
+        # task-local state, so routing schema setup through the shared production
+        # pooler only adds an external startup dependency. A closed or saturated
+        # pooler previously aborted the stack before either task could run.
+        env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # Isolated stacks can start in the same second and share a long
         # workspace-name prefix. Stable ngrok domains truncate that prefix,
         # which can collapse distinct runs onto one public endpoint. Give each

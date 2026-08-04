@@ -4010,20 +4010,49 @@ def _shared_workspace_database_url() -> Optional[str]:
         return None
 
     services_path = shared_context / "services.json"
-    try:
-        services = json.loads(services_path.read_text())
-    except (OSError, ValueError):
-        return None
-    if services.get("status") in {"failed", "stopped"}:
-        return None
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+        except (OSError, ValueError):
+            return None
+        if services.get("status") in {"failed", "stopped"}:
+            return None
 
-    database = services.get("database") or {}
-    ports = services.get("ports") or {}
-    if database.get("use_system_postgres") is True:
-        database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+        database = services.get("database") or {}
+        ports = services.get("ports") or {}
+        if database.get("use_system_postgres") is True:
+            database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+        else:
+            port = database.get("port") or ports.get("local_db")
+            if not port:
+                return None
+            database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
     else:
-        port = database.get("port") or ports.get("local_db")
-        if not port:
+        # A shared run may leave its workspace-scoped Postgres alive after its
+        # services manifest is removed. Isolated stacks replace the inherited
+        # Conductor identity with their per-run identity, so derive the shared
+        # container from the physical repository directory exactly as
+        # scripts/lib/workspace-env.sh does. Never scan or guess another DB.
+        container = f"victoria-db-{REPO_ROOT.name}"
+        inspect = [
+            "docker",
+            "inspect",
+            container,
+            "--format",
+            '{{.State.Running}} {{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}',
+        ]
+        try:
+            result = subprocess.run(inspect, capture_output=True, text=True, timeout=5)
+        except Exception:
+            return None
+        parts = result.stdout.strip().split()
+        if result.returncode != 0 or len(parts) != 2 or parts[0].lower() != "true":
+            return None
+        try:
+            port = int(parts[1])
+        except ValueError:
+            return None
+        if not 1 <= port <= 65535:
             return None
         database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
 

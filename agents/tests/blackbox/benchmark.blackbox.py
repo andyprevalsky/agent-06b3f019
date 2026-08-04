@@ -6624,6 +6624,7 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
+            assert captured["env"]["FAST_MODE_CACHE_USE_LOCAL"] == "1"
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen

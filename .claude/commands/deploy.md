@@ -334,6 +334,10 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    the real assertions without letting a provider retry rerun every repository
    suite.
 
+   After the focused probes finish, run Step 4r's five-run cold-seed memory
+   ratchet by itself. It owns two throwaway Postgres containers and must not
+   overlap the coverage workers, live probes, or Group 4 runtime stacks.
+
    When every applicable runtime-blackbox branch ends, pass or fail, record:
 
    ```bash
@@ -411,10 +415,11 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these thirteen independent suites without
-changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+The concurrent runner executes its independent command-structural suites without
+changing their assertions or test counts, including `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
@@ -563,6 +568,23 @@ python3 scripts/run_deploy_live_probes.py
 ```
 
 Both stage records must pass before closing the `runtime-blackbox` boundary.
+
+## Step 4r: Cold-seed memory ratchet (no skip)
+
+Measure five full cold seeds against the newest cached production dump. Every
+run gets a fresh target database and must pass the source/target fidelity
+fingerprints for Cookies, LocalStorage, IndexedDB, and Cache Storage. The gate
+uses the OS-level maximum resident set size; failed or fidelity-mismatched runs
+never count as a favorable low-memory sample.
+
+```bash
+cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
+  bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget
+```
+
+The checked-in budget is the maximum of the last five stable runs plus exactly
+20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
+all five measurements. Never raise the budget or a machine size to make it pass.
 
 ## Step 5: Spin up local services
 

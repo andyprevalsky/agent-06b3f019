@@ -16,8 +16,11 @@ from benchmarks.sms_runner import (
     SmsScriptError,
     SmsTurn,
     SpendState,
+    _parse_tool_trace_log,
     build_judge_scenario,
     build_judge_transcript,
+    build_report_transcript,
+    build_sms_verifier_prompt,
     parse_sms_script,
     run_sms_static_check,
 )
@@ -51,6 +54,7 @@ def turn(
     allow_spend=False,
     lifecycle=(),
     completion_accepted=True,
+    tool_calls=(),
 ):
     return SmsTurn(
         inbound=inbound,
@@ -63,6 +67,7 @@ def turn(
         spend_before=SpendState(*spend_before),
         spend_after=SpendState(*spend_after),
         allow_spend=allow_spend,
+        tool_calls=list(tool_calls),
     )
 
 
@@ -204,6 +209,81 @@ def test_judge_transcript_reports_observed_side_effects():
     )
     assert row["budget_change_cents"] == 5000
     assert row["agents_started"] == 1
+
+
+def test_report_includes_ordered_tool_calls_but_judge_input_does_not():
+    calls = [
+        {
+            "sequence": 0,
+            "round": 0,
+            "phase": "dispatch",
+            "tool": "web_search",
+            "arguments": {"query": "Lunette Cambodia hours"},
+            "success": True,
+            "result": "temporarily closed",
+            "resultTruncated": False,
+        },
+        {
+            "sequence": 1,
+            "round": 1,
+            "phase": "completion",
+            "tool": "attempt_completion",
+            "arguments": {},
+            "success": True,
+            "result": "Completion accepted",
+            "resultTruncated": False,
+        },
+    ]
+    sms_turn = turn(["Lunette is temporarily closed."], tool_calls=calls)
+
+    [report_row] = build_report_transcript([sms_turn])
+    [judge_row] = build_judge_transcript([sms_turn])
+
+    assert report_row["tool_calls"] == calls
+    assert "tool_calls" not in judge_row
+
+
+def test_tool_trace_parser_reads_dev_and_production_logger_shapes():
+    trace = [
+        {
+            "sequence": 0,
+            "round": 0,
+            "phase": "dispatch",
+            "tool": "web_search",
+            "arguments": {"query": "is Lunette open"},
+            "success": True,
+            "result": "closed",
+            "resultTruncated": False,
+        }
+    ]
+    encoded = json.dumps(trace, separators=(",", ":"))
+    dev = (
+        "\x1b[36m[2026-08-03T00:00:00Z] INFO [SmsSupervisor] "
+        "[SmsSupervisor] TOOL_TRACE userId=u mySeq=1 toolTrace="
+        f"{encoded}\x1b[0m\n"
+    )
+    production = json.dumps(
+        {
+            "timestamp": "2026-08-03T00:00:00Z",
+            "level": "info",
+            "component": "SmsSupervisor",
+            "message": "[SmsSupervisor] TOOL_TRACE",
+            "toolTrace": encoded,
+        }
+    )
+
+    assert _parse_tool_trace_log(dev) == trace
+    assert _parse_tool_trace_log(production) == trace
+
+
+def test_backend_emits_machine_readable_tool_trace_with_arguments():
+    source = (
+        REPO_ROOT_FOR_TEST
+        / "back-end/src/providers/smsSupervisor/supervisorHandler.ts"
+    ).read_text()
+    assert "[SmsSupervisor] TOOL_TRACE" in source
+    assert "arguments: toolCall.arguments" in source
+    assert "recordToolTrace(round, toolCall, result, 'dispatch')" in source
 
 
 def test_judge_scenario_reports_an_empty_world_for_this_task():
@@ -522,7 +602,7 @@ def test_the_pair_differs_only_in_what_the_world_says():
 
     open_world = open_script["web_search_fixture"]["default"]
     closed_world = closed_script["web_search_fixture"]["default"]
-    assert "Open now" in open_world and "TEMPORARILY CLOSED" in closed_world
+    assert "OPEN NOW" in open_world and "TEMPORARILY CLOSED" in closed_world
     # Prod shape: "**Title**\n<excerpts>" blocks joined by blank lines
     # (chatTools.ts:formatSearchResults). A single curated sentence would be an
     # easier input than the model ever gets in production.
@@ -530,6 +610,16 @@ def test_the_pair_differs_only_in_what_the_world_says():
         assert world.startswith("**") and "**\n" in world and "\n\n**" in world
         # Adjacent-vendor noise the model has to read past, as in the real run.
         assert "Se\u00f1or Sisig" in world
+
+
+def test_open_fixture_is_open_regardless_of_when_it_runs():
+    """The open half must not become closed when the calendar rolls over."""
+    world = parse_sms_script(get_task_by_name(TASK_NAME))["web_search_fixture"]["default"]
+    lowered = world.lower()
+    assert "open now" in lowered
+    assert "accepting asap pickup orders" in lowered
+    for conditional in ("closed monday", "tue-sun", "tuesday through sunday", "opens at"):
+        assert conditional not in lowered, f"time-dependent phrasing in open fixture: {conditional}"
 
 
 def test_open_expects_a_spawn_and_closed_forbids_one():
@@ -714,6 +804,19 @@ def test_judge_sees_the_search_results_the_model_saw():
     assert "NOT an invention" in scenario["note"]
 
 
+def test_closed_judge_prompt_enforces_only_the_declared_fact():
+    """The shared SMS wrapper must not smuggle in prose/style criteria."""
+    task = get_task_by_name(CLOSED_TASK_NAME)
+    evaluator = next(e for e in task.evaluators if e["method"] == "single_turn_llm_judge")
+    prompt = build_sms_verifier_prompt(task, evaluator, build_judge_scenario(parse_sms_script(task)))
+
+    assert "Evaluate only the declared criteria" in prompt
+    assert "The reply tells the user the store is closed" in prompt
+    assert "Judge the fact conveyed, not the phrasing" in prompt
+    for undeclared in ("content-free filler", "near-duplicate replies", "reads like one human"):
+        assert undeclared not in prompt
+
+
 def test_closed_fixture_is_closed_regardless_of_when_it_runs():
     """A fixture whose meaning depends on the calendar is not a test.
 
@@ -732,12 +835,14 @@ def test_closed_fixture_is_closed_regardless_of_when_it_runs():
 
 
 def test_cloud_box_gets_the_web_search_fixture_contract():
-    """The cloud fleet launches run.sh directly and never touches local.py.
+    """The cloud stack and its sibling runner receive one fixture path.
 
     If only local.py exported BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE, an SMS task
     on the cloud box would find it unset. The fail-closed guard would then abort
     the run rather than silently score live search — correct, but the benchmark
-    could never run in the fleet. Export it from run.sh so both paths agree.
+    could never run in the fleet. run.sh exports it to the backend; each cloud
+    driver must separately export it to run_benchmark.py because that process is
+    a sibling of run.sh, not its child.
     """
     run_sh = (REPO_ROOT_FOR_TEST / "scripts" / "run.sh").read_text()
     assert "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE" in run_sh
@@ -745,3 +850,27 @@ def test_cloud_box_gets_the_web_search_fixture_contract():
     fixture_at = run_sh.index("BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE")
     surge_at = run_sh.index("BLACKBOX_TEST_FAKE_SURGE")
     assert abs(fixture_at - surge_at) < 1200
+
+    warm_driver = (REPO_ROOT_FOR_TEST / "scripts" / "cloudbench-run.sh").read_text()
+    assert (
+        "export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE="
+        "'$CONTEXT_DIR/sms-web-search-fixture.json'"
+    ) in warm_driver
+    # The backend is launched as a sibling with its own allow-listed env. An
+    # export inside run.sh defaults to a normalized relative path, which resolves
+    # from back-end/ instead of the repository root on cloud machines.
+    assert (
+        '"BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='
+        '$CONTEXT_DIR/sms-web-search-fixture.json"'
+    ) in warm_driver
+
+    image_driver = (
+        REPO_ROOT_FOR_TEST / "scripts" / "cloudbench-entrypoint.sh"
+    ).read_text()
+    assert (
+        '"BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='
+        '$CONTEXT_DIR/sms-web-search-fixture.json"'
+    ) in image_driver
+    # One occurrence configures the stack/backend, one configures the sibling
+    # benchmark process that publishes the fixture.
+    assert image_driver.count("BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE") >= 2

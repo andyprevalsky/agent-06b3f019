@@ -22,6 +22,7 @@ import {
   type UserProfileContext,
 } from '../../providers/smsSupervisor/contextBuilder';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../../providers/rose';
+import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
@@ -164,18 +165,36 @@ runCheck(
   SMS_SURFACE_OVERLAY.includes('primarily through grep'),
   'grep grounding sentence missing from the SMS overlay'
 );
-// The overlay must teach both halves of the send/stop contract the loop
-// enforces: a send does NOT end the run, and attempt_completion carries no
-// message (so it can never be used to talk to the user). Asserted on meaning
-// rather than one exact sentence — the overlay is written as surface mechanics
-// and gets reworded; the contract it describes must not quietly disappear.
+// Tool-specific delivery mechanics belong to the tool description, where the
+// model sees them at the decision boundary, rather than in the global surface
+// prompt. The completion tool owns the other half of the send/stop contract.
+const sendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+const attemptCompletion = TOOL_SCHEMAS.find((tool) => tool.name === 'attempt_completion');
 runCheck(
-  'block 3 separates send_user_message from attempt_completion',
-  /does not end your run/i.test(SMS_SURFACE_OVERLAY) &&
-    /attempt_completion carries no message|attempt_completion sends nothing/i.test(
-      SMS_SURFACE_OVERLAY
-    ),
-  'SMS send/completion contract missing from the overlay'
+  'block 3 does not duplicate send_user_message delivery mechanics',
+  !SMS_SURFACE_OVERLAY.includes('What send_user_message does:'),
+  'tool-specific delivery mechanics leaked into the SMS overlay'
+);
+runCheck(
+  'send_user_message tool owns immediate irreversible delivery and send budget',
+  Boolean(
+    sendUserMessage &&
+    /real SMS/i.test(sendUserMessage.description) &&
+    /immediately/i.test(sendUserMessage.description) &&
+    /cannot be undone/i.test(sendUserMessage.description) &&
+    /does not end the run/i.test(sendUserMessage.description) &&
+    /at most two successful sends/i.test(sendUserMessage.description)
+  ),
+  'send_user_message description is missing delivery or budget mechanics'
+);
+runCheck(
+  'attempt_completion tool owns the no-message completion contract',
+  Boolean(
+    attemptCompletion &&
+    /sends no message/i.test(attemptCompletion.description) &&
+    /successfully called send_user_message/i.test(attemptCompletion.description)
+  ),
+  'attempt_completion description is missing its send prerequisite'
 );
 
 // The SMS prompt must NOT contain main-agent phase/grader prose.

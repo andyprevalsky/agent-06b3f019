@@ -27,7 +27,7 @@ import os
 import pathlib
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 import aiohttp
@@ -96,6 +96,9 @@ class SmsTurn:
     spend_before: SpendState
     spend_after: SpendState
     allow_spend: bool
+    # Ordered, machine-recorded supervisor calls/results for this inbound turn.
+    # Kept out of the LLM judge input but included in the durable run report.
+    tool_calls: list[dict] = field(default_factory=list)
 
 
 class SmsScriptError(RuntimeError):
@@ -286,6 +289,29 @@ def _apply_web_search_fixture(fixture: Any) -> None:
     path.write_text(json.dumps(fixture))
 
 
+def _backend_log_path() -> pathlib.Path | None:
+    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    for candidate in (
+        (REPO_ROOT / context_dir / "logs" / "backend.log") if context_dir else None,
+        REPO_ROOT / "back-end" / "backend-logs.log",
+    ):
+        if candidate is not None and candidate.exists():
+            return candidate
+    return None
+
+
+def _backend_log_after(marker: int) -> str:
+    path = _backend_log_path()
+    if path is None:
+        return ""
+    try:
+        with path.open("rb") as handle:
+            handle.seek(marker)
+            return handle.read().decode("utf-8", errors="ignore")
+    except OSError:
+        return ""
+
+
 def _completion_accepted_after(marker: int) -> bool:
     """Read the supervisor's own END line for this turn.
 
@@ -295,31 +321,48 @@ def _completion_accepted_after(marker: int) -> bool:
     Absent a readable log the check abstains (returns True) rather than failing
     a run for a harness gap.
     """
-    log_path = REPO_ROOT / "back-end" / "backend-logs.log"
-    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR")
-    if context_dir:
-        candidate = REPO_ROOT / context_dir / "logs" / "backend.log"
-        if candidate.exists():
-            log_path = candidate
-    if not log_path.exists():
-        return True
-    try:
-        text = log_path.read_text(errors="ignore")[marker:]
-    except OSError:
+    text = _backend_log_after(marker)
+    if not text:
         return True
     ends = re.findall(r"=== END ===.*?completionAccepted=(\w+)", text)
     return ends[-1] == "true" if ends else True
 
 
+def _parse_tool_trace_log(text: str) -> list[dict]:
+    """Read the last stable TOOL_TRACE record from dev or production logs."""
+    latest: list[dict] = []
+    ansi = re.compile(r"\x1b\[[0-9;]*m")
+    for raw_line in text.splitlines():
+        line = ansi.sub("", raw_line).strip()
+        if "[SmsSupervisor] TOOL_TRACE" not in line:
+            continue
+        encoded: Any = None
+        try:
+            entry = json.loads(line)
+            if isinstance(entry, dict):
+                encoded = entry.get("toolTrace")
+        except json.JSONDecodeError:
+            match = re.search(r"(?:^|\s)toolTrace=(\[.*\])$", line)
+            if match:
+                encoded = match.group(1)
+        if not isinstance(encoded, str):
+            continue
+        try:
+            parsed = json.loads(encoded)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
+            latest = parsed
+    return latest
+
+
+def _tool_trace_after(marker: int) -> list[dict]:
+    return _parse_tool_trace_log(_backend_log_after(marker))
+
+
 def _backend_log_size() -> int:
-    context_dir = os.environ.get("BENCHMARK_CONTEXT_DIR")
-    for candidate in (
-        (REPO_ROOT / context_dir / "logs" / "backend.log") if context_dir else None,
-        REPO_ROOT / "back-end" / "backend-logs.log",
-    ):
-        if candidate is not None and candidate.exists():
-            return candidate.stat().st_size
-    return 0
+    path = _backend_log_path()
+    return path.stat().st_size if path is not None else 0
 
 
 def _live_agent_ids(deps: SmsRunnerDeps, user_id: str) -> set[str]:
@@ -435,6 +478,7 @@ async def _drive_turn(
         spend_before=spend_before,
         spend_after=_read_spend_state(deps, user_id),
         allow_spend=bool(turn.get("allow_spend", False)),
+        tool_calls=_tool_trace_after(log_marker),
     )
 
 
@@ -560,6 +604,14 @@ def build_judge_transcript(turns: list[SmsTurn]) -> list[dict]:
     ]
 
 
+def build_report_transcript(turns: list[SmsTurn]) -> list[dict]:
+    """The durable trajectory, including evidence intentionally hidden from judges."""
+    transcript = build_judge_transcript(turns)
+    for entry, turn in zip(transcript, turns):
+        entry["tool_calls"] = turn.tool_calls
+    return transcript
+
+
 def build_judge_scenario(script: dict) -> dict:
     """Ground truth the judge needs to separate "grounded" from "invented".
 
@@ -592,41 +644,41 @@ def build_judge_scenario(script: dict) -> dict:
     }
 
 
+def build_sms_verifier_prompt(task: BenchmarkTask, evaluator: dict, scenario: dict) -> str:
+    """Build a judge prompt limited to the evaluator's declared criteria."""
+    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
+    return f"""You are a benchmark judge for an SMS assistant's conversation trajectory.
+
+You are given the literal text thread — what the user texted and every SMS the assistant sent back —
+plus the world state that already existed before the thread started. Evaluate only the declared criteria
+below. Do not invent additional requirements about wording, tone, style, length, repetition, promises,
+or general response quality unless a declared criterion explicitly asks for one. Each turn also reports
+`budget_change_cents` and `agents_started` as observed side effects; use them only when a declared
+criterion calls for that evidence.
+
+Score exactly 1.0 only when every declared criterion holds for every turn. Otherwise score 0.0 and name
+the first turn and message that violates a declared criterion.
+
+Scenario: {task.prompt}
+World state before the thread: {json.dumps(scenario, default=str)}
+Criteria:
+{criteria}
+Clarification of the declared criteria: {evaluator.get("judge_prompt", "")}
+"""
+
+
 async def run_sms_llm_judge(
     task: BenchmarkTask, evaluator: dict, turns: list[SmsTurn], scenario: dict
 ) -> dict:
     """Judge the SMS trajectory itself — what the human's phone actually showed."""
     from helpers.llm import check_progress
 
-    criteria = "\n".join(f"- {criterion}" for criterion in evaluator.get("criteria", []))
-    verifier_prompt = f"""You are a strict benchmark judge for an SMS assistant's conversation trajectory.
-
-You are given the literal text thread — what the user texted and every SMS the assistant sent back —
-plus the world state that already existed before the thread started. Judge only what the user's phone
-actually showed. Score exactly 1.0 only when every criterion below holds for every turn. Otherwise
-score 0.0 and name the first turn and message that violates it.
-
-Treat these as failures: more replies than the turn needed, near-duplicate replies, content-free filler
-("acknowledged", "standing by", "monitoring", "got it, I'll update you") sent instead of an answer, and
-any claim of a concrete result (price, confirmation number, pickup time, order status) that neither the
-user nor the pre-existing world state established.
-
-Do NOT treat a correct reference to an already-running agent's goal as invented — that state is given
-to you below. Each turn also reports `budget_change_cents` and `agents_started`, which are the real,
-observed side effects of that turn; use them to check whether a reply's claims actually happened.
-
-Scenario: {task.prompt}
-World state before the thread: {json.dumps(scenario, default=str)}
-Criteria:
-{criteria}
-Judge-specific instruction: {evaluator.get("judge_prompt", "")}
-"""
     return await check_progress(
         context=[
             {"role": "USER", "text": "Evaluate this SMS thread against the criteria."},
             {"role": "TOOL", "text": json.dumps(build_judge_transcript(turns), default=str)},
         ],
-        verifier_system_prompt=verifier_prompt,
+        verifier_system_prompt=build_sms_verifier_prompt(task, evaluator, scenario),
         response_schema=None,
         call_site="benchmark_sms_evaluator",
     )
@@ -759,7 +811,7 @@ async def run_sms_task(base_url: str, task: BenchmarkTask, deps: SmsRunnerDeps) 
         failure_reason=failure_reason,
         stop_metadata={
             "runner": "sms",
-            "turns": build_judge_transcript(turns),
+            "turns": build_report_transcript(turns),
             "declared_evaluators": evaluator_results,
         },
     )

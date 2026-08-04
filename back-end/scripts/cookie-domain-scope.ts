@@ -30,20 +30,31 @@ function domainFieldClauses(field: string, domains: string[]): WhereClause[] {
   return clauses;
 }
 
-function originClauses(domains: string[]): WhereClause[] {
-  const clauses: WhereClause[] = [];
+export type OriginDomainMatch = {
+  mode: 'endsWith' | 'contains';
+  value: string;
+};
+
+export function originDomainMatches(domains: string[]): OriginDomainMatch[] {
+  const matches: OriginDomainMatch[] = [];
   for (const domain of domains) {
     // Exact host and subdomain host, each with an origin terminator, port, or
     // path boundary. Requiring :// or a leading dot avoids look-alikes such as
     // evil-amazon.com.
-    clauses.push({ origin: { endsWith: `://${domain}` } });
-    clauses.push({ origin: { contains: `://${domain}:` } });
-    clauses.push({ origin: { contains: `://${domain}/` } });
-    clauses.push({ origin: { endsWith: `.${domain}` } });
-    clauses.push({ origin: { contains: `.${domain}:` } });
-    clauses.push({ origin: { contains: `.${domain}/` } });
+    matches.push({ mode: 'endsWith', value: `://${domain}` });
+    matches.push({ mode: 'contains', value: `://${domain}:` });
+    matches.push({ mode: 'contains', value: `://${domain}/` });
+    matches.push({ mode: 'endsWith', value: `.${domain}` });
+    matches.push({ mode: 'contains', value: `.${domain}:` });
+    matches.push({ mode: 'contains', value: `.${domain}/` });
   }
-  return clauses;
+  return matches;
+}
+
+function originClauses(domains: string[]): WhereClause[] {
+  return originDomainMatches(domains).map(({ mode, value }) => ({
+    origin: { [mode]: value },
+  }));
 }
 
 function scopedWhere(userId: string, clauses: WhereClause[]): WhereClause {
@@ -117,17 +128,14 @@ export function createScopedBrowserAuthReaders<Rows extends BrowserAuthRowTypes>
   return {
     cookie: (page) => readers.cookie(cookieSyncWhere(userId, domains), page),
     cookieBundle: (page) => readers.cookieBundle(authRealmSyncWhere(userId, domains), page),
-    steelSessionAuth: (page) =>
-      readers.steelSessionAuth(authRealmSyncWhere(userId, domains), page),
+    steelSessionAuth: (page) => readers.steelSessionAuth(authRealmSyncWhere(userId, domains), page),
     localStorageOrigin: (page) =>
       readers.localStorageOrigin(originSyncWhere(userId, domains), page),
     indexedDBOrigin: (page) => readers.indexedDBOrigin(originSyncWhere(userId, domains), page),
-    browserPermission: (page) =>
-      readers.browserPermission(originSyncWhere(userId, domains), page),
+    browserPermission: (page) => readers.browserPermission(originSyncWhere(userId, domains), page),
     cacheStorageOrigin: (page) =>
       readers.cacheStorageOrigin(originSyncWhere(userId, domains), page),
     browserPassword: (page) => readers.browserPassword(originSyncWhere(userId, domains), page),
-    passkeyCredential: (page) =>
-      readers.passkeyCredential(passkeySyncWhere(userId, domains), page),
+    passkeyCredential: (page) => readers.passkeyCredential(passkeySyncWhere(userId, domains), page),
   };
 }

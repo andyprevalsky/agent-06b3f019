@@ -139,6 +139,8 @@ require_text "$DEPLOY_COMMAND" 'python3 scripts/tests/deploy-live-probes.test.py
 require_text "$DEPLOY_COMMAND" 'python3 scripts/run-deploy-structural-gates.py' "/deploy must schedule independent command-structural suites concurrently"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" 'max_workers=len(GATES)' "command-structural runner must default to full independent-suite concurrency"
 require_text "$DEPLOY_STRUCTURAL_RUNNER" '"deploy-structural-runner"' "command-structural runner must retain its signal-handling regression"
+require_text "$DEPLOY_STRUCTURAL_RUNNER" '"seed-memory-ratchet"' "command-structural runner must protect the seed-memory deploy wiring"
+require_text "$DEPLOY_COMMAND" 'bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget' "/deploy must run five enforced cold-seed measurements"
 require_text "$CODERABBIT_CONFIG" 'auto_incremental_review: false' "CodeRabbit must not review every intermediate deploy push"
 require_text "$CODERABBIT_CONFIG" 'auto_pause_after_reviewed_commits: 2' "CodeRabbit must retain a defensive automatic review cap"
 require_text "$DEPLOY_COMMAND" 'scripts/wait-for-code-review --pr "$PR_NUMBER" --head "$REVIEW_HEAD"' "/deploy must wait for CodeRabbit on one exact HEAD"
