@@ -58,7 +58,7 @@ Binary search:
 2. **Harness seatbelt:** `messageGrounding.ts` still rejects ungrounded order-progress / agent-lifecycle claims before Surge delivery (incident-shaped defense in depth).
 3. Clearer `spawn_agent` → `start_new_agent` unknown-tool error + schema/overlay naming.
 
-Exact-state fixture under `back-end/src/tests/fixtures/sms-bluebottle-hallucination/`. Cemented by unit grounding tests and sms-supervisor blackbox. Catalog entry deferred (no SMS-supervisor Temporal runner yet).
+Exact-state fixture under `back-end/src/tests/fixtures/sms-bluebottle-hallucination/`. Cemented by unit grounding tests and sms-supervisor blackbox. Catalog entry deferred until the SMS-supervisor runner (`runner: sms` / tag `sms`) lands; blackbox + fixture remain the durable gate.
 
 10k-agent behavior: O(1) overlay text + O(1) regex check per outbound SMS on the per-user supervisor run; no shared fan-in.
 
