@@ -110,6 +110,7 @@ async function fetchInputs(
     currentAmplitude,
     previousAmplitude,
     connectedConnectors,
+    gmvRecords,
   ] = await Promise.all([
     repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
@@ -125,6 +126,7 @@ async function fetchInputs(
       ? fetchAmplitudeFunnel(new Date(previous.start), new Date(previous.end))
       : Promise.resolve(blackboxOfflineAmplitude()),
     repo.findConnectedConnectors(),
+    repo.findClearedGmvBetween(historyStart, historyEnd),
   ]);
   return {
     tasks,
@@ -137,6 +139,7 @@ async function fetchInputs(
     currentAmplitude,
     previousAmplitude,
     connectedConnectors,
+    gmvRecords,
   };
 }
 
@@ -155,7 +158,8 @@ async function loadAdminHealth(
     input.waitlistSignups,
     input.subscribers,
     input.revenue,
-    input.velocity.buckets
+    input.velocity.buckets,
+    input.gmvRecords
   );
   const latest = series[series.length - 1];
   const currentCohort = buildSignupCohort(input.verifiedUsers, input.tasks, currentPeriod);
@@ -185,11 +189,13 @@ async function loadAdminHealth(
     historyRange: { start: periods[0].start, end: currentPeriod.end },
     summary: {
       revenueCents: latest.revenueCents,
+      gmvCents: latest.gmvCents,
       waitlistSignups: latest.waitlistSignups,
       userCount: latest.userCount,
       taskCount: latest.taskCount,
       tasksIssuedPerUser: latest.tasksIssuedPerUser,
       outputTokensPerTask: latest.outputTokensPerTask,
+      gmvPerTask: latest.gmvPerTask,
       taskCompletionRate: latest.taskCompletionRate,
     },
     series,

@@ -3,7 +3,12 @@
 import assert from 'node:assert';
 import type { AgentStatus } from '@prisma/client';
 import 'dotenv/config';
-import { buildRetentionCohorts, buildSeries } from '../../domains/admin-health/metrics';
+import {
+  buildRetentionCohorts,
+  buildSeries,
+  gmvPerTaskCents,
+  sumGmvCents,
+} from '../../domains/admin-health/metrics';
 import { parseTimeSlice } from '../../domains/admin-health/service';
 import { buildPeriods } from '../../domains/admin-health/time';
 import type { AdminHealthPeriod } from '../../domains/admin-health/types';
@@ -34,6 +39,19 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = 
 
 const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
 
+const gmvRecord = (
+  totalCents: number,
+  createdAt: string,
+  userId = 'subscriber-user',
+  provider = 'agentcard'
+) => ({
+  userId,
+  agentId: `agent-${createdAt}`,
+  totalCents,
+  createdAt: new Date(createdAt),
+  provider,
+});
+
 const series = buildSeries(
   periods,
   [
@@ -58,6 +76,11 @@ const series = buildSeries(
   [
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
+  ],
+  [
+    gmvRecord(1000, '2026-05-04T00:00:00.000Z'),
+    gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'merchant_saved'),
+    gmvRecord(3000, '2026-06-05T00:00:00.000Z'),
   ]
 );
 
@@ -76,6 +99,19 @@ assert.deepStrictEqual(
   [2, 3],
   'Task metrics must exclude users outside the counted user cohort'
 );
+assert.deepStrictEqual(
+  series.map((point) => point.gmvCents),
+  [1500, 3000],
+  'GMV must sum CLEARED AgentCard + merchant_saved spend per period'
+);
+assert.deepStrictEqual(
+  series.map((point) => point.gmvPerTask),
+  [750, 1000],
+  'GMV / task must divide period GMV by subscriber root-task count'
+);
+assert.strictEqual(sumGmvCents([gmvRecord(100, '2026-05-01T00:00:00.000Z')]), 100);
+assert.strictEqual(gmvPerTaskCents(1500, 2), 750);
+assert.strictEqual(gmvPerTaskCents(100, 0), 0);
 assert.strictEqual(parseTimeSlice(undefined), 'monthly');
 assert.strictEqual(parseTimeSlice('weekly'), 'weekly');
 

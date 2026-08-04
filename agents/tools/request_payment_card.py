@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         agentcard_status_activity,
         lookup_purchase_activity,
         mint_purchase_card_activity,
+        record_facilitated_gmv_activity,
     )
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "agentcard_status_activity",
     "lookup_purchase_activity",
     "mint_purchase_card_activity",
+    "record_facilitated_gmv_activity",
     "normalize_payment_payload",
 ]
 
@@ -38,16 +40,19 @@ def __getattr__(name):
         "agentcard_status_activity",
         "lookup_purchase_activity",
         "mint_purchase_card_activity",
+        "record_facilitated_gmv_activity",
     }:
         from domains.request_payment_card.repo import (
             agentcard_status_activity,
             lookup_purchase_activity,
             mint_purchase_card_activity,
+            record_facilitated_gmv_activity,
         )
 
         return {
             "agentcard_status_activity": agentcard_status_activity,
             "lookup_purchase_activity": lookup_purchase_activity,
             "mint_purchase_card_activity": mint_purchase_card_activity,
+            "record_facilitated_gmv_activity": record_facilitated_gmv_activity,
         }[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

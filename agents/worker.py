@@ -57,6 +57,7 @@ from domains.request_payment_card.repo import (
     agentcard_status_activity,
     lookup_purchase_activity,
     mint_purchase_card_activity,
+    record_facilitated_gmv_activity,
 )
 from domains.request_user_approval.repo import (
     create_approval_request_activity,
@@ -1047,6 +1048,7 @@ async def main():
         mint_gmail_connect_activity,
         lookup_purchase_activity,
         mint_purchase_card_activity,
+        record_facilitated_gmv_activity,
         spawn_browser_agent_activity_v3,
         resolve_code_agent_provider_activity,
         spawn_claude_code_activity,

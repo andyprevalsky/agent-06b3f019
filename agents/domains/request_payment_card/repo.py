@@ -220,3 +220,80 @@ async def agentcard_status_activity(user_id: str) -> Dict[str, Any]:
             payload={"request": {"user_id": user_id}, "response": result},
         )
         return result
+
+
+@activity.defn
+async def record_facilitated_gmv_activity(
+    user_id: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Persist merchant card-on-file GMV when a purchase write-lock is approved.
+
+    Accepts either a pre-normalized capture payload or a raw write-lock notification
+    under ``notification``. Idempotent. Skips when an AgentCard PurchaseSpend already
+    covers the agent.
+    """
+    import httpx
+
+    from utils.gmv_capture import extract_facilitated_gmv_capture
+
+    capture = payload
+    notification = payload.get("notification")
+    if notification is not None:
+        extracted = extract_facilitated_gmv_capture(
+            notification,
+            current_url=str(payload.get("currentUrl") or ""),
+            approval_domain=str(payload.get("domain") or ""),
+        )
+        if extracted is None:
+            return {"status": "skipped", "reason": "unparseable_purchase_total"}
+        capture = {
+            **extracted,
+            "agentId": payload.get("agentId"),
+            "approvedAt": payload.get("approvedAt"),
+        }
+
+    total_cents = capture.get("totalCents") or 0
+    merchant = capture.get("merchant") or ""
+    if not total_cents or not merchant:
+        return {"status": "skipped", "reason": "missing_merchant_or_total"}
+
+    config = _load_config()
+    body = {
+        "agentId": capture.get("agentId"),
+        "merchant": merchant,
+        "totalCents": total_cents,
+        "currency": capture.get("currency") or "USD",
+        "paymentMethod": capture.get("paymentMethod"),
+        "domain": capture.get("domain"),
+        "approvedAt": capture.get("approvedAt"),
+        "lineItems": capture.get("lineItems") or [],
+        "totals": capture.get("totals"),
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{config.backend.api_url}/api/purchases/record-facilitated-gmv",
+            json=body,
+            headers={
+                "X-API-Key": config.backend.api_key,
+                "X-User-Id": user_id,
+                "Content-Type": "application/json",
+            },
+        )
+        if response.status_code >= 400:
+            detail = _error_payload(response)
+            _logger().warning(
+                "Facilitated GMV record failed",
+                status_code=response.status_code,
+                detail=str(detail.get("error") or detail)[:200],
+            )
+            return {"status": "error", **detail}
+        result = response.json()
+        archive_root = _current_root_agent_id() or str(capture.get("agentId") or user_id)
+        safe_merchant = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(merchant))[:80]
+        _archive_json(
+            root_agent_id=archive_root,
+            path=f"provider/payment/facilitated-gmv/{safe_merchant or 'unknown'}.json.gz.enc",
+            payload={"request": body, "response": result},
+        )
+        return result if isinstance(result, dict) else {"status": "recorded", "raw": result}

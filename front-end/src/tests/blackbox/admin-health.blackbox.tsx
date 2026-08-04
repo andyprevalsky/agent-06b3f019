@@ -59,12 +59,14 @@ function makeSeries() {
     start: '2026-01-01T00:00:00.000Z',
     end: '2026-01-08T00:00:00.000Z',
     revenueCents: 10000 + index * 1000,
+    gmvCents: 5000 + index * 500,
     waitlistSignups: 3 + index,
     userCount: 20 + index,
     newUsers: 2,
     taskCount: 10 + index,
     tasksIssuedPerUser: 0.8 + index / 10,
     outputTokensPerTask: 1200 + index * 80,
+    gmvPerTask: 400 + index * 25,
     taskCompletionRate: 0.7 + index / 100,
     andyLinearPoints: 3 + index,
     githubCommits: 12 + index,
@@ -120,11 +122,13 @@ function adminHealthPayload(timeSlice = 'monthly') {
     },
     summary: {
       revenueCents: 184000,
+      gmvCents: 25600,
       waitlistSignups: 14,
       userCount: 42,
       taskCount: 128,
       tasksIssuedPerUser: 3.05,
       outputTokensPerTask: 1840,
+      gmvPerTask: 200,
       taskCompletionRate: 0.82,
     },
     series: makeSeries(),
@@ -242,6 +246,11 @@ describe('AdminHealth page', () => {
     expect(screen.queryByText('Tasks and Users')).not.toBeInTheDocument();
     expect(screen.getByText('Output Tokens / Task')).toBeInTheDocument();
     expect(screen.getAllByText('1,840').length).toBeGreaterThan(0);
+    expect(screen.getByText('GMV / Task')).toBeInTheDocument();
+    expect(screen.getByText('GMV')).toBeInTheDocument();
+    expect(screen.getByText('$256.00')).toBeInTheDocument();
+    expect(screen.getByText('$2.00')).toBeInTheDocument();
+    expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
     const connectorAdoption = screen.getByRole('region', { name: 'Connector Adoption' });

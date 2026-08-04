@@ -7800,11 +7800,43 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                         approval_type = result.get("approval_type", "unknown")
                         current_approvals = result.get("write_lock_approvals", {})
+                        approved_at = workflow.now().timestamp()
+                        approval_domain = get_domain_from_url(result.get("current_url", ""))
 
                         current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(result.get("current_url", "")),
-                            "approved_at": workflow.now().timestamp(),
+                            "domain": approval_domain,
+                            "approved_at": approved_at,
                         }
+
+                        # Card-on-file / saved-merchant-method checkouts never mint an
+                        # AgentCard. Record facilitated GMV from the purchase notification
+                        # so Blue Bottle-class orders land in the platform GMV ledger.
+                        # AgentCard mint rows already cover that path — the activity skips
+                        # when a covering PurchaseSpend exists. Best-effort: never block
+                        # checkout resume on a metrics write.
+                        if approval_type == "purchase":
+                            try:
+                                await workflow.execute_activity(
+                                    "record_facilitated_gmv_activity",
+                                    args=[
+                                        workflow_instance.user_id or "",
+                                        {
+                                            "agentId": agent_id,
+                                            "approvedAt": approved_at,
+                                            "domain": approval_domain,
+                                            "currentUrl": result.get("current_url", ""),
+                                            "notification": result.get("write_lock_notification"),
+                                        },
+                                    ],
+                                    start_to_close_timeout=timedelta(seconds=30),
+                                    retry_policy=RetryPolicy(maximum_attempts=2),
+                                )
+                            except Exception as gmv_error:
+                                logger.warning(
+                                    "Facilitated GMV capture failed; continuing checkout",
+                                    error=str(gmv_error)[:200],
+                                    agent_id=agent_id,
+                                )
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
