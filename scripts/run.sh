@@ -360,7 +360,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel|localtunnel --port'
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -1051,10 +1051,46 @@ CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
 CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
 
+# True when the tunnel hostname has at least one A/AAAA record. trycloudflare
+# quick tunnels sometimes print a hostname that never gets DNS (NXDOMAIN from
+# 1.1.1.1 / 8.8.8.8 / local resolver) even after "Registered tunnel connection".
+# Curl then reports 000 forever; fail that case early instead of burning the
+# full edge timeout × retry budget.
+public_tunnel_hostname_resolves() {
+    local url="$1" host
+    host="${url#https://}"
+    host="${host%%/*}"
+    [ -n "$host" ] || return 1
+    if command -v getent >/dev/null 2>&1 && getent ahosts "$host" >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v dig >/dev/null 2>&1; then
+        dig +short A "$host" 2>/dev/null | grep -Eq '^[0-9.]+$' && return 0
+        dig +short AAAA "$host" 2>/dev/null | grep -Eq ':' && return 0
+    fi
+    return 1
+}
+
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
+    local started=$SECONDS
+    local dns_grace_seconds="${CLOUDFLARE_TUNNEL_DNS_GRACE_SECONDS:-15}"
     while [ "$SECONDS" -lt "$deadline" ]; do
+        # NXDOMAIN fast-fail is trycloudflare-specific: account-less quick tunnels
+        # can print a hostname that never gets public DNS. Other providers
+        # (ngrok/loca.lt) resolve normally; skip this gate for them so unit tests
+        # with stub hostnames and non-CF providers keep exercising the HTTP path.
+        if [ "${CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK:-0}" != "1" ] &&
+            [[ "$url" == *".trycloudflare.com" || "$url" == *".trycloudflare.com/"* ]] &&
+            ! public_tunnel_hostname_resolves "$url"; then
+            # Hostname never entered DNS — no amount of curling will help.
+            if [ $((SECONDS - started)) -ge "$dns_grace_seconds" ]; then
+                return 1
+            fi
+            sleep "$retry_seconds"
+            continue
+        fi
         # --noproxy '*': this probe must measure the Cloudflare edge itself, not
         # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
         # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
@@ -1119,6 +1155,19 @@ start_cloudflare_quick_tunnel() {
                 return 0
             fi
             echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
+            # NXDOMAIN across public resolvers means more quick-tunnel attempts
+            # from this IP will almost certainly fail the same way — fall through
+            # to ngrok/localtunnel instead of burning ~minutes of backoff.
+            if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
+                echo "⚠️  $PUBLIC_BASE_URL has no DNS (NXDOMAIN); skipping remaining quick-tunnel attempts."
+                kill "$NGROK_PID" 2>/dev/null || true
+                wait "$NGROK_PID" 2>/dev/null || true
+                unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
+                NGROK_PID=""
+                echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT (DNS never provisioned)."
+                echo "   trycloudflare.com is account-less and best-effort."
+                return 1
+            fi
         fi
 
         # Retire this hostname before asking Cloudflare for a new one, so the dead
@@ -1141,6 +1190,56 @@ start_cloudflare_quick_tunnel() {
     echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
     echo "   trycloudflare.com is account-less and best-effort."
     return 1
+}
+
+# Last-resort public tunnel when trycloudflare DNS is dead AND ngrok has no
+# authtoken (common on Cursor Cloud VMs: NGROK_API_KEY present but invalid,
+# NGROK_AUTHTOKEN unset). loca.lt is already allowlisted in authRealm + browser
+# agent crypto; no account required.
+start_localtunnel_public_tunnel() {
+    if ! command -v npx >/dev/null 2>&1; then
+        echo "   localtunnel fallback unavailable: npx is not installed."
+        return 1
+    fi
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local lt_log="$RUN_CONTEXT_DIR/localtunnel.log"
+    echo "🌐 Falling back to localtunnel (loca.lt) → localhost:$FRONTEND_PORT"
+    # --yes: non-interactive install of the CLI if missing from the cache.
+    npx --yes localtunnel --port "$FRONTEND_PORT" > "$lt_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="localtunnel"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    local lt_url=""
+    for attempt in $(seq 1 45); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ localtunnel exited before publishing a tunnel."
+            tail -20 "$lt_log" || true
+            return 1
+        fi
+        lt_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' "$lt_log" 2>/dev/null | head -1 || true)"
+        [ -n "$lt_url" ] && break
+        sleep 1
+    done
+    [ -n "$lt_url" ] || {
+        echo "❌ localtunnel did not publish an HTTPS endpoint."
+        tail -20 "$lt_log" || true
+        return 1
+    }
+
+    public_tunnel_publish_environment "$lt_url" "$ALLOWED_ORIGINS" || {
+        echo "❌ localtunnel published an unusable origin: $lt_url"
+        return 1
+    }
+
+    echo "🔎 Verifying the localtunnel edge routes: $PUBLIC_BASE_URL"
+    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
+        echo "❌ $PUBLIC_BASE_URL never routed."
+        return 1
+    }
+    echo "🌐 Public tunnel ready (localtunnel): $PUBLIC_BASE_URL"
+    return 0
 }
 
 # Fallback provider when trycloudflare is unavailable.
@@ -1407,8 +1506,13 @@ start_public_tunnel() {
             fi
             NGROK_PUBLIC_TUNNEL_NONFATAL=0
             [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, then the worktree domain)." >&2
+            # Cursor Cloud / Linux VMs often have trycloudflare NXDOMAIN + no
+            # ngrok authtoken. localtunnel (loca.lt) needs neither.
+            reap_failed_ngrok_tunnel
+            start_localtunnel_public_tunnel && return 0
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain, localtunnel)." >&2
             echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+            echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
             exit 1
             ;;
         ngrok) start_ngrok_public_tunnel ;;
