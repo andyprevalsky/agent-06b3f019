@@ -24,6 +24,7 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
@@ -849,6 +850,54 @@ def local_seed_dump_path(
     )
 
 
+def _promote_previous_utc_day_seed_dump(
+    seed_dump: Path,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Promote yesterday's fresh schema-identical seed during UTC rollover."""
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    if current_time.hour >= 2 or seed_dump.exists():
+        return False
+
+    match = re.fullmatch(r"([0-9a-f]{40})-(\d{8})\.dump", seed_dump.name)
+    if match is None or match.group(2) != current_time.strftime("%Y%m%d"):
+        return False
+    schema_hash = match.group(1)
+    previous_day = (current_time - timedelta(days=1)).strftime("%Y%m%d")
+    previous_dump = seed_dump.with_name(f"{schema_hash}-{previous_day}.dump")
+    previous_sidecar = Path(f"{previous_dump}.schemahash")
+    try:
+        previous_stat = previous_dump.stat()
+        if previous_stat.st_size <= 0 or previous_sidecar.read_text().strip() != schema_hash:
+            return False
+    except OSError:
+        return False
+
+    age_seconds = current_time.timestamp() - previous_stat.st_mtime
+    if age_seconds < 0 or age_seconds > 26 * 60 * 60:
+        return False
+
+    seed_dump.parent.mkdir(parents=True, exist_ok=True)
+    temp_dump = seed_dump.with_name(f".{seed_dump.name}.rollover-{os.getpid()}")
+    temp_sidecar = Path(f"{seed_dump}.schemahash.rollover-{os.getpid()}")
+    try:
+        try:
+            os.link(previous_dump, temp_dump)
+        except OSError:
+            shutil.copy2(previous_dump, temp_dump)
+        temp_sidecar.write_text(schema_hash)
+        os.replace(temp_dump, seed_dump)
+        os.replace(temp_sidecar, Path(f"{seed_dump}.schemahash"))
+        return True
+    finally:
+        temp_dump.unlink(missing_ok=True)
+        temp_sidecar.unlink(missing_ok=True)
+
+
 def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
     """Snapshot a healthy shared stack when today's isolated seed cache is cold."""
     schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
@@ -869,6 +918,9 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
     with open(lock_path, "a+") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         if current_dump_exists():
+            return True
+        if _promote_previous_utc_day_seed_dump(seed_dump):
+            print(f"Promoted recent previous-day benchmark seed dump: {seed_dump}")
             return True
         try:
             manifest = json.loads(SERVICES_MANIFEST.read_text())

@@ -7385,6 +7385,36 @@ def test_local_seed_dump_primes_once_from_healthy_shared_stack():
         assert Path(f"{seed_dump}.schemahash").read_text() == schema_hash
 
 
+def test_local_seed_dump_promotes_previous_utc_day_during_rollover_grace():
+    """A schema-identical seed must survive the UTC midnight cache-key rollover."""
+    from datetime import datetime, timedelta, timezone
+
+    from benchmarks import local as local_bench
+
+    schema_hash = "8c27cf62e1abe4b698af89c10008798f3f507e89"
+    now = datetime(2026, 8, 4, 0, 23, tzinfo=timezone.utc)
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_root = Path(tmp)
+        current = cache_root / f"{schema_hash}-20260804.dump"
+        previous = cache_root / f"{schema_hash}-20260803.dump"
+        previous.write_bytes(b"schema-matched-production-seed")
+        Path(f"{previous}.schemahash").write_text(schema_hash)
+        previous_mtime = (now - timedelta(hours=23)).timestamp()
+        os.utime(previous, (previous_mtime, previous_mtime))
+
+        assert local_bench._promote_previous_utc_day_seed_dump(current, now=now)
+        assert current.read_bytes() == b"schema-matched-production-seed"
+        assert Path(f"{current}.schemahash").read_text() == schema_hash
+
+        current.unlink()
+        Path(f"{current}.schemahash").unlink()
+        after_grace = datetime(2026, 8, 4, 3, 0, tzinfo=timezone.utc)
+        assert not local_bench._promote_previous_utc_day_seed_dump(
+            current,
+            now=after_grace,
+        )
+
+
 def test_local_start_services_reaps_process_when_readiness_fails():
     """A partially initialized isolated stack must not outlive its launcher."""
     from unittest.mock import patch
@@ -11594,6 +11624,10 @@ async def run_all_tests():
     r.record(
         "local_seed_dump_primes_from_shared_stack",
         test_local_seed_dump_primes_once_from_healthy_shared_stack,
+    )
+    r.record(
+        "local_seed_dump_promotes_previous_utc_day_during_rollover_grace",
+        test_local_seed_dump_promotes_previous_utc_day_during_rollover_grace,
     )
     r.record(
         "local_start_services_cleanup_error_preserves_readiness_failure",
