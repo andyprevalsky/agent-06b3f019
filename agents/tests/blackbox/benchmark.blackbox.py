@@ -1907,7 +1907,7 @@ def test_system_postgres_fixture_sql_targets_manifest_database_name():
             assert bench._local_victoria_database_url() == (
                 "postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"
             )
-            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"]
+            assert probed_urls == []
 
             probed_urls.clear()
             Path(context_dir, "services.json").write_text(
@@ -6663,28 +6663,73 @@ def test_runner_fixtures_use_isolated_system_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
-def test_runner_fixtures_retry_transient_local_database_probe_timeout():
-    """One bounded psql stall must not abort the benchmark before agent creation."""
+def test_runner_cleanup_uses_manifest_database_without_discovery_probe():
+    """Cleanup must use the exact run DB even when ordinary Conductor DB env is absent."""
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from benchmarks import run_benchmark
 
     manifest = {
+        "status": "running",
         "ports": {"local_db": 55435},
         "database": {
             "use_system_postgres": True,
             "port": 5432,
-            "name": "victoria_bench_transient_probe",
+            "name": "victoria_bench_cleanup_1785821421_68913_38451",
         },
     }
-    database_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_transient_probe"
-    timeout = subprocess.TimeoutExpired(["psql", database_url], 5)
-    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    expected_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_cleanup_1785821421_68913_38451"
+    saved_env = {
+        key: os.environ.get(key)
+        for key in (
+            "BENCHMARK_CONTEXT_DIR",
+            "CONDUCTOR_WORKSPACE_NAME",
+            "DATABASE_URL",
+            "DIRECT_URL",
+        )
+    }
     try:
         with tempfile.TemporaryDirectory() as context_dir:
             Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            for key in ("CONDUCTOR_WORKSPACE_NAME", "DATABASE_URL", "DIRECT_URL"):
+                os.environ.pop(key, None)
+            with (
+                patch.object(run_benchmark, "_local_victoria_db_container", return_value=None),
+                patch.object(run_benchmark, "_local_database_url_responds", return_value=False) as probe,
+                patch.object(
+                    run_benchmark.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+                ) as sql,
+            ):
+                assert run_benchmark._run_local_victoria_sql("SELECT 1;") == "1"
+        probe.assert_not_called()
+        assert sql.call_args.args[0][1] == expected_url
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_runner_fixtures_retry_transient_local_database_probe_timeout():
+    """A fallback env candidate still gets a bounded reachability retry."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    database_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_transient_probe"
+    timeout = subprocess.TimeoutExpired(["psql", database_url], 5)
+    saved_env = {key: os.environ.get(key) for key in ("BENCHMARK_CONTEXT_DIR", "DIRECT_URL", "DATABASE_URL")}
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            os.environ["DIRECT_URL"] = database_url
+            os.environ.pop("DATABASE_URL", None)
             with (
                 patch.object(
                     run_benchmark.subprocess,
@@ -6700,10 +6745,11 @@ def test_runner_fixtures_retry_transient_local_database_probe_timeout():
         assert probe.call_count == 2
         sleep.assert_called_once()
     finally:
-        if prior_context is None:
-            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
-        else:
-            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
@@ -6761,13 +6807,13 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
             "name": "victoria_bench_unavailable",
         },
     }
-    probed_urls = []
+    sql_urls = []
 
     def probe(command, **_kwargs):
         database_url = command[1]
-        probed_urls.append(database_url)
+        sql_urls.append(database_url)
         return SimpleNamespace(
-            returncode=1 if database_url.endswith("/victoria_bench_unavailable") else 0,
+            returncode=1,
             stdout="",
             stderr="connection failed",
         )
@@ -6777,9 +6823,17 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
         with tempfile.TemporaryDirectory() as context_dir:
             Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
-            with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
-                assert run_benchmark._local_victoria_database_url() is None
-        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
+            with (
+                patch.object(run_benchmark, "_local_victoria_db_container", return_value=None),
+                patch.object(run_benchmark.subprocess, "run", side_effect=probe),
+            ):
+                try:
+                    run_benchmark._run_local_victoria_sql("SELECT 1;")
+                except RuntimeError as exc:
+                    assert str(exc) == "Local DB SQL failed: connection failed"
+                else:
+                    raise AssertionError("unreachable isolated database did not fail closed")
+        assert sql_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
@@ -10869,6 +10923,10 @@ async def run_all_tests():
     r.record(
         "runner_fixture_system_database_identity",
         test_runner_fixtures_use_isolated_system_database_identity,
+    )
+    r.record(
+        "runner_cleanup_manifest_database_without_probe",
+        test_runner_cleanup_uses_manifest_database_without_discovery_probe,
     )
     r.record(
         "compute_token_preflight_isolated_source",

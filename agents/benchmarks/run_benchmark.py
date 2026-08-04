@@ -4088,17 +4088,20 @@ def _local_victoria_database_url() -> Optional[str]:
         try:
             services = json.loads(services_path.read_text())
             if _services_manifest_is_active(services):
-                candidates.append(manifest_database_url(services))
+                # An active per-run manifest is the authoritative database
+                # identity. Do not turn discovery into a second connectivity
+                # gate: cleanup's real SQL owns that check and preserves the
+                # underlying psql error when the database is unavailable.
+                return manifest_database_url(services)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
-    if not candidates:
-        env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
-        if env_database_url:
-            candidates.append(_psql_compatible_database_url(env_database_url))
-        candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-        configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
-        if configured_url:
-            candidates.append(_psql_compatible_database_url(configured_url))
+    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+    if env_database_url:
+        candidates.append(_psql_compatible_database_url(env_database_url))
+    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if configured_url:
+        candidates.append(_psql_compatible_database_url(configured_url))
 
     seen: set[str] = set()
     for database_url in candidates:
