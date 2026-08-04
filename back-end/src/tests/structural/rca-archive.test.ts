@@ -25,6 +25,7 @@
  */
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -110,7 +111,37 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The instructions must keep pointing at the archive in both directions:
+// 4. The documented `new` command must actually scaffold a case. Run a copied
+//    tool in an isolated repository-shaped temp directory so this test never
+//    mutates the checked-in archive.
+if (fs.existsSync(VALIDATOR)) {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  try {
+    const tempScripts = path.join(tempRoot, 'scripts');
+    fs.mkdirSync(tempScripts, { recursive: true });
+    const tempValidator = path.join(tempScripts, 'rca_archive.py');
+    fs.copyFileSync(VALIDATOR, tempValidator);
+    execFileSync('python3', [tempValidator, 'new', 'first-bad-boundary'], {
+      cwd: tempRoot,
+      env: { ...process.env, RCA_ARCHIVE_DATE: '2026-01-02' },
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const scaffold = path.join(tempRoot, 'docs/rca/cases/2026-01-02-first-bad-boundary.md');
+    if (!fs.existsSync(scaffold)) {
+      failures.push('rca_archive.py new exited successfully without scaffolding a case file.');
+    }
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string };
+    failures.push(
+      `rca_archive.py new failed:\n${(err.stderr ?? '').trim()}\n${(err.stdout ?? '').trim()}`
+    );
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+// 5. The instructions must keep pointing at the archive in both directions:
 //    read it before diagnosing, write to it after.
 const INSTRUCTION_REQUIREMENTS: Array<{ file: string; needles: string[]; why: string }> = [
   {
