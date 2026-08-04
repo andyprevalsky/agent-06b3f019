@@ -8,7 +8,7 @@ PIDS=()
 cleanup() {
   local pid
   for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    run_kill_tree "$pid"
   done
   for pid in "${PIDS[@]:-}"; do
     wait "$pid" 2>/dev/null || true
@@ -114,7 +114,9 @@ stale_backend="http://localhost:55010"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  # Keep fixtures alive well beyond the worst-case process-table scan under the
+  # fully parallel deploy gate. Cleanup below still terminates them immediately.
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(300)' worker.py
 ) &
 stale_pid="$!"
 PIDS+=("$stale_pid")
@@ -122,7 +124,7 @@ wait_for_process "$stale_pid"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import time; time.sleep(300)' worker.py
 ) &
 current_pid="$!"
 PIDS+=("$current_pid")
@@ -130,7 +132,7 @@ wait_for_process "$current_pid"
 
 (
   cd "$other_workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(300)' worker.py
 ) &
 other_pid="$!"
 PIDS+=("$other_pid")
