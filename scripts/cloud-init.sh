@@ -115,6 +115,16 @@ if ! command -v ngrok >/dev/null 2>&1; then
         || log "WARN: ngrok install failed (local-bench public tunnel only)"
 fi
 
+# shlock — the cloud benchmark fleet's cross-workspace app-env lock requires it
+# (scripts/lib/cloudbench-app-env-lock.sh). The baked Fly bench image ships the
+# real INN shlock; a bare cloud VM does not, so install the repo fallback.
+if ! command -v shlock >/dev/null 2>&1 && [ -f "$ROOT/scripts/lib/shlock" ]; then
+    log "installing shlock (cloudbench app-env lock)…"
+    $SUDO install -m 0755 "$ROOT/scripts/lib/shlock" /usr/local/bin/shlock 2>/dev/null \
+        || { mkdir -p "$HOME/.local/bin" && install -m 0755 "$ROOT/scripts/lib/shlock" "$HOME/.local/bin/shlock"; } \
+        || log "WARN: shlock install failed"
+fi
+
 # ── 3. Dependencies + local Postgres (existing, validated provisioner) ────────
 log "running scripts/cloud-build.sh (deps + local Postgres)…"
 bash scripts/cloud-build.sh || log "WARN: cloud-build.sh returned non-zero"
