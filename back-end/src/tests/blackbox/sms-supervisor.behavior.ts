@@ -355,8 +355,8 @@ export async function testRealLlm_answersContactFactViaGrep(prisma: PrismaClient
   const phone = uniqueSmsPhone();
   const userId = await provisionUserWithPhone(prisma, phone);
   const token = captureToken('sms-supervisor-real-llm-grep');
-  const lastName = `Grepwell${Math.random().toString(36).slice(2, 8)}`;
-  const email = `jane.${lastName.toLowerCase()}@example.com`;
+  const lastName = 'Grepwell';
+  const email = `contact-${Math.random().toString(36).slice(2, 10)}@example.com`;
 
   await prisma.person.create({
     data: { userId, firstName: 'Jane', lastName, email },
@@ -370,7 +370,7 @@ export async function testRealLlm_answersContactFactViaGrep(prisma: PrismaClient
       headers: { 'X-Capture-Token': token },
       body: JSON.stringify({
         data: {
-          body: `What is Jane ${lastName}'s email address?`,
+          body: `Look in my contacts for Jane ${lastName}'s email address.`,
           conversation: {
             contact: { phone_number: phone },
             phone_number: { number: '+14154498072' },
@@ -555,7 +555,9 @@ export async function testAttemptCompletion_requiresSuccessfulUserMessage(prisma
 /**
  * Real-LLM acceptance for bias-to-action: a clear purchase request should
  * spawn a superintelligence agent (start_new_agent) with a purchase goal —
- * not bounce a clarifying question back to the user.
+ * not bounce a clarifying question back to the user. The spawned agent's
+ * budget covers its own LLM/metered-tool spend, so it must not carry the
+ * purchase amount.
  */
 export async function testRealLlm_purchaseRequestSpawnsAgent(prisma: PrismaClient) {
   if (process.env.BLACKBOX_SMS_SUPERVISOR_REAL_LLM !== '1') {
@@ -608,6 +610,15 @@ export async function testRealLlm_purchaseRequestSpawnsAgent(prisma: PrismaClien
     if (!/amazon|purchas|buy|order/.test(goal)) {
       throw new Error(
         `Expected a clear purchase goal (amazon/purchase/buy/order), got: "${agent.goal}"`
+      );
+    }
+    // $2 is the ceiling the budget_dollars description states ("default $1;
+    // usually under $2"), so $2.00 exactly is a conforming pick — the defect
+    // this guards is a purchase-scale limit (the incident stored $120).
+    if (agent.priceLimitCents > 200) {
+      throw new Error(
+        'Expected the agent-run budget (not the purchase amount) in priceLimitCents — ' +
+          `got ${agent.priceLimitCents}`
       );
     }
   } finally {

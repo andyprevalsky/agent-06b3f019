@@ -20,6 +20,7 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
     "moonshotai/kimi-k2.5":           {"prompt": 0.38 / 1_000_000, "completion": 1.72 / 1_000_000},
     "moonshotai/kimi-k2.7-code":      {"prompt": 0.74 / 1_000_000, "completion": 3.50 / 1_000_000},
+    "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
     "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
@@ -95,7 +96,7 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
 
 # Pool waterfall composition — must stay in sync with pools.py.
 _POOL_WATERFALLS: Dict[str, tuple[str, ...]] = {
-    "rose-1-lite":         ("google/gemini-3.5-flash", "moonshotai/kimi-k2.7-code"),
+    "rose-1-lite":         ("google/gemini-3.5-flash", "moonshotai/kimi-k3"),
     "rose-1-ultra":        ("anthropic/claude-opus-4.8", "openai/gpt-5.6-terra"),
     "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.6-sol"),
 }
