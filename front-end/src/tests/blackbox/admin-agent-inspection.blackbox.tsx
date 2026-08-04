@@ -1,7 +1,11 @@
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { TopRightControls } from '@/components/TopRightControls';
+import { AdminAccountSwitcher } from '@/features/admin-account-switcher';
+import { InspectionAccountBadge } from '@/features/terminal/components/InspectionAccountBadge';
 import Terminal from '@/pages/Terminal';
 
 import { server } from './msw/server';
@@ -66,17 +70,25 @@ function agentDetail(inspectionContext: Record<string, string> | null) {
 }
 
 describe('admin agent inspection', () => {
+  let inspectionSlot: HTMLDivElement;
+
   beforeEach(() => {
     mockAdminSession();
     window.history.replaceState({}, '', '/?agent-id=foreign-agent');
+    inspectionSlot = document.createElement('div');
+    inspectionSlot.id = 'top-right-inspection-slot';
+    inspectionSlot.dataset.testid = 'top-right-inspection-slot';
+    document.body.append(inspectionSlot);
   });
 
   afterEach(() => {
     window.history.replaceState({}, '', '/');
     localStorage.clear();
+    inspectionSlot.remove();
   });
 
   it('floats the affected account identity above a cross-account run', async () => {
+    const user = userEvent.setup();
     server.use(
       http.get(`${API_BASE}/agents/:agentId`, () =>
         HttpResponse.json(
@@ -93,11 +105,23 @@ describe('admin agent inspection', () => {
     renderWithProviders(<Terminal />);
 
     const badge = await screen.findByTestId('inspection-account-badge');
-    expect(badge).toHaveTextContent('Inspecting User Account');
+    expect(badge.parentElement).toBe(screen.getByTestId('top-right-inspection-slot'));
+    expect(badge.className).toContain('rounded-full');
+    expect(badge.className).not.toContain('fixed');
+    expect(badge).toHaveAccessibleName(
+      'Inspecting Ada Lovelace, +15555550101, ada@example.com (read-only)',
+    );
+    expect(badge).toHaveTextContent('Inspecting Ada Lovelace');
     expect(badge).toHaveTextContent('Ada Lovelace');
-    expect(badge).toHaveTextContent('+15555550101');
-    expect(badge).toHaveTextContent('ada@example.com');
-    expect(badge).toHaveTextContent('Read-only');
+    expect(screen.queryByText('Phone')).not.toBeInTheDocument();
+    expect(screen.queryByText('Email')).not.toBeInTheDocument();
+
+    await user.hover(badge);
+    const tooltip = await screen.findByRole('tooltip');
+    expect(tooltip).toHaveTextContent('Inspecting user account · Read-only');
+    expect(tooltip).toHaveTextContent('Ada Lovelace');
+    expect(tooltip).toHaveTextContent('+15555550101');
+    expect(tooltip).toHaveTextContent('ada@example.com');
   });
 
   it("does not show the inspection badge for the admin account's own run", async () => {
@@ -113,5 +137,67 @@ describe('admin agent inspection', () => {
 
     await waitFor(() => expect(detailRequests).toBeGreaterThan(0));
     expect(screen.queryByTestId('inspection-account-badge')).not.toBeInTheDocument();
+  });
+});
+
+describe('top-right inspection control layout', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+  });
+
+  it('places the compact inspection pill before the real account switcher', async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <>
+        <TopRightControls>
+          <AdminAccountSwitcher
+            isAdmin
+            ownAccountLabel="Admin with an intentionally very long account label"
+          />
+        </TopRightControls>
+        <InspectionAccountBadge
+          context={{
+            user_id: 'affected-user',
+            name: 'Ada Lovelace',
+            phone: '+15555550101',
+            email: 'ada@example.com',
+          }}
+        />
+      </>,
+    );
+
+    const controls = screen.getByTestId('top-right-controls');
+    const badge = screen.getByTestId('inspection-account-badge');
+    const slot = badge.parentElement;
+    const accountControl = screen.getByTestId('admin-account-switcher');
+    const accountPill = screen.getByTestId('admin-account-pill');
+    const accountButton = screen.getByRole('button', { name: 'Switch account' });
+
+    expect(slot?.parentElement).toBe(controls);
+    expect(accountControl.parentElement).toBe(controls);
+    expect(controls.firstElementChild).toBe(slot);
+    expect(controls.lastElementChild).toBe(accountControl);
+    expect(controls.className).toContain('gap-2');
+    expect(controls.className).not.toContain('flex-wrap');
+    expect(controls.className).toContain('max-w-[calc(100vw-2rem)]');
+    expect(badge.className).toContain('min-w-0');
+    expect(badge.querySelector('span')?.className).toContain('truncate');
+    expect(accountControl.className).toContain('max-w-full');
+    expect(accountControl.className).toContain('min-w-0');
+    expect(accountPill.className).toContain('max-w-full');
+    expect(accountPill.className).toContain('min-w-0');
+    expect(accountButton.className).toContain('min-w-0');
+    expect(accountButton.querySelector('span')?.className).toContain('min-w-0');
+    expect(accountButton.querySelector('span')?.className).toContain('truncate');
+
+    await user.tab();
+    expect(badge).toHaveFocus();
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(
+      'Inspecting user account · Read-only',
+    );
   });
 });

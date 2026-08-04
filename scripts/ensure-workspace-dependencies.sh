@@ -54,7 +54,14 @@ for workspace in "$@"; do
             continue
         fi
         echo "📦 Installing $workspace dependencies..."
-        npm install --workspace="$workspace" --no-audit --no-fund
+        if ! npm install --workspace="$workspace" --no-audit --no-fund; then
+            if [ ! -f "$workspace/package-lock.json" ]; then
+                echo "dependency preflight: workspace install failed and $workspace has no package-lock.json" >&2
+                exit 1
+            fi
+            echo "📦 Workspace install failed; retrying $workspace from its lockfile..."
+            (cd "$workspace" && npm ci --workspaces=false --no-audit --no-fund)
+        fi
         npm ls --workspace="$workspace" --depth=0 --silent >/dev/null
         workspace_dependencies_resolve "$workspace"
     else
