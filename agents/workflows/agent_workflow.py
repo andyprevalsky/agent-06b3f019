@@ -2308,20 +2308,20 @@ class AgentWorkflow:
         When a deploy migrates an agent mid-wait (workflow replacement), the
         in-flight ``wait_for`` sleep is torn down and its tool call is force-closed
         with the ``DEPLOY_INTERRUPTED`` sentinel. Re-issue the wait against its
-        ORIGINAL absolute target so the agent resumes exactly where it left off —
-        ``workflow.sleep`` computes the remaining delta — instead of firing whenever
-        the LLM next happens to re-issue the tool. No-op when there is nothing to
-        resume or the target has already elapsed (the normal loop fires it now).
+        ORIGINAL absolute target with ``resume=True`` so the agent resolves it
+        deterministically instead of the completion depending on the LLM re-issuing
+        the tool: a future target sleeps the remaining delta; an already-elapsed
+        target completes immediately. No-op when there is nothing to resume.
         """
         try:
-            target = pending_timestamp_wait_to_resume(conversation or [], workflow.now())
+            target = pending_timestamp_wait_to_resume(conversation or [])
         except Exception as e:  # never block resume on a best-effort re-arm
             workflow.logger.warning(f"[deploy-resume] wait resume check failed: {e}")
             return
         if not target:
             return
         workflow.logger.info(f"[deploy-resume] Resuming interrupted wait_for until {target}")
-        await wait_for(self, {"until_timestamp": target}, f"wait-resume-{workflow.uuid4()}")
+        await wait_for(self, {"until_timestamp": target, "resume": True}, f"wait-resume-{workflow.uuid4()}")
 
     async def _poll_messages(self, last_checked: datetime) -> List[Dict]:
         """Poll for new messages using the timestamp provided by run_agent.

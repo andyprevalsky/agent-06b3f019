@@ -1484,18 +1484,21 @@ def _interrupted_ts_conversation(until):
 
 
 async def test_workflow_resume_rearms_interrupted_future_wait():
-    """On deploy resume, an interrupted future wait is re-armed at its original target."""
+    """On deploy resume, an interrupted future wait is re-armed with resume=True."""
     now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=timezone.utc)
     tool_call = await _run_resume(_interrupted_ts_conversation("2026-08-03T17:00:00Z"), now)
     assert tool_call is not None, "expected wait_for to be re-armed"
     assert tool_call.get("until_timestamp") == "2026-08-03T17:00:00Z"
+    assert tool_call.get("resume") is True
 
 
-async def test_workflow_resume_skips_elapsed_wait():
-    """A wait whose target already elapsed is NOT re-armed (loop fires it now)."""
+async def test_workflow_resume_rearms_elapsed_wait():
+    """An elapsed interrupted wait is still re-armed (resume=True → completes now)."""
     now = datetime(2026, 8, 3, 20, 0, 0, tzinfo=timezone.utc)
     tool_call = await _run_resume(_interrupted_ts_conversation("2026-08-03T17:00:00Z"), now)
-    assert tool_call is None
+    assert tool_call is not None, "elapsed interrupted wait must still be resolved"
+    assert tool_call.get("until_timestamp") == "2026-08-03T17:00:00Z"
+    assert tool_call.get("resume") is True
 
 
 async def test_workflow_resume_noop_without_pending_wait():
@@ -5623,7 +5626,7 @@ async def run_all_tests():
     r.record("wf_children_tokens_empty", test_workflow_get_children_tokens_empty)
     r.record("wf_children_tokens_sums", test_workflow_get_children_tokens_sums_correctly)
     await r.record_async("wf_resume_rearms_future_wait", test_workflow_resume_rearms_interrupted_future_wait)
-    await r.record_async("wf_resume_skips_elapsed_wait", test_workflow_resume_skips_elapsed_wait)
+    await r.record_async("wf_resume_rearms_elapsed_wait", test_workflow_resume_rearms_elapsed_wait)
     await r.record_async("wf_resume_noop_no_wait", test_workflow_resume_noop_without_pending_wait)
     r.record("wf_get_status_query", test_workflow_get_status_query)
     r.record("wf_is_paused_default", test_workflow_is_paused_query_default_false)

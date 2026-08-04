@@ -69,23 +69,24 @@ def _parse_target(until_timestamp: str) -> Optional[datetime]:
     return target
 
 
-def pending_timestamp_wait_to_resume(
-    messages: list[dict[str, Any]], now: datetime
-) -> Optional[str]:
+def pending_timestamp_wait_to_resume(messages: list[dict[str, Any]]) -> Optional[str]:
     """Return the ``until_timestamp`` of a timestamp ``wait_for`` that must be resumed.
 
     When a deploy migrates an agent (workflow replacement), an in-flight
     ``wait_for`` timestamp sleep is torn down and its tool call is force-closed
     with the ``DEPLOY_INTERRUPTED`` sentinel. The replacement workflow must
-    re-arm that wait from its ORIGINAL absolute target so the agent picks up
-    where it left off instead of firing whenever the LLM happens to re-issue it.
+    resolve that wait deterministically from its ORIGINAL absolute target so the
+    agent picks up where it left off instead of the completion depending on the
+    LLM re-issuing ``wait_for``.
 
     This pure decision scans the conversation and returns the target of the most
-    recent timestamp wait that is (a) not completed normally, (b) interrupted by
-    deployment or still in progress, and (c) still in the future relative to
-    ``now``. Returns ``None`` when there is nothing to resume — no timestamp
-    wait, it already completed, or its target has already elapsed (in which case
-    the normal loop fires it immediately).
+    recent timestamp wait that is (a) not completed normally and (b) interrupted
+    by deployment or still in progress. It returns the target whether or not it
+    has elapsed: the caller re-arms via ``wait_for`` with ``resume=True``, which
+    sleeps the remaining delta for a future target or completes immediately (no
+    error) for an already-elapsed one. Returns ``None`` only when there is
+    nothing to resume — no timestamp wait, it already completed, or its target
+    is unparseable.
 
     ``messages`` are conversation rows shaped like ``{"role", "metadata", ...}``
     where ``metadata`` carries ``waitForMode``, ``untilTimestamp``, ``toolCallId``,
@@ -134,12 +135,9 @@ def pending_timestamp_wait_to_resume(
         pending = group["interrupted"] or group.get("last_status") == "IN_PROGRESS"
         if not pending:
             return None
-        target = _parse_target(until)
-        if target is None:
-            return None
-        if now.tzinfo is None:
-            now = now.replace(tzinfo=timezone.utc)
-        return until if target > now else None
+        # Only require the target be well-formed; elapsed vs future is the
+        # caller's concern (resume=True completes an elapsed wait immediately).
+        return until if _parse_target(until) is not None else None
 
     return None
 

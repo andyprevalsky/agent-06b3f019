@@ -168,9 +168,11 @@ async function terminateStaleWorkflows(
       continue;
     }
 
-    // Stale-but-recognized workspace queues are logged for visibility.
-    if (baseTaskQueue(queue).startsWith(QUEUE_PREFIX)) {
-      staleQueues.set(queue, (staleQueues.get(queue) || 0) + 1);
+    // Stale-but-recognized workspace queues are logged for visibility. Key by
+    // the base queue so multiple build IDs of one stale workspace aggregate.
+    const baseQueue = baseTaskQueue(queue);
+    if (baseQueue.startsWith(QUEUE_PREFIX)) {
+      staleQueues.set(baseQueue, (staleQueues.get(baseQueue) || 0) + 1);
     }
 
     // Stale or unknown — terminate
