@@ -10,7 +10,7 @@
  */
 
 import { Prisma } from '@prisma/client';
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
 import { findDeploymentFencedToolMessage, lockToolCallLifecycle } from './toolLifecycleMessages';
@@ -154,23 +154,32 @@ export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
 ): Promise<{ resolved: boolean }> {
-  const { fresh, finishedMessageCount, resolved } = await prisma.$transaction(async (tx) => {
-    const updated = await tx.agentAttentionRequest.updateMany({
-      where: { id: request.id, userResponse: null },
-      data: { userResponse: response },
-    });
-    const current = await tx.agentAttentionRequest.findUnique({
-      where: { id: request.id },
-    });
-    if (current === null) {
-      throw new Error(`Attention request ${request.id} disappeared during resolution`);
-    }
-    if (updated.count === 0) {
-      return { fresh: current, finishedMessageCount: 0, resolved: false };
-    }
-    const finishedCount = await finishAttentionMessages(tx, request);
-    return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
-  });
+  // Resolving an approval also serializes against workflow replacement and the
+  // tool lifecycle. Under normal deploy-suite/prod concurrency those row locks
+  // can legitimately outlive Prisma's 5s interactive-transaction default. A
+  // short timeout used to roll back the response and surface a false 500 even
+  // though the database was healthy. Keep one atomic transaction, but give the
+  // bounded critical section the same 30s budget as other lock-heavy flows.
+  const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(
+    async (tx) => {
+      const updated = await tx.agentAttentionRequest.updateMany({
+        where: { id: request.id, userResponse: null },
+        data: { userResponse: response },
+      });
+      const current = await tx.agentAttentionRequest.findUnique({
+        where: { id: request.id },
+      });
+      if (current === null) {
+        throw new Error(`Attention request ${request.id} disappeared during resolution`);
+      }
+      if (updated.count === 0) {
+        return { fresh: current, finishedMessageCount: 0, resolved: false };
+      }
+      const finishedCount = await finishAttentionMessages(tx, request);
+      return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
+    },
+    { maxWait: 10_000, timeout: 30_000 }
+  );
   log.info('Resolved attention request read model', {
     request_id: request.id,
     agent_id: request.agentId,
