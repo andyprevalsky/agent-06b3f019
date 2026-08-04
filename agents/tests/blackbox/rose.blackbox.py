@@ -917,6 +917,40 @@ def test_transform_messages_for_openai_strips_boundary_from_later_system_message
     assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in json.dumps(out)
 
 
+def test_transform_messages_for_openai_normalizes_tool_result_name():
+    """Tool results must use the assistant-declared name for Gemini/OpenRouter.
+
+    Internal metadata can retain a concrete executor name such as
+    ``spawn_browser_agent`` even when the model declared the generic
+    ``spawn_agent`` tool. Gemini rejects that mismatched pair as an invalid
+    request despite the matching tool-call ID.
+    """
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "spawn-1",
+                    "type": "function",
+                    "function": {"name": "spawn_agent", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "spawn-1",
+            "name": "spawn_browser_agent",
+            "content": "Browser task complete",
+        },
+    ]
+
+    out = transform_messages_for_openai(msgs)
+
+    assert out[1]["name"] == "spawn_agent"
+    assert msgs[1]["name"] == "spawn_browser_agent"
+
+
 # =====================================================================
 # claude_auth — body assembly
 # =====================================================================
@@ -5589,6 +5623,10 @@ async def run_all_tests():
     r.record(
         "openai_messages_later_system_boundary_stripped",
         test_transform_messages_for_openai_strips_boundary_from_later_system_messages,
+    )
+    r.record(
+        "openai_messages_normalize_tool_result_name",
+        test_transform_messages_for_openai_normalizes_tool_result_name,
     )
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)

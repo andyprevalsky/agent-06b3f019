@@ -946,7 +946,34 @@ def transform_messages_for_openai(
     before calling — those markers are preserved here.
     """
     source = messages if tools_declared else flatten_tool_history_to_text(messages)
-    out = [dict(m) for m in source]
+    out: List[Dict[str, Any]] = []
+    declared_tool_names: Dict[str, str] = {}
+    for message in source:
+        rewritten = dict(message)
+        if rewritten.get("role") == "assistant":
+            tool_calls = rewritten.get("tool_calls")
+            if isinstance(tool_calls, list):
+                for call in tool_calls:
+                    if not isinstance(call, dict):
+                        continue
+                    call_id = call.get("id")
+                    fn = call.get("function")
+                    if not isinstance(call_id, str) or not call_id or not isinstance(fn, dict):
+                        continue
+                    name = fn.get("name")
+                    if isinstance(name, str) and name:
+                        declared_tool_names[call_id] = name
+        elif rewritten.get("role") == "tool":
+            call_id = rewritten.get("tool_call_id")
+            declared_name = declared_tool_names.get(str(call_id or ""))
+            if declared_name:
+                # OpenAI-compatible providers pair tool results by ID, but some
+                # (notably Gemini via OpenRouter) also validate the optional
+                # result name against the assistant declaration. Internal task
+                # metadata can describe the concrete executor instead, so make
+                # the outbound name follow the declared call.
+                rewritten["name"] = declared_name
+        out.append(rewritten)
     if not out:
         return out
 
