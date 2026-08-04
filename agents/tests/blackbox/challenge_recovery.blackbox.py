@@ -277,6 +277,131 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
     )
 
 
+def test_challenge_page_classifier_detects_bing_soft_verify_overlay():
+    """Bing Cloudflare soft gates leave a Verify CTA over hidden organic results.
+
+    Cookie recovery previously treated that DOM as clean (results + button, no
+    classic "verify you are human" / cf-chl markers), falsely returned
+    cookies_sanitized, skipped config search, and burned the benchmark budget
+    in a Verify-click loop (browser-bing-search-single-result).
+    """
+    bing_results_html = (
+        '<html><body class="b_respl">'
+        '<div class="b_overlay"><button type="button">Verify</button></div>'
+        '<ol id="b_results"><li class="b_algo">'
+        '<h2><a href="https://openai.com">OpenAI | Research & Deployment</a></h2>'
+        "<cite>https://openai.com</cite>"
+        "</li></ol></body></html>"
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="OpenAI official website - Search",
+        body_text="Verify",
+        html=bing_results_html,
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="OpenAI official website - Search",
+        body_text="Verification required\nVerify\n",
+        html=bing_results_html,
+    )
+    # A normal Verify button on a non-results page must not trip the Bing gate.
+    assert not page_looks_challenged(
+        status=200,
+        title="Checkout",
+        body_text="Confirm your purchase",
+        html='<form><button type="submit">Verify</button></form>',
+    )
+
+
+async def test_soft_verify_live_commit_escalates_to_config_search():
+    """Isolated cookie probe may look clean; live soft-Verify must escalate."""
+    source = _state(_cookie("cf_clearance", ".bing.com"), _cookie("authState", ".bing.com"))
+    before = copy.deepcopy(source)
+
+    async def probe(candidate):
+        # Isolated probe falsely correlates cookie removal with a clean page.
+        return "cf_clearance" not in {cookie["name"] for cookie in candidate["cookies"]}
+
+    class FakeContext:
+        async def clear_cookies(self, **_kwargs):
+            return None
+
+    class FakeResponse:
+        status = 200
+
+    class FakeBody:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self, timeout):
+            assert timeout == 2_000
+            return self.page.body_text
+
+    class SoftVerifyPage:
+        def __init__(self):
+            self.context = FakeContext()
+            self.body_text = "Verify"
+            self.html = (
+                '<html><body class="b_respl">'
+                '<button type="button">Verify</button>'
+                '<ol id="b_results"><li class="b_algo"><h2>OpenAI</h2></li></ol>'
+                "</body></html>"
+            )
+
+        async def goto(self, *_args, **_kwargs):
+            return FakeResponse()
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+        async def title(self):
+            return "OpenAI official website - Search"
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody(self)
+
+        async def content(self):
+            return self.html
+
+    events = []
+    config_inputs = []
+
+    async def wait_for_solver():
+        return None
+
+    async def progress(stage, message):
+        events.append(stage)
+
+    async def commit(keys):
+        return await commit_cookie_removals(
+            SoftVerifyPage(),
+            keys,
+            "https://www.bing.com/search?q=OpenAI+official+website",
+            solver_timeout_seconds=0,
+        )
+
+    async def search_configs(state):
+        config_inputs.append(state)
+        return {"provider": "kernel", "proxy_mode": "isp_city", "ws_url": "wss://winner"}
+
+    result = await recover_from_challenge(
+        source_state=source,
+        target_url="https://www.bing.com/search?q=OpenAI+official+website",
+        wait_for_solver=wait_for_solver,
+        probe=probe,
+        commit_cookie_removals=commit,
+        search_configs=search_configs,
+        progress=progress,
+    )
+
+    assert result.recovery == "config_selected", result.recovery
+    assert config_inputs, "soft Verify on the live tab must escalate to config search"
+    assert "browser_config_search" in events
+    assert source == before
+
+
 async def test_live_cookie_commit_requires_two_clean_loads():
     class FakeContext:
         def __init__(self):
@@ -368,6 +493,14 @@ async def run_all_tests():
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    result.record(
+        "bing_soft_verify_classifier",
+        test_challenge_page_classifier_detects_bing_soft_verify_overlay,
+    )
+    await result.record_async(
+        "soft_verify_live_commit_escalates",
+        test_soft_verify_live_commit_escalates_to_config_search,
+    )
     await result.record_async(
         "live_cookie_commit_two_passes",
         test_live_cookie_commit_requires_two_clean_loads,
