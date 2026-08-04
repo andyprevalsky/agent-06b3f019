@@ -4742,6 +4742,70 @@ async def test_workflow_mark_complete_no_parent_no_signal():
                 {"key": "order_total_usd", "label": "Order Total Usd", "value": 11.25},
             ],
         }
+        # COMPLETED must not race declared completion_sms_event evaluators:
+        # notify archives provider/sms/notify/completion-*.json.gz.enc first.
+        notify_index = next(
+            i
+            for i, (name, args) in enumerate(fake.activity_calls)
+            if name == "notify_sms_event_activity" and args[1] == "completion"
+        )
+        mark_finished_index = next(
+            i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished"
+        )
+        assert notify_index < mark_finished_index
+    finally:
+        _restore_workflow(original)
+
+
+async def test_workflow_mark_complete_notifies_before_terminal_status():
+    """Root completion SMS notify is durable before mark_finished/COMPLETED.
+
+    Regression for browser-blue-bottle-challenge-recovery: evaluators hydrate the
+    completion SMS archive as soon as status is COMPLETED. Notifying afterward
+    produced false 'Observed 0 completion SMS events' failures while the receipt
+    landed ~50s later in R2.
+    """
+    wf = _bare_workflow_instance()
+    wf.agent_id = "root-sms-order"
+    wf.user_id = "u-sms-order"
+    wf.goal = "blue bottle pickup"
+    wf.model = "rose-1-lite"
+    wf.parent_workflow_id = None
+    wf.start_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    wf.token_count = 0
+    wf.tokens_in = 0
+    wf.tokens_out = 0
+    wf.context_size = 0
+    wf.child_tool_counts = {}
+    wf.output_schema = {"fields": [{"name": "provider", "type": "str"}]}
+    wf.agent_source = "WEB"
+
+    fake = _FakeWorkflowModule()
+    fake.activity_returns["generate_completion_summary"] = {
+        "summary": "reached payment boundary without placing the order",
+        "tool_counts": {},
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    original = _patch_workflow(fake)
+    try:
+        await wf._mark_complete(context=[], structured_response={"provider": "kernel"})
+        final_summary_index = next(
+            i
+            for i, (name, args) in enumerate(fake.activity_calls)
+            if name == "post_agent_message"
+            and len(args or []) >= 4
+            and (args[3] or {}).get("toolName") == "completion_summary"
+            and (args[3] or {}).get("toolStatus") == "FINISHED"
+        )
+        notify_index = next(
+            i
+            for i, (name, args) in enumerate(fake.activity_calls)
+            if name == "notify_sms_event_activity" and args[1] == "completion"
+        )
+        mark_finished_index = next(
+            i for i, (name, _args) in enumerate(fake.activity_calls) if name == "mark_finished"
+        )
+        assert final_summary_index < notify_index < mark_finished_index
     finally:
         _restore_workflow(original)
 
@@ -5843,6 +5907,10 @@ async def run_all_tests():
     )
     await r.record_async("wf_mark_complete_happy", test_workflow_mark_complete_happy_path)
     await r.record_async("wf_mark_complete_no_parent", test_workflow_mark_complete_no_parent_no_signal)
+    await r.record_async(
+        "wf_mark_complete_notifies_before_terminal_status",
+        test_workflow_mark_complete_notifies_before_terminal_status,
+    )
     await r.record_async("wf_format_outputs_with_schema", test_workflow_format_outputs_with_schema)
     await r.record_async("wf_format_outputs_no_schema", test_workflow_format_outputs_empty_without_schema)
     await r.record_async("wf_format_outputs_none_response", test_workflow_format_outputs_none_response)
