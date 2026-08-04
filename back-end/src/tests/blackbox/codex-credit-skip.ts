@@ -95,7 +95,7 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion(
       'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API.',
-      [],
+      []
     ) !== null,
     '"no credits remaining" must be detected as credit exhaustion'
   );
