@@ -352,4 +352,30 @@ ancestor_transition_children="$(pgrep -P "$ancestor_controller_pid" 2>/dev/null 
 kill "$ancestor_controller_pid" 2>/dev/null || true
 for pid in $ancestor_transition_children; do kill "$pid" 2>/dev/null || true; done
 
+# Protection walks must never stop before classifying PID 1. On a Fly cloudbench
+# guest the boot command IS PID 1, so a benchmark controller legitimately lives
+# there; bailing at ppid == 1 left every service beneath it unprotected and
+# killable from outside (CLAUDE.md rule 27). The two protection walks
+# (is_self_ancestor, benchmark_controller_for_pid) must therefore terminate only
+# on an absent/zero/self parent. add_pid_with_tree_and_ancestors deliberately
+# KEEPS its ppid == 1 stop: that walk collects kill targets, so climbing onto
+# PID 1 there could make PID 1 itself a target.
+protection_walk_source=$(
+    awk '/^is_self_ancestor\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh"
+    awk '/^benchmark_controller_for_pid\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh"
+)
+if [[ -z "$protection_walk_source" ]]; then
+    echo "FAIL: could not read the protection walk functions" >&2
+    exit 1
+fi
+if grep -q '"\$ppid" = "1"' <<<"$protection_walk_source"; then
+    echo "FAIL: a protection walk still stops on PID 1; a controller at PID 1 would leave its services unprotected" >&2
+    exit 1
+fi
+if ! grep -q '"\$ppid" = "\$current"' <<<"$protection_walk_source"; then
+    echo "FAIL: protection walks must guard against a self-parent loop once PID 1 is reachable" >&2
+    exit 1
+fi
+echo "PASS: protection walks classify PID 1 instead of bailing before it"
+
 echo "All kill-services tests passed."

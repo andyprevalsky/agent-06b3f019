@@ -67,7 +67,9 @@ is_self_ancestor() {
     while true; do
         local ppid
         ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ]; then
+            return 1
+        fi
         [ "$ppid" = "$candidate" ] && return 0
         current="$ppid"
     done
@@ -99,7 +101,14 @@ benchmark_controller_for_pid() {
         fi
         local ppid
         ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        # Stop only when the walk has genuinely run out of parents. PID 1 must
+        # still be classified: on a Fly cloudbench guest the boot command IS
+        # PID 1, so a benchmark controller legitimately lives there and every
+        # service beneath it must stay protected (CLAUDE.md rule 27). Walking
+        # onto PID 1 is safe because its own parent is 0, which ends the loop.
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ]; then
+            return 1
+        fi
         current="$ppid"
     done
 }
