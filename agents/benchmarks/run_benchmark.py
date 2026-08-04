@@ -4852,10 +4852,11 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
     gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
     Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
-    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
-    infra failure — it dropped every live task while the pre-flight for the same
-    run already tolerated the exact same absence. A genuinely Codex-dependent task
-    still fails at runtime when its Codex call fails, not falsely here.
+    payment) do not spawn Codex, so gating them on gpt_code is a FALSE infra
+    failure. When Anthropic is excluded, their ordinary root/browser turns still
+    use the GPT-family provider waterfall (including OpenRouter); that is distinct
+    from requiring a gpt_code integration for a Codex sandbox. A genuinely
+    Codex-dependent task still fails at its own strict credential gate.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
@@ -4868,7 +4869,10 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
     if _anthropic_family_excluded():
-        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        )
     else:
         synced_compute_tokens = _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
@@ -4894,7 +4898,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     if _anthropic_family_excluded():
-        if not _sync_compute_tokens(required_token_types=("gpt",)):
+        if not _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        ):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked

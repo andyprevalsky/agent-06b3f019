@@ -496,8 +496,8 @@ def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_
     assert calls == ["source-sync", "keychain-overlay"]
 
 
-def test_anthropic_excluded_preflight_requires_gpt_only_sync():
-    captured: dict[str, tuple[str, ...] | None] = {}
+def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
+    captured: dict[str, object] = {}
 
     def fake_sync(
         *,
@@ -506,8 +506,8 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
         required_token_types: tuple[str, ...] | None = None,
     ) -> bool:
         captured["required"] = required_token_types
-        assert tolerate_gpt_code_unavailable is False
-        assert tolerate_claude_code_unavailable is False
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
         return True
 
     with (
@@ -522,7 +522,37 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
     ):
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
-    assert captured == {"required": ("gpt",)}
+    assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
+
+
+def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():
+    captured: dict[str, object] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["required"] = required_token_types
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
+        return True
+
+    ctx = rb.LiveFixtureContext(
+        base_url="http://localhost:3001",
+        user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
+        auth_realm="local",
+    )
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_simulate_mode", return_value=False),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_browser_credentials", return_value=True),
+    ):
+        rb._apply_live_fixture(ctx)
+
+    assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
 
 
 def test_anthropic_excluded_compute_preflight_requests_gpt_token():
