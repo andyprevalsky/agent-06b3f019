@@ -32,7 +32,12 @@ const startNewAgentCallSchema = z.object({
   tool: z.literal('start_new_agent'),
   arguments: z.object({
     goal: z.string(),
-    budget_dollars: z.number().nullable(),
+    budget_dollars: z
+      .number()
+      .nullable()
+      .describe(
+        'Agent-run budget for LLM and metered tool calls only (default $1; usually under $2). Never include purchase cost; purchases are approved separately.'
+      ),
   }),
 });
 

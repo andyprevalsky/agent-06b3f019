@@ -22,13 +22,20 @@ export class CredentialExhaustionSkip extends Error {
 // match bare auth/OAuth-revocation errors (401 / "log out and sign in again"):
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
-// `no credits remaining` / `credit_balance_exhausted` are OpenAI's own current
-// wording for a $0 org balance ("You have no credits remaining. Add credits to
-// continue using the API at .../billing/"). Their absence made this detector
-// miss the single most likely real exhaustion message and hard-fail the deploy
-// on the exact state the skip exists for.
+// `no credits remaining` / `add credits to continue` are the literal wording the
+// OpenAI API returns on an exhausted org balance ("You have no credits
+// remaining. Add credits to continue using the API"). Their absence hard-failed
+// a deploy on 2026-08-04 for exactly the funding state this skip exists to
+// absorb, so both are matched explicitly. Neither phrase can be produced by an
+// auth/OAuth revocation, so the deliberate exclusion above still holds.
+//
+// `credit_balance_exhausted` / `credit balance is too low` are the same state as
+// delivered in a STRUCTURED provider error rather than prose — the API-key leg
+// surfaces the machine code where the CLI surfaces the sentence, and only the
+// prose reaches the raw output. Both dialects are matched so the skip does not
+// depend on which leg reported the exhaustion.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -95,6 +102,18 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
+  );
+  // The exact wording the OpenAI API returns for a defunded account, as seen in
+  // the turn.failed event during a real deploy run.
+  assert(
+    detectCodexCreditExhaustion('normal output', [
+      {
+        type: 'error',
+        message:
+          'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
+      },
+    ]) !== null,
+    'the live "no credits remaining" wording must be detected as exhaustion'
   );
 }
 

@@ -378,7 +378,10 @@ In-process model racing (claudeAuth → OpenRouter waterfall). No external HTTP 
 - `agents/providers/rose/` - Python client (agent/browser-use path)
 - `back-end/src/providers/rose/pools.ts` / `agents/providers/rose/pools.py` - Canonical pool registry (`rose-1-lite`, `rose-1-ultra`, `rose-1-browser-use`)
 - `back-end/src/routes/agents.ts` - Agents API (create, poll, pause/resume)
-- `back-end/src/middleware/hybridAuth.ts` - API key authentication
+- `back-end/src/providers/hybridAuth.ts` - API key authentication. There is NO
+  `src/middleware/` directory — both auth middlewares (`auth.ts`, `hybridAuth.ts`)
+  live in `src/providers/`. Grepping the old path silently returns nothing, which
+  is how a whole authentication path was missed during an RCA.
 
 ## Production Logs (Render)
 

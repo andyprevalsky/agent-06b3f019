@@ -216,7 +216,15 @@ export function finalizeSupervisorResponse(
   let parsed: SupervisorResponse;
   try {
     accumulatedContent = structuredOutput.finalText();
-    parsed = JSON.parse(accumulatedContent);
+    const candidate: unknown = JSON.parse(accumulatedContent);
+    // `JSON.parse` happily returns `null`, `"Red"`, or `3`. Reading
+    // `.reasoning` off those either throws or silently yields an empty turn,
+    // so treat any non-object envelope as a parse failure and take the
+    // existing nudge-retry path.
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
+    }
+    parsed = candidate as SupervisorResponse;
   } catch (error) {
     log.error('[SmsSupervisorLLM] No actionable structured output; nudging for a retry round', {
       error: error instanceof Error ? error.message : String(error),
@@ -226,17 +234,33 @@ export function finalizeSupervisorResponse(
     return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
+  const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
+  // Entries come from provider JSON, so an array is no guarantee its members are
+  // objects with a `tool`. Drop malformed entries here rather than letting them
+  // reach the dispatcher (or throw inside this log call).
+  const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+  const toolCalls = rawToolCalls.filter(
+    (tc): tc is (typeof rawToolCalls)[number] =>
+      tc !== null && typeof tc === 'object' && typeof (tc as { tool?: unknown }).tool === 'string'
+  );
+  if (toolCalls.length !== rawToolCalls.length) {
+    log.warn('[SmsSupervisorLLM] Discarded malformed tool_call entries', {
+      received: rawToolCalls.length,
+      usable: toolCalls.length,
+    });
+  }
+
   log.info('[SmsSupervisorLLM] Parsed response', {
-    reasoning: parsed.reasoning.substring(0, 300),
-    toolCallCount: parsed.tool_calls?.length || 0,
-    toolCalls: parsed.tool_calls?.map((tc) => ({
+    reasoning: reasoning.substring(0, 300),
+    toolCallCount: toolCalls.length,
+    toolCalls: toolCalls.map((tc) => ({
       tool: tc.tool,
-      args: JSON.stringify(tc.arguments).substring(0, 100),
+      args: JSON.stringify(tc.arguments ?? {}).substring(0, 100),
     })),
   });
 
   return {
-    reasoning: parsed.reasoning || '',
-    tool_calls: Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [],
+    reasoning,
+    tool_calls: toolCalls,
   };
 }
