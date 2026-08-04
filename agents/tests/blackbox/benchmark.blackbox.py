@@ -3934,17 +3934,15 @@ def test_hotel_catalog_requires_single_clean_completed_reservation():
         "browser_agent_session_count",
         "agent_status",
         "approval_request_count",
-        "approval_request_details",
     }
-    approval_check = next(
-        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
-    )
-    assert approval_check["required_strings"] == ["Hotel Kabuki", "free cancellation"]
-    assert approval_check["minimum_date_count"] == 2
-    assert approval_check["require_amount"] is True
+    # Approval contents are judged semantically, never matched by substring/regex:
+    # the literal checks rejected correct phrasings and passed on incidental
+    # letter+digit tokens from image URLs. The judge is the sole owner.
+    assert "approval_request_details" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in ("lowest-priced", "free cancellation", "completed", "confirmation"):
         assert requirement in semantic_criteria
+    assert "approval" in semantic_criteria
 
 
 def test_event_ticket_catalog_stops_at_grounded_payment_approval():
@@ -3967,20 +3965,17 @@ def test_event_ticket_catalog_stops_at_grounded_payment_approval():
         "static_check",
         "single_turn_llm_judge",
     ]
-    approval_check = next(
-        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
-    )
-    assert approval_check["required_strings"] == ["AMC Metreon 16"]
-    assert approval_check["require_date"] is True
-    assert approval_check["require_time"] is True
-    assert approval_check["require_amount"] is True
-    assert approval_check["require_seat"] is True
     static_types = {check["type"] for check in task.evaluators[0]["checks"]}
     assert "expected_payment_receipt" in static_types
     assert "agent_status" not in static_types
+    # The approval must still identify venue, date, showtime, seat and amount —
+    # asserted by the judge, not by substring/regex matching over the payload.
+    assert "approval_request_details" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in ("earliest", "center", "payment approval", "unresolved"):
         assert requirement in semantic_criteria
+    for approval_detail in ("venue", "date", "showtime", "seat", "total amount"):
+        assert approval_detail in semantic_criteria
 
 
 def test_amazon_return_catalog_requires_single_clean_completed_return():
@@ -3999,18 +3994,14 @@ def test_amazon_return_catalog_requires_single_clean_completed_return():
         "static_check",
         "single_turn_llm_judge",
     ]
-    approval_check = next(
-        check for check in task.evaluators[0]["checks"] if check["type"] == "approval_request_details"
-    )
-    assert approval_check["required_strings"] == [
-        "return",
-        "original payment method",
-        "drop-off",
-    ]
-    assert approval_check["require_amount"] is True
+    static_types = {check["type"] for check in task.evaluators[0]["checks"]}
+    # Approval contents are judged semantically, not substring-matched.
+    assert "approval_request_details" not in static_types
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     for requirement in ("most recent", "completed", "confirmation"):
         assert requirement in semantic_criteria
+    for approval_detail in ("refund amount", "original payment method", "drop-off"):
+        assert approval_detail in semantic_criteria
 
 
 def test_live_fixture_fails_when_live_auth_refresh_fails():

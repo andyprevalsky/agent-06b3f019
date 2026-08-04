@@ -2003,15 +2003,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "Hotel Kabuki",
-              "free cancellation"
-            ],
-            "minimum_date_count": 2,
-            "require_amount": true
           }
         ]
       },
@@ -2140,16 +2131,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "AMC Metreon 16"
-            ],
-            "require_date": true,
-            "require_time": true,
-            "require_amount": true,
-            "require_seat": true
           }
         ]
       },
@@ -2251,16 +2232,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "AMC Metreon 16"
-            ],
-            "require_date": true,
-            "require_time": true,
-            "require_amount": true,
-            "require_seat": true
           }
         ]
       },
@@ -2368,15 +2339,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "return",
-              "original payment method",
-              "drop-off"
-            ],
-            "require_amount": true
           }
         ]
       },
