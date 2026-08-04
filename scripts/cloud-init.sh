@@ -61,6 +61,108 @@ materialize_env() {
 materialize_env AGENTS_ENV_B64  agents/.env   AGENTS_ENV_SHA256  agents
 materialize_env BACKEND_ENV_B64 back-end/.env BACKEND_ENV_SHA256 backend
 
+# Cursor Cloud often injects per-key Secrets without AGENTS_ENV_B64 /
+# BACKEND_ENV_B64. When the whole-file blob is absent, synthesize .env from the
+# injected process env so children that load dotenv (Prisma seed, run.sh helpers)
+# still see the same secrets as the parent shell.
+materialize_env_from_injected_process() {
+    local dest="$1" label="$2"
+    if [ -f "$dest" ]; then
+        return 0
+    fi
+    local names="${CLOUD_AGENT_INJECTED_SECRET_NAMES:-}"
+    if [ -z "$names" ]; then
+        log "WARN: no $dest and no CLOUD_AGENT_INJECTED_SECRET_NAMES — $label .env not synthesized"
+        return 0
+    fi
+    DEST="$dest" NAMES="$names" python3 - <<'PY'
+import os
+from pathlib import Path
+
+dest = Path(os.environ["DEST"])
+names = [n.strip() for n in os.environ["NAMES"].split(",") if n.strip()]
+lines = []
+for name in names:
+    val = os.environ.get(name)
+    if val is None or val == "":
+        continue
+    if any(ch in val for ch in ' \t\n"\'#$`\\'):
+        escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{name}="{escaped}"')
+    else:
+        lines.append(f"{name}={val}")
+dest.write_text("\n".join(lines) + ("\n" if lines else ""))
+os.chmod(dest, 0o600)
+print(len(lines))
+PY
+    local count
+    count="$(wc -l < "$dest" 2>/dev/null | tr -d ' ' || echo 0)"
+    log "synthesized $dest from injected Cursor secrets ($count keys) for $label"
+}
+
+materialize_env_from_injected_process agents/.env agents
+materialize_env_from_injected_process back-end/.env backend
+
+# Always keep ngrok credentials in both .env files when the process has them.
+# NGROK_API_KEY must be the secret token (FIRSTPART_SECONDPART), NOT the key ID
+# (ak_…). An ID fails reserved-domain list with ERR_NGROK_208 / 403 and tears
+# down run.sh before the public tunnel starts.
+upsert_env_key() {
+    local dest="$1" key="$2" val="$3"
+    [ -n "$val" ] || return 0
+    [ -f "$dest" ] || printf '' > "$dest"
+    DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PY'
+import os
+from pathlib import Path
+
+p = Path(os.environ["DEST"])
+key = os.environ["KEY"]
+val = os.environ["VAL"]
+if any(ch in val for ch in ' \t\n"\'#$`\\'):
+    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+    rendered = f'{key}="{escaped}"'
+else:
+    rendered = f"{key}={val}"
+lines = p.read_text().splitlines() if p.exists() else []
+out = []
+found = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(rendered)
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(rendered)
+p.write_text("\n".join(out) + "\n")
+os.chmod(p, 0o600)
+PY
+}
+
+if [ -n "${NGROK_API_KEY:-}" ]; then
+    case "${NGROK_API_KEY}" in
+        ak_*)
+            log "WARN: NGROK_API_KEY looks like a key ID (ak_…), not the secret token — reserved-domain API will fail. Paste the Reveal/copy token (FIRSTPART_SECONDPART) from dashboard.ngrok.com/api-keys"
+            ;;
+        *)
+            for envf in agents/.env back-end/.env; do
+                upsert_env_key "$envf" NGROK_API_KEY "$NGROK_API_KEY"
+            done
+            log "synced NGROK_API_KEY into agents/.env and back-end/.env"
+            ;;
+    esac
+fi
+if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+    for envf in agents/.env back-end/.env; do
+        upsert_env_key "$envf" NGROK_AUTHTOKEN "$NGROK_AUTHTOKEN"
+    done
+    if command -v ngrok >/dev/null 2>&1; then
+        HOME="${HOME:-/home/ubuntu}" ngrok config add-authtoken "$NGROK_AUTHTOKEN" >/dev/null 2>&1 \
+            || log "WARN: ngrok config add-authtoken failed"
+    fi
+    log "synced NGROK_AUTHTOKEN into .env + ngrok config"
+fi
+
 # seed-local.ts reads the REMOTE DATABASE_URL from back-end/.env (run.sh
 # overrides process.env to the local DB). Cursor Cloud also injects the prod
 # pooled URL into the process environment; if .env was rewritten to localhost

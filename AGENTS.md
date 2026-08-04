@@ -11,3 +11,21 @@ Cloud/Linux agents: see `CLAUDE.md` → **"Cursor Cloud / Linux dev environment"
 (setup via `bash scripts/cloud-init.sh`, system Postgres, skip `mac-app`,
 injected-env-vars-override-`.env` gotchas, and which test suites need funded/live
 accounts).
+
+## Cursor Cloud specific instructions
+
+- **Update script:** `bash scripts/cloud-init.sh` (idempotent). When
+  `AGENTS_ENV_B64` / `BACKEND_ENV_B64` are absent, it synthesizes `agents/.env` /
+  `back-end/.env` from injected Cursor Secrets.
+- **ngrok:** Keep both `NGROK_API_KEY` (secret token `FIRSTPART_SECONDPART`,
+  **not** the `ak_…` key ID) and `NGROK_AUTHTOKEN` in Cursor Secrets. `cloud-init`
+  syncs them into both `.env` files and runs `ngrok config add-authtoken`. Use
+  `HOME=/home/ubuntu` — a polluted `HOME` (e.g. `/tmp/cf-home*`) breaks ngrok
+  config lookup. `trycloudflare.com` is often NXDOMAIN here; reserved-domain /
+  ephemeral ngrok is the reliable public-tunnel path. Prefer
+  `ROSE_USE_SYSTEM_PG=true` when Docker overlay mounts fail on the Cloud VM.
+- **mac-app:** skip on Linux (tests and `dev`). All other smoke gates remain
+  mandatory unless the user overrides that specific gate.
+- **Isolated stacks:** do not let `.cloud-env` force `CONDUCTOR_PORT=3001` onto
+  benchmark/AgentCard stacks — `run.sh` / `run-bench` must keep per-run ports.
+- Standard run/test commands: `CLAUDE.md` + `docs/testing.md`.

@@ -167,6 +167,14 @@ of truth; do not duplicate them into other files.
   per-workspace queue). `BROWSER_PROVIDER` must be `kernel` or `steel`. When
   something is misconfigured despite a correct `.env`, check for an injected env
   var of the same name first.
+- **ngrok (public tunnels / AgentCard):** Cursor Secrets must include both
+  `NGROK_AUTHTOKEN` and `NGROK_API_KEY`. `NGROK_API_KEY` is the **secret token**
+  (`FIRSTPART_SECONDPART` from dashboard.ngrok.com/api-keys → Reveal), **not** the
+  key ID (`ak_…`). An ID fails reserved-domain calls (`ERR_NGROK_208` / 403) and
+  tears down `scripts/run.sh`. `cloud-init.sh` syncs both into `agents/.env` +
+  `back-end/.env` and configures the local ngrok authtoken. Prefer
+  `HOME=/home/ubuntu` so ngrok finds `~/.config/ngrok/ngrok.yml`. On Cloud VMs
+  where Docker overlay mounts fail, set `ROSE_USE_SYSTEM_PG=true`.
 - **Tests needing funded/live accounts** (RCA Step 4: third-party/config — surface,
   don't mask): the Codex E2B backend blackbox domain and all **smoke benchmarks**
   need OpenAI account credits (+ OpenRouter access to the `rose-1-ultra` waterfall
