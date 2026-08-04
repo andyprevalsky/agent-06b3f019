@@ -710,6 +710,8 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             cached = _user_context_cache[user_id]
             fetched_at = cached.get("fetched_at")
             if fetched_at and (now - fetched_at) < timedelta(minutes=CACHE_TTL_MINUTES):
+                refresh_generation = cached.get("profile_refresh_generation", 0) + 1
+                cached["profile_refresh_generation"] = refresh_generation
                 config = load_config()
                 try:
                     async with httpx.AsyncClient() as client:
@@ -726,7 +728,8 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
                     user_settings, settings_read_succeeded = {}, False
                 if settings_read_succeeded:
                     profile_context = _render_profile_context(user_settings)
-                    cached["profile_context"] = profile_context
+                    if cached.get("profile_refresh_generation") == refresh_generation:
+                        cached["profile_context"] = profile_context
                 else:
                     profile_context = cached.get("profile_context", "")
                 logger.info(
@@ -808,6 +811,7 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             _user_context_cache[user_id] = {
                 "base_context": base_context,
                 "profile_context": profile_context,
+                "profile_refresh_generation": 0,
                 "fetched_at": now,
             }
 

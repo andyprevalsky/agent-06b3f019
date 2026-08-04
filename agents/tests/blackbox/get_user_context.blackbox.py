@@ -209,6 +209,47 @@ async def test_get_user_context_cache_hit_times_out_to_stale_profile():
     assert result == cached_result
 
 
+async def test_get_user_context_ignores_out_of_order_profile_refresh():
+    """An older refresh cannot overwrite a newer profile after finishing late."""
+    _setup()
+    _clear_user_context_cache()
+
+    with patch("temporalio.activity.heartbeat"):
+        from helpers.get_user_context import get_user_context
+
+        await get_user_context(user_id="user-cache-generation")
+        module = _get_user_context_module()
+        older_started = asyncio.Event()
+        release_older = asyncio.Event()
+        refresh_calls = 0
+
+        async def refresh_profile(_client, _config, _user_id):
+            nonlocal refresh_calls
+            refresh_calls += 1
+            if refresh_calls == 1:
+                older_started.set()
+                await release_older.wait()
+                return {"name": "Older Profile", "deliveryRecipientName": "Older Recipient"}, True
+            if refresh_calls == 2:
+                return {"name": "Newest Profile", "deliveryRecipientName": "Newest Recipient"}, True
+            return {}, False
+
+        with patch.object(module, "_fetch_user_settings_with_status", new=refresh_profile):
+            older_task = asyncio.create_task(get_user_context(user_id="user-cache-generation"))
+            await older_started.wait()
+            newest_result = await get_user_context(user_id="user-cache-generation")
+            release_older.set()
+            older_result = await older_task
+            failed_refresh_result = await get_user_context(user_id="user-cache-generation")
+
+    assert "Full Name: Newest Profile" in newest_result
+    assert "Recipient Name: Newest Recipient" in newest_result
+    assert "Full Name: Older Profile" in older_result
+    assert "Full Name: Newest Profile" in failed_refresh_result
+    assert "Recipient Name: Newest Recipient" in failed_refresh_result
+    assert "Older Profile" not in failed_refresh_result
+
+
 async def test_get_system_name():
     """get_user_system_name returns the custom system name."""
     _setup()
@@ -902,6 +943,7 @@ async def run_all_tests():
     await r.record_async("happy_path", test_get_user_context_happy_path)
     await r.record_async("uses_cache", test_get_user_context_uses_cache_on_second_call)
     await r.record_async("cache_timeout_uses_stale", test_get_user_context_cache_hit_times_out_to_stale_profile)
+    await r.record_async("cache_ignores_out_of_order_refresh", test_get_user_context_ignores_out_of_order_profile_refresh)
     await r.record_async("get_system_name", test_get_system_name)
     await r.record_async("get_system_name_error", test_get_system_name_default_on_error)
     await r.record_async("get_system_name_outer_except", test_get_system_name_outer_except)
