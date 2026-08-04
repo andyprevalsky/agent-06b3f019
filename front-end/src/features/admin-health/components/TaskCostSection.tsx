@@ -122,6 +122,14 @@ export default function TaskCostSection({ data }: { data: AdminHealthData }) {
           cost. Current sample: {data.summary.costPerTask.sampleSize.toLocaleString()} real root
           runs. Chat/setup-only sessions and simulated runs are excluded; real-model benchmark runs
           are included.
+          {data.summary.costPerTask.unpricedUsageTokens > 0 && (
+            <>
+              {' '}
+              API-rate pricing covers every model in this sample except{' '}
+              {data.summary.costPerTask.unpricedUsageTokens.toLocaleString()} tokens from models
+              with no published rate and no recorded cost, so the API-rate figure is a floor.
+            </>
+          )}
         </p>
         <div role="img" aria-label="Cost per root task over time" className="h-[280px] w-full">
           <ResponsiveContainer width="100%" height="100%">

@@ -105,8 +105,19 @@ async function main(): Promise<void> {
             },
           });
           stats.updated += 1;
-        } catch {
+        } catch (error) {
+          // This script mutates rows, so a partial run must be diagnosable. A bare
+          // catch collapsed decrypt, parse, and update failures into one opaque
+          // counter, leaving no way to tell which rows were left uncaptured.
           stats.failures += 1;
+          console.error(
+            JSON.stringify({
+              event: 'backfill_target_failed',
+              goalHistoryId: target.id,
+              originalAgentId: target.originalAgentId,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          );
         }
       })
     )

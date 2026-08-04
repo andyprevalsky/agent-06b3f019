@@ -110,10 +110,28 @@ function normalizeModel(model: string): string {
   return normalized;
 }
 
-function apiEquivalentLlmDollars(usage: RootAgentRunUsageRecord, pricedAt: number): number {
-  if (usage.fromFastCache) return 0;
+interface LlmCostSample {
+  dollars: number;
+  /** Tokens we could neither reprice nor back onto a recorded cost. */
+  unpricedTokens: number;
+}
+
+function totalTokens(usage: RootAgentRunUsageRecord): number {
+  return (
+    usage.tokensIn + usage.cacheReadInputTokens + usage.cacheCreationInputTokens + usage.tokensOut
+  );
+}
+
+function apiEquivalentLlmDollars(usage: RootAgentRunUsageRecord, pricedAt: number): LlmCostSample {
+  if (usage.fromFastCache) return { dollars: 0, unpricedTokens: 0 };
   const rates = currentModelRates(normalizeModel(usage.model), pricedAt);
-  if (rates === undefined) return usage.costCents / 100;
+  if (rates === undefined) {
+    // Unknown model: fall back to whatever the row actually cost. When there is no
+    // recorded cost either, the tokens are genuinely unpriceable — surface them as
+    // coverage loss instead of silently averaging them in as $0.
+    if (usage.costCents > 0) return { dollars: usage.costCents / 100, unpricedTokens: 0 };
+    return { dollars: 0, unpricedTokens: totalTokens(usage) };
+  }
   const uncachedInputTokens = rates.inputIncludesCacheTokens
     ? Math.max(0, usage.tokensIn - usage.cacheReadInputTokens - usage.cacheCreationInputTokens)
     : usage.tokensIn;
@@ -121,10 +139,12 @@ function apiEquivalentLlmDollars(usage: RootAgentRunUsageRecord, pricedAt: numbe
     uncachedInputTokens +
     usage.cacheReadInputTokens * rates.cacheReadMultiplier +
     usage.cacheCreationInputTokens * rates.cacheWriteMultiplier;
-  return (
-    (input * rates.inputDollarsPerMillion + usage.tokensOut * rates.outputDollarsPerMillion) /
-    1_000_000
-  );
+  return {
+    dollars:
+      (input * rates.inputDollarsPerMillion + usage.tokensOut * rates.outputDollarsPerMillion) /
+      1_000_000,
+    unpricedTokens: 0,
+  };
 }
 
 function roundedDollars(value: number): number {
@@ -146,22 +166,30 @@ export function calculateTaskCostPerTask(
       apiRateDollars: null,
       computeTokenRateDollars: null,
       sampleSize: 0,
+      unpricedUsageTokens: 0,
     };
   }
   const includedTaskIds = new Set(runs.map((run) => run.taskId));
   let serviceDollars = 0;
   let apiLlmDollars = 0;
+  let unpricedUsageTokens = 0;
   for (const usage of usageRows) {
     if (!includedTaskIds.has(usage.taskId)) continue;
     if (usage.kind.toLowerCase() === 'llm') {
-      apiLlmDollars += apiEquivalentLlmDollars(usage, pricedAt);
+      const sample = apiEquivalentLlmDollars(usage, pricedAt);
+      apiLlmDollars += sample.dollars;
+      unpricedUsageTokens += sample.unpricedTokens;
     } else serviceDollars += usage.costCents / 100;
   }
-  const taskCount = runs.length;
+  // The denominator is the number of DISTINCT tasks the numerator draws from. With
+  // today's callers this always equals runs.length (runs arrive Map-deduped by id,
+  // and taskId is that key), so this is a defensive invariant — not a metric change.
+  const taskCount = includedTaskIds.size;
   return {
     zeroLlmCostDollars: roundedDollars(serviceDollars / taskCount),
     apiRateDollars: roundedDollars((serviceDollars + apiLlmDollars) / taskCount),
     computeTokenRateDollars: roundedDollars((serviceDollars + apiLlmDollars / 20) / taskCount),
     sampleSize: taskCount,
+    unpricedUsageTokens,
   };
 }

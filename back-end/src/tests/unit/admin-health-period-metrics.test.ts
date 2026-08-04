@@ -251,6 +251,7 @@ assert.deepStrictEqual(
     apiRateDollars: null,
     computeTokenRateDollars: null,
     sampleSize: 0,
+    unpricedUsageTokens: 0,
   },
   'Periods without a real root-run sample must be unavailable rather than reported as zero cost'
 );
@@ -261,8 +262,52 @@ assert.deepStrictEqual(
     apiRateDollars: 0.84,
     computeTokenRateDollars: 0.2795,
     sampleSize: 1,
+    unpricedUsageTokens: 0,
   },
   'Cost scenarios must retain service spend, apply cache rates, price Fast Cache at zero, and exclude children'
+);
+// A task repeated in the runs array must not divide that task's usage across the
+// repeats. The numerator attributes each usage row to a task exactly once, so a
+// denominator that counted raw runs would report every scenario at a fraction of
+// its true value.
+const duplicatedRunCost = calculateTaskCostPerTask(
+  [{ taskId: 'root-task' }, { taskId: 'root-task' }, { taskId: 'root-task' }],
+  [usage('root-task', { kind: 'llm', model: 'claude-sonnet-4-6', tokensIn: 1_000_000 })]
+);
+assert.strictEqual(
+  duplicatedRunCost.apiRateDollars,
+  3,
+  'Repeated task IDs must not divide the usage of one task across the duplicates'
+);
+assert.strictEqual(
+  duplicatedRunCost.sampleSize,
+  1,
+  'sampleSize must report distinct tasks rather than an inflated raw run count'
+);
+// An unknown model with no recorded cost is unpriceable. Averaging it in as $0
+// would silently understate the repriced figures, so it must surface as coverage
+// loss instead.
+const unpricedCost = calculateTaskCostPerTask(
+  [{ taskId: 'root-task' }],
+  [
+    usage('root-task', {
+      kind: 'llm',
+      model: 'some-unreleased-model-v9',
+      tokensIn: 1_000,
+      tokensOut: 500,
+      costCents: 0,
+    }),
+  ]
+);
+assert.strictEqual(
+  unpricedCost.apiRateDollars,
+  0,
+  'An unpriceable model contributes no invented dollars'
+);
+assert.strictEqual(
+  unpricedCost.unpricedUsageTokens,
+  1_500,
+  'Unpriceable LLM tokens must be surfaced as coverage loss, not silently averaged in as $0'
 );
 assert.strictEqual(
   providerCacheSemantics.apiRateDollars,

@@ -27,6 +27,9 @@ export async function findRootAgentRunsBetween(
     prisma.agent.findMany({
       where: {
         parentAgentId: null,
+        // Root means depth 0 as well: a handful of production agents have a null
+        // parent without being depth 0, and they are not root runs.
+        depth: 0,
         worldModelMode: 'real',
         createdAt: { gte: start, lt: end },
         toolUsages: { some: { toolName: { notIn: [...CHAT_ONLY_TOOL_NAMES] } } },
@@ -92,6 +95,7 @@ async function findLiveRootAgentRunUsageBetween(
           END
         ) AS item(value)
         WHERE agent."parentAgentId" IS NULL
+          AND agent."depth" = 0
           AND agent."worldModelMode" = 'real'
           AND agent."createdAt" >= ${start}
           AND agent."createdAt" < ${end}
@@ -137,7 +141,19 @@ export async function findRootAgentRunUsageBetween(
     }),
   ]);
   const liveTaskIds = new Set(liveUsage.map((row) => row.taskId));
-  const archivedUsage = archivedRows.flatMap((row) =>
+  // GoalHistory is not unique on originalAgentId — production holds thousands of
+  // duplicate root rows for the same archived agent. Collapse to one row per task
+  // (matching findRootAgentRunsBetween) so a task's usage is not counted once per
+  // duplicate against a denominator that counts it once. A duplicate without
+  // telemetry must never shadow one that carries it.
+  const archivedByTaskId = new Map<string, (typeof archivedRows)[number]>();
+  for (const row of archivedRows) {
+    const existing = archivedByTaskId.get(row.originalAgentId);
+    if (existing === undefined || (existing.costTelemetry === null && row.costTelemetry !== null)) {
+      archivedByTaskId.set(row.originalAgentId, row);
+    }
+  }
+  const archivedUsage = [...archivedByTaskId.values()].flatMap((row) =>
     liveTaskIds.has(row.originalAgentId)
       ? []
       : readStoredRootCostTelemetry(row.originalAgentId, row.costTelemetry)

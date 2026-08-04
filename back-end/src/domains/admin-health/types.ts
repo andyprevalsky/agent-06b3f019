@@ -18,6 +18,12 @@ export interface AdminHealthTaskCostPerTask {
   computeTokenRateDollars: number | null;
   /** Real root agent runs included in this period's cost average. */
   sampleSize: number;
+  /**
+   * LLM tokens from models with no known API rate and no recorded cost. They
+   * contribute $0 to apiRateDollars, so a non-zero value means the repriced
+   * figures understate real usage.
+   */
+  unpricedUsageTokens: number;
 }
 
 export interface RootAgentRunRecord {

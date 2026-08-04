@@ -5,6 +5,12 @@ export interface AdminHealthTaskCostPerTask {
   apiRateDollars: number | null;
   computeTokenRateDollars: number | null;
   sampleSize: number;
+  /**
+   * LLM tokens from models with no known API rate and no recorded cost. They
+   * contribute $0 to apiRateDollars, so a non-zero value means the repriced
+   * figures understate real usage.
+   */
+  unpricedUsageTokens: number;
 }
 
 export interface AdminHealthSeriesPoint {
