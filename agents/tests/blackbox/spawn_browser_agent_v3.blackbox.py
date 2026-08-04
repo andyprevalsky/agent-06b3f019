@@ -8948,24 +8948,6 @@ def test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary():
     assert '"recorded_passkey_credential_ids", []' in activity_source
 
 
-def test_redirect_realm_credential_prep_failure_is_quarantined_without_recovery():
-    """A failed optional realm prep cannot monopolize the guest browser loop."""
-    import inspect
-
-    from domains.spawn_browser_agent_v3 import handler
-
-    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    start = source.index("observed_auth_realm = auth_realm_from_url(current_url)")
-    end = source.index("if current_url and (not visited_urls", start)
-    redirect_block = source[start:end]
-
-    assert "try:" in redirect_block
-    assert "await _prepare_credentials_for_url(current_url)" in redirect_block
-    assert "failed_credential_prep_realms" in redirect_block
-    assert "continuing without saved credentials" in redirect_block
-    assert "_recover_browser_step(" not in redirect_block
-
-
 # ── _execute_click ───────────────────────────────────────────────────
 
 
@@ -13658,10 +13640,6 @@ async def run_all_tests():
     r.record(
         "passkey_usage_dedupe_survives_resume_boundaries",
         test_passkey_usage_dedupe_survives_every_browser_activity_resume_boundary,
-    )
-    r.record(
-        "redirect_realm_credential_prep_failure_is_quarantined",
-        test_redirect_realm_credential_prep_failure_is_quarantined_without_recovery,
     )
     r.record(
         "browser_action_log_summary_redacts_payment_secrets", test_browser_action_log_summary_redacts_payment_secrets

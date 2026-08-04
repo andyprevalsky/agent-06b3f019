@@ -118,6 +118,78 @@ async def test_cross_realm_goto_prepares_complete_credentials_before_navigation(
         assert sensitive_key not in serialized_result
 
 
+async def test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fails() -> None:
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    events: list[str] = []
+
+    class FakeEvent:
+        def __await__(self):
+            async def done():
+                return None
+
+            return done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    class FakeEventBus:
+        def dispatch(self, _event):
+            events.append("navigate")
+            return FakeEvent()
+
+    async def fail_optional_credentials(_target_url: str):
+        events.append("prepare_credentials")
+        raise RuntimeError("realm state decode failed")
+
+    action_history = SimpleNamespace(record_action=AsyncMock())
+    result = await _execute_goto(
+        session=SimpleNamespace(event_bus=FakeEventBus()),
+        dom_service=SimpleNamespace(),
+        action_history=action_history,
+        params={"url": "https://www.google.com/search?q=movie+genre"},
+        thinking="compare showtimes",
+        session_id="session-1",
+        config=SimpleNamespace(),
+        current_auth_realm="amctheatres.com",
+        prepare_credentials_for_url=fail_optional_credentials,
+        wait_for_navigation=AsyncMock(),
+    )
+
+    assert events == ["prepare_credentials", "navigate"], events
+    assert result == {
+        "success": True,
+        "message": "",
+        "current_url": "https://www.google.com/search?q=movie+genre",
+    }
+    action_history.record_action.assert_awaited_once()
+
+
+async def test_redirected_realm_failure_is_quarantined_after_any_prep_stage() -> None:
+    from domains.spawn_browser_agent_v3.handler import prepare_optional_realm_credentials
+
+    failed_realms: dict[str, str] = {}
+    calls: list[str] = []
+
+    async def fail_after_prepare_auth(target_url: str):
+        calls.append(target_url)
+        raise ValueError("credential realm mismatch after payload decode")
+
+    for _attempt in range(2):
+        prepared = await prepare_optional_realm_credentials(
+            target_url="https://www.google.com/search?q=movie+genre",
+            current_auth_realm="amctheatres.com",
+            failed_realms=failed_realms,
+            prepare_credentials=fail_after_prepare_auth,
+        )
+        assert prepared is None
+
+    assert calls == ["https://www.google.com/search?q=movie+genre"]
+    assert failed_realms == {
+        "google.com": "ValueError:credential realm mismatch after payload decode"
+    }
+
+
 def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
     from domains.spawn_browser_agent_v3.service_crypto import (
         auth_realm_matches_url,
@@ -406,6 +478,14 @@ async def run_all_tests():
     await runner.record_async(
         "cross_realm_goto_prepares_complete_credentials_before_navigation",
         test_cross_realm_goto_prepares_complete_credentials_before_navigation,
+    )
+    await runner.record_async(
+        "cross_realm_goto_continues_guest_navigation_when_optional_prep_fails",
+        test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fails,
+    )
+    await runner.record_async(
+        "redirected_realm_failure_is_quarantined_after_any_prep_stage",
+        test_redirected_realm_failure_is_quarantined_after_any_prep_stage,
     )
     runner.record(
         "worker_and_backend_use_the_same_canonical_auth_realms",

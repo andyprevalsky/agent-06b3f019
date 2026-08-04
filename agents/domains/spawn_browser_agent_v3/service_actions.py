@@ -25,6 +25,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     auth_realm_matches_url,
     has_payment_card_secret_refs,
 )
+from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_product_url_for_pages
 
 if TYPE_CHECKING:
@@ -1868,7 +1869,16 @@ async def _execute_goto(
         and target_auth_realm
         and not auth_realm_matches_url(current_auth_realm, url)
     ):
-        prepared = await prepare_credentials_for_url(url)
+        try:
+            prepared = await prepare_credentials_for_url(url)
+        except Exception as prep_error:
+            logger.warning(
+                "Optional goto credential preparation failed; continuing guest navigation",
+                auth_realm=target_auth_realm,
+                target_url=url,
+                error=f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
+            )
+            prepared = None
         if prepared is not None:
             credential_summary = {
                 key: prepared[key]

@@ -22,7 +22,7 @@ import time
 import traceback
 import uuid as uuid_module
 from datetime import timedelta
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import structlog
 import structlog.contextvars
@@ -154,6 +154,37 @@ from .types import ClaudeTokenState
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
+
+
+async def prepare_optional_realm_credentials(
+    *,
+    target_url: str,
+    current_auth_realm: str,
+    failed_realms: Dict[str, str],
+    prepare_credentials: Callable[[str], Awaitable[Optional[Dict[str, Any]]]],
+) -> Optional[Dict[str, Any]]:
+    """Run one optional cross-realm preparation and quarantine every failure stage."""
+    target_realm = auth_realm_from_url(target_url)
+    if (
+        not target_realm
+        or auth_realm_matches_url(current_auth_realm, target_url)
+        or target_realm in failed_realms
+    ):
+        return None
+    try:
+        return await prepare_credentials(target_url)
+    except Exception as prep_error:
+        error_signature = (
+            f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
+        )
+        failed_realms[target_realm] = error_signature
+        logger.warning(
+            "Optional realm credential preparation failed once; continuing without saved credentials",
+            auth_realm=target_realm,
+            target_url=target_url,
+            error=error_signature,
+        )
+        return None
 
 
 def _normalize_payment_card_last4(value: Any) -> Optional[str]:
@@ -5531,7 +5562,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         )
         failed_credential_prep_realms: Dict[str, str] = {}
 
-        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+        async def _prepare_credentials_for_url_unquarantined(
+            target_url: str,
+        ) -> Optional[Dict[str, Any]]:
             """Atomically activate every saved credential type for a new realm."""
             nonlocal auth_realm
             nonlocal auth_options
@@ -5668,6 +5701,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 "passkey_count": len(realm_state.decrypted_passkeys),
                 "passkeys_newly_injected": injected_passkey_count,
             }
+
+        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+            return await prepare_optional_realm_credentials(
+                target_url=target_url,
+                current_auth_realm=auth_realm,
+                failed_realms=failed_credential_prep_realms,
+                prepare_credentials=_prepare_credentials_for_url_unquarantined,
+            )
 
         async def _recover_browser_step(reason: str, *, reload_page: bool) -> bool:
             nonlocal supervisor_recovery_count
@@ -5839,13 +5880,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # injected cookies and origin state participate in the first page
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
-            if (
-                observed_auth_realm
-                and observed_auth_realm not in failed_credential_prep_realms
-                and not auth_realm_matches_url(auth_realm, current_url)
-            ):
-                try:
-                    await _prepare_credentials_for_url(current_url)
+            if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
+                prepared_realm = await _prepare_credentials_for_url(current_url)
+                if prepared_realm is not None:
                     from browser_use.browser.events import NavigateToUrlEvent
 
                     reload_event = dom_service.session.event_bus.dispatch(
@@ -5860,13 +5897,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         current_url=current_url,
                     )
                     continue
-                except Exception as prep_error:
-                    logger.warning(
-                        "Redirected realm credential preparation failed once; continuing without saved credentials",
-                        auth_realm=observed_auth_realm,
-                        current_url=current_url,
-                        error=f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
-                    )
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
