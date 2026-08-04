@@ -3,6 +3,7 @@ import {
   callOrgTool,
   type AgentCardOrgToolCaller,
 } from './agentcard/org-runtime';
+import { orgPollWaitsMs } from './agentcard/org-poll-schedule';
 import { createLogger } from './logger';
 
 const log = createLogger('WalletFunding');
@@ -232,15 +233,21 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
       );
     }
 
-    for (let attempt = 1; attempt <= this.releaseRetry.attempts; attempt += 1) {
+    // Back off exponentially instead of polling every `delayMs`: the observation window is
+    // unchanged (sum of the waits equals the old fixed cadence's total) but it now costs 6
+    // organization-MCP requests instead of 20, which keeps this one reclaim from draining the
+    // org-wide 120-requests-per-minute window that every other AgentCard caller shares.
+    const waits = orgPollWaitsMs(this.releaseRetry.attempts, this.releaseRetry.delayMs);
+    const observations = waits.length + 1;
+    for (let attempt = 1; attempt <= observations; attempt += 1) {
       let result: unknown;
       try {
         result = await this.toolCaller('list_transfers', { limit: 100 });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/too many requests|rate.?limit|\b429\b/i.test(message)) throw error;
-        if (attempt < this.releaseRetry.attempts) {
-          await delay(this.releaseRetry.delayMs);
+        if (attempt < observations) {
+          await delay(waits[attempt - 1]);
           continue;
         }
         break;
@@ -276,7 +283,7 @@ export class AgentCardCompanyWalletFundingProvider implements WalletFundingProvi
           }),
         };
       }
-      if (attempt < this.releaseRetry.attempts) await delay(this.releaseRetry.delayMs);
+      if (attempt < observations) await delay(waits[attempt - 1]);
     }
 
     throw new WalletFundingProviderError(

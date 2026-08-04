@@ -1,3 +1,4 @@
+import { orgPollWaitsMs } from '../agentcard/org-poll-schedule';
 import { callOrgTool, type AgentCardOrgToolCaller } from '../agentcard/org-runtime';
 import { createLogger } from '../logger';
 import { AgentCardProviderError } from './errors';
@@ -490,7 +491,12 @@ export class AgentCardOrgMcpProvider implements CardProvider {
   }
 
   private async findCompanyTransferId(cardId: string): Promise<string | undefined> {
-    for (let attempt = 1; attempt <= this.transferLookup.attempts; attempt += 1) {
+    // Each attempt costs TWO organization-MCP reads, so the old fixed 500ms cadence spent 40
+    // requests of the org-wide 120-per-minute window on a single mint. Exponential backoff waits
+    // for exactly as long overall while issuing 12.
+    const waits = orgPollWaitsMs(this.transferLookup.attempts, this.transferLookup.delayMs);
+    const observations = waits.length + 1;
+    for (let attempt = 1; attempt <= observations; attempt += 1) {
       let observedTransferCount = 0;
       for (const args of [{ status: 'consumed', limit: 100 }, { limit: 100 }]) {
         const result = await this.toolCaller('list_transfers', args);
@@ -514,14 +520,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
           return transferId;
         }
       }
-      if (attempt < this.transferLookup.attempts) {
+      if (attempt < observations) {
         if (attempt === 1) {
           log.info('Waiting for AgentCard organization transfer visibility', {
             card_id: maskId(cardId),
             observed_transfer_count: observedTransferCount,
           });
         }
-        await delay(this.transferLookup.delayMs);
+        await delay(waits[attempt - 1]);
       }
     }
     return undefined;

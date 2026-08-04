@@ -419,6 +419,62 @@ async function main(): Promise<void> {
   );
   assert.deepStrictEqual(proseKycCalls, ['create_card']);
 
+  // Regression: the transfer-visibility poll ran on a FIXED interval and issues TWO reads per
+  // attempt, so a single mint spent 40 requests of AgentCard's org-wide 120-requests-per-minute
+  // window in ten seconds — throttling the reclaim/lifecycle callers that share it. Exponential
+  // backoff waits for the same total time on far fewer requests.
+  // Scaled to 1/100 of production (delayMs 5 stands in for 500) so the assertion runs fast; the
+  // request count is a pure function of the schedule shape, so it is identical at either scale.
+  const invisibleTransferAttempts = 20;
+  const invisibleTransferScaledDelayMs = 5;
+  const invisibleTransferTotalWaitMs =
+    (invisibleTransferAttempts - 1) * invisibleTransferScaledDelayMs;
+  let invisibleTransferLookups = 0;
+  const invisibleTransferProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name) => {
+      if (name === 'create_card') return toolResult({ status: 'created', card_id: 'card-invis' });
+      if (name === 'get_card_details') {
+        return toolResult({
+          pan: '4242424242424242',
+          cvv: '123',
+          expiry: '07/28',
+          balance_cents: 4396,
+          status: 'OPEN',
+        });
+      }
+      if (name === 'list_transfers') {
+        invisibleTransferLookups += 1;
+        return toolResult({ transfers: [] });
+      }
+      throw new Error(`unexpected invisible-transfer tool ${name}`);
+    },
+    { attempts: invisibleTransferAttempts, delayMs: invisibleTransferScaledDelayMs }
+  );
+  const invisibleTransferStartedAt = Date.now();
+  await assert.rejects(
+    () =>
+      invisibleTransferProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:invisible-transfer',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress'
+  );
+  assert.strictEqual(
+    invisibleTransferLookups,
+    12,
+    `a full transfer-visibility wait must cost 12 organization-MCP requests, not ${invisibleTransferLookups}`
+  );
+  // The visibility deadline was NOT shortened to buy the request saving.
+  assert.ok(
+    Date.now() - invisibleTransferStartedAt >= invisibleTransferTotalWaitMs,
+    'the transfer-visibility window must not shrink'
+  );
+
   console.log('AgentCard organization MCP provider tests passed');
 }
 

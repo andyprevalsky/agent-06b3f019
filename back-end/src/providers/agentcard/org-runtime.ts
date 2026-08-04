@@ -11,9 +11,15 @@ const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
  * small bounded wait converts a hard failure into a successful call.
  *
  * Bounded by a TOTAL delay budget rather than a per-attempt delay: some callers (the wallet-funding
- * release observer) already poll this runtime up to 20 times, and a per-attempt bound would let the
- * nested waits multiply into a multi-minute request. The budget caps what one `callTool` can ever
- * add, so the outer poll loop's own timing stays the dominant term.
+ * release observer, the card-mint transfer-visibility poll) poll this runtime repeatedly, and a
+ * per-attempt bound would let the nested waits multiply into a multi-minute request. The budget
+ * caps what one `callTool` can ever add, so the outer poll loop's own timing stays the dominant
+ * term.
+ *
+ * Retrying is the LAST line of defence, not the fix: the retry budget (10s) is far smaller than the
+ * throttle window (60s), so the durable remedy is issuing fewer requests. See
+ * `org-poll-schedule.ts` for the backoff that removed most of the volume, and `inFlightReads` below
+ * for the coalescing that removes duplicate concurrent reads.
  */
 const RATE_LIMIT_RETRY_ATTEMPTS = 3;
 const RATE_LIMIT_BASE_DELAY_MS = 1_000;
@@ -119,6 +125,40 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Organization tools that only READ provider state. Two identical reads issued while one is still
+ * in flight cannot observe different data, so they are coalesced into a single request. Mutations
+ * (`create_card`, `close_card`, `confirm_collection`, `test_charge`, the KYC/onboarding starters)
+ * are deliberately absent: they must reach AgentCard once per caller.
+ */
+const IDEMPOTENT_READ_TOOLS = new Set([
+  'get_card',
+  'get_card_details',
+  'get_cardholder_kyc_status',
+  'get_company_wallet',
+  'get_onboarding_session',
+  'list_cards',
+  'list_transfers',
+]);
+
+/** Order-independent key so two call sites building the same args share one in-flight request. */
+function readKey(toolName: string, args: Record<string, unknown>): string {
+  const entries = Object.entries(args).sort(([left], [right]) => left.localeCompare(right));
+  return `${toolName}:${JSON.stringify(entries)}`;
+}
+
+/**
+ * Joiners get their own copy so a caller that mutates a parsed provider record cannot corrupt a
+ * sibling's view. The first caller keeps the original object, so an uncoalesced call is untouched.
+ */
+function detachedCopy(value: unknown): unknown {
+  try {
+    return structuredClone(value);
+  } catch {
+    return value;
+  }
+}
+
 export class AgentCardOrgRuntime {
   private cachedToken?: { accessToken: string; expiresAtMs: number };
   /**
@@ -130,6 +170,15 @@ export class AgentCardOrgRuntime {
    * credential.
    */
   private inFlightToken?: Promise<string>;
+  /**
+   * In-flight idempotent reads, keyed by tool + args. The organization MCP throttle is shared by
+   * EVERY org caller at 120 requests/minute, and Rose fans identical reads out constantly: each
+   * concurrent payment-lifecycle read issues the same `list_transfers` status sweep, and the minute
+   * cron reconciler polls the same `list_transfers` page as an in-flight wallet reclaim. Coalescing
+   * makes that fan-out cost one request instead of one per caller, so request volume stays flat as
+   * concurrent agents grow rather than scaling with them.
+   */
+  private readonly inFlightReads = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly toolCaller: TokenMcpToolCaller = mcpCallTool,
@@ -145,6 +194,22 @@ export class AgentCardOrgRuntime {
    * rate-limit handling turned a few seconds of provider backpressure into a hard failure.
    */
   async callTool(toolName: string, args: Record<string, unknown>): Promise<unknown> {
+    if (!IDEMPOTENT_READ_TOOLS.has(toolName))
+      return this.callToolWithRateLimitRetry(toolName, args);
+    const key = readKey(toolName, args);
+    const joined = this.inFlightReads.get(key);
+    if (joined !== undefined) return detachedCopy(await joined);
+    const read = this.callToolWithRateLimitRetry(toolName, args).finally(() => {
+      if (this.inFlightReads.get(key) === read) this.inFlightReads.delete(key);
+    });
+    this.inFlightReads.set(key, read);
+    return read;
+  }
+
+  private async callToolWithRateLimitRetry(
+    toolName: string,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
     let lastRateLimitError: unknown;
     let remainingBudgetMs = RATE_LIMIT_TOTAL_DELAY_BUDGET_MS;
     for (let attempt = 1; attempt <= RATE_LIMIT_RETRY_ATTEMPTS; attempt += 1) {

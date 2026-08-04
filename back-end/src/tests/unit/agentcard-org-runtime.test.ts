@@ -261,6 +261,65 @@ async function main(): Promise<void> {
     );
     assert.equal(hardFailureCalls, 1);
 
+    // The organization MCP throttle (120 requests/minute) is shared by EVERY org caller, so
+    // identical idempotent reads that overlap must cost ONE request, not one per caller. Rose fans
+    // these out constantly: concurrent payment-lifecycle reads issue the same `list_transfers`
+    // status sweep, and the minute cron polls the same page as an in-flight wallet reclaim.
+    let coalescedCalls = 0;
+    let releaseCoalescedCall: (() => void) | undefined;
+    const coalescedGate = new Promise<void>((resolve) => {
+      releaseCoalescedCall = resolve;
+    });
+    const coalescingRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      coalescedCalls += 1;
+      await coalescedGate;
+      return { structuredContent: { tool: toolName, transfers: [{ id: 'owt_1' }] } };
+    });
+    const coalesced = Promise.all([
+      coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 }),
+      coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 }),
+      // Argument order must not defeat the coalescing key.
+      coalescingRuntime.callTool('list_transfers', { limit: 100, status: 'reclaimed' }),
+      coalescingRuntime.callTool('list_transfers', { status: 'failed', limit: 100 }),
+    ]);
+    releaseCoalescedCall?.();
+    const coalescedResults = await coalesced;
+    assert.equal(
+      coalescedCalls,
+      2,
+      'three identical in-flight reads must share one request; a different status is its own request'
+    );
+    assert.deepEqual(coalescedResults[0], coalescedResults[1]);
+    assert.notEqual(
+      coalescedResults[0],
+      coalescedResults[1],
+      'joiners must get a detached copy so one caller cannot mutate another caller view'
+    );
+
+    // A completed read must not be served from the coalescing map: the next caller needs fresh
+    // provider state (an abandon flow reads a card immediately after closing it).
+    await coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 });
+    assert.equal(coalescedCalls, 3, 'coalescing must never outlive the in-flight request');
+
+    // Mutations must NEVER be coalesced — each caller's side effect has to reach AgentCard.
+    let mutationCalls = 0;
+    let releaseMutation: (() => void) | undefined;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const mutationRuntime = new AgentCardOrgRuntime(async () => {
+      mutationCalls += 1;
+      await mutationGate;
+      return { structuredContent: { status: 'CLOSED' } };
+    });
+    const mutations = Promise.all([
+      mutationRuntime.callTool('close_card', { card_id: 'card_1' }),
+      mutationRuntime.callTool('close_card', { card_id: 'card_1' }),
+    ]);
+    releaseMutation?.();
+    await mutations;
+    assert.equal(mutationCalls, 2, 'identical mutations must not be coalesced');
+
     process.stdout.write('AgentCard org runtime tests passed\n');
   } finally {
     for (const name of ENV_NAMES) {
