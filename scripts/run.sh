@@ -313,9 +313,19 @@ run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_A
 
 is_current_process_family() {
     local pid=$1
-    while [ -n "$pid" ] && [ "$pid" != "0" ]; do
-        [ "$pid" = "$$" ] && return 0
-        pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+    # Walk UP from pid → true when pid is us or one of our descendants.
+    local walk=$pid
+    while [ -n "$walk" ] && [ "$walk" != "0" ]; do
+        [ "$walk" = "$$" ] && return 0
+        walk=$(ps -p "$walk" -o ppid= 2>/dev/null | tr -d ' ') || break
+    done
+    # Walk UP from us → true when pid is an ancestor launcher. Without this,
+    # `bash -lc '... bash scripts/run.sh --benchmark'` matches the stale
+    # pattern, gets killed, and SIGTERMs the new run.sh (exit 143).
+    walk=$$
+    while [ -n "$walk" ] && [ "$walk" != "0" ]; do
+        [ "$walk" = "$pid" ] && return 0
+        walk=$(ps -p "$walk" -o ppid= 2>/dev/null | tr -d ' ') || break
     done
     return 1
 }
