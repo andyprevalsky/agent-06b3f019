@@ -63,8 +63,18 @@ is_self_ancestor() {
     done
 }
 
+# Agent tool shells (Claude Code wraps every Bash call in a shell that sources a
+# generated snapshot) routinely sit in the worktree and launch run.sh, so the
+# ancestor walk climbs straight into them and the cwd sweep can select them.
+# They are the agent's own pollers, not services: killing one silently destroys
+# the monitor that is supposed to be watching the stack being restarted, which
+# looks identical to "the task is still running".
+is_agent_tool_shell() {
+    cmd_of "$1" | grep -Fq '.claude/shell-snapshots/'
+}
+
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_agent_tool_shell "$1"
 }
 
 service_like_process() {
@@ -180,8 +190,9 @@ add_pid_with_tree_and_ancestors() {
 }
 
 ROOTS_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE"' EXIT
 ALL_FILE=$(mktemp)
+KEEP_FILE=$(mktemp)
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$KEEP_FILE"' EXIT
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory.
@@ -230,7 +241,16 @@ while read -r pid; do
     add_pid_with_tree_and_ancestors "$pid"
 done < "$ROOTS_FILE"
 
-PIDS=$(sort -un "$ALL_FILE" | grep -v "^$SELF$" | grep -v "^$SELF_PPID$" || true)
+> "$KEEP_FILE"
+while read -r pid; do
+    [[ -z "$pid" ]] && continue
+    # pid_tree collects descendants without consulting the root filters, so the
+    # protection check has to be re-applied to the fully expanded set.
+    is_protected_process "$pid" && continue
+    echo "$pid" >> "$KEEP_FILE"
+done < <(sort -un "$ALL_FILE")
+
+PIDS=$(grep -v "^$SELF$" "$KEEP_FILE" | grep -v "^$SELF_PPID$" || true)
 
 if [[ -z "$PIDS" ]]; then
     if [[ $DRY -eq 0 ]]; then

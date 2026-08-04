@@ -5,10 +5,22 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
 
+# Kill a pid and every descendant. Signalling only the direct pid orphans
+# grandchildren, which then hold this script's stdout pipe open long after it
+# exits and make the suite look hung.
+kill_tree() {
+  local root="$1" child
+  for child in $(pgrep -P "$root" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill -TERM "$root" 2>/dev/null || true
+  kill -KILL "$root" 2>/dev/null || true
+}
+
 cleanup() {
   local pid
   for pid in "${PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null || true
+    kill_tree "$pid"
   done
   for pid in "${PIDS[@]:-}"; do
     wait "$pid" 2>/dev/null || true
@@ -141,6 +153,71 @@ run_kill_stale_same_task_queue_workers "$workspace" "$queue" "$expected_backend"
 assert_dead "$stale_pid" "same-worktree worker with stale backend is killed"
 assert_alive "$current_pid" "same-worktree worker with current backend survives"
 assert_alive "$other_pid" "other-worktree worker survives"
+
+assert_agent_tool_shell_protected() {
+  local worktree="$TMP_ROOT/kill-services-worktree"
+  local snapshot="$worktree/.claude/shell-snapshots/snapshot-zsh-test.sh"
+  mkdir -p "$worktree/scripts" "$(dirname "$snapshot")"
+  : > "$snapshot"
+
+  cat > "$worktree/scripts/run.sh" <<'RUNSH'
+#!/usr/bin/env bash
+sleep 300
+RUNSH
+  cat > "$worktree/scripts/launch.sh" <<'LAUNCHSH'
+#!/usr/bin/env bash
+cd "$(dirname "$0")/.." || exit 1
+exec bash scripts/run.sh --benchmark
+LAUNCHSH
+  chmod +x "$worktree/scripts/run.sh" "$worktree/scripts/launch.sh"
+
+  # Mimic the Claude Code Bash tool: a shell that sources a generated snapshot,
+  # launches the service tree, and keeps polling afterwards. Its own argv must
+  # NOT contain scripts/run.sh, so it can only be reached through the
+  # worktree-local ancestor walk.
+  (cd "$worktree" && exec bash -c "source '$snapshot'; bash '$worktree/scripts/launch.sh'; sleep 300") &
+  local agent_pid="$!"
+  PIDS+=("$agent_pid")
+  wait_for_process "$agent_pid"
+
+  local service_pid="" attempt
+  for attempt in $(seq 1 50); do
+    service_pid="$(pgrep -P "$agent_pid" 2>/dev/null | head -1)"
+    [ -n "$service_pid" ] && break
+    sleep 0.1
+  done
+  if [ -z "$service_pid" ]; then
+    echo "FAIL: decoy run.sh child never started" >&2
+    exit 1
+  fi
+
+  local targets
+  targets="$(cd "$worktree" && bash "$ROOT_DIR/scripts/kill-services.sh" --dry-run 2>/dev/null)"
+
+  if echo "$targets" | grep -Eq "^ +$agent_pid  "; then
+    echo "FAIL: agent tool shell $agent_pid was targeted for kill" >&2
+    echo "$targets" >&2
+    exit 1
+  fi
+  echo "PASS: agent tool shell is never killed as a service ancestor"
+
+  if ! echo "$targets" | grep -Eq "^ +$service_pid  "; then
+    echo "FAIL: run.sh service $service_pid was not targeted" >&2
+    echo "$targets" >&2
+    exit 1
+  fi
+  echo "PASS: run.sh service under an agent tool shell is still targeted"
+
+  # The real kill path is what actually regressed: the service tree must die
+  # while the agent's own shell keeps running.
+  (cd "$worktree" && bash "$ROOT_DIR/scripts/kill-services.sh" >/dev/null 2>&1) || true
+  assert_dead "$service_pid" "run.sh service under an agent tool shell is killed"
+  assert_alive "$agent_pid" "agent tool shell survives a real kill-services run"
+
+  kill_tree "$agent_pid"
+}
+
+assert_agent_tool_shell_protected
 
 assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
 assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"
