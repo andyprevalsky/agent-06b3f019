@@ -3,6 +3,7 @@ import { mcpCallTool } from './runtime';
 
 const DEFAULT_ORG_TOKEN_ENDPOINT = 'https://api.agentcard.sh/api/v1/oauth/token';
 const DEFAULT_ORG_TOKEN_TIMEOUT_MS = 15_000;
+const MIN_STALE_TOKEN_VALIDITY_MS = 5_000;
 
 function orgTokenTimeoutMs(): number {
   const raw = process.env.AGENTCARD_ORG_TOKEN_TIMEOUT_MS?.trim();
@@ -98,17 +99,37 @@ export class AgentCardOrgRuntime {
     const direct = directAccessToken();
     if (!forceClientCredentials && !hasClientCredentials() && direct !== undefined) return direct;
 
-    if (this.cachedToken !== undefined && this.cachedToken.expiresAtMs > Date.now() + 60_000) {
-      return this.cachedToken.accessToken;
+    const cachedToken = this.cachedToken;
+    if (cachedToken !== undefined && cachedToken.expiresAtMs > Date.now() + 60_000) {
+      return cachedToken.accessToken;
     }
 
-    if (this.inFlightToken !== undefined) return this.inFlightToken;
+    let tokenPromise = this.inFlightToken;
+    if (tokenPromise === undefined) {
+      tokenPromise = this.fetchAccessToken().finally(() => {
+        if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
+      });
+      this.inFlightToken = tokenPromise;
+    }
 
-    const tokenPromise = this.fetchAccessToken().finally(() => {
-      if (this.inFlightToken === tokenPromise) this.inFlightToken = undefined;
-    });
-    this.inFlightToken = tokenPromise;
-    return tokenPromise;
+    try {
+      return await tokenPromise;
+    } catch (error) {
+      // A proactive refresh must not turn a still-valid organization token into
+      // an outage when AgentCard's token endpoint is temporarily unavailable.
+      // Forced refreshes follow an MCP auth rejection, so they must never reuse
+      // the rejected token.
+      if (
+        !forceClientCredentials &&
+        cachedToken !== undefined &&
+        cachedToken.expiresAtMs > Date.now() + MIN_STALE_TOKEN_VALIDITY_MS &&
+        error instanceof AgentCardOrgRuntimeError &&
+        error.code === 'agentcard_org_token_unavailable'
+      ) {
+        return cachedToken.accessToken;
+      }
+      throw error;
+    }
   }
 
   private async fetchAccessToken(): Promise<string> {

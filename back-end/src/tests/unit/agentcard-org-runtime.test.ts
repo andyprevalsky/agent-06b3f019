@@ -103,6 +103,42 @@ async function main(): Promise<void> {
     assert.equal(retryTokenRequests, 2, 'an MCP auth rejection must refresh once');
     assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
 
+    const originalDateNow = Date.now;
+    let nowMs = 1_700_000_000_000;
+    let proactiveTokenRequests = 0;
+    const proactiveToolTokens: string[] = [];
+    try {
+      Date.now = () => nowMs;
+      const proactiveRuntime = new AgentCardOrgRuntime(
+        async (accessToken) => {
+          proactiveToolTokens.push(accessToken);
+          return { structuredContent: { transfers: [] } };
+        },
+        async () => {
+          proactiveTokenRequests += 1;
+          if (proactiveTokenRequests === 1) {
+            return new Response(
+              JSON.stringify({ access_token: 'still-valid-org-token', expires_in: 120 }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            );
+          }
+          return new Response(JSON.stringify({ error: 'Backend init failed' }), { status: 500 });
+        }
+      );
+
+      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
+      nowMs += 61_000;
+      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
+      assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
+      assert.deepEqual(
+        proactiveToolTokens,
+        ['still-valid-org-token', 'still-valid-org-token'],
+        'a transient proactive-refresh failure should reuse the unexpired token'
+      );
+    } finally {
+      Date.now = originalDateNow;
+    }
+
     // A stalled/aborted token endpoint surfaces as an AgentCardOrgRuntimeError, not a raw hang.
     const timingOutRuntime = new AgentCardOrgRuntime(
       async () => {
