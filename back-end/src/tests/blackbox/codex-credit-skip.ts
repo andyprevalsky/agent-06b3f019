@@ -22,8 +22,13 @@ export class CredentialExhaustionSkip extends Error {
 // match bare auth/OAuth-revocation errors (401 / "log out and sign in again"):
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
+// `no credits remaining` / `credit_balance_exhausted` are OpenAI's own current
+// wording for a $0 org balance ("You have no credits remaining. Add credits to
+// continue using the API at .../billing/"). Their absence made this detector
+// miss the single most likely real exhaustion message and hard-fail the deploy
+// on the exact state the skip exists for.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|credit[_ ]balance[_ ]exhausted|credit balance is too low|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -90,6 +95,40 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
+  );
+}
+
+export function testDetectCreditExhaustion_observedOpenAiWording(): void {
+  // VERBATIM from the 2026-08-04 deploy, which this detector failed to skip and
+  // hard-failed instead. Pin the real wording, not a paraphrase.
+  const real =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    codexSmokeCreditSkipReason(real, []) !== null,
+    "OpenAI's real $0-balance message must be detected as credit exhaustion"
+  );
+  // The same state as delivered in a structured provider-error event.
+  assert(
+    codexSmokeCreditSkipReason('no sentinel', [
+      {
+        type: 'error',
+        error: {
+          type: 'insufficient_quota',
+          code: 'credit_balance_exhausted',
+        } as unknown as string,
+        message: 'You have no credits remaining.',
+      },
+    ]) !== null,
+    'structured credit_balance_exhausted must be detected as credit exhaustion'
+  );
+  // Success still wins: a run that reached the sentinel can never skip, even if
+  // a recoverable funding warning appeared earlier in its output.
+  assert(
+    codexSmokeCreditSkipReason(`warning: no credits remaining on key A\nCODEX_E2B_DONE`, []) ===
+      null,
+    'a run that produced CODEX_E2B_DONE must never skip'
   );
 }
 

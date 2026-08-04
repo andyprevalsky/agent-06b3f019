@@ -1280,8 +1280,13 @@ def convert_context_to_messages(
 
     sorted_context = sorted(context, key=sort_key)
 
-    # Track which tool_call_ids have been declared by ASSISTANT messages
+    # Track which tool_call_ids have been declared by ASSISTANT messages, and the
+    # function name each one was declared under. Gemini pairs a tool result to its
+    # call by NAME (not by tool_call_id), so a result whose `name` disagrees with
+    # the declared `function.name` is rejected with 400 INVALID_ARGUMENT and takes
+    # the whole waterfall step down with it.
     declared_tool_ids = set()
+    declared_tool_names: Dict[str, str] = {}
 
     for msg in sorted_context:
         role = msg.get("role", "ASSISTANT")
@@ -1310,6 +1315,9 @@ def convert_context_to_messages(
                 for tc in metadata["tool_calls"]:
                     tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
+                    declared_name = tc.get("tool")
+                    if declared_name:
+                        declared_tool_names[tc_id] = str(declared_name)
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
@@ -1367,8 +1375,14 @@ def convert_context_to_messages(
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                if metadata.get("toolName"):
-                    tool_msg["name"] = metadata["toolName"]
+                # Pair by the name the ASSISTANT actually declared this call under.
+                # metadata["toolName"] is the UI DISPLAY name and can legitimately
+                # differ (spawn_agent renders as spawn_browser_agent), which Gemini
+                # rejects. Omit `name` entirely when the declaration is unknown —
+                # a wrong name is worse than no name.
+                declared_name = declared_tool_names.get(tool_call_id)
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
             else:
                 # No matching ASSISTANT tool_call - convert to SYSTEM message

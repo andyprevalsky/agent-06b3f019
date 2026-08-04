@@ -146,6 +146,78 @@ def test_convert_context_to_messages_with_declared_tool_call():
     assert "tool_calls" in assistant_msg
 
 
+def test_tool_result_name_pairs_with_the_declared_call_not_the_display_name():
+    """A tool result must be named for the function the ASSISTANT declared.
+
+    metadata["toolName"] is the UI DISPLAY name and legitimately differs from the
+    declared call (spawn_agent renders as spawn_browser_agent). Gemini pairs a
+    tool result to its call by NAME, not by tool_call_id, so emitting the display
+    name made it reject the request with 400 INVALID_ARGUMENT — which took out the
+    only non-Anthropic waterfall route and failed 36/36 execute_loop calls.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {"role": "USER", "text": "order dinner", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "delegating",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "9ryenvug"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "browser agent finished",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolCallId": "9ryenvug",
+                # The display name the UI shows — deliberately NOT the declared name.
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    assistant_msg = next(m for m in messages if m["role"] == "assistant")
+    declared = assistant_msg["tool_calls"][0]["function"]["name"]
+
+    assert tool_msg["name"] == declared, (
+        f"tool result name {tool_msg['name']!r} must match the declared call {declared!r}; "
+        "a display-name mismatch is rejected by Gemini as an invalid argument"
+    )
+    assert tool_msg["name"] == "spawn_agent"
+
+
+def test_tool_result_omits_name_when_no_declaration_is_known():
+    """An unknown declaration must omit `name` rather than guess the display name.
+
+    A wrong name is worse than no name: it is what the provider rejects.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "declared one call",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-known"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "result for the known call",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolCallId": "tc-known", "toolName": "web_search_display", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    # Declared name wins over the display name.
+    assert tool_msg["name"] == "web_search"
+
+
 def test_convert_context_to_messages_includes_structured_values_not_schema():
     """Terminal tool results include structured values without repeating raw output_schema."""
     from helpers.llm import convert_context_to_messages
@@ -6011,6 +6083,14 @@ async def run_all_tests():
     r.record("convert_context_to_messages_empty", test_convert_context_to_messages_empty)
     r.record(
         "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
+    )
+    r.record(
+        "tool_result_name_pairs_with_declared_call",
+        test_tool_result_name_pairs_with_the_declared_call_not_the_display_name,
+    )
+    r.record(
+        "tool_result_omits_name_when_no_declaration_known",
+        test_tool_result_omits_name_when_no_declaration_is_known,
     )
     r.record(
         "convert_context_to_messages_includes_structured_values_not_schema",
