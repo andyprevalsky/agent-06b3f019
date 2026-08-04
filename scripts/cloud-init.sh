@@ -67,6 +67,26 @@ if [ ! -f front-end/.env ] && [ -f front-end/.env.example ]; then
     log "wrote front-end/.env (from front-end/.env.example)"
 fi
 
+# Injected Cursor Secrets override dotenv (Node/Python keep existing env). An
+# unsupported BROWSER_PROVIDER (e.g. browserbase) makes live /init 500. Force a
+# supported value into this shell AND rewrite .env so children agree.
+case "${BROWSER_PROVIDER:-}" in
+  kernel|steel) ;;
+  *)
+    log "WARN: BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' unsupported — forcing kernel"
+    export BROWSER_PROVIDER=kernel
+    for envf in back-end/.env agents/.env; do
+      if [ -f "$envf" ]; then
+        if grep -q '^BROWSER_PROVIDER=' "$envf" 2>/dev/null; then
+          sed -i 's/^BROWSER_PROVIDER=.*/BROWSER_PROVIDER="kernel"/' "$envf"
+        else
+          printf '\nBROWSER_PROVIDER="kernel"\n' >> "$envf"
+        fi
+      fi
+    done
+    ;;
+esac
+
 # ── 2. System tools a fresh cloud box lacks (idempotent, fail-soft) ───────────
 # Everything our test suites + cloud benchmark runner need beyond the base image:
 #   ruby   — deploy-gate workflow-YAML checks (scripts/tests/auto-rca-workflow)

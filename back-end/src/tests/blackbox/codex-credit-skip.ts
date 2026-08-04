@@ -23,7 +23,7 @@ export class CredentialExhaustionSkip extends Error {
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -90,6 +90,14 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
+  );
+  // OpenAI Codex stream wording used when the org billing balance is zero.
+  assert(
+    detectCodexCreditExhaustion(
+      'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API.',
+      [],
+    ) !== null,
+    '"no credits remaining" must be detected as credit exhaustion'
   );
 }
 

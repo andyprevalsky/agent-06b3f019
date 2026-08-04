@@ -25,6 +25,18 @@ normalize_conductor_workspace_env
 source "$SCRIPT_DIR/local-db-container.sh"
 cd "$BACKEND_DIR"
 
+# Cursor Cloud (and similar) may inject BROWSER_PROVIDER into the process
+# environment. Node dotenv does not override existing vars, so a stale value
+# like "browserbase" wins over back-end/.env ("kernel") and the live
+# browser-provider blackbox 500s on /init. Force a supported provider here.
+case "${BROWSER_PROVIDER:-}" in
+  kernel|steel) ;;
+  *)
+    echo "⚠️  BROWSER_PROVIDER='${BROWSER_PROVIDER:-}' is unsupported; forcing kernel for coverage."
+    export BROWSER_PROVIDER=kernel
+    ;;
+esac
+
 REPORT_ONLY=0
 for arg in "$@"; do
   [[ "$arg" == "--report-only" ]] && REPORT_ONLY=1
