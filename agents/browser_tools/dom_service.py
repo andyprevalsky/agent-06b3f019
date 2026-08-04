@@ -64,7 +64,7 @@ def _urls_from_dynamic_image_attr(value: str) -> List[str]:
         # still safe because we only keep http(s) image candidates below.
         return re.findall(r"https?://[^\"'\s]+", text)
     if isinstance(parsed, dict):
-        return [str(key) for key in parsed.keys()]
+        return [str(key) for key in parsed]
     if isinstance(parsed, list):
         return [str(item) for item in parsed if isinstance(item, str)]
     return []
@@ -155,6 +155,67 @@ def _candidate_text_from_node(original: Any) -> str:
     return compact[:300]
 
 
+def _media_bounds(original: Any) -> Optional[Dict[str, int]]:
+    snapshot_node = getattr(original, "snapshot_node", None)
+    rect = getattr(snapshot_node, "clientRects", None) or getattr(original, "absolute_position", None)
+    if not rect:
+        return None
+    return {
+        "x": round(getattr(rect, "x", 0) or 0),
+        "y": round(getattr(rect, "y", 0) or 0),
+        "width": round(getattr(rect, "width", 0) or 0),
+        "height": round(getattr(rect, "height", 0) or 0),
+    }
+
+
+def _media_candidates_for_node(node: Any, page_url: str) -> List[Dict[str, Any]]:
+    original = getattr(node, "original_node", node)
+    tag = (getattr(original, "tag_name", "") or getattr(original, "node_name", "") or "").lower()
+    attrs = getattr(original, "attributes", None) or {}
+    if tag not in {"img", "source", "picture"} or not attrs:
+        return []
+
+    urls = _image_urls_from_attrs(attrs, page_url)
+    if not urls:
+        return []
+
+    bounds = _media_bounds(original)
+    alt = attrs.get("alt") or attrs.get("aria-label") or attrs.get("title")
+    nearby_text = _candidate_text_from_node(original)
+    visible = bool(getattr(original, "is_visible", True)) and bool(getattr(node, "should_display", True))
+    candidates: List[Dict[str, Any]] = []
+    for url in urls:
+        candidate = {
+            "url": url,
+            "alt": alt,
+            "nearby_text": nearby_text,
+            "tag": tag,
+            "visible": visible,
+        }
+        if bounds:
+            candidate["bounds"] = bounds
+        candidates.append(candidate)
+    return candidates
+
+
+def _score_media_candidate(candidate: Dict[str, Any]) -> Tuple[int, int]:
+    url = str(candidate.get("url") or "").lower()
+    text = f"{candidate.get('alt') or ''} {candidate.get('nearby_text') or ''}".lower()
+    bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else {}
+    area = int(bounds.get("width") or 0) * int(bounds.get("height") or 0)
+    value = 40 if candidate.get("visible") else 0
+    if any(host in url for host in ("media-amazon", "images-na.ssl-images-amazon", "ssl-images-amazon")):
+        value += 35
+    value += _image_url_quality_score(url, area)
+    if any(word in text for word in ("price", "$", "bought", "seller", "ships from", "color", "size")):
+        value += 20
+    if area >= 80 * 80:
+        value += 15
+    if any(word in text for word in ("logo", "sprite", "icon", "premium brands", "trending")):
+        value -= 30
+    return (value, area)
+
+
 def _extract_media_candidates_from_dom_state(
     dom_state: Any,
     *,
@@ -171,62 +232,14 @@ def _extract_media_candidates_from_dom_state(
     def traverse(node: Any) -> None:
         if not node:
             return
-        original = getattr(node, "original_node", node)
-        tag = (getattr(original, "tag_name", "") or getattr(original, "node_name", "") or "").lower()
-        attrs = getattr(original, "attributes", None) or {}
-        if tag in {"img", "source", "picture"} and attrs:
-            urls = _image_urls_from_attrs(attrs, page_url)
-            if urls:
-                bounds = None
-                snapshot_node = getattr(original, "snapshot_node", None)
-                rect = getattr(snapshot_node, "clientRects", None) or getattr(original, "absolute_position", None)
-                if rect:
-                    bounds = {
-                        "x": round(getattr(rect, "x", 0) or 0),
-                        "y": round(getattr(rect, "y", 0) or 0),
-                        "width": round(getattr(rect, "width", 0) or 0),
-                        "height": round(getattr(rect, "height", 0) or 0),
-                    }
-                alt = attrs.get("alt") or attrs.get("aria-label") or attrs.get("title")
-                nearby_text = _candidate_text_from_node(original)
-                visible = bool(getattr(original, "is_visible", True)) and bool(getattr(node, "should_display", True))
-                for url in urls:
-                    candidate = {
-                        "url": url,
-                        "alt": alt,
-                        "nearby_text": nearby_text,
-                        "tag": tag,
-                        "visible": visible,
-                    }
-                    if bounds:
-                        candidate["bounds"] = bounds
-                    candidates_by_url.setdefault(url, candidate)
+        for candidate in _media_candidates_for_node(node, page_url):
+            candidates_by_url.setdefault(candidate["url"], candidate)
 
         for child in getattr(node, "children", []) or []:
             traverse(child)
 
     traverse(root)
-
-    def score(candidate: Dict[str, Any]) -> Tuple[int, int]:
-        url = str(candidate.get("url") or "").lower()
-        text = f"{candidate.get('alt') or ''} {candidate.get('nearby_text') or ''}".lower()
-        bounds = candidate.get("bounds") if isinstance(candidate.get("bounds"), dict) else {}
-        area = int(bounds.get("width") or 0) * int(bounds.get("height") or 0)
-        value = 0
-        if candidate.get("visible"):
-            value += 40
-        if any(host in url for host in ("media-amazon", "images-na.ssl-images-amazon", "ssl-images-amazon")):
-            value += 35
-        value += _image_url_quality_score(url, area)
-        if any(word in text for word in ("price", "$", "bought", "seller", "ships from", "color", "size")):
-            value += 20
-        if area >= 80 * 80:
-            value += 15
-        if any(word in text for word in ("logo", "sprite", "icon", "premium brands", "trending")):
-            value -= 30
-        return (value, area)
-
-    ranked = sorted(candidates_by_url.values(), key=score, reverse=True)
+    ranked = sorted(candidates_by_url.values(), key=_score_media_candidate, reverse=True)
     return ranked[:max_candidates]
 
 
@@ -1032,6 +1045,125 @@ class DOMService:
         counts = await self.read_passkey_signcounts()
         return [cid for cid, base in self._passkey_seed_counts.items() if counts.get(cid, base) > base]
 
+    def _page_geometry(self, state: Any) -> Dict[str, Any]:
+        geometry: Dict[str, Any] = {
+            "viewport_width": self.viewport_width,
+            "viewport_height": self.viewport_height,
+            "scroll_x": 0,
+            "scroll_y": 0,
+            "pages_above": 0.0,
+            "pages_below": 0.0,
+            "total_pages": 1.0,
+        }
+        page_info = getattr(state, "page_info", None)
+        if not page_info:
+            return geometry
+        if getattr(page_info, "viewport_width", 0) > 0:
+            geometry["viewport_width"] = int(page_info.viewport_width)
+        if getattr(page_info, "viewport_height", 0) > 0:
+            geometry["viewport_height"] = int(page_info.viewport_height)
+        geometry["scroll_x"] = int(getattr(page_info, "scroll_x", 0))
+        geometry["scroll_y"] = int(getattr(page_info, "scroll_y", 0))
+        if getattr(page_info, "viewport_height", 0) > 0:
+            geometry["pages_above"] = page_info.pixels_above / page_info.viewport_height
+            geometry["pages_below"] = page_info.pixels_below / page_info.viewport_height
+            geometry["total_pages"] = page_info.page_height / page_info.viewport_height
+        return geometry
+
+    @staticmethod
+    def _serialized_dom_tree(dom_state: Any, pages_above: float, pages_below: float) -> str:
+        if not dom_state:
+            return ""
+        elements_text = dom_state.llm_representation()
+        if not elements_text:
+            return "empty page"
+        prefix = f"... {pages_above:.1f} pages above ...\n" if pages_above > 0 else "[Start of page]\n"
+        suffix = "\n[End of page]" if pages_below <= 0 else ""
+        return f"{prefix}{elements_text}{suffix}"
+
+    @staticmethod
+    def _summarized_tabs(state: Any) -> List[Dict[str, str]]:
+        return [
+            {
+                "id": tab.target_id[-4:] if tab.target_id else "????",
+                "url": tab.url or "",
+                "title": (tab.title or "")[:50],
+            }
+            for tab in (getattr(state, "tabs", None) or [])
+        ]
+
+    async def _capture_surface_screenshot(self, state: Any) -> Optional[str]:
+        try:
+            target_id = self._session.agent_focus_target_id
+            if not target_id:
+                logger.warning("📸 No focused target, falling back to browser-use screenshot")
+                return state.screenshot
+            cdp_session = await self._session.get_or_create_cdp_session(target_id, focus=False)
+            cdp_result = await cdp_session.cdp_client.send_raw(
+                "Page.captureScreenshot",
+                {"format": "png", "fromSurface": True},
+                session_id=cdp_session.session_id,
+            )
+            screenshot = cdp_result.get("data")
+            logger.info(f"📸 CDP surface screenshot captured (len={len(screenshot) if screenshot else 0})")
+            return screenshot
+        except Exception as error:
+            logger.warning(f"📸 CDP screenshot failed, falling back to browser-use: {error}")
+            return state.screenshot
+
+    @staticmethod
+    def _blank_screenshot(viewport_width: int, viewport_height: int) -> Optional[str]:
+        try:
+            import base64
+            from io import BytesIO
+
+            from PIL import Image
+
+            blank_image = Image.new("RGB", (viewport_width, viewport_height), color="white")
+            buffer = BytesIO()
+            blank_image.save(buffer, format="PNG")
+            return base64.b64encode(buffer.getvalue()).decode("utf-8")
+        except Exception as error:
+            logger.warning(f"📸 Failed to generate blank screenshot: {error}")
+            return None
+
+    @staticmethod
+    def _analyze_screenshot(screenshot: str, viewport_width: int, viewport_height: int) -> None:
+        import base64
+        import os
+        import time as time_module
+        from io import BytesIO
+
+        try:
+            screenshot_bytes = base64.b64decode(screenshot)
+            logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
+            try:
+                from PIL import Image
+
+                image = Image.open(BytesIO(screenshot_bytes))
+                dimension_match = image.width == viewport_width and image.height == viewport_height
+                logger.info(
+                    f"📸 [SCREENSHOT] Dimensions: actual={image.width}x{image.height}, "
+                    f"expected={viewport_width}x{viewport_height}, match={dimension_match}"
+                )
+                if not dimension_match:
+                    logger.warning(
+                        "⚠️ [SCREENSHOT] DIMENSION MISMATCH - may include browser chrome! "
+                        f"width_diff={image.width - viewport_width}, height_diff={image.height - viewport_height}"
+                    )
+            except ImportError:
+                logger.warning("📸 PIL not available for dimension check")
+
+            if os.getenv("ENVIRONMENT") != "production":
+                debug_dir = "/tmp/browser_screenshots"
+                os.makedirs(debug_dir, exist_ok=True)
+                filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
+                with open(filename, "wb") as screenshot_file:
+                    screenshot_file.write(screenshot_bytes)
+                logger.info(f"📸 [DEBUG] Saved to {filename}")
+        except Exception as error:
+            logger.error(f"📸 Failed to analyze screenshot: {error}")
+
     async def get_browser_state(self, include_screenshot: bool = True) -> Dict[str, Any]:
         """Get current browser state with full context like browser-use provides.
 
@@ -1053,186 +1185,49 @@ class DOMService:
         if not self._session:
             raise RuntimeError("Not connected. Call connect() first.")
 
-        # Get browser state summary from browser-use
         state = await self._session.get_browser_state_summary(include_screenshot=include_screenshot)
-
-        # Cache the selector map for coordinate conversions
         if state.dom_state and state.dom_state.selector_map:
             self._selector_map = state.dom_state.selector_map
-
-        # Calculate scroll position and page info
-        # Use actual viewport from CDP, fall back to defaults
-        viewport_width = self.viewport_width
-        viewport_height = self.viewport_height
-        scroll_x = 0
-        scroll_y = 0
-        pages_above = 0.0
-        pages_below = 0.0
-        total_pages = 1.0
-
-        if state.page_info:
-            pi = state.page_info
-            # Use real viewport dimensions from CDP if available
-            if hasattr(pi, "viewport_width") and pi.viewport_width > 0:
-                viewport_width = int(pi.viewport_width)
-            if hasattr(pi, "viewport_height") and pi.viewport_height > 0:
-                viewport_height = int(pi.viewport_height)
-            scroll_x = int(pi.scroll_x) if hasattr(pi, "scroll_x") else 0
-            scroll_y = int(pi.scroll_y) if hasattr(pi, "scroll_y") else 0
-            if pi.viewport_height > 0:
-                pages_above = pi.pixels_above / pi.viewport_height
-                pages_below = pi.pixels_below / pi.viewport_height
-                total_pages = pi.page_height / pi.viewport_height
-
-        # Build DOM tree with scroll context markers (like browser-use does)
-        dom_tree = ""
-        if state.dom_state:
-            elements_text = state.dom_state.llm_representation()
-
-            # Add scroll context markers
-            if elements_text:
-                if pages_above > 0:
-                    dom_tree = f"... {pages_above:.1f} pages above ...\n{elements_text}"
-                else:
-                    dom_tree = f"[Start of page]\n{elements_text}"
-
-                if pages_below <= 0:
-                    dom_tree = f"{dom_tree}\n[End of page]"
-            else:
-                dom_tree = "empty page"
-
-        # Extract page statistics
+        geometry = self._page_geometry(state)
+        viewport_width = geometry["viewport_width"]
+        viewport_height = geometry["viewport_height"]
         page_stats = self._extract_page_statistics(state)
         media_candidates = _extract_media_candidates_from_dom_state(
             state.dom_state,
             page_url=state.url or "",
         )
-
-        # Build tabs list
-        tabs = []
-        if hasattr(state, "tabs") and state.tabs:
-            for tab in state.tabs:
-                tabs.append(
-                    {
-                        "id": tab.target_id[-4:] if tab.target_id else "????",
-                        "url": tab.url or "",
-                        "title": (tab.title or "")[:50],
-                    }
-                )
-
-        # Build result dict
         result = {
             "url": state.url or "",
             "title": state.title or "",
             "viewport": {"width": viewport_width, "height": viewport_height},
             "scroll_position": {
-                "x": scroll_x,
-                "y": scroll_y,
-                "pages_above": round(pages_above, 1),
-                "pages_below": round(pages_below, 1),
-                "total_pages": round(total_pages, 1),
+                "x": geometry["scroll_x"],
+                "y": geometry["scroll_y"],
+                "pages_above": round(geometry["pages_above"], 1),
+                "pages_below": round(geometry["pages_below"], 1),
+                "total_pages": round(geometry["total_pages"], 1),
             },
-            "dom_tree": dom_tree,
-            "tabs": tabs,
+            "dom_tree": self._serialized_dom_tree(
+                state.dom_state,
+                geometry["pages_above"],
+                geometry["pages_below"],
+            ),
+            "tabs": self._summarized_tabs(state),
             "page_stats": page_stats,
         }
         if media_candidates:
             result["media_candidates"] = media_candidates
-
-        # Add recent events if available
-        if hasattr(state, "recent_events") and state.recent_events:
+        if getattr(state, "recent_events", None):
             result["recent_events"] = state.recent_events
-
-        # Add closed popup messages if any
-        if hasattr(state, "closed_popup_messages") and state.closed_popup_messages:
+        if getattr(state, "closed_popup_messages", None):
             result["closed_popups"] = state.closed_popup_messages
-
-        # Take screenshot using CDP's Page.captureScreenshot with fromSurface=True.
-        # NOTE: This captures the page compositing surface only — it does NOT include
-        # browser-chrome-level overlays (passkey popups, permission prompts, download bars).
-        # Those are suppressed at connect time via _suppress_browser_overlays() so the
-        # agent's screenshots always match what's actually interactive on the page.
-        screenshot_to_use = None
-        if include_screenshot:
-            try:
-                target_id = self._session.agent_focus_target_id
-                if target_id:
-                    cdp_sess = await self._session.get_or_create_cdp_session(target_id, focus=False)
-                    cdp_result = await cdp_sess.cdp_client.send_raw(
-                        "Page.captureScreenshot",
-                        {"format": "png", "fromSurface": True},
-                        session_id=cdp_sess.session_id,
-                    )
-                    screenshot_to_use = cdp_result.get("data")
-                    logger.info(
-                        f"📸 CDP surface screenshot captured (len={len(screenshot_to_use) if screenshot_to_use else 0})"
-                    )
-                else:
-                    logger.warning("📸 No focused target, falling back to browser-use screenshot")
-                    screenshot_to_use = state.screenshot
-            except Exception as e:
-                logger.warning(f"📸 CDP screenshot failed, falling back to browser-use: {e}")
-                screenshot_to_use = state.screenshot
-
-        # Generate blank screenshot if none provided (e.g., about:blank pages)
+        screenshot_to_use = await self._capture_surface_screenshot(state) if include_screenshot else None
         if include_screenshot and not screenshot_to_use:
             logger.info(f"📸 No screenshot available, generating blank for {result.get('url', 'unknown')}")
-            try:
-                import base64
-                from io import BytesIO
-
-                from PIL import Image
-
-                blank_img = Image.new("RGB", (viewport_width, viewport_height), color="white")
-                buffer = BytesIO()
-                blank_img.save(buffer, format="PNG")
-                screenshot_to_use = base64.b64encode(buffer.getvalue()).decode("utf-8")
-            except Exception as e:
-                logger.warning(f"📸 Failed to generate blank screenshot: {e}")
-
+            screenshot_to_use = self._blank_screenshot(viewport_width, viewport_height)
         if include_screenshot and screenshot_to_use:
             result["screenshot"] = screenshot_to_use
-
-            # Debug: analyze and save screenshot
-            import base64
-            import os
-            import time as time_module
-            from io import BytesIO
-
-            try:
-                screenshot_bytes = base64.b64decode(screenshot_to_use)
-                logger.info(f"📸 [SCREENSHOT] Captured: size_kb={round(len(screenshot_bytes) / 1024, 1)}")
-
-                # Get dimensions using PIL
-                try:
-                    from PIL import Image
-
-                    img = Image.open(BytesIO(screenshot_bytes))
-                    dimension_match = img.width == viewport_width and img.height == viewport_height
-                    logger.info(
-                        f"📸 [SCREENSHOT] Dimensions: actual={img.width}x{img.height}, "
-                        f"expected={viewport_width}x{viewport_height}, match={dimension_match}"
-                    )
-                    if not dimension_match:
-                        logger.warning(
-                            f"⚠️ [SCREENSHOT] DIMENSION MISMATCH - may include browser chrome! "
-                            f"width_diff={img.width - viewport_width}, height_diff={img.height - viewport_height}"
-                        )
-                except ImportError:
-                    logger.warning("📸 PIL not available for dimension check")
-
-                # Save screenshots to disk for debugging (dev only)
-                if os.getenv("ENVIRONMENT") != "production":
-                    debug_dir = "/tmp/browser_screenshots"
-                    os.makedirs(debug_dir, exist_ok=True)
-                    filename = f"{debug_dir}/screenshot_{int(time_module.time() * 1000)}.png"
-                    with open(filename, "wb") as f:
-                        f.write(screenshot_bytes)
-                    logger.info(f"📸 [DEBUG] Saved to {filename}")
-
-            except Exception as e:
-                logger.error(f"📸 Failed to analyze screenshot: {e}")
-
+            self._analyze_screenshot(screenshot_to_use, viewport_width, viewport_height)
         return result
 
     def _extract_page_statistics(self, state) -> Dict[str, int]:
@@ -1326,7 +1321,25 @@ class DOMService:
 
         return None
 
-    async def get_element_rect(self, index: int) -> Optional[Dict[str, int]]:
+    async def get_click_coordinates(self, index: int) -> Optional[Tuple[int, int]]:
+        """Resolve humanized click coordinates, including visible labels for checkable inputs."""
+        rect = await self.get_element_rect(index, use_associated_label=True)
+        if rect:
+            return offcenter_click_point(
+                rect["x"] + rect["width"] / 2,
+                rect["y"] + rect["height"] / 2,
+                rect["width"],
+                rect["height"],
+            )
+
+        return None
+
+    async def get_element_rect(
+        self,
+        index: int,
+        *,
+        use_associated_label: bool = False,
+    ) -> Optional[Dict[str, int]]:
         """Get the visible viewport rect for an element.
 
         The browser input APIs used by the humanizer expect viewport/client
@@ -1380,41 +1393,86 @@ class DOMService:
                 params={
                     "objectId": object_id,
                     "functionDeclaration": """
-                    function() {
-                        const rect = this.getBoundingClientRect();
+                    function(useAssociatedLabel) {
                         const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
                         const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
 
-                        const visibleLeft = Math.max(0, rect.left);
-                        const visibleTop = Math.max(0, rect.top);
-                        const visibleRight = Math.min(viewportWidth, rect.right);
-                        const visibleBottom = Math.min(viewportHeight, rect.bottom);
-                        const visibleWidth = visibleRight - visibleLeft;
-                        const visibleHeight = visibleBottom - visibleTop;
+                        const visibleViewportRect = (element) => {
+                            const rect = element.getBoundingClientRect();
+                            const visibleLeft = Math.max(0, rect.left);
+                            const visibleTop = Math.max(0, rect.top);
+                            const visibleRight = Math.min(viewportWidth, rect.right);
+                            const visibleBottom = Math.min(viewportHeight, rect.bottom);
+                            const visibleWidth = visibleRight - visibleLeft;
+                            const visibleHeight = visibleBottom - visibleTop;
 
-                        if (visibleWidth <= 0 || visibleHeight <= 0) {
+                            if (visibleWidth <= 0 || visibleHeight <= 0) {
+                                return null;
+                            }
+
                             return {
-                                visible: false,
-                                x: rect.left,
-                                y: rect.top,
-                                width: rect.width,
-                                height: rect.height,
+                                visible: true,
+                                x: visibleLeft,
+                                y: visibleTop,
+                                width: visibleWidth,
+                                height: visibleHeight,
                                 viewportWidth,
                                 viewportHeight
                             };
+                        };
+
+                        const isReliableHitTarget = (element, rect) => {
+                            const style = window.getComputedStyle(element);
+                            if (style.visibility === "hidden" || style.visibility === "collapse"
+                                || Number.parseFloat(style.opacity || "1") <= 0
+                                || style.pointerEvents === "none") {
+                                return false;
+                            }
+
+                            const centerX = rect.x + rect.width / 2;
+                            const centerY = rect.y + rect.height / 2;
+                            const radius = Math.min(rect.width * 0.3, rect.height * 0.3, 6);
+                            const samples = [[0, 0]];
+                            for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
+                                samples.push([Math.cos(angle) * radius, Math.sin(angle) * radius]);
+                            }
+
+                            return samples.every(([dx, dy]) => {
+                                const hit = document.elementFromPoint(centerX + dx, centerY + dy);
+                                return hit === element || (hit && element.contains(hit));
+                            });
+                        };
+
+                        const ownRect = visibleViewportRect(this);
+                        if (ownRect) {
+                            return ownRect;
                         }
 
+                        const inputType = String(this.type || "").toLowerCase();
+                        const isCheckableInput = this.tagName === "INPUT"
+                            && (inputType === "checkbox" || inputType === "radio");
+                        if (useAssociatedLabel && isCheckableInput && !this.disabled && this.labels) {
+                            for (const label of this.labels) {
+                                const labelRect = visibleViewportRect(label);
+                                if (labelRect && isReliableHitTarget(label, labelRect)) {
+                                    return labelRect;
+                                }
+                            }
+                        }
+
+                        const rect = this.getBoundingClientRect();
                         return {
-                            visible: true,
-                            x: visibleLeft,
-                            y: visibleTop,
-                            width: visibleWidth,
-                            height: visibleHeight,
+                            visible: false,
+                            x: rect.left,
+                            y: rect.top,
+                            width: rect.width,
+                            height: rect.height,
                             viewportWidth,
                             viewportHeight
                         };
                     }
                     """,
+                    "arguments": [{"value": use_associated_label}],
                     "returnByValue": True,
                 },
                 session_id=session_id,

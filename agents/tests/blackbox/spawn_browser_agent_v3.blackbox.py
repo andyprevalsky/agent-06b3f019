@@ -8752,6 +8752,157 @@ async def test_dom_service_element_coordinates_use_visible_viewport_rect():
     assert calls[0][1] == {"backendNodeId": 123}
 
 
+async def test_dom_service_hidden_checkbox_coordinates_use_visible_associated_label():
+    from browser_tools.dom_service import DOMService
+
+    class _FakeDOM:
+        async def scrollIntoViewIfNeeded(self, *, params, session_id):
+            assert params == {"backendNodeId": 456}
+            assert session_id == "cdp-session"
+
+        async def resolveNode(self, *, params, session_id):
+            assert params == {"backendNodeId": 456}
+            assert session_id == "cdp-session"
+            return {"object": {"objectId": "hidden-checkbox"}}
+
+    class _FakeRuntime:
+        async def callFunctionOn(self, *, params, session_id):
+            assert session_id == "cdp-session"
+            assert params["objectId"] == "hidden-checkbox"
+            function = params["functionDeclaration"]
+            use_associated_label = params["arguments"][0]["value"]
+            if not use_associated_label:
+                return {
+                    "result": {
+                        "value": {
+                            "visible": False,
+                            "x": 0,
+                            "y": 0,
+                            "width": 0,
+                            "height": 0,
+                            "viewportWidth": 1280,
+                            "viewportHeight": 800,
+                        }
+                    }
+                }
+            assert 'this.tagName === "INPUT"' in function
+            assert 'inputType === "checkbox"' in function
+            assert 'inputType === "radio"' in function
+            assert "document.elementFromPoint" in function
+            return {
+                "result": {
+                    "value": {
+                        "visible": True,
+                        "x": 522,
+                        "y": 348,
+                        "width": 44,
+                        "height": 36,
+                        "viewportWidth": 1280,
+                        "viewportHeight": 800,
+                    }
+                }
+            }
+
+    cdp_session = SimpleNamespace(
+        session_id="cdp-session",
+        cdp_client=SimpleNamespace(send=SimpleNamespace(DOM=_FakeDOM(), Runtime=_FakeRuntime())),
+    )
+    element = SimpleNamespace(backend_node_id=456)
+
+    class _FakeSession:
+        agent_focus_target_id = "target"
+
+        async def cdp_client_for_node(self, node):
+            assert node is element
+            return cdp_session
+
+    dom = DOMService(cdp_url="")
+    dom._session = _FakeSession()
+    dom._selector_map = {456: element}
+
+    assert await dom.get_element_coordinates(456) is None
+    coords = await dom.get_click_coordinates(456)
+
+    # The hidden checkbox has no box of its own. Its visible seat label is
+    # centered at (544, 366), with the same bounded humanization jitter.
+    assert coords is not None
+    assert abs(coords[0] - 544) <= 6 and abs(coords[1] - 366) <= 6
+
+
+async def test_dom_service_hidden_checkbox_label_coordinates_in_real_cdp():
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            await page.set_content(
+                """
+                <style>
+                  #seat { position: absolute; opacity: 0; width: 0; height: 0; }
+                  label { position: absolute; left: 522px; top: 348px; width: 44px; height: 36px; }
+                </style>
+                <input id="seat" type="checkbox"><label for="seat">E11</label>
+                """
+            )
+            cdp = await page.context.new_cdp_session(page)
+            document = await cdp.send("DOM.getDocument")
+            node = await cdp.send(
+                "DOM.querySelector",
+                {"nodeId": document["root"]["nodeId"], "selector": "#seat"},
+            )
+            described = await cdp.send("DOM.describeNode", {"nodeId": node["nodeId"]})
+            backend_node_id = described["node"]["backendNodeId"]
+
+            class _DOMAdapter:
+                async def scrollIntoViewIfNeeded(self, *, params, session_id):
+                    assert session_id == "playwright"
+                    return await cdp.send("DOM.scrollIntoViewIfNeeded", params)
+
+                async def resolveNode(self, *, params, session_id):
+                    assert session_id == "playwright"
+                    return await cdp.send("DOM.resolveNode", params)
+
+            class _RuntimeAdapter:
+                async def callFunctionOn(self, *, params, session_id):
+                    assert session_id == "playwright"
+                    return await cdp.send("Runtime.callFunctionOn", params)
+
+            cdp_session = SimpleNamespace(
+                session_id="playwright",
+                cdp_client=SimpleNamespace(
+                    send=SimpleNamespace(DOM=_DOMAdapter(), Runtime=_RuntimeAdapter())
+                ),
+            )
+            element = SimpleNamespace(backend_node_id=backend_node_id)
+
+            class _FakeSession:
+                agent_focus_target_id = "page"
+
+                async def cdp_client_for_node(self, candidate):
+                    assert candidate is element
+                    return cdp_session
+
+            dom = DOMService(cdp_url="")
+            dom._session = _FakeSession()
+            dom._selector_map = {backend_node_id: element}
+
+            assert await dom.get_element_coordinates(backend_node_id) is None
+            coords = await dom.get_click_coordinates(backend_node_id)
+
+            assert coords is not None
+            assert abs(coords[0] - 544) <= 6 and abs(coords[1] - 366) <= 6
+            await page.mouse.click(*coords)
+            assert await page.locator("#seat").is_checked()
+
+            await page.locator("label").evaluate("element => element.style.pointerEvents = 'none'")
+            assert await dom.get_click_coordinates(backend_node_id) is None
+        finally:
+            await browser.close()
+
+
 async def test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser():
     from browser_tools.dom_service import DOMService
 
@@ -8957,7 +9108,7 @@ async def test_execute_click_with_element_humanizer():
     session = MagicMock()
     session.highlight_interaction_element = AsyncMock()
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(10, 20))
+    dom.get_click_coordinates = AsyncMock(return_value=(10, 20))
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="hi")
     ah = MagicMock()
@@ -8988,7 +9139,7 @@ async def test_execute_click_with_element_humanizer_missing_coords_refuses_fallb
     session = _fake_session_with_event_bus()
     session.highlight_interaction_element = AsyncMock()
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=None)
+    dom.get_click_coordinates = AsyncMock(return_value=None)
     dom.get_browser_state = AsyncMock()
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="hi")
@@ -9024,7 +9175,7 @@ async def test_execute_click_with_element_humanizer_refreshes_stale_coordinates(
     session = MagicMock()
     session.highlight_interaction_element = AsyncMock()
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(side_effect=[None, (44, 55)])
+    dom.get_click_coordinates = AsyncMock(side_effect=[None, (44, 55)])
     dom.get_browser_state = AsyncMock()
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="Pay $43.96")
@@ -9191,7 +9342,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
     session = _fake_session_with_event_bus()
     session.get_page = AsyncMock(return_value=None)
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(25, 40))
+    dom.get_click_coordinates = AsyncMock(return_value=(25, 40))
     ah = MagicMock()
     ah.record_action = AsyncMock()
 
@@ -9346,7 +9497,7 @@ async def test_execute_click_write_lock_social_auth_url_does_not_trigger_approva
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(10, 20))
+    dom.get_click_coordinates = AsyncMock(return_value=(10, 20))
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="Continue\nsubmit")
     ah = MagicMock()
@@ -9378,7 +9529,7 @@ async def test_execute_click_write_lock_social_auth_button_on_root_does_not_trig
 
     session = _fake_session_with_event_bus()
     dom = MagicMock()
-    dom.get_element_coordinates = AsyncMock(return_value=(10, 20))
+    dom.get_click_coordinates = AsyncMock(return_value=(10, 20))
     element = MagicMock()
     element.get_all_children_text = MagicMock(return_value="Continue\nsubmit")
     ah = MagicMock()
@@ -14286,6 +14437,14 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_element_coordinates_viewport_rect",
         test_dom_service_element_coordinates_use_visible_viewport_rect,
+    )
+    await r.record_async(
+        "dom_service_hidden_checkbox_coordinates_associated_label",
+        test_dom_service_hidden_checkbox_coordinates_use_visible_associated_label,
+    )
+    await r.record_async(
+        "dom_service_hidden_checkbox_label_coordinates_real_cdp",
+        test_dom_service_hidden_checkbox_label_coordinates_in_real_cdp,
     )
     await r.record_async(
         "dom_service_disconnect_stops_session",
