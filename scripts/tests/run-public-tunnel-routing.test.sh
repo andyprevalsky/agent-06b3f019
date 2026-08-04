@@ -135,8 +135,20 @@ grep -q 'start_localtunnel_public_tunnel' "$RUN_SH" \
 awk '/^start_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_public.sh"
 grep -q 'start_localtunnel_public_tunnel && return 0' "$TMP/start_public.sh" \
   || fail "case 7: start_public_tunnel no longer calls localtunnel before hard-fail"
+grep -q 'ngrok has no authtoken; trying localtunnel' "$TMP/start_public.sh" \
+  || fail "case 7: start_public_tunnel no longer short-circuits to localtunnel when ngrok is unconfigured"
 grep -q 'loca\.lt' "$RUN_SH" \
   || fail "case 7: localtunnel URL parser no longer accepts loca.lt"
+# Bare `exit 1` on missing authtoken must not remain — it skipped localtunnel.
+awk '/^start_ngrok_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_ngrok.sh"
+grep -q 'ngrok_public_tunnel_fail.*missing an authtoken' "$TMP/start_ngrok.sh" \
+  || fail "case 7: start_ngrok_public_tunnel must use ngrok_public_tunnel_fail for missing authtoken"
+if grep -nE '^\s*exit 1\s*$' "$TMP/start_ngrok.sh" | grep -vq 'ngrok_public_tunnel_fail'; then
+  # Allow only exits inside ngrok_public_tunnel_fail itself (not in this fn).
+  :
+fi
+! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
+  || fail "case 7: start_ngrok_public_tunnel still bare-exits on missing authtoken"
 echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

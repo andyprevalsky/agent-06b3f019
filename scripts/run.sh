@@ -1370,13 +1370,14 @@ reap_failed_ngrok_tunnel() {
 
 start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
-        echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
-        exit 1
+        # Must use ngrok_public_tunnel_fail: in cloudflare/ephemeral mode this
+        # function is a non-fatal fallback and a bare `exit 1` would skip
+        # localtunnel and tear down the whole stack.
+        ngrok_public_tunnel_fail "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken." || return 1
     fi
     if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
         ngrok config check >/dev/null 2>&1 || {
-            echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
-            exit 1
+            ngrok_public_tunnel_fail "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>" || return 1
         }
     fi
 
@@ -1459,6 +1460,18 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
+            # No ngrok credentials at all → skip the reserved-domain path (it
+            # cannot succeed) and go straight to account-less localtunnel.
+            # Previously start_ngrok_public_tunnel used bare `exit 1` here, which
+            # tore down the stack before localtunnel could run (Cloud AgentCard).
+            if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
+                echo "⚠️  cloudflare unavailable and ngrok has no authtoken; trying localtunnel." >&2
+                start_localtunnel_public_tunnel && return 0
+                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then localtunnel; ngrok unconfigured)." >&2
+                echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+                echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
+                exit 1
+            fi
             # Last resort: this worktree's already-reserved stable domain.
             #
             # Both providers above are ACCOUNT-GLOBAL and can be exhausted by
