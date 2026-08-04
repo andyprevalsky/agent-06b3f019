@@ -22,10 +22,12 @@ export class CredentialExhaustionSkip extends Error {
 // match bare auth/OAuth-revocation errors (401 / "log out and sign in again"):
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
-// `no credits remaining` / `add credits to continue` is the wording the OpenAI
-// API returns today ("You have no credits remaining. Add credits to continue
-// using the API at ..."); without it a fully-defunded account hard-failed the
-// gate instead of taking the deploy-approved skip.
+// `no credits remaining` / `add credits to continue` are the literal wording the
+// OpenAI API returns on an exhausted org balance ("You have no credits
+// remaining. Add credits to continue using the API"). Their absence hard-failed
+// a deploy on 2026-08-04 for exactly the funding state this skip exists to
+// absorb, so both are matched explicitly. Neither phrase can be produced by an
+// auth/OAuth revocation, so the deliberate exclusion above still holds.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
   /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
 
