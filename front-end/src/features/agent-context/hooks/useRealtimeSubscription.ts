@@ -148,9 +148,15 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         attempt === 0 ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), MAX_RECONNECT_DELAY_MS);
       const delay = backoff === 0 ? 0 : backoff + Math.floor(Math.random() * 250);
 
-      reconnectTimeoutRef.current = window.setTimeout(() => {
+      // Use globalThis so a pending Node timer cannot throw if jsdom already
+      // tore down `window` between schedule and fire (vitest file teardown).
+      reconnectTimeoutRef.current = globalThis.setTimeout(() => {
+        reconnectTimeoutRef.current = null;
+        // Effect cleanup sets cancelled and clears this timer; still guard in
+        // case the callback is already queued when the environment is destroyed.
+        if (cancelled || typeof globalThis.window === 'undefined') return;
         setForceResubscribeCounter((prev) => prev + 1);
-      }, delay);
+      }, delay) as unknown as number;
     };
 
     const setupRealtime = async () => {
