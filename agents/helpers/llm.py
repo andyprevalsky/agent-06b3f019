@@ -290,6 +290,11 @@ acquired. Accept a labeled order/confirmation/receipt identifier when the provid
 provider confirmation/status page showing that the purchase was placed or completed. Do not require a specific
 identifier unless the user explicitly asks for that identifier.
 Selecting a product URL, adding an item to cart, or reaching checkout is not enough to verify a purchase goal.
+When the goal explicitly authorizes reporting a blocker instead of purchasing (for example, "if the exact brand is
+unavailable, report the blocker"), preserve both mutually exclusive terminal branches. The completed-purchase branch
+must retain every purchase constraint and provider confirmation field. The authorized-blocker branch must identify
+the exact unmet requirement and ground its unavailability without a substitute; checkout-only fields do not apply
+to that branch.
 
 # YOUR JOB
 
@@ -598,6 +603,91 @@ def _is_purchase_goal(goal: str) -> bool:
     return any(marker in normalized for marker in _PURCHASE_GOAL_MARKERS)
 
 
+def _goal_authorizes_reported_blocker(goal: str) -> bool:
+    """Return whether the purchase goal explicitly makes a reported blocker terminal."""
+    normalized = " ".join(goal.lower().replace("_", " ").replace("-", " ").split())
+    return bool(
+        re.search(
+            r"\bif\b[^.!?]{0,240}\b(?:unavailable|not available|cannot be found|no eligible|none eligible)\b"
+            r"[^.!?]{0,240}\breport\s+(?:the\s+)?(?:blocker|unavailability)\b",
+            normalized,
+        )
+    )
+
+
+def _authorized_blocker_outcome_field(fields: List[Dict[str, Any]]) -> Dict[str, Any]:
+    existing = next(
+        (
+            field
+            for field in fields
+            if "blocker" in f"{field.get('name', '')} {field.get('description', '')}".lower()
+            and any(
+                marker in f"{field.get('name', '')} {field.get('description', '')}".lower()
+                for marker in ("checkout", "completion", "purchase", "outcome")
+            )
+        ),
+        None,
+    )
+    name = (
+        str(existing.get("name"))
+        if isinstance(existing, dict) and existing.get("name")
+        else "purchase_completion_or_authorized_blocker_evidence"
+    )
+    return {
+        "name": name,
+        "type": "str",
+        "required": True,
+        "description": (
+            "Grounded provider-native evidence for either the completed purchase branch or the prompt-authorized blocker "
+            "branch. A completed purchase must show provider confirmation; an authorized blocker must identify "
+            "the exact unmet requirement and ground its unavailability without a substitute."
+        ),
+    }
+
+
+def _authorized_blocker_branch_schema(fields: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Keep full purchase evidence while making a grounded blocker mutually exclusive."""
+    evidence_field = _authorized_blocker_outcome_field(fields)
+    evidence_name = evidence_field["name"]
+    success_fields: List[Dict[str, Any]] = []
+    for source in fields:
+        if source.get("name") == evidence_name:
+            continue
+        field = dict(source)
+        field["required"] = False
+        original_description = str(field.get("description") or "").strip()
+        branch_description = (
+            "Required and non-null only when terminal_outcome is completed_purchase; "
+            "return null when terminal_outcome is authorized_blocker."
+        )
+        field["description"] = (
+            f"{original_description} {branch_description}".strip()
+            if original_description
+            else branch_description
+        )
+        success_fields.append(field)
+
+    outcome_field = {
+        "name": "terminal_outcome",
+        "type": "str",
+        "required": True,
+        "description": (
+            "Exactly completed_purchase or authorized_blocker. Use authorized_blocker only when the prompt explicitly "
+            "permits reporting the exact unmet requirement and provider-native evidence proves it unavailable."
+        ),
+    }
+    return {
+        "fields": [outcome_field, *success_fields, evidence_field],
+        "authorized_blocker_branch": {
+            "outcome_field": "terminal_outcome",
+            "completed_value": "completed_purchase",
+            "blocker_value": "authorized_blocker",
+            "evidence_field": evidence_name,
+            "success_field_names": [field["name"] for field in success_fields],
+        },
+    }
+
+
 def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool:
     fields = schema.get("fields", []) if isinstance(schema, dict) else []
     for field in fields:
@@ -654,6 +744,10 @@ def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Di
         return schema
 
     normalized = {**schema, "fields": list(schema.get("fields", []))}
+    if _goal_authorizes_reported_blocker(goal):
+        normalized.update(_authorized_blocker_branch_schema(normalized["fields"]))
+        return normalized
+
     if _goal_explicitly_requests_purchase_confirmation_identifier(goal):
         if _schema_has_purchase_confirmation_identifier(normalized):
             return normalized
@@ -4045,6 +4139,27 @@ def _structured_response_satisfies_schema(
     fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
     if not fields:
         return False
+    branch = response_schema.get("authorized_blocker_branch") if isinstance(response_schema, dict) else None
+    if isinstance(branch, dict):
+        outcome_field = branch.get("outcome_field")
+        evidence_field = branch.get("evidence_field")
+        outcome = structured_response.get(outcome_field)
+        if outcome not in {branch.get("completed_value"), branch.get("blocker_value")}:
+            return False
+        if not _has_schema_value(structured_response.get(evidence_field), "str"):
+            return False
+        fields_by_name = {
+            field.get("name"): field for field in fields if isinstance(field, dict) and field.get("name")
+        }
+        success_field_names = branch.get("success_field_names") or []
+        if outcome == branch.get("completed_value"):
+            for name in success_field_names:
+                field = fields_by_name.get(name) or {}
+                if not _has_schema_value(structured_response.get(name), field.get("type")):
+                    return False
+        elif any(structured_response.get(name) is not None for name in success_field_names):
+            return False
+        return True
     for field in fields:
         if not isinstance(field, dict):
             return False
@@ -4068,6 +4183,12 @@ def _completed_child_task_structured_response(
     already delegated successfully.
     """
     if not context or not response_schema:
+        return None
+    if isinstance(response_schema.get("authorized_blocker_branch"), dict):
+        # A schema can prove branch shape, but only the semantic verifier can
+        # prove that a reported blocker is the exact alternative authorized by
+        # the full goal. Never turn blocker-shaped child output directly into
+        # a perfect parent score.
         return None
 
     for message in reversed(context):
@@ -4107,11 +4228,42 @@ def _build_verifier_response_model(
             if field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field):
                 openai_strict = False
             annotation = _verifier_field_annotation_for_field(field)
+            if field.get("required") is False:
+                annotation = Optional[annotation]
             output_fields[field["name"]] = (
                 annotation,
                 Field(..., description=field.get("description", "")),
             )
-        output_model = create_model("VerifierOutput", **output_fields)
+        output_validators: Dict[str, Any] = {}
+        branch = response_schema.get("authorized_blocker_branch")
+        if isinstance(branch, dict):
+            outcome_field = str(branch.get("outcome_field") or "")
+            evidence_field = str(branch.get("evidence_field") or "")
+            completed_value = branch.get("completed_value")
+            blocker_value = branch.get("blocker_value")
+            success_field_names = [str(name) for name in branch.get("success_field_names") or []]
+
+            @model_validator(mode="after")
+            def validate_authorized_blocker_branch(value: Any) -> Any:
+                outcome = getattr(value, outcome_field, None)
+                evidence = getattr(value, evidence_field, None)
+                if not isinstance(evidence, str) or not evidence.strip():
+                    raise ValueError(f"{evidence_field} must contain grounded evidence")
+                if outcome == completed_value:
+                    missing = [name for name in success_field_names if getattr(value, name, None) is None]
+                    if missing:
+                        raise ValueError(f"completed_purchase requires non-null fields: {', '.join(missing)}")
+                elif outcome == blocker_value:
+                    populated = [name for name in success_field_names if getattr(value, name, None) is not None]
+                    if populated:
+                        raise ValueError(f"authorized_blocker requires null success fields: {', '.join(populated)}")
+                else:
+                    raise ValueError(f"{outcome_field} must be {completed_value} or {blocker_value}")
+                return value
+
+            output_validators["validate_authorized_blocker_branch"] = validate_authorized_blocker_branch
+
+        output_model = create_model("VerifierOutput", __validators__=output_validators, **output_fields)
         fields["output"] = (output_model, ...)
 
     fields["reasoning"] = (
@@ -4345,6 +4497,11 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             has_open_object = has_open_object or is_open
 
             output_properties[field_name] = json_type
+
+            if field.get("required") is False:
+                output_properties[field_name] = {
+                    "anyOf": [json_type, {"type": "null"}],
+                }
 
             # All fields are required in the output for strict mode
             output_required.append(field_name)

@@ -101,6 +101,7 @@ from .repo import (
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
+    mark_steel_session_auth_failed,
     prepare_browser_auth,
     propagate_browser_run_credentials,
     recover_browser_challenge,
@@ -1078,6 +1079,20 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
+class BrowserStorageCaptureTimeoutError(RuntimeError):
+    """Raised when auth-preserving browser storage capture exceeds its hard bound."""
+
+
+def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 15.0
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        return 15.0
+    return min(timeout_seconds, 60.0)
+
+
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
@@ -1087,8 +1102,23 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
     """
     if page is None or getattr(page, "context", None) is None:
         return None
+    timeout_seconds = _rotation_storage_capture_timeout_seconds(
+        os.getenv("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", "15")
+    )
     try:
-        return await page.context.storage_state(indexed_db=True)
+        return await asyncio.wait_for(
+            page.context.storage_state(indexed_db=True),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out capturing browser storage before IP rotation",
+            timeout_seconds=timeout_seconds,
+            capture_scope="cookies_localstorage_indexeddb",
+        )
+        raise BrowserStorageCaptureTimeoutError(
+            f"Browser storage capture timed out after {timeout_seconds:g}s before challenge recovery."
+        )
     except Exception as exc:
         logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
         return None
@@ -1243,36 +1273,42 @@ async def _reconnect_browser_stack_after_rotation(
     _disable_cdp_websocket_proxy()
     connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
     dom_service = DOMService(cdp_url=connection_cdp_url)
-    await dom_service.connect()
-    dom_page = await dom_service.session.get_current_page()
-
-    from playwright.async_api import async_playwright
-
-    pw_instance = await async_playwright().start()
-    driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
+    pw_instance = None
+    pw_browser = None
+    driver_pid = None
     try:
+        await dom_service.connect()
+        dom_page = await dom_service.session.get_current_page()
+
+        from playwright.async_api import async_playwright
+
+        pw_instance = await async_playwright().start()
+        driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
         pw_browser = await pw_instance.chromium.connect_over_cdp(connection_cdp_url)
+        pw_context = pw_browser.contexts[0]
+        pw_page = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=dom_service,
+            playwright_browser=pw_browser,
+            current_page=pw_context.pages[0],
+        )
+
+        # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
+        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+            from helpers.fingerprint_injection import apply_fingerprint_injection
+
+            with contextlib.suppress(Exception):
+                await apply_fingerprint_injection(pw_page, fingerprint_injection)
     except BaseException:
-        driver_process = _playwright_driver_process(pw_instance)
-        with contextlib.suppress(Exception):
-            await pw_instance.stop()
-        await _reap_playwright_driver_process(driver_process, agent_id)
+        await _stop_playwright_resources(
+            pw_browser,
+            pw_instance,
+            agent_id,
+            close_browser=False,
+            driver_pid=driver_pid,
+        )
         with contextlib.suppress(Exception):
             await dom_service.disconnect()
         raise
-    pw_context = pw_browser.contexts[0]
-    pw_page = await _synchronize_playwright_page_with_agent_focus(
-        dom_service=dom_service,
-        playwright_browser=pw_browser,
-        current_page=pw_context.pages[0],
-    )
-
-    # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
-    if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
-        from helpers.fingerprint_injection import apply_fingerprint_injection
-
-        with contextlib.suppress(Exception):
-            await apply_fingerprint_injection(pw_page, fingerprint_injection)
 
     logger.info("Reconnected browser stack after proxy rotation", agent_id=agent_id)
     return {
@@ -1283,6 +1319,74 @@ async def _reconnect_browser_stack_after_rotation(
         "playwright_instance": pw_instance,
         "playwright_driver_pid": driver_pid,
     }
+
+
+async def _restart_after_failed_steel_auth(
+    *,
+    config: Any,
+    user_id: str,
+    task_id: str,
+    credential_ref: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Invalidate one proven-signed-out Steel profile and recreate the task.
+
+    Recreating the provider session is the source-isolation boundary: the new
+    session is initialized after the stale marker is disabled, so normal
+    credential selection can choose a CookieBundle without overlaying it onto
+    the failed Steel profile.
+    """
+    credential_id = str(credential_ref.get("id") or "")
+    if credential_ref.get("kind") != "steel_session" or not credential_id:
+        raise ValueError("A concrete Steel session credential is required for auth restart")
+    reason = "All automated authentication options were exhausted and the site remained signed out."
+    await mark_steel_session_auth_failed(
+        config,
+        user_id,
+        credential_id,
+        reason,
+        preserve_browser_session_id=task_id,
+    )
+    replacement = await resume_browser_session(
+        config,
+        task_id,
+        force_fresh_profile=True,
+    )
+    new_cdp_url = replacement.get("ws_url")
+    if not isinstance(new_cdp_url, str) or not new_cdp_url:
+        raise RuntimeError("Replacement browser session did not return a CDP URL")
+    replacement_ref = replacement.get("credential_ref") or replacement.get("auth_credential_ref")
+    if (
+        isinstance(replacement_ref, dict)
+        and replacement_ref.get("kind") == "steel_session"
+        and str(replacement_ref.get("id") or "") == credential_id
+    ):
+        raise RuntimeError("Replacement browser session reused the Steel credential proven signed out")
+    return replacement
+
+
+async def _discard_replacement_browser_stack(
+    *,
+    humanizer: Optional[Any],
+    dom_service: Optional[Any],
+    playwright_browser: Optional[Any],
+    playwright_instance: Optional[Any],
+    playwright_driver_pid: Optional[int],
+    agent_id: str,
+) -> None:
+    """Disconnect a replacement CDP stack without closing its remote session."""
+    if humanizer is not None:
+        with contextlib.suppress(Exception):
+            await humanizer.close()
+    if dom_service is not None:
+        with contextlib.suppress(Exception):
+            await dom_service.disconnect()
+    await _stop_playwright_resources(
+        playwright_browser,
+        playwright_instance,
+        agent_id,
+        close_browser=False,
+        driver_pid=playwright_driver_pid,
+    )
 
 
 async def _synchronize_playwright_page_with_agent_focus(
@@ -1885,6 +1989,56 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+async def _capture_recovery_storage_state(
+    page: Any,
+    emit_progress: Callable[[str, str], Awaitable[None]],
+) -> Dict[str, Any]:
+    """Capture auth state for challenge recovery with visible bounded progress."""
+    await emit_progress(
+        "capture_browser_state",
+        "Capturing cookies, local storage, and IndexedDB before challenge recovery",
+    )
+    storage_state = await _capture_rotation_storage_state(page)
+    if storage_state is None:
+        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+    return storage_state
+
+
+async def _finalize_browser_recovery_action_result(
+    *,
+    action_result: Dict[str, Any],
+    dom_service: Optional[Any],
+    action_history: Any,
+    thinking: str,
+    recovery_reason: str,
+    browser_turn_messages: List[Dict[str, Any]],
+    task_prompt: str,
+    browser_state: Dict[str, Any],
+    unified_action: Dict[str, Any],
+    recovery_call_id: str,
+    browser_stream: Any,
+) -> None:
+    """Persist one recovery result and close its streamed tool lifecycle."""
+    if dom_service is not None:
+        await action_history.record_action(
+            dom_service=dom_service,
+            action="recover_from_challenge",
+            thinking=thinking,
+            params={"reason": recovery_reason},
+            result=action_result,
+        )
+    _append_browser_turn_messages(
+        browser_turn_messages,
+        task=task_prompt,
+        browser_state=browser_state,
+        include_screenshot=False,
+        unified_action=unified_action,
+        result=action_result,
+        tool_call_id=recovery_call_id,
+    )
+    await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
 
 
 async def _feed_browser_tool_validation_error_back(
@@ -5554,6 +5708,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         supervisor_recovery_count = 0
+        failed_steel_auth_recovery_ids: set[str] = set()
         task_prompt = build_browser_task_prompt(goal)
         dynamic_system_context = build_browser_dynamic_system_context(
             base_custom_instructions,
@@ -5583,6 +5738,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             nonlocal secret_refs
             nonlocal session_passkeys
             nonlocal session_passwords
+            nonlocal session_credential_ref
 
             target_realm = auth_realm_from_url(target_url)
             if not target_realm or auth_realm_matches_url(auth_realm, target_url):
@@ -5642,6 +5798,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             secret_refs = {**card_refs, **realm_state.password_secret_refs}
             session_passwords = list(payload.get("passwords") or [])
             session_passkeys = list(payload.get("passkeys") or [])
+            session_credential_ref = realm_state.auth_credential_ref
             base_custom_instructions = user_context_section + "\n\n" + auth_options_section
             dynamic_system_context = build_browser_dynamic_system_context(
                 base_custom_instructions,
@@ -6275,6 +6432,149 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "Browser agent requested user authentication assistance",
                     base_site=base_site,
                 )
+                steel_credential_id = (
+                    str(session_credential_ref.get("id") or "")
+                    if isinstance(session_credential_ref, dict)
+                    and session_credential_ref.get("kind") == "steel_session"
+                    else ""
+                )
+                if steel_credential_id and steel_credential_id not in failed_steel_auth_recovery_ids:
+                    failed_steel_auth_recovery_ids.add(steel_credential_id)
+                    browser_stack_replacement_started = False
+                    try:
+                        replacement = await _restart_after_failed_steel_auth(
+                            config=config,
+                            user_id=user_id,
+                            task_id=task_id,
+                            credential_ref=session_credential_ref,
+                        )
+                        new_cdp_url = replacement["ws_url"]
+                        session_id = replacement.get("session_id", session_id)
+                        browser_url = replacement.get("debug_url", browser_url)
+                        cdp_url = new_cdp_url
+                        fingerprint_injection = replacement.get("fingerprint_injection") or fingerprint_injection
+                        session_credential_ref = replacement.get("credential_ref") or replacement.get(
+                            "auth_credential_ref"
+                        )
+                        auth_realm = replacement.get("auth_realm") or auth_realm
+                        browser_session_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(replacement),
+                        )
+                        browser_stack_replacement_started = True
+                        reconnected = await _reconnect_browser_stack_after_rotation(
+                            new_cdp_url=new_cdp_url,
+                            old_dom_service=dom_service,
+                            old_playwright_browser=playwright_browser,
+                            old_playwright_instance=playwright_instance,
+                            old_driver_pid=playwright_driver_pid,
+                            fingerprint_injection=replacement.get("fingerprint_injection")
+                            or fingerprint_injection,
+                            agent_id=agent_id,
+                        )
+                        dom_service = reconnected["dom_service"]
+                        dom_page = reconnected["dom_page"]
+                        input_page = reconnected["input_page"]
+                        playwright_browser = reconnected["playwright_browser"]
+                        playwright_instance = reconnected["playwright_instance"]
+                        playwright_driver_pid = reconnected["playwright_driver_pid"]
+                        if browser_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_recorder.transition_browser(
+                                    page=input_page,
+                                    session_id=session_id,
+                                    browser_url=browser_url or "",
+                                    session_metadata=browser_session_metadata,
+                                )
+                        if browser_network_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        humanizer = await _replace_browser_humanizer(
+                            current_humanizer=humanizer,
+                            enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
+                            dom_page=dom_page,
+                            input_page=input_page,
+                            cursor_observer=observe_cursor,
+                            humanizer_factory=BrowserHumanizer,
+                        )
+                        browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                        current_url = browser_state.get("url", current_url)
+                        recovery_result = {
+                            "success": True,
+                            "message": (
+                                "The saved Steel session was signed out, so it was replaced with a fresh "
+                                "credential-isolated browser session. Recheck the page before requesting assistance."
+                            ),
+                            "auth_source": replacement.get("auth_source"),
+                            "cookies_injected": int(replacement.get("cookies_count") or 0),
+                        }
+                        await action_history.record_action(
+                            dom_service=dom_service,
+                            action="request_user_assistance_for_authentication",
+                            thinking=thinking,
+                            params={},
+                            result=recovery_result,
+                        )
+                        _append_browser_turn_messages(
+                            browser_turn_messages,
+                            task=task_prompt,
+                            browser_state=browser_state,
+                            include_screenshot=False,
+                            unified_action=unified_action,
+                            result=recovery_result,
+                            tool_call_id=tool_call_id_action,
+                        )
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Replaced signed-out saved browser session",
+                            task_id=task_id,
+                            message=recovery_result["message"],
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url,
+                            action_type="browser_auth_session_recovery",
+                            tool_call_id=tool_call_id_action,
+                            steps_taken=iteration,
+                            total_steps=MAX_ITERATIONS,
+                            extra_metadata={
+                                "auth_source": replacement.get("auth_source"),
+                                "cookies_injected": int(replacement.get("cookies_count") or 0),
+                            },
+                        )
+                        logger.info(
+                            "Replaced signed-out Steel session before user assistance",
+                            auth_realm=auth_realm or base_site,
+                            steel_session_auth_id=steel_credential_id,
+                            replacement_auth_source=replacement.get("auth_source"),
+                            replacement_credential_ref=session_credential_ref,
+                        )
+                        await browser_stream.finish_tools(status="FINISHED")
+                        continue
+                    except Exception as stale_auth_error:
+                        if browser_stack_replacement_started:
+                            await _discard_replacement_browser_stack(
+                                humanizer=humanizer,
+                                dom_service=dom_service,
+                                playwright_browser=playwright_browser,
+                                playwright_instance=playwright_instance,
+                                playwright_driver_pid=playwright_driver_pid,
+                                agent_id=agent_id,
+                            )
+                            humanizer = None
+                            dom_service = None
+                            dom_page = None
+                            input_page = None
+                            playwright_browser = None
+                            playwright_instance = None
+                            playwright_driver_pid = None
+                        logger.warning(
+                            "Failed to replace signed-out Steel session before user assistance",
+                            auth_realm=auth_realm or base_site,
+                            steel_session_auth_id=steel_credential_id,
+                            error=extract_error_message(stale_auth_error),
+                        )
                 auth_handoff_current_url = select_auth_assistance_current_url(current_url, visited_urls)
                 if auth_handoff_current_url != current_url:
                     logger.info(
@@ -6303,13 +6603,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
 
                 success_result = {"success": True, "request_id": request_id}
-                await action_history.record_action(
-                    dom_service=dom_service,
-                    action="request_user_assistance_for_authentication",
-                    thinking=thinking,
-                    params={},
-                    result=success_result,
-                )
+                if dom_service is not None:
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="request_user_assistance_for_authentication",
+                        thinking=thinking,
+                        params={},
+                        result=success_result,
+                    )
                 _append_browser_turn_messages(
                     browser_turn_messages,
                     task=task_prompt,
@@ -6379,6 +6680,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
                 progress_titles = {
+                    "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
                     "known_challenge_cookies": "Testing challenge cookies",
                     "all_target_cookies": "Testing target-site cookies",
@@ -6419,9 +6721,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 try:
                     if playwright_browser is None or input_page is None:
                         raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
-                    recovery_storage_state = await _capture_rotation_storage_state(input_page)
-                    if recovery_storage_state is None:
-                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+                    recovery_storage_state = await _capture_recovery_storage_state(
+                        input_page,
+                        emit_recovery_progress,
+                    )
 
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
@@ -6568,24 +6871,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     action_result = {"success": False, "error": error_message}
 
-                if dom_service is not None:
-                    await action_history.record_action(
-                        dom_service=dom_service,
-                        action="recover_from_challenge",
-                        thinking=thinking,
-                        params={"reason": recovery_reason},
-                        result=action_result,
-                    )
-                _append_browser_turn_messages(
-                    browser_turn_messages,
-                    task=task_prompt,
+                await _finalize_browser_recovery_action_result(
+                    action_result=action_result,
+                    dom_service=dom_service,
+                    action_history=action_history,
+                    thinking=thinking,
+                    recovery_reason=recovery_reason,
+                    browser_turn_messages=browser_turn_messages,
+                    task_prompt=task_prompt,
                     browser_state=browser_state,
-                    include_screenshot=False,
                     unified_action=unified_action,
-                    result=action_result,
-                    tool_call_id=recovery_call_id,
+                    recovery_call_id=recovery_call_id,
+                    browser_stream=browser_stream,
                 )
-                await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
                 continue
 
             if action_name == "send_message_to_user":

@@ -137,6 +137,31 @@ export async function completeAuthAssistanceForUser(
           disabledReason: null,
         },
       });
+      await tx.browserContext.update({
+        where: { id: session.context.id },
+        data: { contextId: steelContextId },
+      });
+      await tx.browserProviderProfile.upsert({
+        where: {
+          contextId_provider: {
+            contextId: session.context.id,
+            provider: 'steel',
+          },
+        },
+        create: {
+          contextId: session.context.id,
+          provider: 'steel',
+          profileId: steelContextId,
+        },
+        update: { profileId: steelContextId },
+      });
+      await tx.browserSession.update({
+        where: { id: session.id },
+        data: {
+          providerProfileSource: 'steel_session_auth',
+          providerProfilePersist: true,
+        },
+      });
       steelSessionAuthId = steelAuth.id;
     }
 

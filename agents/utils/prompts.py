@@ -424,9 +424,41 @@ def build_verifier_prompt(response_schema: dict = None) -> str:
         return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
     fields_desc = "\n".join(
-        [f"  - {f['name']} ({f['type']}): {f.get('description', '')}" for f in response_schema["fields"]]
+        [
+            f"  - {f['name']} ({f['type']}, {'required' if f.get('required', True) else 'branch-optional'}): "
+            f"{f.get('description', '')}"
+            for f in response_schema["fields"]
+        ]
     )
     num_fields = len(response_schema["fields"])
+    branch = response_schema.get("authorized_blocker_branch")
+    if isinstance(branch, dict):
+        outcome_field = branch.get("outcome_field")
+        evidence_field = branch.get("evidence_field")
+        completed_value = branch.get("completed_value")
+        blocker_value = branch.get("blocker_value")
+        success_fields = ", ".join(branch.get("success_field_names") or [])
+        fields_block = dedent(
+            f"""
+
+            # Structured Output Required — Mutually Exclusive Terminal Branches
+
+            Extract every field below, using null only for branch-optional fields that do not apply:
+            {fields_desc}
+
+            Score 1.0 only when exactly one fully grounded branch is satisfied:
+              - `{outcome_field}={completed_value}`: `{evidence_field}` must contain provider-native purchase
+                confirmation, and every completed-purchase field must be non-null: {success_fields}.
+              - `{outcome_field}={blocker_value}`: `{evidence_field}` must identify the exact unmet requirement and
+                contain provider-native evidence that it is unavailable without a substitute. Completed-purchase
+                fields must be null because checkout did not occur.
+
+            An unrelated or constraint-violating purchase is not a completed purchase. Weak absence, an ungrounded
+            agent claim, or a blocker not explicitly authorized by the user forbids 1.0. Always return every JSON key;
+            use null for branch-optional fields on the blocker branch.
+            """
+        ).rstrip()
+        return _VERIFIER_STATIC_PROMPT + SYSTEM_PROMPT_DYNAMIC_BOUNDARY + fields_block
     fields_block = dedent(
         f"""
 

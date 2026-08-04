@@ -45,6 +45,7 @@ router.post(
       const userId = req.userId;
       const body = req.body as Record<string, unknown>;
       const reason = body.reason;
+      const preserveBrowserSessionId = body.preserve_browser_session_id;
       if (typeof userId !== 'string' || userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -53,8 +54,20 @@ router.post(
         res.status(400).json({ error: 'reason is required' });
         return;
       }
+      if (
+        preserveBrowserSessionId !== undefined &&
+        (typeof preserveBrowserSessionId !== 'string' || preserveBrowserSessionId.trim() === '')
+      ) {
+        res.status(400).json({ error: 'preserve_browser_session_id must be a non-empty string' });
+        return;
+      }
 
-      const result = await markSteelSessionAuthFailed(userId, req.params.id, reason);
+      const result = await markSteelSessionAuthFailed(
+        userId,
+        req.params.id,
+        reason,
+        typeof preserveBrowserSessionId === 'string' ? preserveBrowserSessionId : undefined
+      );
       if (result === null) {
         res.status(404).json({ error: 'Steel session auth not found' });
         return;

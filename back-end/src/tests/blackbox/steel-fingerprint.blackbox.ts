@@ -401,6 +401,48 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'resume did not preserve the read-only session profile binding'
     );
 
+    const previousIsolatedProfiles = process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+    let forceFreshCreateInput: Record<string, unknown> | undefined;
+    try {
+      process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = 'true';
+      await recreateSession(
+        'replacement-city-retry-task',
+        { forceManagedRotation: false, forceFreshProfile: true },
+        {
+          createSession: async (input) => {
+            forceFreshCreateInput = input as unknown as Record<string, unknown>;
+            return {
+              id: 'steel-force-fresh-new',
+              debugUrl: 'https://steel.example/debug',
+              profileId: 'steel-force-fresh-profile',
+            };
+          },
+          validateConnection: async () => true,
+        }
+      );
+    } finally {
+      if (previousIsolatedProfiles === undefined) {
+        delete process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES;
+      } else {
+        process.env.BENCHMARK_ISOLATED_BROWSER_PROFILES = previousIsolatedProfiles;
+      }
+    }
+    assert(
+      forceFreshCreateInput?.profileId === undefined,
+      'force-fresh resume reused the session-bound failed Steel profile'
+    );
+    assert(
+      forceFreshCreateInput?.persistProfile === true,
+      'force-fresh resume did not create a persistent isolated replacement profile'
+    );
+    const forceFreshWrite = replacementWrites.at(-1);
+    assert(
+      forceFreshWrite?.providerProfileId === 'steel-force-fresh-profile' &&
+        forceFreshWrite?.providerProfileSource === 'benchmark_anon_fresh',
+      'force-fresh resume did not commit the isolated replacement profile'
+    );
+
+    const replacementWritesBeforeMismatch = replacementWrites.length;
     let mismatchCreateAttempts = 0;
     let mismatchReleaseCount = 0;
     let mismatchFailure: unknown;
@@ -436,7 +478,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       'profile mismatch did not release every uncommitted remote session'
     );
     assert(
-      replacementWrites.length === 1,
+      replacementWrites.length === replacementWritesBeforeMismatch,
       'profile mismatch wrote a replacement BrowserSession binding'
     );
 

@@ -24,6 +24,7 @@ export const closeSessionSchema = z.object({
 
 export const resumeSessionSchema = z.object({
   task_id: z.string().uuid(), // Use stable task ID instead of session_id
+  force_fresh_profile: z.boolean().optional().default(false),
 });
 
 export const browserControlSchema = z.object({

@@ -371,7 +371,7 @@ def _expected_attention_kind(task: BenchmarkTask, observed_count: int) -> Option
         return f"exactly one of {alternatives}"
     sequence = task.expected_attention_kinds
     if sequence:
-        return sequence[observed_count] if observed_count < len(sequence) else None
+        return sequence[observed_count] if observed_count < len(sequence) else "no further attention request"
     return task.expected_attention_kind
 
 
@@ -385,6 +385,8 @@ def _attention_request_matches_task(
     alternatives = getattr(task, "expected_attention_kind_any_of", [])
     if alternatives:
         return observed_count == 0 and _attention_request_kind(req) in alternatives
+    if task.expected_attention_kinds and observed_count >= len(task.expected_attention_kinds):
+        return False
     expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
@@ -3387,6 +3389,29 @@ async def poll_agent(
         if fetch_approvals_now:
             try:
                 pending = _pending_attention
+                if task.expected_attention_kind_any_of:
+                    unseen_open = [
+                        req
+                        for req in pending
+                        if (req.get("agentId") or req.get("agent_id", "")) in tree_agent_ids
+                        and _attention_request_is_open(req)
+                        and req.get("id")
+                        and req.get("id") not in seen_attention_ids
+                    ]
+                    if len(unseen_open) > 1:
+                        observed = [*seen_attention_kinds, *(_attention_request_kind(req) for req in unseen_open)]
+                        data["_benchmark"] = {
+                            **data.get("_benchmark", {}),
+                            "expected_attention_kind_any_of": list(task.expected_attention_kind_any_of),
+                            "attention_kinds_observed": observed,
+                        }
+                        return (
+                            data,
+                            approvals_triggered,
+                            approvals_resolved,
+                            f"Expected exactly one attention request of kind one of "
+                            f"{task.expected_attention_kind_any_of}, observed {observed}",
+                        )
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
                     if req_agent_id in tree_agent_ids and _attention_request_is_open(req):
@@ -3479,21 +3504,22 @@ async def poll_agent(
                                 }
                                 print(f"    ✅ Expected gate observed {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
-                            receipt_error = _validate_payment_receipt(task, req, messages=messages)
-                            if receipt_error:
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "payment_receipt_validation_error": receipt_error,
-                                    "payment_receipt_request_id": req_id,
-                                }
-                                return data, approvals_triggered, approvals_resolved, receipt_error
-                            if task.expected_payment_receipt:
-                                validated_payment_receipt_request_id = req_id
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "expected_payment_receipt_seen": True,
-                                    "expected_payment_receipt_request_id": req_id,
-                                }
+                            if observed_kind == "payment_approval":
+                                receipt_error = _validate_payment_receipt(task, req, messages=messages)
+                                if receipt_error:
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "payment_receipt_validation_error": receipt_error,
+                                        "payment_receipt_request_id": req_id,
+                                    }
+                                    return data, approvals_triggered, approvals_resolved, receipt_error
+                                if task.expected_payment_receipt:
+                                    validated_payment_receipt_request_id = req_id
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "expected_payment_receipt_seen": True,
+                                        "expected_payment_receipt_request_id": req_id,
+                                    }
                             if task.success_on_payment_card_request and task.payment_card_request_action is None:
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
@@ -7524,12 +7550,70 @@ _APPROVAL_AMOUNT_RE = re.compile(
     r"(?:\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\bUSD\s*\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\s*USD\b)",
     re.IGNORECASE,
 )
-_APPROVAL_SEAT_RE = re.compile(
-    r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
-    r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
-    r"[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)",
-    re.IGNORECASE,
-)
+_APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+def _approval_user_visible_text(request: dict) -> str:
+    """Return only approval copy shown to the user, excluding opaque IDs."""
+    return " ".join(
+        str(request.get(key) or "")
+        for key in ("question", "message", "description")
+    ).lower()
+
+
+def _approval_request_satisfies_detail_check(
+    request: dict,
+    check: dict,
+    *,
+    user_visible_only: bool = False,
+) -> bool:
+    evidence = (
+        _approval_user_visible_text(request)
+        if user_visible_only
+        else json.dumps(request, default=str).lower()
+    )
+    required_strings = check.get("required_strings") or []
+    if not all(str(value).lower() in evidence for value in required_strings):
+        return False
+    require_date = check.get("require_date") is True
+    minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
+    if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
+        return False
+    if check.get("require_time") is True and not _APPROVAL_CLOCK_RE.search(evidence):
+        return False
+    if check.get("require_amount") is True and not _APPROVAL_AMOUNT_RE.search(evidence):
+        return False
+    minimum_seat_count = int(check.get("minimum_seat_count", 1 if check.get("require_seat") is True else 0))
+    if minimum_seat_count:
+        seat_tokens = {
+            re.sub(r"\s+|-", "", token.lower())
+            for token in _APPROVAL_SEAT_TOKEN_RE.findall(evidence)
+        }
+        if len(seat_tokens) < minimum_seat_count:
+            return False
+    return True
+
+
+def _approval_request_detail_failure(check: dict) -> str:
+    required_strings = check.get("required_strings") or []
+    minimum_date_count = int(check.get("minimum_date_count", 1 if check.get("require_date") is True else 0))
+    minimum_seat_count = int(check.get("minimum_seat_count", 1 if check.get("require_seat") is True else 0))
+    missing = ", ".join(str(value) for value in required_strings) or "required details"
+    if minimum_date_count == 1:
+        date_suffix = " and a calendar date"
+    elif minimum_date_count > 1:
+        date_suffix = f" and {minimum_date_count} calendar dates"
+    else:
+        date_suffix = ""
+    time_suffix = " and a reservation time" if check.get("require_time") is True else ""
+    amount_suffix = " and a monetary amount" if check.get("require_amount") is True else ""
+    if minimum_seat_count == 1:
+        seat_suffix = " and a seat assignment"
+    elif minimum_seat_count > 1:
+        seat_suffix = f" and {minimum_seat_count} distinct seat assignments"
+    else:
+        seat_suffix = ""
+    return f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
 
 
 def _run_declared_static_check(
@@ -7673,39 +7757,26 @@ def _run_declared_static_check(
             continue
         if check_type == "approval_request_details":
             requests = benchmark_state.get("attention_requests_seen") or []
-            required_strings = check.get("required_strings") or []
-            require_date = check.get("require_date") is True
-            minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
-            require_time = check.get("require_time") is True
-            require_amount = check.get("require_amount") is True
-            require_seat = check.get("require_seat") is True
             for request in requests:
-                evidence = json.dumps(request, default=str).lower()
-                if not all(str(value).lower() in evidence for value in required_strings):
-                    continue
-                if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
-                    continue
-                if require_time and not _APPROVAL_CLOCK_RE.search(evidence):
-                    continue
-                if require_amount and not _APPROVAL_AMOUNT_RE.search(evidence):
-                    continue
-                if require_seat and not _APPROVAL_SEAT_RE.search(evidence):
-                    continue
-                break
+                if _approval_request_satisfies_detail_check(request, check):
+                    break
             else:
-                missing = ", ".join(str(value) for value in required_strings) or "required details"
-                if minimum_date_count == 1:
-                    date_suffix = " and a calendar date"
-                elif minimum_date_count > 1:
-                    date_suffix = f" and {minimum_date_count} calendar dates"
-                else:
-                    date_suffix = ""
-                time_suffix = " and a reservation time" if require_time else ""
-                amount_suffix = " and a monetary amount" if require_amount else ""
-                seat_suffix = " and a seat assignment" if require_seat else ""
-                return False, (
-                    f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
-                )
+                return False, _approval_request_detail_failure(check)
+            continue
+        if check_type == "approval_request_details_by_kind":
+            requests = benchmark_state.get("attention_requests_seen") or []
+            details_by_kind = check.get("details_by_kind") or {}
+            for kind, kind_check in details_by_kind.items():
+                matching = [request for request in requests if _attention_request_kind(request) == kind]
+                if not any(
+                    _approval_request_satisfies_detail_check(
+                        request,
+                        kind_check,
+                        user_visible_only=True,
+                    )
+                    for request in matching
+                ):
+                    return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
             continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"

@@ -196,10 +196,13 @@ async function reservePasskeysForRealm(userId: string, authRealm: string) {
   }));
 }
 
-export async function resumeBrowserSession(taskId: string) {
-  log.info('Resuming browser task', { taskId });
+export async function resumeBrowserSession(
+  taskId: string,
+  options: { forceFreshProfile?: boolean } = {}
+) {
+  log.info('Resuming browser task', { taskId, forceFreshProfile: options.forceFreshProfile });
 
-  const result = await resumeSession(taskId);
+  const result = await resumeSession(taskId, options);
   return assembleResumeResponse(taskId, result);
 }
 

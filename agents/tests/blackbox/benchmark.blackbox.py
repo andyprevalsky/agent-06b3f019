@@ -2079,7 +2079,7 @@ def test_expected_attention_kind_uses_ordered_sequence():
     )
     assert _expected_attention_kind(task, 0) == "payment_approval"
     assert _expected_attention_kind(task, 1) == "agentcard_user_cardholder_onboarding_required"
-    assert _expected_attention_kind(task, 2) is None
+    assert _expected_attention_kind(task, 2) == "no further attention request"
 
 
 def test_agentcard_setup_attention_is_not_auto_approved():
@@ -2547,6 +2547,52 @@ def test_opentable_catalog_uses_auto_approved_mixed_evaluators():
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
     assert "completed" in semantic_criteria
     assert "closest" in semantic_criteria
+
+
+def test_opentable_proposed_weekday_matches_prospect_service_contract():
+    """Prospect's weekday-only service makes the Sunday contract unsatisfiable."""
+    from copy import deepcopy
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-opentable-reservation")
+    failing_prompt = (
+        "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, "
+        "San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose "
+        "the closest standard table between 6:00 PM and 8:00 PM. Complete the "
+        "reservation using the saved guest details."
+    )
+    assert task.prompt == failing_prompt
+    proposed_evaluators = deepcopy(task.evaluators)
+    proposed_evaluators[1]["criteria"] = [
+        criterion.replace("Sunday", "Friday") for criterion in proposed_evaluators[1]["criteria"]
+    ]
+    proposed_evaluators[1]["judge_prompt"] = proposed_evaluators[1]["judge_prompt"].replace("Sunday", "Friday")
+    proposed = replace(
+        task,
+        description=task.description.replace("Sunday", "Friday"),
+        prompt=failing_prompt.replace("Sunday", "Friday"),
+        evaluators=proposed_evaluators,
+    )
+
+    def requested_service_day(candidate_prompt: str) -> str:
+        for day in ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"):
+            if f"this {day}" in candidate_prompt:
+                return day
+        raise AssertionError("reservation prompt has no relative weekday")
+
+    prospect_service_days = {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday"}
+    assert requested_service_day(failing_prompt) not in prospect_service_days
+    assert requested_service_day(proposed.prompt) in prospect_service_days
+
+    def dated_contract_text(candidate) -> list[str]:
+        semantic = candidate.evaluators[1]
+        dated_criterion = next(criterion for criterion in semantic["criteria"] if "reservation is for" in criterion)
+        return [candidate.description, candidate.prompt, dated_criterion, semantic["judge_prompt"]]
+
+    assert all("Sunday" in text and "Friday" not in text for text in dated_contract_text(task))
+    assert all("Friday" in text and "Sunday" not in text for text in dated_contract_text(proposed))
 
 
 def test_instacart_catalog_uses_complete_weekly_grocery_basket():
@@ -3238,7 +3284,13 @@ def _amazon_attention_poll_task():
     )
 
 
-async def _run_attention_poll(task, requests: list[dict], *, messages: list[dict] | None = None):
+async def _run_attention_poll(
+    task,
+    requests: list[dict],
+    *,
+    messages: list[dict] | None = None,
+    attention_batches: list[list[dict]] | None = None,
+):
     import benchmarks.run_benchmark as bench
 
     agent_reads = 0
@@ -3253,11 +3305,12 @@ async def _run_attention_poll(task, requests: list[dict], *, messages: list[dict
         "agent-attention-test",
     )
     root_messages = list(messages or [])
+    poll_batches = attention_batches or [[request] for request in requests]
 
     async def fake_get_agent(_base_url: str, _agent_id: str) -> dict:
         nonlocal agent_reads
         agent_reads += 1
-        status = "COMPLETED" if agent_reads > len(requests) else "ACTIVE"
+        status = "COMPLETED" if attention_reads >= len(poll_batches) else "ACTIVE"
         return {
             "agent": {"status": status, "progress": 1.0},
             "messages": root_messages,
@@ -3266,8 +3319,8 @@ async def _run_attention_poll(task, requests: list[dict], *, messages: list[dict
     async def fake_get_attention_requests(_base_url: str) -> list[dict]:
         nonlocal attention_reads
         attention_reads += 1
-        if attention_reads <= len(requests):
-            return [requests[attention_reads - 1]]
+        if attention_reads <= len(poll_batches):
+            return poll_batches[attention_reads - 1]
         return []
 
     async def fake_respond(_base_url: str, request_id: str, response: str) -> None:
@@ -3387,6 +3440,266 @@ async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
         "payment_approval",
         "write_lock",
     ]
+
+
+async def test_instacart_proposed_checkout_boundary_accepts_exactly_one_supported_kind():
+    """Instacart's stop boundary is one-of, not an ordered two-approval purchase flow."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    base = get_task_by_name("browser-instacart-grocery-order")
+    proposed = replace(
+        base,
+        expected_attention_kinds=[],
+        expected_attention_kind_any_of=["payment_approval", "write_lock"],
+        expected_approval_count=1,
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        timeout_seconds=5,
+    )
+    payment = {
+        "id": "instacart-payment",
+        "agentId": "agent-instacart",
+        "metadata": {"requestPaymentCard": {}},
+    }
+    write_lock = {
+        "id": "instacart-write-lock",
+        "agentId": "agent-instacart",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(base, [write_lock])
+    assert failure == "Expected attention kind payment_approval, observed write_lock"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
+
+    for request in (payment, write_lock):
+        (data, triggered, resolved, failure), responses = await _run_attention_poll(proposed, [request])
+        assert failure is None
+        assert (triggered, resolved) == (1, 0)
+        assert responses == []
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [payment, write_lock],
+        attention_batches=[[payment, write_lock]],
+    )
+    assert failure == (
+        "Expected exactly one attention request of kind one of "
+        "['payment_approval', 'write_lock'], observed ['payment_approval', 'write_lock']"
+    )
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
+
+
+async def test_imax_poll_requires_payment_then_purchase_write_lock():
+    """AMC completion crosses the card boundary before the final purchase boundary."""
+    from dataclasses import replace
+    from copy import deepcopy
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check, evaluate_task
+
+    base = get_task_by_name("browser-imax-group-tickets")
+    common = {
+        "expected_tools": [],
+        "expected_tool_counts": None,
+        "enforce_declared_evaluators": False,
+        "evaluators": [],
+        "timeout_seconds": 5,
+    }
+    legacy = replace(
+        base,
+        **common,
+        expected_approval_count=1,
+        expected_attention_kinds=["write_lock"],
+    )
+    proposed = replace(
+        base,
+        **common,
+        expected_approval_count=2,
+        expected_attention_kinds=["payment_approval", "write_lock"],
+        expected_payment_receipt={
+            "merchant": "AMC Theatres (direct - amctheatres.com)",
+            "currency": "USD",
+            "requiredFields": [
+                "merchant",
+                "currency",
+                "lineItems",
+                "fees",
+                "subtotalCents",
+                "totalCents",
+                "fingerprint",
+                "userId",
+                "agentId",
+            ],
+            "requiredLineItemFields": [
+                "name",
+                "imageUrl",
+                "productUrl",
+                "rating",
+                "reviewCount",
+                "unitPriceCents",
+                "quantity",
+                "lineTotalCents",
+            ],
+            "requiredFeeFields": ["label", "amountCents"],
+        },
+    )
+    payment_receipt = {
+        "merchant": "AMC Theatres",
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": (
+                    "3 Adult IMAX Tickets, AMC Metreon 16, August 3 2026 8:00 PM, "
+                    "Seats A9, A10, A11"
+                ),
+                "imageUrl": None,
+                "productUrl": "https://www.amctheatres.com/showtimes/order-123",
+                "rating": "0 stars",
+                "reviewCount": "0 reviews",
+                "unitPriceCents": 3198,
+                "quantity": 3,
+                "lineTotalCents": 9594,
+            }
+        ],
+        "fees": [],
+        "subtotalCents": 9594,
+        "totalCents": 9594,
+        "fingerprint": "c" * 64,
+        "userId": "user-imax",
+        "agentId": "agent-imax",
+    }
+    payment = {
+        "id": "imax-payment",
+        "agentId": "agent-imax",
+        "question": (
+            "Approve $95.94 for 3 Adult IMAX Tickets at AMC Metreon 16 on "
+            "August 3, 2026 at 8:00 PM in seats A9, A10, A11?"
+        ),
+        "metadata": {"requestPaymentCard": payment_receipt, "writePermission": True},
+    }
+    write_lock = {
+        "id": "imax-write-lock",
+        "agentId": "agent-imax",
+        "question": (
+            "Purchase 3 Adult IMAX Tickets at AMC Metreon 16 on August 3, 2026 "
+            "at 8:00 PM in seats A9, A10, A11 for $95.94?"
+        ),
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        legacy,
+        [payment, write_lock],
+    )
+    assert failure == "Expected attention kind write_lock, observed payment_approval"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [payment, write_lock],
+    )
+    assert failure is None, failure
+    assert (triggered, resolved) == (2, 2)
+    assert responses == [("imax-payment", "approved"), ("imax-write-lock", "approved")]
+    assert data["_benchmark"]["expected_attention_kinds_seen"] == [
+        "payment_approval",
+        "write_lock",
+    ]
+    assert evaluate_task(proposed, data, triggered) == (True, None)
+    valid_attention_data = deepcopy(data)
+    detail_evaluator = {
+        "checks": [
+            {
+                "type": "approval_request_details_by_kind",
+                "details_by_kind": {
+                    "payment_approval": {
+                        "required_strings": ["AMC Metreon 16", "3 Adult"],
+                        "require_date": True,
+                        "require_time": True,
+                        "require_amount": True,
+                        "minimum_seat_count": 3,
+                    },
+                    "write_lock": {
+                        "required_strings": ["AMC Metreon 16", "3 Adult"],
+                        "require_date": True,
+                        "require_time": True,
+                        "require_amount": True,
+                        "minimum_seat_count": 3,
+                    },
+                },
+            }
+        ]
+    }
+    assert _run_declared_static_check(detail_evaluator, valid_attention_data)[0] is True
+    incomplete_details = deepcopy(valid_attention_data)
+    incomplete_details["_benchmark"]["attention_requests_seen"][1]["id"] = "write-a12-c34"
+    incomplete_details["_benchmark"]["attention_requests_seen"][1]["agentId"] = "agent-b23"
+    incomplete_details["_benchmark"]["attention_requests_seen"][1]["question"] = (
+        "Purchase 3 Adult IMAX Tickets at AMC Metreon 16 on August 3, 2026 "
+        "at 8:00 PM in seat A9 for $95.94?"
+    )
+    passed, reason = _run_declared_static_check(detail_evaluator, incomplete_details)
+    assert passed is False
+    assert reason is not None and "3 distinct seat assignments" in reason
+    opaque_details = deepcopy(valid_attention_data)
+    opaque_write = opaque_details["_benchmark"]["attention_requests_seen"][1]
+    opaque_write["question"] = "Purchase these tickets?"
+    opaque_write["id"] = (
+        "AMC Metreon 16 3 Adult IMAX August 3 2026 8:00 PM $95.94 "
+        "A9 A10 A11"
+    )
+    passed, reason = _run_declared_static_check(detail_evaluator, opaque_details)
+    assert passed is False
+    assert reason is not None and "AMC Metreon 16" in reason
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [payment],
+    )
+    assert failure is None
+    assert (triggered, resolved) == (1, 1)
+    passed, reason = evaluate_task(proposed, data, triggered)
+    assert passed is False
+    assert reason is not None and "expected exactly 2 approval" in reason.lower()
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [write_lock, payment],
+    )
+    assert failure == "Expected attention kind payment_approval, observed write_lock"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
+
+    extra_auth = {
+        "id": "imax-extra-auth",
+        "agentId": "agent-imax",
+        "metadata": {"attentionKind": "auth_assistance"},
+    }
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [payment, write_lock, extra_auth],
+    )
+    assert failure == "Expected attention kind no further attention request, observed auth_assistance"
+    assert (triggered, resolved) == (2, 2)
+    assert responses == [("imax-payment", "approved"), ("imax-write-lock", "approved")]
+
+    malformed_payment = deepcopy(payment)
+    malformed_payment["id"] = "imax-malformed-payment"
+    malformed_payment["metadata"]["requestPaymentCard"].pop("lineItems")
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        proposed,
+        [malformed_payment],
+    )
+    assert failure == "missing required payment receipt field: lineItems"
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
 
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
@@ -12140,6 +12453,10 @@ async def run_all_tests():
         test_opentable_catalog_uses_auto_approved_mixed_evaluators,
     )
     r.record(
+        "opentable_proposed_weekday_matches_service_contract",
+        test_opentable_proposed_weekday_matches_prospect_service_contract,
+    )
+    r.record(
         "instacart_weekly_grocery_catalog",
         test_instacart_catalog_uses_complete_weekly_grocery_basket,
     )
@@ -12202,6 +12519,14 @@ async def run_all_tests():
     await r.record_async(
         "doordash_single_write_lock_checkout_approval",
         test_doordash_poll_accepts_single_write_lock_as_checkout_approval,
+    )
+    await r.record_async(
+        "instacart_exactly_one_supported_checkout_boundary",
+        test_instacart_proposed_checkout_boundary_accepts_exactly_one_supported_kind,
+    )
+    await r.record_async(
+        "imax_payment_then_purchase_write_lock",
+        test_imax_poll_requires_payment_then_purchase_write_lock,
     )
     await r.record_async(
         "invalid_payment_receipt_records_attention",

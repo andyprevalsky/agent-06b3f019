@@ -5278,7 +5278,19 @@ async def test_resume_browser_session_posts_resume_endpoint():
     assert out["session_id"] == "s2"
     call = assert_captured_call(url_contains="/api/browser-session/resume", method="POST")
     assert call["method"] == "POST"
-    assert json.loads(call["requestBody"])["task_id"] == "t1"
+    assert json.loads(call["requestBody"]) == {"task_id": "t1", "force_fresh_profile": False}
+
+    setup_mock(
+        {
+            "/api/browser-session/resume": {
+                "status": 200,
+                "json": {"session_id": "s3", "debug_url": "d3", "ws_url": "w3"},
+            }
+        }
+    )
+    await resume_browser_session(cfg, "t1", force_fresh_profile=True)
+    forced_call = assert_captured_call(index=1, url_contains="/api/browser-session/resume", method="POST")
+    assert json.loads(forced_call["requestBody"]) == {"task_id": "t1", "force_fresh_profile": True}
 
 
 async def test_resume_browser_session_rate_limited():
@@ -5390,6 +5402,108 @@ async def test_rotation_storage_state_survives_provider_switch():
     )
 
 
+async def test_rotation_storage_capture_is_bounded_when_indexeddb_stalls():
+    """Challenge recovery must regain control if Playwright storage capture stalls."""
+    from domains.spawn_browser_agent_v3.handler import (
+        BrowserStorageCaptureTimeoutError,
+        _capture_rotation_storage_state,
+        _rotation_storage_capture_timeout_seconds,
+    )
+
+    assert _rotation_storage_capture_timeout_seconds(float("inf")) == 15.0
+    assert _rotation_storage_capture_timeout_seconds("1e999") == 15.0
+    assert _rotation_storage_capture_timeout_seconds(600) == 60.0
+
+    previous_timeout = os.environ.get("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS")
+
+    async def stalled_storage_state(*, indexed_db):
+        assert indexed_db is True
+        await asyncio.Event().wait()
+
+    context = SimpleNamespace(storage_state=stalled_storage_state)
+    page = SimpleNamespace(context=context)
+    os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = "0.01"
+    try:
+        try:
+            await asyncio.wait_for(
+                _capture_rotation_storage_state(page),
+                timeout=1.0,
+            )
+        except BrowserStorageCaptureTimeoutError as exc:
+            assert "timed out after 0.01s" in str(exc)
+        else:
+            raise AssertionError("expected a typed bounded storage-capture timeout")
+    finally:
+        if previous_timeout is None:
+            os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = previous_timeout
+
+async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_model_loop():
+    """The factored recovery path persists timeout evidence and closes the tool as ERROR."""
+    from domains.spawn_browser_agent_v3.handler import (
+        BrowserStorageCaptureTimeoutError,
+        _capture_recovery_storage_state,
+        _finalize_browser_recovery_action_result,
+    )
+
+    previous_timeout = os.environ.get("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS")
+
+    async def stalled_storage_state(*, indexed_db):
+        assert indexed_db is True
+        await asyncio.Event().wait()
+
+    progress = AsyncMock()
+    action_history = SimpleNamespace(record_action=AsyncMock())
+    browser_stream = SimpleNamespace(finish_tools=AsyncMock())
+    browser_turn_messages = []
+    dom_service = SimpleNamespace()
+    unified_action = {
+        "action": "recover_from_challenge",
+        "thinking": "recover safely",
+        "params": {"reason": "DataDome challenge"},
+    }
+    page = SimpleNamespace(context=SimpleNamespace(storage_state=stalled_storage_state))
+    os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = "0.01"
+    try:
+        try:
+            await _capture_recovery_storage_state(page, progress)
+        except BrowserStorageCaptureTimeoutError as exc:
+            action_result = {"success": False, "error": str(exc)}
+        else:
+            raise AssertionError("expected storage capture timeout")
+
+        await _finalize_browser_recovery_action_result(
+            action_result=action_result,
+            dom_service=dom_service,
+            action_history=action_history,
+            thinking="recover safely",
+            recovery_reason="DataDome challenge",
+            browser_turn_messages=browser_turn_messages,
+            task_prompt="Book a hotel",
+            browser_state={"url": "https://expedia.com/login"},
+            unified_action=unified_action,
+            recovery_call_id="recovery-call-1",
+            browser_stream=browser_stream,
+        )
+    finally:
+        if previous_timeout is None:
+            os.environ.pop("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS"] = previous_timeout
+
+    progress.assert_awaited_once_with(
+        "capture_browser_state",
+        "Capturing cookies, local storage, and IndexedDB before challenge recovery",
+    )
+    recorded = action_history.record_action.await_args.kwargs["result"]
+    assert recorded["success"] is False
+    assert "timed out after 0.01s" in recorded["error"]
+    browser_stream.finish_tools.assert_awaited_once_with(status="ERROR")
+    assert browser_turn_messages[-1]["role"] == "tool"
+    assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
+
+
 async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state():
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
 
@@ -5475,9 +5589,9 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
 
     try_offset = recovery_block.index("try:")
     guard_offset = recovery_block.index("if playwright_browser is None or input_page is None:")
-    capture_offset = recovery_block.index("await _capture_rotation_storage_state(input_page)")
+    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
     except_offset = recovery_block.index("except Exception as exc:")
-    finish_offset = recovery_block.index("await browser_stream.finish_tools(")
+    finish_offset = recovery_block.index("await _finalize_browser_recovery_action_result(")
 
     assert try_offset < guard_offset < capture_offset < except_offset < finish_offset
     assert 'action_result = {"success": False, "error": error_message}' in recovery_block
@@ -5499,11 +5613,10 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
     clear_humanizer = recovery_block.index("humanizer = None", close_humanizer)
     clear_handles = recovery_block.index("dom_service = None", reconnect)
     preserve_error = recovery_block.index("error_message = extract_error_message(exc)", clear_handles)
-    history_guard = recovery_block.index("if dom_service is not None:", preserve_error)
-    append_turn = recovery_block.index("_append_browser_turn_messages(", history_guard)
+    finalize = recovery_block.index("await _finalize_browser_recovery_action_result(", preserve_error)
 
     assert reconnect < close_humanizer < clear_humanizer < clear_handles
-    assert clear_handles < preserve_error < history_guard < append_turn
+    assert clear_handles < preserve_error < finalize
     disconnected_slice = recovery_block[clear_handles:preserve_error]
     for handle in (
         "dom_service",
@@ -5514,6 +5627,12 @@ def test_recovery_reconnect_failure_drops_disconnected_browser_handles():
         "playwright_driver_pid",
     ):
         assert f"{handle} = None" in disconnected_slice
+
+    finalizer_source = inspect.getsource(handler._finalize_browser_recovery_action_result)
+    history_guard = finalizer_source.index("if dom_service is not None:")
+    append_turn = finalizer_source.index("_append_browser_turn_messages(", history_guard)
+    finish_tool = finalizer_source.index("await browser_stream.finish_tools(", append_turn)
+    assert history_guard < append_turn < finish_tool
 
 
 def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
@@ -5621,6 +5740,101 @@ async def test_provider_handoff_closes_humanizer_even_when_disabled():
 
     assert result is None
     old_humanizer.close.assert_awaited_once()
+
+
+async def test_failed_replacement_stack_cleanup_keeps_remote_session_open():
+    from domains.spawn_browser_agent_v3.handler import _discard_replacement_browser_stack
+
+    humanizer = SimpleNamespace(close=AsyncMock())
+    dom_service = SimpleNamespace(disconnect=AsyncMock())
+    stop_mock = AsyncMock()
+    browser = SimpleNamespace()
+    playwright = SimpleNamespace()
+
+    with patch("domains.spawn_browser_agent_v3.handler._stop_playwright_resources", stop_mock):
+        await _discard_replacement_browser_stack(
+            humanizer=humanizer,
+            dom_service=dom_service,
+            playwright_browser=browser,
+            playwright_instance=playwright,
+            playwright_driver_pid=123,
+            agent_id="agent-1",
+        )
+
+    humanizer.close.assert_awaited_once()
+    dom_service.disconnect.assert_awaited_once()
+    stop_mock.assert_awaited_once_with(
+        browser,
+        playwright,
+        "agent-1",
+        close_browser=False,
+        driver_pid=123,
+    )
+
+
+async def test_provider_reconnect_cleans_partial_new_stack_on_focus_failure():
+    from domains.spawn_browser_agent_v3.handler import _reconnect_browser_stack_after_rotation
+
+    old_dom = SimpleNamespace(disconnect=AsyncMock())
+    old_browser = SimpleNamespace()
+    old_playwright = SimpleNamespace()
+
+    class _NewDom:
+        last_instance = None
+
+        def __init__(self, cdp_url):
+            self.cdp_url = cdp_url
+            self.connect = AsyncMock()
+            self.disconnect = AsyncMock()
+            self.session = SimpleNamespace(get_current_page=AsyncMock(return_value=SimpleNamespace()))
+            _NewDom.last_instance = self
+
+    page = SimpleNamespace()
+    new_browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page])])
+    new_playwright = SimpleNamespace(
+        chromium=SimpleNamespace(connect_over_cdp=AsyncMock(return_value=new_browser))
+    )
+    async_playwright_factory = MagicMock(
+        return_value=SimpleNamespace(start=AsyncMock(return_value=new_playwright))
+    )
+    stop_mock = AsyncMock()
+
+    with (
+        patch("browser_tools.dom_service.DOMService", _NewDom),
+        patch("playwright.async_api.async_playwright", async_playwright_factory),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._synchronize_playwright_page_with_agent_focus",
+            AsyncMock(side_effect=RuntimeError("focus sync failed")),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler._stop_playwright_resources", stop_mock),
+    ):
+        try:
+            await _reconnect_browser_stack_after_rotation(
+                new_cdp_url="ws://replacement",
+                old_dom_service=old_dom,
+                old_playwright_browser=old_browser,
+                old_playwright_instance=old_playwright,
+                old_driver_pid=11,
+                fingerprint_injection=None,
+                agent_id="agent-1",
+            )
+        except RuntimeError as exc:
+            assert "focus sync failed" in str(exc)
+        else:
+            raise AssertionError("expected focus synchronization failure")
+
+    old_dom.disconnect.assert_awaited_once()
+    assert stop_mock.await_count == 2
+    stop_mock.assert_any_await(old_browser, old_playwright, "agent-1", driver_pid=11)
+    stop_mock.assert_any_await(
+        new_browser,
+        new_playwright,
+        "agent-1",
+        close_browser=False,
+        driver_pid=None,
+    )
+    assert _NewDom.last_instance is not None
+    _NewDom.last_instance.disconnect.assert_awaited_once()
 
 
 async def test_rotation_storage_state_round_trips_in_real_browser():
@@ -12263,7 +12477,7 @@ async def test_browser_supervisor_snapshot_reads_lightweight_page_state():
     assert "Only accepting scheduled orders" in message
 
 
-async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_open():
+async def test_spawn_browser_activity_failed_steel_auth_recovers_same_run():
     from domains.spawn_browser_agent_v3.handler import spawn_browser_agent_activity_v3
 
     class _FakeDomSession:
@@ -12333,14 +12547,49 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         "passwords": [],
         "auth_options": {"realm": "example.com"},
         "browser_session_metadata": {"provider": "steel", "profile_id": "profile-1"},
+        "credential_ref": {"kind": "steel_session", "id": "steel-auth-1"},
         "same_session_available": True,
     }
-    auth_request = {
-        "request": {"id": "uar1"},
-        "handoff": {"liveViewUrl": "https://steel.example/debug?interactive=true&showControls=true"},
-    }
     close_mock = AsyncMock()
-    create_auth_mock = AsyncMock(return_value=auth_request)
+    create_auth_mock = AsyncMock()
+    restart_mock = AsyncMock(
+        return_value={
+            "session_id": "session-cookie",
+            "debug_url": "https://steel.example/debug-cookie",
+            "ws_url": "ws://cookie",
+            "auth_realm": "example.com",
+            "auth_source": "cookie_bundle",
+            "cookies_count": 4,
+            "auth_credential_ref": {"kind": "cookie_bundle", "id": "bundle-1"},
+            "browser_session_metadata": {"provider": "steel", "profile_id": "profile-cookie"},
+        }
+    )
+    replacement_dom = _FakeDomService("ws://cookie")
+    replacement_page = SimpleNamespace()
+    replacement_browser = SimpleNamespace(
+        contexts=[SimpleNamespace(pages=[replacement_page])],
+        close=AsyncMock(),
+    )
+    replacement_playwright = _FakePlaywright(replacement_browser)
+    reconnect_mock = AsyncMock(
+        return_value={
+            "dom_service": replacement_dom,
+            "dom_page": replacement_page,
+            "input_page": replacement_page,
+            "playwright_browser": replacement_browser,
+            "playwright_instance": replacement_playwright,
+            "playwright_driver_pid": None,
+        }
+    )
+    auth_boundary_calls = []
+
+    async def restart(*args, **kwargs):
+        auth_boundary_calls.append("restart")
+        return await restart_mock(*args, **kwargs)
+
+    async def create_auth(*args, **kwargs):
+        auth_boundary_calls.append("create_assistance")
+        return await create_auth_mock(*args, **kwargs)
 
     with (
         patch(
@@ -12363,20 +12612,59 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
         patch(
             "domains.spawn_browser_agent_v3.handler._call_browser_use_with_rotation",
             AsyncMock(
-                return_value={
-                    "action": {
-                        "action": "request_user_assistance_for_authentication",
-                        "thinking": "",
-                        "params": {},
+                side_effect=[
+                    {
+                        "action": {
+                            "action": "request_user_assistance_for_authentication",
+                            "thinking": "",
+                            "params": {},
+                        },
+                        "usage": {},
+                        "mode": "waterfall",
                     },
-                    "usage": {},
-                    "mode": "waterfall",
-                }
+                    {
+                        "action": {
+                            "action": "attempt_completion",
+                            "thinking": "The signed-in page confirms completion.",
+                            "params": {"reasoning": "confirmed"},
+                        },
+                        "usage": {},
+                        "mode": "waterfall",
+                    },
+                ]
             ),
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.create_user_auth_assistance_request",
-            create_auth_mock,
+            create_auth,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._restart_after_failed_steel_auth",
+            restart,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler._reconnect_browser_stack_after_rotation",
+            reconnect_mock,
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.build_browser_verifier_context",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.call_temporal_activity_from_activity",
+            AsyncMock(
+                return_value={
+                    "score": 1.0,
+                    "reasoning": "completed",
+                    "structured_response": {"result": "ride requested"},
+                    "usage": {},
+                }
+            ),
+        ),
+        patch("domains.spawn_browser_agent_v3.handler.extract_session_files", AsyncMock(return_value=[])),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.disconnect_browser_after_passkey_capture",
+            AsyncMock(),
         ),
         patch(
             "domains.spawn_browser_agent_v3.handler.propagate_browser_run_credentials",
@@ -12413,20 +12701,111 @@ async def test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_o
             },
         )
 
-    assert result["status"] == "awaiting_auth_assistance"
-    assert result["session_id"] == "session-1"
-    close_mock.assert_not_awaited()
-    assert _FakeDomService.last_instance is not None
-    _FakeDomService.last_instance.disconnect.assert_awaited_once()
-    fake_browser.close.assert_not_awaited()
-    fake_playwright.stop.assert_awaited_once()
-    create_auth_mock.assert_awaited_once()
-    kwargs = create_auth_mock.await_args.kwargs
-    assert kwargs["steel_session_id"] == "session-1"
-    assert kwargs["mode"] == "live_view"
+    assert result["status"] == "completed"
+    assert result["session_id"] == "session-cookie"
+    assert result["structured_response"] == {"result": "ride requested"}
+    close_mock.assert_awaited_once_with(_fake_config(), "session-cookie", pause=False)
+    create_auth_mock.assert_not_awaited()
+    restart_mock.assert_awaited_once_with(
+        config=_fake_config(),
+        user_id="user-1",
+        task_id="task-1",
+        credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
+    )
+    assert auth_boundary_calls == ["restart"]
+    reconnect_mock.assert_awaited_once()
+    assert reconnect_mock.await_args.kwargs["new_cdp_url"] == "ws://cookie"
     assert _FakeHumanizer.last_instance is not None
     assert callable(_FakeHumanizer.last_instance.cursor_observer)
     assert _FakeHumanizer.last_instance.idle_started is True
+
+
+async def test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume():
+    from domains.spawn_browser_agent_v3.handler import _restart_after_failed_steel_auth
+
+    calls = []
+    mark_failed_mock = AsyncMock(return_value={"ok": True})
+    resume_mock = AsyncMock(
+        return_value={
+            "session_id": "session-cookie",
+            "ws_url": "ws://cookie",
+            "auth_source": "cookie_bundle",
+            "auth_credential_ref": {"kind": "cookie_bundle", "id": "bundle-1"},
+        }
+    )
+
+    async def mark_failed(*args, **kwargs):
+        calls.append("mark_failed")
+        return await mark_failed_mock(*args, **kwargs)
+
+    async def resume(*args, **kwargs):
+        calls.append("resume")
+        return await resume_mock(*args, **kwargs)
+
+    with (
+        patch("domains.spawn_browser_agent_v3.handler.mark_steel_session_auth_failed", mark_failed),
+        patch("domains.spawn_browser_agent_v3.handler.resume_browser_session", resume),
+    ):
+        replacement = await _restart_after_failed_steel_auth(
+            config=_fake_config(),
+            user_id="user-1",
+            task_id="task-1",
+            credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
+        )
+
+    assert calls == ["mark_failed", "resume"]
+    mark_failed_mock.assert_awaited_once_with(
+        _fake_config(),
+        "user-1",
+        "steel-auth-1",
+        "All automated authentication options were exhausted and the site remained signed out.",
+        preserve_browser_session_id="task-1",
+    )
+    resume_mock.assert_awaited_once_with(_fake_config(), "task-1", force_fresh_profile=True)
+    assert replacement["auth_source"] == "cookie_bundle"
+    assert replacement["auth_credential_ref"] == {"kind": "cookie_bundle", "id": "bundle-1"}
+
+    with (
+        patch(
+            "domains.spawn_browser_agent_v3.handler.mark_steel_session_auth_failed",
+            AsyncMock(return_value={"ok": True}),
+        ),
+        patch(
+            "domains.spawn_browser_agent_v3.handler.resume_browser_session",
+            AsyncMock(
+                return_value={
+                    "session_id": "session-stale",
+                    "ws_url": "ws://stale",
+                    "auth_credential_ref": {"kind": "steel_session", "id": "steel-auth-1"},
+                }
+            ),
+        ),
+    ):
+        try:
+            await _restart_after_failed_steel_auth(
+                config=_fake_config(),
+                user_id="user-1",
+                task_id="task-1",
+                credential_ref={"kind": "steel_session", "id": "steel-auth-1"},
+            )
+        except RuntimeError as exc:
+            assert "reused the Steel credential proven signed out" in str(exc)
+        else:
+            raise AssertionError("expected stale Steel credential reuse to fail closed")
+
+
+def test_realm_transition_refreshes_active_session_credential_ref():
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    helper_start = source.index("async def _prepare_credentials_for_url_unquarantined")
+    helper_end = source.index("async def _prepare_credentials_for_url(", helper_start)
+    helper_source = source[helper_start:helper_end]
+
+    assert "nonlocal session_credential_ref" in helper_source
+    assert "session_credential_ref = realm_state.auth_credential_ref" in helper_source
 
 
 async def test_manager_cancelled_browser_pause_event_includes_task_metadata():
@@ -14129,6 +14508,14 @@ async def run_all_tests():
         test_rotation_storage_state_survives_provider_switch,
     )
     await r.record_async(
+        "rotation_storage_capture_bounded",
+        test_rotation_storage_capture_is_bounded_when_indexeddb_stalls,
+    )
+    await r.record_async(
+        "rotation_storage_timeout_finishes_error",
+        test_recovery_storage_timeout_finishes_error_and_returns_control_to_model_loop,
+    )
+    await r.record_async(
         "recovery_preloaded_solver_cookies",
         test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
     )
@@ -14155,6 +14542,14 @@ async def run_all_tests():
     await r.record_async(
         "provider_handoff_closes_disabled_humanizer",
         test_provider_handoff_closes_humanizer_even_when_disabled,
+    )
+    await r.record_async(
+        "failed_replacement_stack_cleanup",
+        test_failed_replacement_stack_cleanup_keeps_remote_session_open,
+    )
+    await r.record_async(
+        "provider_reconnect_partial_stack_cleanup",
+        test_provider_reconnect_cleans_partial_new_stack_on_focus_failure,
     )
     await r.record_async(
         "rotation_storage_state_real_browser_round_trip",
@@ -14952,8 +15347,16 @@ async def run_all_tests():
         test_browser_supervisor_snapshot_reads_lightweight_page_state,
     )
     await r.record_async(
-        "activity_auth_assistance_keeps_live_session_open",
-        test_spawn_browser_activity_auth_assistance_keeps_live_steel_session_open,
+        "activity_failed_steel_auth_recovers_same_run",
+        test_spawn_browser_activity_failed_steel_auth_recovers_same_run,
+    )
+    await r.record_async(
+        "failed_steel_auth_credential_isolated_restart",
+        test_failed_steel_auth_restart_invalidates_before_credential_isolated_resume,
+    )
+    r.record(
+        "realm_transition_refreshes_session_credential_ref",
+        test_realm_transition_refreshes_active_session_credential_ref,
     )
     await r.record_async(
         "manager_cancelled_pause_metadata",

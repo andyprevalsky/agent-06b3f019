@@ -49,12 +49,16 @@ export async function getBrowserControlState(taskId: string, userId?: string) {
   };
 }
 
-export async function resumeOwnedBrowserSession(taskId: string, userId?: string) {
+export async function resumeOwnedBrowserSession(
+  taskId: string,
+  userId?: string,
+  forceFreshProfile = false
+) {
   const session = await repo.findSessionByTaskId(taskId);
   if (session === null || (userId !== undefined && session.context.userId !== userId)) {
     throw new SessionNotFoundError();
   }
-  return resumeBrowserSessionProvider(taskId);
+  return resumeBrowserSessionProvider(taskId, { forceFreshProfile });
 }
 
 export async function setBrowserControlState(
