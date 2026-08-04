@@ -573,10 +573,41 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
             "_refresh_local_gpt_token_from_codex_auth",
             side_effect=lambda _url: calls.append("codex-overlay") or True,
         ),
+        patch.object(rb.sys, "platform", "darwin"),
     ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("[REDACTED]"))
 
     assert calls == ["source-sync", "codex-overlay"]
+
+
+def test_anthropic_excluded_preflight_skips_codex_overlay_on_linux():
+    calls: list[str] = []
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        assert required_token_types == ("gpt",)
+        calls.append("source-sync")
+        return True
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(
+            rb,
+            "_refresh_local_gpt_token_from_codex_auth",
+            side_effect=AssertionError("Codex overlay must not run on Linux"),
+        ),
+        patch.object(rb.sys, "platform", "linux"),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("[REDACTED]"))
+
+    assert calls == ["source-sync"]
 
 
 def test_anthropic_excluded_compute_preflight_requests_gpt_token():

@@ -4119,24 +4119,46 @@ def _production_compute_token_database_url(local_database_url: str) -> Optional[
     --compute-tokens-only``. Keep the source selection in Python so the seed
     command never falls back to an ambient ``DATABASE_URL`` that run.sh has
     overwritten with the isolated destination.
+
+    Cursor Cloud also injects the prod pooled URL into the process environment
+    while ``back-end/.env`` may have been rewritten to local Postgres for the
+    stack. Prefer the file URL when it is a distinct remote; otherwise accept a
+    process-env URL that is not loopback so compute-token refresh can still
+    reach prod gpt_code/claude_code rows.
     """
     target_identity = _database_endpoint_identity(local_database_url)
     if target_identity is None:
         return None
-    configured_url = (
+
+    def _usable_prod_source(candidate: Optional[str]) -> Optional[str]:
+        if not candidate:
+            return None
+        configured_identity = _database_endpoint_identity(candidate)
+        if not configured_identity or configured_identity == target_identity:
+            return None
+        if configured_identity[0] in {"localhost", "127.0.0.1", "::1"}:
+            return None
+        if _database_urls_equivalent(candidate, local_database_url):
+            return None
+        # This URL is consumed by Prisma, not psql. Preserve its pooler contract
+        # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
+        # makes Supabase's transaction pooler reject prepared statements (26000).
+        return candidate
+
+    file_url = (
         load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
     )
-    if not configured_url:
-        return None
-    configured_identity = _database_endpoint_identity(configured_url)
-    if not configured_identity or configured_identity == target_identity:
-        return None
-    # This URL is consumed by Prisma, not psql. Preserve its pooler contract
-    # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
-    # makes Supabase's transaction pooler reject prepared statements (26000).
-    return configured_url if not _database_urls_equivalent(configured_url, local_database_url) else None
+    from_file = _usable_prod_source(file_url)
+    if from_file:
+        return from_file
+
+    # Explicit override only — never ambient DATABASE_URL. During run.sh that
+    # variable is the isolated local destination; during Cloud idle it may be
+    # the injected prod secret. Ambiguity here previously made guest-sync
+    # fail-closed tests flip green against a live prod URL.
+    return _usable_prod_source(os.environ.get("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", "").strip())
 
 
 def _compute_token_source_database_url(target_database_url: str) -> tuple[Optional[str], Optional[str]]:
@@ -4871,8 +4893,18 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
-        if not database_url or not _refresh_local_gpt_token_from_codex_auth(database_url):
-            raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
+        if not database_url:
+            raise RuntimeError("Benchmark run could not refresh local compute tokens")
+        # Codex auth.json / Keychain overlay exists only on macOS. Cloud/Linux
+        # agents sync gpt_code from the prod-backed .env remote instead; requiring
+        # the darwin overlay there falsely fails AgentCard after a healthy sync.
+        if sys.platform == "darwin":
+            if not _refresh_local_gpt_token_from_codex_auth(database_url):
+                raise RuntimeError(
+                    "Benchmark run could not refresh GPT credentials from local Codex auth"
+                )
+        else:
+            print("    🔑 Non-darwin host — using synced gpt_code (Codex keychain overlay skipped)")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
