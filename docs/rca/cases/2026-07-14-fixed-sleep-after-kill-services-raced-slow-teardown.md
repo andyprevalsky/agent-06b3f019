@@ -12,7 +12,7 @@ symptoms:
   - "Killed: 9"
   - "exit 144"
   - "AssertionError: async write must eventually flush to disk"
-  - non-blocking-fetch-cache.test.ts failed under backend unit coverage
+  - "FAIL: same-worktree worker with current backend survives"
 tags:
   - benchmark-harness
   - teardown
@@ -22,7 +22,7 @@ tags:
 sources:
   - memory:project_agentcard_lifecycle_test_infra
   - PR #924
-repro: back-end/src/tests/unit/non-blocking-fetch-cache.test.ts
+repro: back-end/src/tests/unit/non-blocking-fetch-cache.test.ts; scripts/tests/run-process-cleanup.test.sh
 status: fixed
 ---
 
@@ -50,6 +50,12 @@ failed the persistence assertion. The component already exposed
 `flushPendingWrites()`, so elapsed time had again replaced the owned readiness
 condition.
 
+It recurred again in the deploy command's process-cleanup structural test. Its
+three fake workers used `sleep(60)` as their lifetime, but the parallel gate
+took 89.75 seconds before asserting that the two intentionally retained workers
+were still alive. Cleanup correctly killed the stale worker; the current worker
+had simply expired on its own before the survival assertion.
+
 Related footgun from the same family, recorded in the same session: launching
 `run.sh --benchmark` as a plain background Bash-tool command orphans it when the
 launcher task exits, and its messy teardown then SIGKILLs the _next_ stack the
@@ -72,12 +78,17 @@ assertion remains, so synchronous-write regressions are still detected without
 guessing when asynchronous work will finish. This is test-only synchronization
 over already-owned promises and adds no production runtime work.
 
+For the process-cleanup recurrence, fake workers now block in `signal.pause()`
+until the harness's owned cleanup signal arrives. Their lifetime therefore
+matches the test lifecycle instead of an assumed upper bound on gate duration.
+This is test-only lifecycle synchronization and adds zero production runtime
+work or fan-in, including at 10,000 concurrent production runs.
+
 ## Human feedback
 
 None recorded.
 
 ## Reusable lesson
 
-Never gate stack startup on a fixed `sleep` after a teardown — poll for the
-actual release condition (ports free, PIDs gone), or the previous cleanup will
-kill your new process and leave an empty log.
+Gate asynchronous assertions and fixture lifetimes on owned readiness or
+lifecycle signals, never on a guessed amount of elapsed wall-clock time.

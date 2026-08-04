@@ -114,7 +114,7 @@ stale_backend="http://localhost:55010"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 stale_pid="$!"
 PIDS+=("$stale_pid")
@@ -122,7 +122,7 @@ wait_for_process "$stale_pid"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 current_pid="$!"
 PIDS+=("$current_pid")
@@ -130,7 +130,7 @@ wait_for_process "$current_pid"
 
 (
   cd "$other_workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(60)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 other_pid="$!"
 PIDS+=("$other_pid")
