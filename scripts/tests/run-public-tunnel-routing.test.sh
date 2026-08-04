@@ -40,6 +40,8 @@ grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/fn.sh" \
   || fail "could not extract cloudflare_tunnel_edge_is_routing from run.sh"
 grep -q '000' "$TMP/fn.sh" \
   || fail "extracted routing check no longer distinguishes the 000 no-response case"
+grep -qE 'curl -4 ' "$TMP/fn.sh" \
+  || fail "extracted routing check no longer prefers IPv4 (curl -4) for trycloudflare probes"
 
 # Drive the extracted function with a stub curl whose status sequence we control.
 # STATUS_FILE holds one status per line; the stub pops one per invocation and

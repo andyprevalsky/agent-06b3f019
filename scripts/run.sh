@@ -1060,7 +1060,15 @@ cloudflare_tunnel_edge_is_routing() {
         # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
         # (as on a macOS host with a content blocker configured system-wide)
         # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        #
+        # Prefer IPv4 (-4): some Cloud/Linux VMs resolve trycloudflare.com to
+        # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
+        # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
+        # probe falsely declares a healthy tunnel dead and recycles forever.
+        status="$(curl -4 -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        fi
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0
         fi
