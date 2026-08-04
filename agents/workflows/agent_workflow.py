@@ -4021,15 +4021,10 @@ class AgentWorkflow:
         1. Post IN_PROGRESS message → FE shows loading state
         2. Generate completion summary (LLM call)
         3. Post FINISHED message with isFinalSummary → FE renders CompletionSummaryCard
-        4. Root completion SMS notify (archives the durable receipt evaluators read)
-        5. Mark finished in DB
-        6. Update tree state (broadcast COMPLETED)
-        7. Signal parent (if sub-agent)
-        8. Save blueprint (fire-and-forget, no UI)
-
-        COMPLETED is a safe point for pollers and declared evaluators: the final
-        summary message and (for roots) the completion-SMS archive receipt must
-        already be durable before terminal status is published.
+        4. Mark finished in DB
+        5. Update tree state (broadcast COMPLETED)
+        6. Signal parent (if sub-agent)
+        7. Save blueprint (fire-and-forget, no UI)
         """
         workflow.logger.info("✓ Marking task complete")
         # Latch the terminal flag FIRST so any late child_cost_update signal
@@ -4171,33 +4166,6 @@ class AgentWorkflow:
                 update_tree=False,
             )
 
-            # Completion lifecycle SMS is root-only and must archive its durable
-            # provider receipt BEFORE mark_finished/COMPLETED. Declared evaluators
-            # hydrate `provider/sms/notify/completion-*.json.gz.enc` as soon as
-            # they observe COMPLETED; notifying afterward races the grade and
-            # yields false "Observed 0 completion SMS events" failures
-            # (browser-blue-bottle-challenge-recovery / agent 630a2293-...).
-            if not self.parent_workflow_id and summary:
-                try:
-                    notification_args = [
-                        self.user_id,
-                        "completion",
-                        self.agent_id,
-                        {"summary": summary, "outputs": formatted_outputs},
-                    ]
-                    if self.world_model_mode != "real":
-                        notification_args.append(self.world_model_mode)
-                    await workflow.execute_activity(
-                        notify_sms_event_activity,
-                        args=notification_args,
-                        start_to_close_timeout=timedelta(seconds=30),
-                        retry_policy=RetryPolicy(maximum_attempts=2),
-                    )
-                    workflow.logger.info("Sent completion SMS notification", agent_id=self.agent_id)
-                except Exception as sms_error:
-                    # Log but don't fail completion if SMS fails
-                    workflow.logger.warning(f"Failed to send completion SMS notification: {sms_error}")
-
             # Mark finished (includes structured_response for persistence)
             await workflow.execute_activity(
                 mark_finished,
@@ -4220,6 +4188,29 @@ class AgentWorkflow:
             # Broadcast COMPLETED status with structured output to tree
             # (output_schema is already cached from startup and included in all broadcasts)
             await self._update_tree_state(progress=1.0, status="COMPLETED", structured_output=structured_response)
+
+            # Completion lifecycle SMS is root-only. Sub-agents report to their
+            # parent; notifying per child would fan out at tree scale.
+            if not self.parent_workflow_id and summary:
+                try:
+                    notification_args = [
+                        self.user_id,
+                        "completion",
+                        self.agent_id,
+                        {"summary": summary, "outputs": formatted_outputs},
+                    ]
+                    if self.world_model_mode != "real":
+                        notification_args.append(self.world_model_mode)
+                    await workflow.execute_activity(
+                        notify_sms_event_activity,
+                        args=notification_args,
+                        start_to_close_timeout=timedelta(seconds=30),
+                        retry_policy=RetryPolicy(maximum_attempts=2),
+                    )
+                    workflow.logger.info("Sent completion SMS notification", agent_id=self.agent_id)
+                except Exception as sms_error:
+                    # Log but don't fail completion if SMS fails
+                    workflow.logger.warning(f"Failed to send completion SMS notification: {sms_error}")
 
         except Exception as e:
             workflow.logger.error(f"Failed to mark complete: {e}")
