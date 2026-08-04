@@ -1146,13 +1146,26 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
         / "scripts"
         / "setup-benchmark-payment.ts"
     ).read_text()
-    assert "DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106'" in fixture
+    purchase_config = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "domains"
+        / "purchases"
+        / "config.ts"
+    ).read_text()
+    assert (
+        "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106'"
+        in purchase_config
+    )
+    assert "import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID }" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
     assert "assertDedicatedBenchmarkUser(userId)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
-    assert "await tx.$executeRaw" in fixture
-    assert "tx.$queryRaw" not in fixture
+    assert "await tx.$queryRaw" in fixture
+    assert "tx.$executeRaw" not in fixture
     assert "tx.credit.aggregate" in fixture
     assert "tx.toolUsage.aggregate" in fixture
     assert "if (deficitCents > 0)" in fixture
