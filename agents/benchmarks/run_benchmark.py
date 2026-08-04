@@ -1763,6 +1763,7 @@ async def _wait_for_expected_payment_lifecycle(
     deadline = time.monotonic() + timeout_seconds
     retryable_statuses = {"FUNDING_RECLAIM_FAILED", "REFUND_FAILED"}
     consecutive_fetch_errors = 0
+    last_fetch_error: Optional[Exception] = None
     while True:
         error = _validate_payment_lifecycle(
             task,
@@ -1785,24 +1786,36 @@ async def _wait_for_expected_payment_lifecycle(
         if status not in retryable_statuses and not compensation_pending:
             return lifecycle
         if time.monotonic() >= deadline:
+            if last_fetch_error is not None:
+                raise RuntimeError(
+                    "Payment lifecycle remained unavailable at the reconciliation deadline after "
+                    f"{consecutive_fetch_errors} consecutive reads: {last_fetch_error}"
+                ) from last_fetch_error
             raise RuntimeError(f"Payment lifecycle did not reach the expected terminal state before timeout: {error}")
         await asyncio.sleep(poll_interval_seconds)
         try:
             lifecycle = await (recover_lifecycle or fetch_lifecycle)(base_url, agent_id)
             consecutive_fetch_errors = 0
-        except Exception as error:
+            last_fetch_error = None
+        except Exception as fetch_error:
             # Lifecycle reads join local DB state with several read-only provider
             # views. A single transient provider timeout must not turn a
             # successfully compensated purchase into a benchmark failure. Keep
             # the last durable snapshot and retry within the existing bounded
-            # reconciliation window, but surface persistent outages promptly.
+            # reconciliation window. AgentCard throttling can outlast three
+            # ten-second reads, so the reconciliation deadline is the one
+            # authoritative bound instead of a second, shorter outage cutoff.
             consecutive_fetch_errors += 1
-            if consecutive_fetch_errors >= 3 or time.monotonic() >= deadline:
+            last_fetch_error = fetch_error
+            if time.monotonic() >= deadline:
                 raise RuntimeError(
-                    "Payment lifecycle remained unavailable after "
-                    f"{consecutive_fetch_errors} consecutive reads: {error}"
-                ) from error
-            print(f"    ⚠ Transient payment lifecycle read failed ({consecutive_fetch_errors}/3); retrying: {error}")
+                    "Payment lifecycle remained unavailable at the reconciliation deadline after "
+                    f"{consecutive_fetch_errors} consecutive reads: {fetch_error}"
+                ) from fetch_error
+            print(
+                "    ⚠ Transient payment lifecycle read failed "
+                f"({consecutive_fetch_errors} consecutive); retrying until reconciliation deadline: {fetch_error}"
+            )
 
 
 async def abandon_test_payment(base_url: str, agent_id: str) -> dict:

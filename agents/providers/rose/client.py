@@ -657,6 +657,23 @@ class RoseClient:
         openrouter_response_format = (
             build_openai_response_format(response_model) if response_model is not None else None
         )
+        direct_auth_tools = tools
+        effective_tool_choice = tool_choice
+        if direct_auth_tools is None and response_model is not None:
+            direct_auth_tools = build_anthropic_tools_from_response_model(
+                response_model,
+                model=pool_spec.claude_auth_model,
+            )
+        # OpenRouter accepts the same native function-tool contract. Preserve
+        # the AgentAction projection through the final fallback instead of
+        # reverting to response_format, which OpenRouter's Anthropic routes
+        # reject and some Gemini routes handle inconsistently.
+        waterfall_tools = None
+        waterfall_tool_choice = effective_tool_choice
+        if not _is_synthetic_output_toolset(direct_auth_tools):
+            waterfall_tools = direct_auth_tools
+        if waterfall_tools:
+            waterfall_tool_choice = effective_tool_choice or "any"
         dump_path: Optional[str] = None
         dump_result = RoseResponse()
         if dump_context:
@@ -699,8 +716,8 @@ class RoseClient:
                         },
                         "exclude_anthropic_family": _exclude_anthropic_family,
                     },
-                    response_format=None if tools else openrouter_response_format,
-                    tools=tools,
+                    response_format=None if waterfall_tools else openrouter_response_format,
+                    tools=waterfall_tools,
                     extra=dump_extra,
                 )
             except Exception:
@@ -763,13 +780,6 @@ class RoseClient:
         gpt_api_key_tool_choice = None
         anthropic_api_key_tools = None
         anthropic_api_key_tool_choice = None
-        direct_auth_tools = tools
-        effective_tool_choice = tool_choice
-        if direct_auth_tools is None and response_model is not None:
-            direct_auth_tools = build_anthropic_tools_from_response_model(
-                response_model,
-                model=pool_spec.claude_auth_model,
-            )
         # A direct credential can rotate between Claude and GPT inside this
         # call, so prepare both provider contracts before route selection. If
         # these projections depend on the credential present at entry, a
@@ -1361,9 +1371,9 @@ class RoseClient:
                 waterfall_complete(
                     pool_spec=pool_spec,
                     messages=messages,
-                    tools=tools,
-                    tool_choice=tool_choice,
-                    response_format=None if tools else openrouter_response_format,
+                    tools=waterfall_tools,
+                    tool_choice=waterfall_tool_choice,
+                    response_format=None if waterfall_tools else openrouter_response_format,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
