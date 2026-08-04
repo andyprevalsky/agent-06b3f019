@@ -77,6 +77,48 @@ fi
 unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
 echo "PASS: cold isolated seed retries transient Docker health misses"
 
+SLEEP_DELAYS=()
+sleep() {
+    SLEEP_DELAYS+=("$1")
+}
+docker_info_quick() {
+    return 1
+}
+for delay_case in invalid -1 999999 0 2.5; do
+    SLEEP_DELAYS=()
+    COLD_SEED_DOCKER_RETRY_DELAY_SECONDS="$delay_case"
+    if docker_available_for_cold_seed; then
+        echo "FAIL: unavailable Docker unexpectedly recovered for delay $delay_case" >&2
+        exit 1
+    fi
+    case "$delay_case" in
+        invalid|-1) expected_delay=1 ;;
+        999999) expected_delay=5 ;;
+        0) expected_delay='' ;;
+        2.5) expected_delay=2.5 ;;
+    esac
+    if [ -z "$expected_delay" ]; then
+        [ "${#SLEEP_DELAYS[@]}" -eq 0 ] || {
+            echo "FAIL: zero cold-seed delay must not sleep" >&2
+            exit 1
+        }
+    else
+        [ "${#SLEEP_DELAYS[@]}" -eq 5 ] || {
+            echo "FAIL: expected five bounded sleeps for delay $delay_case" >&2
+            exit 1
+        }
+        for observed_delay in "${SLEEP_DELAYS[@]}"; do
+            [ "$observed_delay" = "$expected_delay" ] || {
+                echo "FAIL: delay $delay_case normalized to $observed_delay, expected $expected_delay" >&2
+                exit 1
+            }
+        done
+    fi
+done
+unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
+unset -f sleep
+echo "PASS: cold isolated seed validates and caps retry delays"
+
 find_free_port() {
     local port
     for port in $(seq 61000 62000); do

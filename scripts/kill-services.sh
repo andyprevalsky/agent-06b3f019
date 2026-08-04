@@ -38,7 +38,7 @@ cwd_of() {
 }
 
 cmd_of() {
-    ps -p "$1" -o command= 2>/dev/null | head -1
+    ps -ww -p "$1" -o command= 2>/dev/null | head -1
 }
 
 # Stable identity for the lifetime of one process. The start time rejects PID
@@ -179,6 +179,16 @@ for pid in [data.get("run_sh_pid"), *[service.get("pid") for service in data.get
     if isinstance(pid, int) and pid > 0:
         print(pid)
 PY
+}
+
+manifest_has_protected_benchmark_tree() {
+    local pid
+    while read -r pid; do
+        [ -n "$pid" ] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        is_protected_benchmark_tree "$pid" && return 0
+    done < <(manifest_pids)
+    return 1
 }
 
 service_ports() {
@@ -339,7 +349,11 @@ fi
 
 if [[ ! -s "$TARGETS_FILE" ]]; then
     if [[ $DRY -eq 0 ]]; then
-        mark_manifest_stopped
+        if manifest_has_protected_benchmark_tree; then
+            echo "🛡️  Preserving running manifest for protected benchmark controller tree" >&2
+        else
+            mark_manifest_stopped
+        fi
     fi
     echo "No services to kill in $WORKTREE_DIR"
     exit 0

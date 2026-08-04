@@ -63,6 +63,15 @@ assert_alive() {
     fi
 }
 
+manifest_status() {
+    python3 - "$WORKTREE/.context/services.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1]) as f:
+    print(json.load(f).get("status"))
+PY
+}
+
 WORKTREE="$TMP_ROOT/worktree"
 mkdir -p "$WORKTREE/scripts" "$WORKTREE/.context" "$WORKTREE/agents" "$WORKTREE/back-end" "$TMP_ROOT/foreign"
 WORKTREE="$(cd "$WORKTREE" && pwd -P)"
@@ -145,17 +154,45 @@ if lsof -ti :"$worker_port" >/dev/null 2>&1; then
     exit 1
 fi
 
-status="$(python3 - "$WORKTREE/.context/services.json" <<'PY'
-import json
-import sys
-with open(sys.argv[1]) as f:
-    print(json.load(f).get("status"))
-PY
-)"
+status="$(manifest_status)"
 if [ "$status" != "stopped" ]; then
     echo "FAIL: expected services manifest status to be stopped, got $status" >&2
     exit 1
 fi
+
+# Controller markers can occur beyond BSD ps's default output width. The
+# manifest must remain running when its only live PID is such a protected
+# controller, even though there are no service targets to signal.
+long_controller_argv="$(printf 'x%.0s' $(seq 1 4000)) run-predeploy-local"
+(
+    cd "$WORKTREE"
+    exec -a "$long_controller_argv" sleep 1000
+) &
+long_controller_pid=$!
+PIDS+=("$long_controller_pid")
+python3 - "$WORKTREE/.context/services.json" "$long_controller_pid" <<'PY'
+import json
+import sys
+path, pid = sys.argv[1], int(sys.argv[2])
+with open(path) as f:
+    data = json.load(f)
+data["status"] = "running"
+data["run_sh_pid"] = pid
+with open(path, "w") as f:
+    json.dump(data, f, indent=2, sort_keys=True)
+    f.write("\n")
+PY
+
+(cd "$WORKTREE" && bash scripts/kill-services.sh > /dev/null)
+assert_alive "$long_controller_pid" "long-argv benchmark controller"
+status="$(manifest_status)"
+if [ "$status" != "running" ]; then
+    echo "FAIL: protected controller manifest must stay running, got $status" >&2
+    exit 1
+fi
+kill "$long_controller_pid" 2>/dev/null || true
+wait "$long_controller_pid" 2>/dev/null || true
+echo "PASS: long-argv benchmark controller is detected and preserves the manifest"
 
 # ── Rule 27: a benchmark controller must survive, and must not drag its
 #    isolated stack's ancestors into the kill set ───────────────────────────────

@@ -120,8 +120,21 @@ docker_available_for_workspace_db() {
 }
 
 docker_available_for_cold_seed() {
-    local attempt delay_seconds
+    local attempt delay_seconds integer_part fractional_part
     delay_seconds="${COLD_SEED_DOCKER_RETRY_DELAY_SECONDS:-1}"
+    if [[ ! "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        delay_seconds=1
+    else
+        integer_part="${delay_seconds%%.*}"
+        fractional_part=""
+        [[ "$delay_seconds" == *.* ]] && fractional_part="${delay_seconds#*.}"
+        if (( 10#$integer_part > 5 )) || \
+           { (( 10#$integer_part == 5 )) && [[ "$fractional_part" =~ [1-9] ]]; }; then
+            delay_seconds=5
+        elif [[ "$delay_seconds" =~ ^0+([.]0+)?$ ]]; then
+            delay_seconds=0
+        fi
+    fi
     # A false-negative Docker probe here makes the one-time seed run against a
     # potentially newer system Postgres. Its archive can then be unreadable by
     # the normal postgres:16 workspace container. Cold boot is rare, so spend a
