@@ -431,6 +431,55 @@ def test_first_url_in_text_trims_prose_punctuation():
     assert first_url_in_text(None) is None
 
 
+def test_first_url_in_text_requires_a_host():
+    """Hostless URLs parse but name no server, so they are not recoverable."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https:///orders") is None
+    assert first_url_in_text("go to https://?next=orders") is None
+    assert first_url_in_text("go to https://#frag") is None
+
+
+def test_spawn_agent_browser_refuses_to_recover_cleartext_url():
+    """An http:// goal still fails loudly; only https is repaired.
+
+    The browser restores authenticated session cookies before navigating, so
+    silently promoting a cleartext target inferred from prose would transmit
+    that state in the clear (CWE-319).
+    """
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    try:
+        SpawnAgentTool(
+            tool="spawn_agent",
+            type="browser",
+            goal="Navigate to http://insecure.test/checkout and pay.",
+            output_schema=schema,
+        )
+    except Exception as exc:  # pydantic wraps the ValueError
+        assert "start_url is required" in str(exc)
+    else:
+        raise AssertionError("cleartext start_url was recovered instead of rejected")
+
+
+def test_url_origin_for_log_drops_credentials_and_query():
+    """Only the origin is logged — never userinfo, path, query, or fragment."""
+    from utils.tool_schemas import url_origin_for_log
+
+    redacted = url_origin_for_log("https://u:pw@a.test/p?token=secret#f")
+    assert redacted == "https://a.test"
+    assert url_origin_for_log("https://a.test:8443/p?token=secret") == "https://a.test:8443"
+    for leak in ("pw", "secret", "token", "/p"):
+        assert leak not in redacted
+
+
 def test_spawn_agent_general_purpose_missing_phase_raises():
     """SpawnAgentTool general_purpose without start_phase raises."""
     from utils.tool_schemas import (
@@ -882,6 +931,12 @@ async def run_all_tests():
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
     r.record("spawn_agent_browser_url_from_goal", test_spawn_agent_browser_recovers_start_url_from_goal)
     r.record("first_url_in_text_trims_punctuation", test_first_url_in_text_trims_prose_punctuation)
+    r.record("first_url_in_text_requires_host", test_first_url_in_text_requires_a_host)
+    r.record(
+        "spawn_agent_browser_rejects_cleartext_url",
+        test_spawn_agent_browser_refuses_to_recover_cleartext_url,
+    )
+    r.record("url_origin_for_log_redacts", test_url_origin_for_log_drops_credentials_and_query)
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)

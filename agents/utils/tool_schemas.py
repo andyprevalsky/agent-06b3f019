@@ -4,6 +4,7 @@ import json
 import re
 from enum import Enum
 from typing import Annotated, Any, Dict, List, Literal, Optional, Type, Union
+from urllib.parse import urlsplit
 
 import structlog
 from pydantic import (
@@ -600,8 +601,37 @@ def first_url_in_text(text: Optional[str]) -> Optional[str]:
             continue
         break
 
-    # A bare scheme ("https://") carries no destination.
-    return url if url and not url.endswith("//") else None
+    # A destination needs a host: "https://", "https:///orders" and
+    # "https://?next=orders" all parse but name no server to navigate to.
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return url
+
+
+def url_origin_for_log(url: str) -> str:
+    """Scheme + host (+ port) only — never credentials, path, query, or fragment.
+
+    A URL recovered from free-form text can carry `user:password@` userinfo and
+    secrets in the query string, so only the origin is ever safe to log.
+    """
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return "<unparseable-url>"
+    if not parts.hostname:
+        return "<hostless-url>"
+    origin = f"{parts.scheme}://{parts.hostname}"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    return f"{origin}:{port}" if port else origin
 
 
 class SpawnAgentTool(BaseModel):
@@ -722,12 +752,16 @@ class SpawnAgentTool(BaseModel):
             # the blind retry reproduces it — three strikes then kills the agent
             # before a browser session is ever created. Recover the URL instead;
             # only fail when the goal genuinely names no destination.
+            # Only https is recoverable. The browser restores authenticated
+            # session cookies before it navigates, so silently promoting a
+            # cleartext target inferred from prose would leak that state; an
+            # http:// goal still fails loudly rather than being repaired.
             recovered = first_url_in_text(self.goal)
-            if recovered:
+            if recovered and urlsplit(recovered).scheme == "https":
                 self.start_url = recovered
                 logger.warning(
                     "spawn_agent(type='browser') omitted start_url; recovered from goal",
-                    start_url=recovered,
+                    start_url_origin=url_origin_for_log(recovered),
                 )
             else:
                 raise ValueError("start_url is required when type='browser'.")
