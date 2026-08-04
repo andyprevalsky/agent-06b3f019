@@ -28,7 +28,10 @@ function testRejectsLookalikeLocalhostBeforeDatabaseAccess(): void {
   });
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
 
-  assert(result.error === undefined, `expected the seed CLI to start hermetically: ${result.error}`);
+  assert(
+    result.error === undefined,
+    `expected the seed CLI to start hermetically: ${result.error}`
+  );
   assert(result.status !== 0, 'expected the non-local seed attempt to fail');
   assert(
     output.includes(

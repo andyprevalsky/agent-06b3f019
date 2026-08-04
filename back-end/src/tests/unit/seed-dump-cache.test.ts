@@ -125,7 +125,10 @@ async function testHangingEndpointIsBounded(): Promise<void> {
     harnessTimer.unref();
   });
   try {
-    await Promise.race([get('tok', `/tmp/seed-dump-cache-hang-${process.pid}.out`), harnessDeadline]);
+    await Promise.race([
+      get('tok', `/tmp/seed-dump-cache-hang-${process.pid}.out`),
+      harnessDeadline,
+    ]);
   } catch {
     requestFailed = true;
   } finally {
