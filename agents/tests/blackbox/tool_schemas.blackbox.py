@@ -386,6 +386,51 @@ def test_spawn_agent_browser_missing_url_raises():
     )
 
 
+def test_spawn_agent_browser_recovers_start_url_from_goal():
+    """A browser spawn whose URL lives only in `goal` is repaired, not rejected.
+
+    Regression: benchmark agent-payment-abandonment (agent
+    3e6e3834-44a2-4a2e-84aa-016e8d502280) died after three identical
+    `start_url is required when type='browser'` validation failures. The model
+    consistently put the checkout URL in `goal` and left `start_url` unset, so
+    every blind re-generation reproduced the same omission and no browser agent
+    was ever spawned.
+    """
+    from utils.tool_schemas import (
+        ResponseSchemaConfig,
+        ResponseSchemaFieldConfig,
+        SpawnAgentTool,
+    )
+
+    schema = ResponseSchemaConfig(
+        fields=[ResponseSchemaFieldConfig(name="x", type="str", required=True, description="d")]
+    )
+    tool = SpawnAgentTool(
+        tool="spawn_agent",
+        type="browser",
+        goal=(
+            "Navigate to https://example-shop.test/test_payment?benchmark=agentcard-abandonment. "
+            "Select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and "
+            "Canvas Tote. Do not submit payment."
+        ),
+        output_schema=schema,
+    )
+    assert tool.start_url == "https://example-shop.test/test_payment?benchmark=agentcard-abandonment"
+
+
+def test_first_url_in_text_trims_prose_punctuation():
+    """URL recovery strips sentence punctuation and unbalanced brackets."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https://a.test/x.") == "https://a.test/x"
+    assert first_url_in_text("see (https://a.test/x) now") == "https://a.test/x"
+    assert first_url_in_text("open https://a.test/x?q=1#frag!") == "https://a.test/x?q=1#frag"
+    assert first_url_in_text("keep https://a.test/path(1) intact") == "https://a.test/path(1)"
+    assert first_url_in_text("no link here") is None
+    assert first_url_in_text("bare https:// scheme") is None
+    assert first_url_in_text(None) is None
+
+
 def test_spawn_agent_general_purpose_missing_phase_raises():
     """SpawnAgentTool general_purpose without start_phase raises."""
     from utils.tool_schemas import (
@@ -835,6 +880,8 @@ async def run_all_tests():
         test_spawn_agent_type_description_explains_capability_routing,
     )
     r.record("spawn_agent_browser_no_url", test_spawn_agent_browser_missing_url_raises)
+    r.record("spawn_agent_browser_url_from_goal", test_spawn_agent_browser_recovers_start_url_from_goal)
+    r.record("first_url_in_text_trims_punctuation", test_first_url_in_text_trims_prose_punctuation)
     r.record("spawn_agent_general_purpose_no_phase", test_spawn_agent_general_purpose_missing_phase_raises)
     r.record("spawn_agent_for_each_both", test_spawn_agent_for_each_items_and_csv_raises)
     r.record("spawn_agent_for_each_neither", test_spawn_agent_for_each_no_items_raises)

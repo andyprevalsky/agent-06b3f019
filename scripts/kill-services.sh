@@ -69,8 +69,16 @@ is_self_ancestor() {
 # They are the agent's own pollers, not services: killing one silently destroys
 # the monitor that is supposed to be watching the stack being restarted, which
 # looks identical to "the task is still running".
+# Match the shape of the wrapper, not merely a mention of the path: the process
+# must itself be a shell interpreter invoked with -c on a snapshot script. A
+# substring test would let any service evade cleanup just by carrying the
+# snapshot path somewhere in its argv.
 is_agent_tool_shell() {
-    cmd_of "$1" | grep -Fq '.claude/shell-snapshots/'
+    local cmd
+    cmd=$(cmd_of "$1")
+    [[ "$cmd" =~ ^(/[^[:space:]]*/)?(zsh|bash|sh)[[:space:]] ]] || return 1
+    [[ "$cmd" =~ [[:space:]]-[[:alnum:]]*c[[:space:]] ]] || return 1
+    [[ "$cmd" =~ \.claude/shell-snapshots/[^[:space:]]+\.sh ]]
 }
 
 is_protected_process() {
@@ -192,7 +200,8 @@ add_pid_with_tree_and_ancestors() {
 ROOTS_FILE=$(mktemp)
 ALL_FILE=$(mktemp)
 KEEP_FILE=$(mktemp)
-trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$KEEP_FILE"' EXIT
+IDENT_FILE=$(mktemp)
+trap 'rm -f "$ROOTS_FILE" "$ALL_FILE" "$KEEP_FILE" "$IDENT_FILE"' EXIT
 
 # Manifest PIDs are authoritative when present. They catch wrappers whose argv
 # is generic after cd'ing into a service directory.
@@ -252,6 +261,49 @@ done < <(sort -un "$ALL_FILE")
 
 PIDS=$(grep -v "^$SELF$" "$KEEP_FILE" | grep -v "^$SELF_PPID$" || true)
 
+# A PID is only a stable handle while its process lives. Between collection and
+# the TERM/KILL passes a target can exit and the kernel can hand its number to
+# an unrelated process, so record each target's start time now and re-check it
+# immediately before every signal.
+pid_identity() {
+    ps -p "$1" -o lstart= 2>/dev/null | tr -s ' ' | sed 's/^ *//;s/ *$//'
+}
+
+> "$IDENT_FILE"
+for pid in $PIDS; do
+    identity=$(pid_identity "$pid")
+    [ -n "$identity" ] && printf '%s\t%s\n' "$pid" "$identity" >> "$IDENT_FILE"
+done
+
+recorded_identity() {
+    awk -F'\t' -v want="$1" '$1 == want { print $2; exit }' "$IDENT_FILE"
+}
+
+# Signal only if this PID still refers to the exact process we selected.
+signal_if_same_process() {
+    local pid=$1 sig=$2 expected current
+    expected=$(recorded_identity "$pid")
+    [ -n "$expected" ] || return 0
+    current=$(pid_identity "$pid")
+    [ -n "$current" ] || return 0
+    if [ "$current" != "$expected" ]; then
+        echo "   ⏭️  pid $pid was recycled since selection; not signalling"
+        return 0
+    fi
+    is_protected_process "$pid" && return 0
+    kill "-$sig" "$pid" 2>/dev/null || true
+}
+
+# Alive AND still the same process we selected.
+is_live_target() {
+    local pid=$1 expected current
+    expected=$(recorded_identity "$pid")
+    [ -n "$expected" ] || return 1
+    current=$(pid_identity "$pid")
+    [ -n "$current" ] || return 1
+    [ "$current" = "$expected" ]
+}
+
 if [[ -z "$PIDS" ]]; then
     if [[ $DRY -eq 0 ]]; then
         mark_manifest_stopped
@@ -273,24 +325,24 @@ if [[ $DRY -eq 1 ]]; then
 fi
 
 # SIGTERM pass
-for pid in $PIDS; do kill -TERM "$pid" 2>/dev/null || true; done
+for pid in $PIDS; do signal_if_same_process "$pid" TERM; done
 sleep 2
 
 # SIGKILL any survivors
 SURVIVORS=""
 for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && SURVIVORS="$SURVIVORS $pid"
+    is_live_target "$pid" && SURVIVORS="$SURVIVORS $pid"
 done
 if [[ -n "$SURVIVORS" ]]; then
     echo "   SIGTERM survivors → SIGKILL:$SURVIVORS"
-    for pid in $SURVIVORS; do kill -9 "$pid" 2>/dev/null || true; done
+    for pid in $SURVIVORS; do signal_if_same_process "$pid" KILL; done
     sleep 1
 fi
 
-# Final verify
+# Final verify. A recycled PID that is merely alive is not a survivor.
 STILL=""
 for pid in $PIDS; do
-    kill -0 "$pid" 2>/dev/null && STILL="$STILL $pid"
+    is_live_target "$pid" && STILL="$STILL $pid"
 done
 if [[ -n "$STILL" ]]; then
     echo "⚠️  Survived TERM+KILL:$STILL"

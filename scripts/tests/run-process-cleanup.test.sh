@@ -217,7 +217,105 @@ LAUNCHSH
   kill_tree "$agent_pid"
 }
 
+# A service must not escape cleanup merely by carrying the snapshot path in its
+# argv; only a real shell -c snapshot wrapper is protected.
+assert_snapshot_path_decoy_is_still_killed() {
+  local worktree="$TMP_ROOT/kill-services-decoy"
+  local snapshot="$worktree/.claude/shell-snapshots/snapshot-zsh-test.sh"
+  mkdir -p "$worktree/scripts" "$(dirname "$snapshot")"
+  : > "$snapshot"
+
+  cat > "$worktree/scripts/run.sh" <<'RUNSH'
+#!/usr/bin/env bash
+sleep 300
+RUNSH
+  chmod +x "$worktree/scripts/run.sh"
+
+  # Service-shaped process whose argv mentions the snapshot path as a plain
+  # argument. It is not a shell -c wrapper, so it must still be cleaned up.
+  (cd "$worktree" && exec bash scripts/run.sh --benchmark "$snapshot") &
+  local decoy_pid="$!"
+  PIDS+=("$decoy_pid")
+  wait_for_process "$decoy_pid"
+
+  local targets
+  targets="$(cd "$worktree" && bash "$ROOT_DIR/scripts/kill-services.sh" --dry-run 2>/dev/null)"
+  if ! echo "$targets" | grep -Eq "^ +$decoy_pid  "; then
+    echo "FAIL: service carrying the snapshot path in argv escaped cleanup" >&2
+    echo "$targets" >&2
+    exit 1
+  fi
+  echo "PASS: snapshot path in argv does not exempt a service from cleanup"
+
+  kill_tree "$decoy_pid"
+}
+
+# A PID that is recycled between selection and signalling must not be signalled.
+assert_recycled_pid_is_not_signalled() {
+  local out
+  out="$(
+    ROOT_DIR="$ROOT_DIR" bash -c '
+      set -uo pipefail
+      IDENT_FILE=$(mktemp)
+      pid_identity() { ps -p "$1" -o lstart= 2>/dev/null | tr -s " " | sed "s/^ *//;s/ *$//"; }
+      recorded_identity() { awk -F"\t" -v want="$1" "\$1 == want { print \$2; exit }" "$IDENT_FILE"; }
+      is_protected_process() { return 1; }
+      signal_if_same_process() {
+        local pid=$1 sig=$2 expected current
+        expected=$(recorded_identity "$pid")
+        [ -n "$expected" ] || return 0
+        current=$(pid_identity "$pid")
+        [ -n "$current" ] || return 0
+        if [ "$current" != "$expected" ]; then
+          echo "SKIPPED_RECYCLED"
+          return 0
+        fi
+        is_protected_process "$pid" && return 0
+        echo "SIGNALLED"
+        kill "-$sig" "$pid" 2>/dev/null || true
+      }
+
+      sleep 300 &
+      victim=$!
+      # Record a deliberately stale identity for this PID, simulating the case
+      # where the selected process exited and the number was handed to another.
+      printf "%s\t%s\n" "$victim" "Thu Jan  1 00:00:00 1970" >> "$IDENT_FILE"
+      signal_if_same_process "$victim" TERM
+      kill -0 "$victim" 2>/dev/null && echo "VICTIM_ALIVE"
+      kill -9 "$victim" 2>/dev/null
+      rm -f "$IDENT_FILE"
+    '
+  )"
+
+  if ! echo "$out" | grep -q "SKIPPED_RECYCLED"; then
+    echo "FAIL: recycled PID was not detected (got: $out)" >&2
+    exit 1
+  fi
+  if ! echo "$out" | grep -q "VICTIM_ALIVE"; then
+    echo "FAIL: recycled PID was signalled anyway (got: $out)" >&2
+    exit 1
+  fi
+  echo "PASS: a PID recycled since selection is never signalled"
+
+  # The behavioural check above pins the guard's logic; this pins the wiring, so
+  # the signal passes cannot regress to raw kills that skip revalidation.
+  local killer="$ROOT_DIR/scripts/kill-services.sh"
+  if grep -Eq '^[[:space:]]*for pid in \$(PIDS|SURVIVORS)\b.*kill[[:space:]]+-' "$killer"; then
+    echo "FAIL: kill-services.sh signals PIDs without revalidating identity" >&2
+    grep -nE '^[[:space:]]*for pid in \$(PIDS|SURVIVORS)\b.*kill[[:space:]]+-' "$killer" >&2
+    exit 1
+  fi
+  if ! grep -q 'signal_if_same_process "$pid" TERM' "$killer" ||
+     ! grep -q 'signal_if_same_process "$pid" KILL' "$killer"; then
+    echo "FAIL: kill-services.sh TERM/KILL passes are not routed through the identity guard" >&2
+    exit 1
+  fi
+  echo "PASS: kill-services.sh routes every signal through the identity guard"
+}
+
 assert_agent_tool_shell_protected
+assert_snapshot_path_decoy_is_still_killed
+assert_recycled_pid_is_not_signalled
 
 assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
 assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"
