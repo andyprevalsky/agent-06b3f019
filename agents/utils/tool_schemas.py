@@ -607,9 +607,12 @@ def first_url_in_text(text: Optional[str]) -> Optional[str]:
         return None
     try:
         parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return None
+        # `.port` is what actually validates the port; urlsplit itself accepts
+        # "https://a.test:99999/" and only raises when the value is read.
+        parts.port
     except ValueError:
-        return None
-    if parts.scheme not in ("http", "https") or not parts.hostname:
         return None
     return url
 

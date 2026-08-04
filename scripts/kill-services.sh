@@ -294,14 +294,18 @@ signal_if_same_process() {
     kill "-$sig" "$pid" 2>/dev/null || true
 }
 
-# Alive AND still the same process we selected.
+# Alive AND still the same process we selected AND still a legitimate target.
+# The protection check has to be repeated here: a process that became protected
+# after selection is deliberately never signalled, so counting it as a survivor
+# would report a phantom "Survived TERM+KILL" and fail the teardown.
 is_live_target() {
     local pid=$1 expected current
     expected=$(recorded_identity "$pid")
     [ -n "$expected" ] || return 1
     current=$(pid_identity "$pid")
     [ -n "$current" ] || return 1
-    [ "$current" = "$expected" ]
+    [ "$current" = "$expected" ] || return 1
+    ! is_protected_process "$pid"
 }
 
 if [[ -z "$PIDS" ]]; then

@@ -313,9 +313,61 @@ assert_recycled_pid_is_not_signalled() {
   echo "PASS: kill-services.sh routes every signal through the identity guard"
 }
 
+# A target that becomes protected after selection is skipped by the signal
+# passes, so it must not then be reported as a TERM+KILL survivor.
+assert_newly_protected_target_is_not_a_survivor() {
+  local out
+  out="$(
+    bash -c '
+      set -uo pipefail
+      IDENT_FILE=$(mktemp)
+      PROTECTED_FILE=$(mktemp)
+      pid_identity() { ps -p "$1" -o lstart= 2>/dev/null | tr -s " " | sed "s/^ *//;s/ *$//"; }
+      recorded_identity() { awk -F"\t" -v want="$1" "\$1 == want { print \$2; exit }" "$IDENT_FILE"; }
+      # Becomes true only once the marker file is non-empty.
+      is_protected_process() { [ -s "$PROTECTED_FILE" ]; }
+      is_live_target() {
+        local pid=$1 expected current
+        expected=$(recorded_identity "$pid")
+        [ -n "$expected" ] || return 1
+        current=$(pid_identity "$pid")
+        [ -n "$current" ] || return 1
+        [ "$current" = "$expected" ] || return 1
+        ! is_protected_process "$pid"
+      }
+
+      sleep 300 &
+      victim=$!
+      printf "%s\t%s\n" "$victim" "$(pid_identity "$victim")" >> "$IDENT_FILE"
+      is_live_target "$victim" && echo "SURVIVOR_BEFORE_PROTECTION"
+      echo protected > "$PROTECTED_FILE"
+      is_live_target "$victim" && echo "SURVIVOR_AFTER_PROTECTION"
+      kill -9 "$victim" 2>/dev/null
+      rm -f "$IDENT_FILE" "$PROTECTED_FILE"
+    '
+  )"
+
+  if ! echo "$out" | grep -q "SURVIVOR_BEFORE_PROTECTION"; then
+    echo "FAIL: a live unprotected target should count as a survivor (got: $out)" >&2
+    exit 1
+  fi
+  if echo "$out" | grep -q "SURVIVOR_AFTER_PROTECTION"; then
+    echo "FAIL: newly protected process was reported as a survivor (got: $out)" >&2
+    exit 1
+  fi
+  echo "PASS: a target protected after selection is not reported as a survivor"
+
+  if ! grep -q '! is_protected_process "$pid"' "$ROOT_DIR/scripts/kill-services.sh"; then
+    echo "FAIL: is_live_target no longer re-checks process protection" >&2
+    exit 1
+  fi
+  echo "PASS: is_live_target re-checks protection before counting a survivor"
+}
+
 assert_agent_tool_shell_protected
 assert_snapshot_path_decoy_is_still_killed
 assert_recycled_pid_is_not_signalled
+assert_newly_protected_target_is_not_a_survivor
 
 assert_db_cleanup_guard "container-old" "container-old" true $'rm -f container-old\nvolume rm victoria-pgdata-test' "isolated owner removes its exact DB instance ID"
 assert_db_cleanup_guard "container-old" "container-new" true "" "stale owner cannot remove a replacement DB container"

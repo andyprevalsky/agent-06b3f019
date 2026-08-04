@@ -440,6 +440,15 @@ def test_first_url_in_text_requires_a_host():
     assert first_url_in_text("go to https://#frag") is None
 
 
+def test_first_url_in_text_rejects_invalid_port():
+    """urlsplit accepts an out-of-range port; only reading .port validates it."""
+    from utils.tool_schemas import first_url_in_text
+
+    assert first_url_in_text("go to https://a.test:99999/checkout") is None
+    assert first_url_in_text("go to https://a.test:notaport/checkout") is None
+    assert first_url_in_text("go to https://a.test:8443/checkout") == "https://a.test:8443/checkout"
+
+
 def test_spawn_agent_browser_refuses_to_recover_cleartext_url():
     """An http:// goal still fails loudly; only https is repaired.
 
@@ -932,6 +941,7 @@ async def run_all_tests():
     r.record("spawn_agent_browser_url_from_goal", test_spawn_agent_browser_recovers_start_url_from_goal)
     r.record("first_url_in_text_trims_punctuation", test_first_url_in_text_trims_prose_punctuation)
     r.record("first_url_in_text_requires_host", test_first_url_in_text_requires_a_host)
+    r.record("first_url_in_text_rejects_invalid_port", test_first_url_in_text_rejects_invalid_port)
     r.record(
         "spawn_agent_browser_rejects_cleartext_url",
         test_spawn_agent_browser_refuses_to_recover_cleartext_url,
