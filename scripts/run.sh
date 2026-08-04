@@ -1233,12 +1233,22 @@ start_localtunnel_public_tunnel() {
         return 1
     }
 
-    echo "🔎 Verifying the localtunnel edge routes: $PUBLIC_BASE_URL"
-    cloudflare_tunnel_edge_is_routing "$PUBLIC_BASE_URL" || {
-        echo "❌ $PUBLIC_BASE_URL never routed."
+    # loca.lt does NOT return 502 when the origin is down — the request hangs
+    # until the client times out (curl http_code 000). The Cloudflare-style
+    # edge probe therefore falsely fails here because the frontend is started
+    # AFTER the public tunnel. Verify DNS + process liveness now; HTTP proof
+    # is deferred to scripts/test-public-tunnel.sh once vite is up.
+    echo "🔎 Verifying localtunnel DNS + process: $PUBLIC_BASE_URL"
+    if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
+        echo "❌ $PUBLIC_BASE_URL has no DNS."
         return 1
-    }
-    echo "🌐 Public tunnel ready (localtunnel): $PUBLIC_BASE_URL"
+    fi
+    if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+        echo "❌ localtunnel process exited after publishing $PUBLIC_BASE_URL."
+        tail -20 "$lt_log" || true
+        return 1
+    fi
+    echo "🌐 Public tunnel ready (localtunnel; HTTP verify deferred until frontend up): $PUBLIC_BASE_URL"
     return 0
 }
 
