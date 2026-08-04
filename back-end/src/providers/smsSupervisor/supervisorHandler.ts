@@ -17,12 +17,7 @@ import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
-import {
-  commitPendingWrites,
-  dispatchToolCall,
-  PendingOp,
-  ToolResult,
-} from './supervisorTools';
+import { commitPendingWrites, dispatchToolCall, PendingOp, ToolResult } from './supervisorTools';
 import { createLogger } from '../logger';
 import { getComputeToken } from './supervisorComputeToken';
 import { appendOutboundSms } from './sessionStore';
