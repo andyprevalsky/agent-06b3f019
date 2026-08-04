@@ -4,11 +4,18 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 
 import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
-const tsxCli = path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs');
+// Resolve tsx through Node's own lookup rather than assuming npm hoisted it to
+// the repo root: a worktree whose workspaces were installed per package keeps
+// tsx in back-end/node_modules. A hard-coded root path silently spawns a
+// missing module, which exits 1 — indistinguishable from the fail-closed exits
+// these cases assert, so the CLI cases pass while testing nothing.
+const tsxPackageJson = createRequire(__filename).resolve('tsx/package.json');
+const tsxCli = path.join(path.dirname(tsxPackageJson), 'dist/cli.mjs');
 
 function test(name: string, fn: () => void): void {
   try {

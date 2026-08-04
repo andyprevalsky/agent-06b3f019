@@ -246,6 +246,95 @@ interface ExtractedTools {
 }
 
 /**
+ * Rewrite `anyOf: [T, {type: "null"}]` — how an OpenAI-strict schema spells
+ * "optional", since strict mode requires every property — as plain `T` that is
+ * absent from `required`.
+ *
+ * Anthropic caps a request at 16 union-typed parameters; the SMS supervisor's
+ * grep tool alone declares 24, so without this every claudeAuth SMS round is
+ * rejected with `invalid_request_error` and burns the paid waterfall. Anthropic
+ * expresses optionality through `required`, so the collapsed schema carries the
+ * same contract with no unions at all.
+ */
+function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(relaxNullableUnionsForAnthropic);
+
+  const out: JsonSchema = { ...(schema as JsonSchema) };
+  const optionalKeys = new Set<string>();
+
+  if (out.properties && typeof out.properties === 'object') {
+    const newProps: JsonSchema = {};
+    for (const [key, value] of Object.entries(out.properties as JsonSchema)) {
+      const relaxed = relaxNullableUnionsForAnthropic(value) as JsonSchema;
+      const unwrapped = unwrapNullableUnion(relaxed);
+      if (unwrapped) {
+        newProps[key] = unwrapped;
+        optionalKeys.add(key);
+      } else {
+        newProps[key] = relaxed;
+      }
+    }
+    out.properties = newProps;
+  }
+
+  if (optionalKeys.size > 0 && Array.isArray(out.required)) {
+    out.required = (out.required as unknown[]).filter(
+      (key) => typeof key !== 'string' || !optionalKeys.has(key)
+    );
+  }
+
+  if (out.items) out.items = relaxNullableUnionsForAnthropic(out.items);
+  if (out.$defs && typeof out.$defs === 'object') {
+    const newDefs: JsonSchema = {};
+    for (const [key, value] of Object.entries(out.$defs as JsonSchema)) {
+      newDefs[key] = relaxNullableUnionsForAnthropic(value);
+    }
+    out.$defs = newDefs;
+  }
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    if (Array.isArray(out[keyword])) {
+      out[keyword] = (out[keyword] as unknown[]).map(relaxNullableUnionsForAnthropic);
+    }
+  }
+
+  return out;
+}
+
+/** Returns the value branch of a two-branch `T | null` union, else null. */
+function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
+  const branches = (Array.isArray(schema.anyOf) ? schema.anyOf : schema.oneOf) as
+    JsonSchema[] | undefined;
+  if (!Array.isArray(branches) || branches.length !== 2) return null;
+  const valueBranch = branches.find((b) => b && typeof b === 'object' && b.type !== 'null');
+  const hasNullBranch = branches.some((b) => b && typeof b === 'object' && b.type === 'null');
+  if (!valueBranch || !hasNullBranch) return null;
+
+  const merged: JsonSchema = { ...valueBranch };
+  // The description hangs off the union wrapper, not the value branch, so
+  // collapsing without it would silently drop the model-facing field docs.
+  if (typeof schema.description === 'string') merged.description = schema.description;
+  return merged;
+}
+
+/**
+ * Read a tool-variant discriminator, which JSON-Schema generators spell two
+ * ways: `const: "name"` (a bare literal) and `enum: ["name"]` (what
+ * `z.discriminatedUnion` emits). Accepting only `const` silently rejected every
+ * discriminated-union envelope — including the SMS supervisor's — dropping it
+ * to the legacy single-schema path whose 27 nullable unions Anthropic refuses.
+ */
+function discriminatorName(toolField: JsonSchema | undefined): string | null {
+  if (!toolField || typeof toolField !== 'object') return null;
+  if (typeof toolField.const === 'string') return toolField.const;
+  const values = toolField.enum;
+  if (Array.isArray(values) && values.length === 1 && typeof values[0] === 'string') {
+    return values[0];
+  }
+  return null;
+}
+
+/**
  * Pull native Anthropic tools out of an OpenAI-style response_format whose
  * top-level shape is `{ properties: { tool_calls: { items: { anyOf: [...] } } } }`
  * — the supervisor / agent envelope where each anyOf variant is a tool with a
@@ -272,15 +361,14 @@ export function extractToolsFromResponseFormat(
   for (const variant of anyOf) {
     if (!variant || typeof variant !== 'object') return null;
     const variantProps = (variant as JsonSchema).properties as JsonSchema | undefined;
-    const toolField = variantProps?.tool as JsonSchema | undefined;
-    if (!toolField || !('const' in toolField)) return null;
+    if (discriminatorName(variantProps?.tool as JsonSchema | undefined) === null) return null;
   }
 
   const tools: Array<Record<string, unknown>> = [];
   for (const variant of anyOf) {
     const variantObj = variant as JsonSchema;
     const variantProps = { ...((variantObj.properties as JsonSchema | undefined) ?? {}) };
-    const toolName = (variantProps.tool as JsonSchema).const as string;
+    const toolName = discriminatorName(variantProps.tool as JsonSchema) as string;
     const description = (variantObj.description as string | undefined) ?? '';
 
     delete variantProps.tool;
@@ -300,7 +388,7 @@ export function extractToolsFromResponseFormat(
     tools.push({
       name: toolName,
       description,
-      input_schema: transformSchemaForAnthropic(inputSchema),
+      input_schema: relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema)),
     });
   }
 

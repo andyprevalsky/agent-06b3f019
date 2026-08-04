@@ -46,6 +46,19 @@ CHANGED_FILES="$(
 )"
 
 PROMPT_FILES=""
+is_zod_description_file() {
+  local file="$1"
+  local zod_import_pattern="from[[:space:]]+['\"]zod['\"]|require\\([[:space:]]*['\"]zod['\"]"
+  local describe_pattern='\.[[:space:]]*describe[[:space:]]*\('
+
+  if [ -f "$file" ] && grep -Eq "$zod_import_pattern" "$file" && grep -Eq "$describe_pattern" "$file"; then
+    return 0
+  fi
+
+  git grep -Eq "$zod_import_pattern" "$BASE_REF" -- "$file" 2>/dev/null &&
+    git grep -Eq "$describe_pattern" "$BASE_REF" -- "$file" 2>/dev/null
+}
+
 while IFS= read -r file; do
   [ -n "$file" ] || continue
   case "$file" in
@@ -54,6 +67,17 @@ while IFS= read -r file; do
       ;;
     */tests/*|*/test/*|*/__tests__/*|*/*test*.py|*/*test*.ts|*/*test*.tsx|*/*spec*.ts|*/*spec*.tsx|*.blackbox.py|*.blackbox.ts|*.blackbox.tsx)
       continue
+      ;;
+  esac
+  case "$file" in
+    *.ts|*.tsx|*.js|*.jsx)
+      if is_zod_description_file "$file"; then
+        # Zod `.describe(...)` strings are serialized into model-facing JSON
+        # schemas. Classify the containing file so content-only edits inside an
+        # existing multiline call cannot evade the line-oriented diff scanner.
+        PROMPT_FILES="${PROMPT_FILES}${file}"$'\n'
+        continue
+      fi
       ;;
   esac
   case "$file" in

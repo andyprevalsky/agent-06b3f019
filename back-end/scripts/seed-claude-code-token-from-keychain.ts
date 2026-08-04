@@ -4,9 +4,15 @@
  * sync-codex-token.ts seeds gpt_code, but for the Claude path.
  *
  * Usage:
- *   DATABASE_URL=... DIRECT_URL=... CLAUDE_CREDENTIAL_DECRYPTION_KEY=... \
- *   npx tsx back-end/scripts/seed-claude-code-token-from-keychain.ts
+ *   DATABASE_URL=... DIRECT_URL=... npx tsx \
+ *     back-end/scripts/seed-claude-code-token-from-keychain.ts
+ *
+ * CLAUDE_CREDENTIAL_DECRYPTION_KEY comes from back-end/.env unless the caller
+ * exports it; explicit process env always wins, so a caller can still point the
+ * seed at a different database than the .env default.
  */
+import 'dotenv/config';
+
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import { execSync } from 'child_process';
 import * as crypto from 'crypto';

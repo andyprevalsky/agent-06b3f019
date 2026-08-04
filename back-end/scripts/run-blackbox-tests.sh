@@ -289,6 +289,25 @@ SQL
         fi
       fi
     fi
+
+    # Real-LLM blackbox users are freshly provisioned and own no compute
+    # credential, so without a pooled token every claudeAuth path in the suite
+    # silently degrades to the paid waterfall — a different model than
+    # production runs, which makes model-behavior acceptances meaningless.
+    # Seed the local Claude Code envelope the same way gpt_code is seeded, and
+    # mark it poolable so provisioned test users can draw it. Best-effort: no
+    # keychain (CI, Linux) leaves the previous waterfall behavior untouched.
+    if [[ "${BACKEND_CLAUDE_TOKEN_SYNC_SKIP:-0}" != "1" ]] &&
+      security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1; then
+      echo "Syncing local Claude Code credentials to local test database..."
+      if DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+        npx tsx scripts/seed-claude-code-token-from-keychain.ts >/dev/null 2>&1; then
+        psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -c \
+          "UPDATE \"Integration\" SET \"poolingEnabled\"=true WHERE name='claude_code';" >/dev/null 2>&1 || true
+      else
+        echo "   Claude Code credential sync failed; claudeAuth paths will use the waterfall."
+      fi
+    fi
   fi
 else
   echo "❌ No local Postgres available. Blackbox tests require a local DB to"

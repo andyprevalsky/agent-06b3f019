@@ -731,17 +731,20 @@ export function finalizeSupervisorResponse(
     return { reasoning: accumulatedReasoning, tool_calls: [] };
   }
 
+  const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
+  const toolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+
   log.info('[SmsSupervisorLLM] Parsed response', {
-    reasoning: parsed.reasoning.substring(0, 300),
-    toolCallCount: parsed.tool_calls?.length || 0,
-    toolCalls: parsed.tool_calls?.map((tc) => ({
+    reasoning: reasoning.substring(0, 300),
+    toolCallCount: toolCalls.length,
+    toolCalls: toolCalls.map((tc) => ({
       tool: tc.tool,
       args: JSON.stringify(tc.arguments).substring(0, 100),
     })),
   });
 
   return {
-    reasoning: parsed.reasoning || '',
-    tool_calls: Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [],
+    reasoning,
+    tool_calls: toolCalls,
   };
 }

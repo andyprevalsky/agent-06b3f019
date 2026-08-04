@@ -174,6 +174,55 @@ function testValidStructuredAnswerPassesThrough(): void {
 }
 
 /**
+ * A nonconforming structured-output provider can omit the schema-required
+ * reasoning field while still returning usable tool calls. Logging must not
+ * turn that usable response into a retry/fallback failure.
+ */
+function testStructuredAnswerWithoutReasoningPassesThrough(): void {
+  const acc = new StructuredOutputAccumulator();
+  acc.addChunk({
+    kind: 'content',
+    data: {
+      text: JSON.stringify({
+        tool_calls: [{ tool: 'send_user_message', arguments: { message: 'Red' } }],
+      }),
+      item_id: 'final-without-reasoning',
+      output_index: 0,
+      content_index: 0,
+      phase: 'final_answer',
+    },
+  });
+
+  const res = finalizeSupervisorResponse([], acc, '');
+  assert.equal(res.reasoning, '', 'omitted reasoning should normalize to an empty string');
+  assert.equal(res.tool_calls.length, 1, 'valid tool calls must survive omitted reasoning');
+  assert.equal(res.tool_calls[0].arguments.message, 'Red');
+}
+
+/**
+ * The captured photo failure returned six content bytes, no native tool calls,
+ * and no structured reasoning. A primitive JSON answer must enter the normal
+ * empty-tool nudge path instead of crashing the logger.
+ */
+function testPrimitiveStructuredAnswerNudgesInsteadOfThrowing(): void {
+  const acc = new StructuredOutputAccumulator();
+  acc.addChunk({
+    kind: 'content',
+    data: {
+      text: JSON.stringify('Red'),
+      item_id: 'primitive-photo-answer',
+      output_index: 0,
+      content_index: 0,
+      phase: 'final_answer',
+    },
+  });
+
+  const res = finalizeSupervisorResponse([], acc, 'identified the photo color');
+  assert.equal(res.reasoning, '', 'primitive output has no structured reasoning');
+  assertNudgeRetry(res, 'primitive structured photo answer');
+}
+
+/**
  * A transient LLM/stream throw (peer-closed mid-stream, socket timeout, a stray
  * 429) must NOT reach the user. callWithRetries retries the round and returns
  * the first success, so a blip that recovers on retry yields a real answer
@@ -307,13 +356,15 @@ async function main(): Promise<void> {
   testAmbiguousMultiItemStreamDoesNotThrow();
   testNativeToolCallsPassThrough();
   testValidStructuredAnswerPassesThrough();
+  testStructuredAnswerWithoutReasoningPassesThrough();
+  testPrimitiveStructuredAnswerNudgesInsteadOfThrowing();
   await testLlmRetrySucceedsAfterTransientThrows();
   await testLlmRetryRethrowsAfterExhaustion();
   await testLlmRetryStopsOnAbort();
   await testDispatchToolSafelyConvertsThrowToFailure();
   await testDispatchToolSafelyPassesThroughSuccess();
   testFallbackMessageStaysWarm();
-  console.log('PASS sms-supervisor-stream (11 cases)');
+  console.log('PASS sms-supervisor-stream (13 cases)');
 }
 
 main().catch((error) => {

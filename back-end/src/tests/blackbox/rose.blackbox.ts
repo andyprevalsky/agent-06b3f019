@@ -51,6 +51,7 @@ import {
   responseModel,
   type CompletionChunk,
 } from '../../providers/rose';
+import { buildAnthropicBody } from '../../providers/rose/claudeAuth';
 import { buildCodexResponsesBody } from '../../providers/rose/gptAuth';
 import {
   parseAnthropicSSE,
@@ -627,6 +628,67 @@ async function testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses() {
     looseObjects.join(', '),
     '',
     'SMS supervisor schema must not contain open object shapes rejected by Codex'
+  );
+}
+
+/**
+ * Anthropic rejects a request declaring more than 16 union-typed parameters.
+ * `z.discriminatedUnion` spells its discriminator as `enum: ["name"]`, so a
+ * `const`-only extractor sent the whole envelope down the legacy single-schema
+ * path — 27 nullable unions — and every claudeAuth SMS round 400'd into the
+ * paid waterfall.
+ */
+async function testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions() {
+  const extracted = extractToolsFromResponseFormat(SUPERVISOR_RESPONSE_SCHEMA);
+  assert(extracted !== null, 'discriminated-union envelope must lift to native tools');
+
+  const names = extracted.tools.map((tool) => tool.name as string);
+  assert(names.includes('start_new_agent'), `expected start_new_agent, got ${names.join(',')}`);
+  assert(names.includes('grep'), `expected grep, got ${names.join(',')}`);
+
+  for (const tool of extracted.tools) {
+    const serialized = JSON.stringify(tool.input_schema);
+    const unions = (serialized.match(/"type":"null"/g) ?? []).length;
+    assertEqual(String(unions), '0', `${tool.name as string} must declare no nullable unions`);
+  }
+
+  // Collapsing the union must not drop the model-facing field documentation.
+  const startAgent = extracted.tools.find((tool) => tool.name === 'start_new_agent');
+  const budget = (
+    ((startAgent?.input_schema as Record<string, unknown>).properties as Record<string, unknown>)
+      .arguments as Record<string, unknown>
+  ).properties as Record<string, Record<string, unknown>>;
+  assert(
+    typeof budget.budget_dollars.description === 'string' &&
+      budget.budget_dollars.description.length > 0,
+    'budget_dollars description must survive the Anthropic transform'
+  );
+}
+
+/** Anthropic caps a request at four `cache_control` blocks. */
+async function testClaudeAuth_bodyStaysWithinCacheBlockBudget() {
+  const system = ['universal static', 'stable user block', 'third section', 'fourth section'].join(
+    SYSTEM_PROMPT_DYNAMIC_BOUNDARY
+  );
+  const body = buildAnthropicBody({
+    poolSpec: getPool('rose-1-lite'),
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: 'hi from sms' },
+    ],
+    responseFormat: SUPERVISOR_RESPONSE_SCHEMA,
+  });
+
+  const blocks = (JSON.stringify(body).match(/cache_control/g) ?? []).length;
+  assert(blocks <= 4, `expected at most 4 cache_control blocks, got ${blocks}`);
+
+  const systemBlocks = body.system as Array<Record<string, unknown>>;
+  const marked = systemBlocks.filter((block) => 'cache_control' in block);
+  assert(marked.length > 0, 'the longest system prefix must stay cached');
+  assertEqual(
+    JSON.stringify(marked[marked.length - 1]),
+    JSON.stringify(systemBlocks.filter((b) => 'cache_control' in b).slice(-1)[0]),
+    'the last system breakpoint is the one retained'
   );
 }
 
@@ -2860,6 +2922,14 @@ async function main(): Promise<void> {
     {
       name: 'gptAuth / SMS supervisor schema is strict for Codex Responses',
       fn: testGptAuth_smsSupervisorSchemaIsStrictForCodexResponses,
+    },
+    {
+      name: 'claudeAuth / SMS supervisor lifts native tools without unions',
+      fn: testClaudeAuth_smsSupervisorLiftsNativeToolsWithoutUnions,
+    },
+    {
+      name: 'claudeAuth / body stays within the cache_control block budget',
+      fn: testClaudeAuth_bodyStaysWithinCacheBlockBudget,
     },
     {
       name: 'schema / Zod response_model builds strict OpenAI schema',

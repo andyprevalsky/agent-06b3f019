@@ -29,9 +29,24 @@ interface LogEntry {
   [key: string]: unknown;
 }
 
+/**
+ * Objects and arrays interpolate as `[object Object]`, which silently destroys
+ * the context a dev-log line exists to carry (an RCA on SMS tool selection lost
+ * every tool call this way). Serialize them the way the production JSON path
+ * already does.
+ */
+function formatValue(value: unknown): string {
+  if (value === null || typeof value !== 'object') return String(value);
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
 function formatExtra(extra: Record<string, unknown>): string {
   return Object.entries(extra)
-    .map(([k, v]) => `${k}=${v}`)
+    .map(([k, v]) => `${k}=${formatValue(v)}`)
     .join(' ');
 }
 
