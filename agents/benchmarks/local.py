@@ -762,6 +762,13 @@ def validate_agentcard_org_credentials(
 
 
 def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
+    # The local runner owns both the isolated stack and the later benchmark
+    # subprocesses. Keep their isolation view aligned so credential refreshes
+    # can safely enable synthetic-user pooling only for the per-run database.
+    if isolated:
+        os.environ["BENCHMARK_ISOLATED_RUN"] = "true"
+    else:
+        os.environ.pop("BENCHMARK_ISOLATED_RUN", None)
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
