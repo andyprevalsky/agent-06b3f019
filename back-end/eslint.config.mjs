@@ -63,9 +63,11 @@ export default tseslint.config(
     },
   },
 
-  // ── Blackbox test scripts: console output IS the test-runner reporting surface ──
+  // ── Test runners: console output IS the reporting surface ──
+  // Blackbox and structural suites are CLI runners whose pass/fail output is
+  // their product. Declared here so they never need an inline eslint-disable.
   {
-    files: ['src/tests/blackbox/**/*.ts'],
+    files: ['src/tests/blackbox/**/*.ts', 'src/tests/structural/**/*.ts'],
     rules: {
       'no-console': 'off',
     },
@@ -97,13 +99,6 @@ export default tseslint.config(
       ]
     : []),
 
-  // ── Blackbox test scripts: CLI runners that report via console by design ──
-  {
-    files: ['src/tests/blackbox/**/*.ts'],
-    rules: {
-      'no-console': 'off',
-    },
-  },
 
   // ── Domain non-config files: enforce config.ts pattern for env vars ──
   // process.env must only be read in config.ts; services/routes/repos import from config.ts.
