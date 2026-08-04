@@ -620,11 +620,20 @@ async def spawn_explore_agent_activity(
             f"{joined}"
         )
 
-    # A required data source that isn't connected means the explore could not
-    # do its job — it is FAILED (the parent will raise the connect gate). This
-    # takes precedence over the run's own completed/error status.
+    # Disconnected sources are a gap notice, not a hard explore failure. Grep
+    # already skipped them and the parent still raises source_connect gates;
+    # keep the explore's own completion status so the user-visible result is
+    # not clobbered by "required data source(s) not connected".
     has_unavailable = bool(unavailable_sources_collected)
     unavailable_names = ", ".join(str(u.get("source")) for u in unavailable_sources_collected)
+    if has_unavailable and "not connected" not in (final_response or "").lower():
+        notice = (
+            f"\n\n⚠️ Source(s) not connected: {unavailable_names}. These were skipped — "
+            "do NOT retry them. A one-time connect request will be sent to the user "
+            "after this exploration finishes when connect gates are enabled."
+        )
+        final_response = f"{(final_response or '').rstrip()}{notice}"
+
     # A tool-free explore completion is not grounded research. Models can
     # occasionally call attempt_completion immediately and claim that search
     # was unavailable even though the tools were present. Treat that as a
@@ -637,19 +646,15 @@ async def spawn_explore_agent_activity(
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {
-        "status": "error" if has_unavailable else ("completed" if run_completed else "error"),
+        "status": "completed" if run_completed else "error",
         "result": final_response,
         "summary": final_response,
         "final_response": final_response,
         "best_effort_response": result.get("best_effort_response") or final_response,
         "error_reason": (
-            f"required data source(s) not connected: {unavailable_names}"
-            if has_unavailable
-            else (
-                "explore completed without tool evidence"
-                if completed_without_tool_evidence
-                else (None if run_completed else (result.get("message") or result.get("status")))
-            )
+            "explore completed without tool evidence"
+            if completed_without_tool_evidence
+            else (None if run_completed else (result.get("message") or result.get("status")))
         ),
         "unavailable_sources": unavailable_sources_collected,
         "partial_structured_response": result.get("partial_structured_response"),

@@ -368,7 +368,6 @@ class GrepTool(BaseModel):
                 "gmail",
                 "imessage",
                 "whatsapp",
-                "sms",
                 "network",
                 "agent_network",
                 "transactions",
@@ -383,7 +382,8 @@ class GrepTool(BaseModel):
             "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
             "search the local defaults (messages, network, agent_network). "
             "Channels of the user's communications: email searches the user's email/Gmail; "
-            "imessage searches iMessage; whatsapp searches WhatsApp; sms searches SMS. "
+            "imessage searches iMessage (including SMS stored in the Mac Messages DB); "
+            "whatsapp searches WhatsApp. "
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
@@ -401,7 +401,6 @@ class GrepTool(BaseModel):
             "gmail",
             "imessage",
             "whatsapp",
-            "sms",
             "network",
             "agent_network",
             "transactions",
