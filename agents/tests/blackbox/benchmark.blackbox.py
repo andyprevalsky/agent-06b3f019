@@ -4390,6 +4390,67 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     assert restored == [(manifest, "fresh browser state")]
 
 
+async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
+    """Slow credential subprocesses must not freeze every concurrent benchmark lane."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        name = "browser-smoke"
+        environment = {"live_fixtures": ["live"]}
+
+    setup_timeline = []
+
+    def blocking_applier(_ctx):
+        setup_timeline.append("setup-start")
+        time.sleep(0.1)
+        setup_timeline.append("setup-end")
+        return {"fixture": "live"}
+
+    async def setup_probe():
+        async def heartbeat():
+            await asyncio.sleep(0.02)
+            setup_timeline.append("parallel-tick")
+
+        with (
+            patch.dict(bench.LIVE_FIXTURE_APPLIERS, {"live": blocking_applier}),
+            patch.object(bench, "_is_local_base_url", return_value=True),
+            patch.object(bench, "_has_usable_anthropic_api_key_fallback", return_value=False),
+        ):
+            await asyncio.gather(
+                bench._apply_live_fixtures(Task(), "http://localhost:3001"),
+                heartbeat(),
+            )
+
+    await setup_probe()
+    assert setup_timeline.index("parallel-tick") < setup_timeline.index("setup-end")
+
+    restore_timeline = []
+    manifest = {
+        "scenario": "fresh_browser_state",
+        "fixture": "live",
+    }
+
+    def blocking_restore(_manifest, *, label):
+        assert label == "fresh browser state"
+        restore_timeline.append("restore-start")
+        time.sleep(0.1)
+        restore_timeline.append("restore-end")
+
+    async def restore_probe():
+        async def restore():
+            await bench._restore_live_fixture_scenarios_async([manifest])
+
+        async def heartbeat():
+            await asyncio.sleep(0.02)
+            restore_timeline.append("parallel-tick")
+
+        with patch.object(bench, "_restore_isolated_browser_state_scenario", blocking_restore):
+            await asyncio.gather(restore(), heartbeat())
+
+    await restore_probe()
+    assert restore_timeline.index("parallel-tick") < restore_timeline.index("restore-end")
+
+
 def test_benchmark_agent_source_override_validates_known_sources():
     """Benchmark source override accepts only real AgentSource values."""
     import os
@@ -10802,6 +10863,10 @@ async def run_all_tests():
     r.record(
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
+    )
+    await r.record_async(
+        "live_fixture_setup_restore_yields",
+        test_live_fixture_setup_and_restore_yield_to_parallel_tasks,
     )
     r.record(
         "anon_benchmark_mode_disables_saved_auth",

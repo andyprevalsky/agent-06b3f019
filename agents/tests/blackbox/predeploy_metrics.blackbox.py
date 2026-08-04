@@ -187,6 +187,7 @@ def test_local_runner_persists_console_log_and_summary() -> None:
             json.dumps(
                 [
                     {"name": "short-task", "tags": ["smoke"]},
+                    {"name": "medium-task", "tags": ["smoke"]},
                     {"name": "long-task", "tags": ["smoke"]},
                 ]
             )
@@ -197,8 +198,10 @@ def test_local_runner_persists_console_log_and_summary() -> None:
                 json.dumps({"task": task, "duration_seconds": duration}) + "\n"
                 for task, duration in [
                     ("short-task", 10),
+                    ("medium-task", 20),
                     ("long-task", 30),
                     ("short-task", 12),
+                    ("medium-task", 22),
                     ("long-task", 32),
                 ]
             )
@@ -212,6 +215,7 @@ def test_local_runner_persists_console_log_and_summary() -> None:
         subprocess.run(["git", "-C", str(fixture), "add", "."], check=True)
         subprocess.run(["git", "-C", str(fixture), "commit", "-qm", "fixture"], check=True)
         env = {**os.environ, "PREDEPLOY_RUN_ID": "fixture-run"}
+        env.pop("PREDEPLOY_LOCAL_CONCURRENCY", None)
 
         completed = subprocess.run(
             ["bash", str(fixture / "scripts/run-predeploy-local")],
@@ -227,11 +231,18 @@ def test_local_runner_persists_console_log_and_summary() -> None:
         runner_log = (artifact_dir / "runner.log").read_text()
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "Schedule (longest recent median first, concurrency 2): long-task short-task" in completed.stdout
-    assert "fake runner: --local long-task short-task --max-concurrency 2" in runner_log
+    assert (
+        "Schedule (longest recent median first, concurrency 2): "
+        "long-task medium-task short-task"
+    ) in completed.stdout
+    assert (
+        "fake runner: --local long-task medium-task short-task --max-concurrency 2"
+        in runner_log
+    )
     assert summary["status"] == "passed"
-    assert summary["tasks"] == ["short-task", "long-task"]
-    assert summary["schedule"] == ["long-task", "short-task"]
+    assert summary["concurrency"] == 2
+    assert summary["tasks"] == ["short-task", "medium-task", "long-task"]
+    assert summary["schedule"] == ["long-task", "medium-task", "short-task"]
 
 
 def test_timing_wrappers_terminate_child_groups_and_record_signal() -> None:

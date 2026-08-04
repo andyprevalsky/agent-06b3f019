@@ -2010,6 +2010,51 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     return result
 
 
+STRUCTURED_RETRY_FEEDBACK = (
+    "Your response did not satisfy the required output schema.\n"
+    "Validation error:\n{error}\n"
+    "Return a corrected, complete response."
+)
+
+
+def _build_structured_retry_messages(
+    messages: List[Dict[str, Any]],
+    *,
+    error_message: str,
+    tool_use_blocks: List[Dict[str, Any]],
+    text_buffer: str,
+    raw_json: str,
+) -> List[Dict[str, Any]]:
+    """Replay the rejected turn plus its validation error so the retry isn't a blind resample.
+
+    Same repair `_feed_browser_tool_validation_error_back` applies to browser tool
+    args: a model can only correct a mistake it can see. A native tool_use must be
+    answered by a tool_result carrying a matching id — an unpaired tool_use is a 400.
+    """
+    feedback = STRUCTURED_RETRY_FEEDBACK.format(error=error_message)
+
+    if not tool_use_blocks:
+        replay = [{"role": "assistant", "content": raw_json}] if raw_json else []
+        return [*messages, *replay, {"role": "user", "content": feedback}]
+
+    calls = [
+        {
+            "id": block.get("id") or f"structured_retry_{index}",
+            "type": "function",
+            "function": {
+                "name": block.get("name") or "",
+                "arguments": json.dumps(block.get("input") or {}),
+            },
+        }
+        for index, block in enumerate(tool_use_blocks)
+    ]
+    return [
+        *messages,
+        {"role": "assistant", "content": text_buffer, "tool_calls": calls},
+        *({"role": "tool", "tool_call_id": c["id"], "name": c["function"]["name"], "content": feedback} for c in calls),
+    ]
+
+
 async def call_llm_structured_streaming(
     messages: List[Dict[str, Any]],
     model: Optional[str],
@@ -2317,7 +2362,16 @@ async def call_llm_structured_streaming(
                     if not isinstance(parsed_args, dict):
                         parsed_args = {}
                     tool_name = chunk.data.get("name", "") or ""
-                    tool_use_blocks.append({"name": tool_name, "input": parsed_args})
+                    # Keep the provider's tool_use id: a schema-invalid turn is
+                    # replayed on the parse retry, and a tool_use block can only
+                    # be paired with its tool_result by id.
+                    tool_use_blocks.append(
+                        {
+                            "id": chunk.data.get("id", "") or "",
+                            "name": tool_name,
+                            "input": parsed_args,
+                        }
+                    )
 
                     if first_tool_calls_chunk is None:
                         first_tool_calls_chunk = chunk_count
@@ -2834,8 +2888,15 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
+                retry_messages = _build_structured_retry_messages(
+                    messages,
+                    error_message=error_message,
+                    tool_use_blocks=tool_use_blocks,
+                    text_buffer=text_buffer,
+                    raw_json=accumulated_json,
+                )
                 return await call_llm_structured_streaming(
-                    messages=messages,
+                    messages=retry_messages,
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,

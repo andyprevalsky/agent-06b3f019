@@ -5153,6 +5153,11 @@ def _restore_live_fixture_scenarios(manifests: list[dict]) -> None:
             _restore_amazon_passkey_scenario(manifest)
 
 
+async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
+    """Restore blocking browser fixtures without freezing concurrent task polling."""
+    await asyncio.to_thread(_restore_live_fixture_scenarios, manifests)
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
 }
@@ -5189,9 +5194,12 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         applier = LIVE_FIXTURE_APPLIERS.get(name)
         if applier is None:
             raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
-        manifests.append(applier(ctx))
+        # Credential overlays shell out to seed processes and can take minutes.
+        # Keep that blocking work off the event loop so an unrelated benchmark
+        # lane can still poll its agent and observe completion before its cap.
+        manifests.append(await asyncio.to_thread(applier, ctx))
     if task.name == AMAZON_PASSKEY_TASK_NAME and not _is_simulate_mode():
-        manifests.append(_apply_amazon_passkey_scenario(ctx))
+        manifests.append(await asyncio.to_thread(_apply_amazon_passkey_scenario, ctx))
     return manifests
 
 
@@ -8194,7 +8202,7 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
-        _restore_live_fixture_scenarios(live_fixture_manifests)
+        await _restore_live_fixture_scenarios_async(live_fixture_manifests)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
