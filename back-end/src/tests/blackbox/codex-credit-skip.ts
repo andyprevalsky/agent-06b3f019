@@ -22,8 +22,13 @@ export class CredentialExhaustionSkip extends Error {
 // match bare auth/OAuth-revocation errors (401 / "log out and sign in again"):
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
+// `no credits remaining` / `add credits to continue` are OpenAI's CURRENT
+// out-of-funds wording ("You have no credits remaining. Add credits to continue
+// using the API at .../settings/organization/billing/"). They were missing here,
+// so a genuinely fundless deploy hard-failed instead of taking the loud skip
+// this module exists to provide.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -90,6 +95,22 @@ export function testDetectCreditExhaustion_positive(): void {
   assert(
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
+  );
+  // OpenAI's CURRENT out-of-funds wording, verbatim from the 2026-08-04 deploy
+  // that hard-failed because this exact phrasing was not matched.
+  const liveWording =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    detectCodexCreditExhaustion(liveWording, []) !== null,
+    'OpenAI "no credits remaining" wording must be detected as out of funds'
+  );
+  assert(
+    detectCodexCreditExhaustion('normal output', [
+      { type: 'error', message: liveWording, raw_type: 'turn.failed' },
+    ]) !== null,
+    'OpenAI "no credits remaining" surfaced only in a turn.failed event must be detected'
   );
 }
 
