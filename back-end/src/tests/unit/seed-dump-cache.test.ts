@@ -1,14 +1,40 @@
 #!/usr/bin/env tsx
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
 
-import { cacheRequestTimeoutMs, get, objectKey } from '../../../scripts/seed-dump-cache';
+import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
-const tsxCli = require.resolve('tsx/cli');
+/**
+ * Resolve the tsx CLI used to spawn the script under test.
+ *
+ * npm workspaces normally hoist tsx to the REPO ROOT, but a worktree whose root
+ * install failed (or that installed `back-end` on its own) only has it under
+ * back-end/. Hard-coding the hoisted path made every spawn here run a
+ * non-existent file: the child died instantly with MODULE_NOT_FOUND, so the
+ * deadline test reported the misleading "never reached the hanging endpoint",
+ * and the exit-code test passed VACUOUSLY because a missing module also exits 1.
+ * Probe both locations and fail with the real reason when neither exists.
+ */
+function resolveTsxCli(): string {
+  const candidates = [
+    path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs'),
+    path.resolve(__dirname, '../../../node_modules/tsx/dist/cli.mjs'),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  assert.ok(
+    found !== undefined,
+    `tsx CLI not found. Looked in:\n  ${candidates.join('\n  ')}\n` +
+      'Run `npm ci` in back-end/ (or at the repo root) before this suite.'
+  );
+  return found;
+}
+
+const tsxCli = resolveTsxCli();
 
 function test(name: string, fn: () => void): void {
   try {
@@ -87,64 +113,53 @@ test('CLI fails closed (exit 1) on a missing subcommand argument', () => {
 
 async function testHangingEndpointIsBounded(): Promise<void> {
   let requestObserved = false;
+  let requestWatchdog: NodeJS.Timeout | undefined;
+  let killedByRequestWatchdog = false;
   const server = createServer(() => {
     // Intentionally leave the response open: the client deadline must abort it.
     requestObserved = true;
+    requestWatchdog = setTimeout(() => {
+      killedByRequestWatchdog = true;
+      child.kill('SIGKILL');
+    }, 2_000);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   assert(address && typeof address !== 'string');
 
-  const ownedEnv = [
-    'R2_BUCKET_TRACE_ARCHIVE',
-    'R2_ACCOUNT_ID',
-    'R2_ACCESS_KEY_ID',
-    'R2_SECRET_ACCESS_KEY',
-    'R2_ENDPOINT',
-    'SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS',
-  ] as const;
-  const previousEnv = new Map(ownedEnv.map((key) => [key, process.env[key]]));
-  Object.assign(process.env, {
-    R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
-    R2_ACCOUNT_ID: 'test-account',
-    R2_ACCESS_KEY_ID: 'test-access',
-    R2_SECRET_ACCESS_KEY: 'test-secret',
-    R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
-    SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
-  });
-
-  let harnessDeadlineFired = false;
-  let requestFailed = false;
-  let harnessTimer: NodeJS.Timeout | undefined;
-  const harnessDeadline = new Promise<never>((_, reject) => {
-    harnessTimer = setTimeout(() => {
-      harnessDeadlineFired = true;
-      reject(new Error('R2 request exceeded the harness deadline'));
-    }, 2_000);
-    harnessTimer.unref();
-  });
-  try {
-    await Promise.race([
-      get('tok', `/tmp/seed-dump-cache-hang-${process.pid}.out`),
-      harnessDeadline,
-    ]);
-  } catch {
-    requestFailed = true;
-  } finally {
-    if (harnessTimer !== undefined) clearTimeout(harnessTimer);
-    for (const key of ownedEnv) {
-      const previous = previousEnv.get(key);
-      if (previous === undefined) delete process.env[key];
-      else process.env[key] = previous;
+  const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
+  const child = spawn(
+    process.execPath,
+    [tsxCli, script, 'get', 'tok', '/tmp/seed-dump-cache-hang.out'],
+    {
+      env: {
+        ...process.env,
+        R2_BUCKET_TRACE_ARCHIVE: 'test-bucket',
+        R2_ACCOUNT_ID: 'test-account',
+        R2_ACCESS_KEY_ID: 'test-access',
+        R2_SECRET_ACCESS_KEY: 'test-secret',
+        R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
+        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+      },
+      stdio: 'pipe',
     }
-    server.closeAllConnections();
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-  }
+  );
+  let killedByStartupWatchdog = false;
+  const startupWatchdog = setTimeout(() => {
+    killedByStartupWatchdog = true;
+    child.kill('SIGKILL');
+  }, 30_000);
+  const [code] = (await once(child, 'close')) as [number | null];
+  clearTimeout(startupWatchdog);
+  if (requestWatchdog) clearTimeout(requestWatchdog);
+  server.closeAllConnections();
+  server.close();
 
+  assert.equal(killedByStartupWatchdog, false, 'R2 deadline test CLI did not start');
   assert.equal(requestObserved, true, 'R2 deadline test never reached the hanging endpoint');
-  assert.equal(harnessDeadlineFired, false, 'R2 request exceeded its client-owned deadline');
-  assert.equal(requestFailed, true, 'timed-out cache lookup must fail closed');
+  assert.equal(killedByRequestWatchdog, false, 'R2 request exceeded its client-owned deadline');
+  assert.equal(code, 1, 'timed-out cache lookup must fail closed');
 }
 
 testHangingEndpointIsBounded()

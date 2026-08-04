@@ -25,6 +25,7 @@
  */
 import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -110,39 +111,38 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The documented scaffold command must remain executable. Redirect its
-//    cases directory to a temporary folder so this probe never mutates the
-//    checked-in archive or races the validator above.
+// 4. The documented `new` command must actually dispatch. Exercise a copied
+//    validator in a temporary archive so this structural test never mutates the
+//    checked-in cases.
 if (fs.existsSync(VALIDATOR)) {
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  const probeValidator = path.join(probeRoot, 'scripts/rca_archive.py');
+  const probeCase = path.join(probeRoot, 'docs/rca/cases/2099-01-02-dispatch-probe.md');
+
   try {
-    const probe = execFileSync(
-      'python3',
-      [
-        '-c',
-        [
-          'import pathlib, sys, tempfile',
-          'sys.path.insert(0, "scripts")',
-          'import rca_archive',
-          'with tempfile.TemporaryDirectory(dir=rca_archive.REPO_ROOT / ".context") as directory:',
-          '    rca_archive.CASES_DIR = pathlib.Path(directory)',
-          '    sys.argv = ["rca_archive.py", "new", "command-probe"]',
-          '    raise SystemExit(rca_archive.main())',
-        ].join('\n'),
-      ],
-      {
-        cwd: REPO_ROOT,
-        encoding: 'utf8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
-    if (!probe.includes('command-probe.md')) {
-      failures.push(`rca_archive.py new did not report the scaffolded case path.`);
+    fs.mkdirSync(path.dirname(probeValidator), { recursive: true });
+    fs.mkdirSync(path.dirname(probeCase), { recursive: true });
+    fs.copyFileSync(VALIDATOR, probeValidator);
+
+    const result = execFileSync('python3', [probeValidator, 'new', 'dispatch-probe'], {
+      cwd: probeRoot,
+      encoding: 'utf8',
+      env: { ...process.env, RCA_ARCHIVE_DATE: '2099-01-02' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (!fs.existsSync(probeCase) || !result.includes('2099-01-02-dispatch-probe.md')) {
+      failures.push(
+        `rca_archive.py new did not scaffold the requested case.\n` +
+          `    Command output:\n${result.trim()}`
+      );
     }
   } catch (error) {
     const err = error as { stdout?: string; stderr?: string };
     failures.push(
       `rca_archive.py new failed:\n${(err.stderr ?? '').trim()}\n${(err.stdout ?? '').trim()}`
     );
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
   }
 }
 

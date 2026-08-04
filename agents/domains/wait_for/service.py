@@ -7,12 +7,15 @@ for lightweight LLM condition evaluation.
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from temporalio import activity
 
 from domains.wait_for.config import EVIDENCE_CHAR_BUDGET
 from domains.wait_for.types import ConditionEvaluation
+
+DEPLOY_INTERRUPTED_ERROR_CODE = "DEPLOY_INTERRUPTED"
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -48,6 +51,97 @@ def format_duration(seconds: int) -> str:
             days = int(days)
             return f"{days} day{'s' if days != 1 else ''}"
         return f"{days:.1f} days"
+
+
+def _parse_target(until_timestamp: str) -> Optional[datetime]:
+    """Parse an ISO 8601 wait target the same way the handler does.
+
+    Offset-less (naive) timestamps are treated as UTC, matching
+    ``WaitForManager._timestamp_mode`` so resume math agrees with the original
+    wait exactly.
+    """
+    try:
+        target = datetime.fromisoformat(str(until_timestamp).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if target.tzinfo is None:
+        target = target.replace(tzinfo=timezone.utc)
+    return target
+
+
+def pending_timestamp_wait_to_resume(messages: list[dict[str, Any]]) -> Optional[str]:
+    """Return the ``until_timestamp`` of a timestamp ``wait_for`` that must be resumed.
+
+    When a deploy migrates an agent (workflow replacement), an in-flight
+    ``wait_for`` timestamp sleep is torn down and its tool call is force-closed
+    with the ``DEPLOY_INTERRUPTED`` sentinel. The replacement workflow must
+    resolve that wait deterministically from its ORIGINAL absolute target so the
+    agent picks up where it left off instead of the completion depending on the
+    LLM re-issuing ``wait_for``.
+
+    This pure decision scans the conversation and returns the target of the most
+    recent timestamp wait that is (a) not completed normally and (b) interrupted
+    by deployment or still in progress. It returns the target whether or not it
+    has elapsed: the caller re-arms via ``wait_for`` with ``resume=True``, which
+    sleeps the remaining delta for a future target or completes immediately (no
+    error) for an already-elapsed one. Returns ``None`` only when there is
+    nothing to resume — no timestamp wait, it already completed, or its target
+    is unparseable.
+
+    ``messages`` are conversation rows shaped like ``{"role", "metadata", ...}``
+    where ``metadata`` carries ``waitForMode``, ``untilTimestamp``, ``toolCallId``,
+    ``toolStatus`` and (when interrupted) ``errorCode``.
+    """
+    # Aggregate every timestamp-wait tool-call by its id, in arrival order.
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for msg in messages:
+        if msg.get("role") != "TOOL":
+            continue
+        metadata = msg.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if metadata.get("waitForMode") != "timestamp":
+            continue
+        call_id = metadata.get("toolCallId")
+        if not isinstance(call_id, str) or not call_id:
+            continue
+        group = groups.get(call_id)
+        if group is None:
+            group = {"until": None, "completed": False, "interrupted": False, "seq": len(order)}
+            groups[call_id] = group
+            order.append(call_id)
+
+        until = metadata.get("untilTimestamp")
+        if isinstance(until, str) and until:
+            group["until"] = until
+
+        status = str(metadata.get("toolStatus") or "").upper()
+        error_code = metadata.get("errorCode")
+        if error_code == DEPLOY_INTERRUPTED_ERROR_CODE:
+            group["interrupted"] = True
+        elif status in ("FINISHED", "SUCCESS", "COMPLETED"):
+            # A terminal wait_for that is NOT a deploy interruption is a normal
+            # "Wait complete" — the wait already fired, nothing to resume.
+            group["completed"] = True
+        group["last_status"] = status
+
+    # The most recently active timestamp wait wins.
+    for call_id in reversed(order):
+        group = groups[call_id]
+        if group["completed"]:
+            return None
+        until = group["until"]
+        if not isinstance(until, str) or not until:
+            return None
+        pending = group["interrupted"] or group.get("last_status") == "IN_PROGRESS"
+        if not pending:
+            return None
+        # Only require the target be well-formed; elapsed vs future is the
+        # caller's concern (resume=True completes an elapsed wait immediately).
+        return until if _parse_target(until) is not None else None
+
+    return None
 
 
 # ---------------------------------------------------------------------------
