@@ -60,6 +60,8 @@ const LIVE_CARD_STATUSES = new Set(['OPEN', 'ACTIVE']);
  * merchant settles a charge (verified against `sk_test_`). Callers ask the card itself rather than
  * trusting that a `transaction.cleared` webhook was delivered.
  */
-export function isCardLive(details: CardProviderDetailsResult): boolean {
+export function isCardLive(
+  details: Pick<CardProviderDetailsResult, 'status' | 'balanceCents'>
+): boolean {
   return details.balanceCents > 0 && LIVE_CARD_STATUSES.has(details.status.trim().toUpperCase());
 }

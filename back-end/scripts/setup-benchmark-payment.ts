@@ -3,13 +3,13 @@ import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
 import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-// Keep the Stripe-backed lifecycle fixture on a non-admin identity. Real admin users intentionally
-// bypass Stripe and receive company-funded cards, while these benchmarks assert the ordinary
-// authorize/capture/refund lifecycle.
-const DEFAULT_BENCHMARK_USER_ID = '00000000-0000-4000-8000-000000000106';
+// Keep payment settlement on the normal Stripe-backed path. The shared benchmark identity is a
+// production admin and intentionally receives company-funded cards without a personal Stripe hold.
+const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
@@ -82,11 +82,7 @@ function requireStripeTestKey(): string {
   return key;
 }
 
-/**
- * This command mutates billing, integration, and credit state, so it may only target the
- * disposable identity reserved for the AgentCard lifecycle suite. Accepting an arbitrary
- * --user-id made a typo capable of deleting or replacing a real user's payment state.
- */
+/** Restrict destructive fixture replacement to the disposable lifecycle identity. */
 function assertDedicatedBenchmarkUser(userId: string): void {
   if (userId === DEFAULT_BENCHMARK_USER_ID) return;
   throw new Error(
@@ -96,16 +92,22 @@ function assertDedicatedBenchmarkUser(userId: string): void {
 }
 
 /**
- * Keep the synthetic user solvent without deleting ledger history. The transaction-level
- * advisory lock serializes concurrent setup processes for this fixture, while topping up only
- * the deficit makes repeated runs idempotent even as ToolUsage accumulates.
+ * Keep the synthetic user solvent without deleting ledger history. The advisory lock serializes
+ * concurrent setup processes; topping up only the deficit makes repeated runs idempotent.
  */
 async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
   await prisma.$transaction(
     async (tx) => {
-      await tx.$executeRaw`SELECT pg_advisory_xact_lock(
-        hashtext(${`benchmark-payment-credit:${userId}`})::bigint
-      )`;
+      // Prisma cannot deserialize PostgreSQL's `void` return type, so materialize the lock call
+      // and project a supported scalar instead of selecting pg_advisory_xact_lock directly.
+      await tx.$queryRaw`
+        WITH acquired AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtext(${`benchmark-payment-credit:${userId}`})::bigint
+          )
+        )
+        SELECT 1 AS locked FROM acquired
+      `;
       const now = new Date();
       const [creditTotal, usageTotal] = await Promise.all([
         tx.credit.aggregate({
@@ -141,14 +143,19 @@ async function main(): Promise<void> {
   const prisma = new PrismaClient();
 
   try {
+    const onboarded = {
+      isAnonymous: false,
+      name: 'Rose Labs Benchmark Payer',
+      offWaitlistAt: new Date(),
+      onboardingCompletedAt: new Date(),
+    };
     await prisma.user.upsert({
       where: { userId },
-      update: { isAnonymous: true },
-      create: { userId, isAnonymous: true },
+      update: onboarded,
+      create: { userId, ...onboarded },
     });
 
-    // Non-admin agents are subject to the normal Rose credit gate. Preserve ledger history and
-    // guarantee deterministic headroom for every isolated run.
+    // Non-admin agents are subject to the normal Rose credit gate.
     await ensureBenchmarkCredits(prisma, userId);
 
     const customer = await stripe.customers.create({

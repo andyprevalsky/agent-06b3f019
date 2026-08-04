@@ -32,6 +32,33 @@ function contentRecord(record: Record<string, unknown>): Record<string, unknown>
   throw new TestPaymentError('AgentCard lifecycle response was invalid', 502);
 }
 
+function nestedMcpResultCode(value: unknown, depth = 0): string | undefined {
+  if (depth > 5) return undefined;
+  const record = asRecord(value);
+  if (record === undefined) return undefined;
+  if (typeof record.code === 'string' && record.code.trim() !== '') return record.code.trim();
+  for (const key of ['error', 'toolResult', 'structuredContent']) {
+    const code = nestedMcpResultCode(record[key], depth + 1);
+    if (code !== undefined) return code;
+  }
+  const content = Array.isArray(record.content) ? record.content : [];
+  for (const part of content) {
+    const text = asRecord(part)?.text;
+    if (typeof text !== 'string' || text.trim() === '') continue;
+    try {
+      const code = nestedMcpResultCode(JSON.parse(text), depth + 1);
+      if (code !== undefined) return code;
+    } catch {
+      // Non-JSON MCP text is handled by the normal result parser.
+    }
+  }
+  return undefined;
+}
+
+export function mcpResultCode(result: unknown): string | undefined {
+  return nestedMcpResultCode(result);
+}
+
 export function mcpResultRecord(result: unknown): Record<string, unknown> {
   const envelope = asRecord(result);
   if (envelope === undefined) {
@@ -49,6 +76,26 @@ export function mcpResultRecord(result: unknown): Record<string, unknown> {
   const structured = asRecord(envelope.structuredContent);
   if (structured !== undefined) return structured;
   return contentRecord(envelope);
+}
+
+export function agentCardSummaryFromMcpResult(result: unknown): {
+  status: string;
+  balanceCents: number;
+} {
+  if (mcpResultCode(result)?.toLowerCase() === 'card_closed') {
+    return { status: 'closed', balanceCents: 0 };
+  }
+  const record = mcpResultRecord(result);
+  const card = asRecord(record.card) ?? record;
+  const status = card.status;
+  const balanceCents = card.balanceCents ?? card.balance_cents;
+  if (typeof status !== 'string' || status === '') {
+    throw new TestPaymentError('AgentCard card lifecycle missing status', 502);
+  }
+  if (typeof balanceCents !== 'number' || !Number.isInteger(balanceCents)) {
+    throw new TestPaymentError('AgentCard card lifecycle missing balanceCents', 502);
+  }
+  return { status, balanceCents };
 }
 
 export function mcpResultRows(result: unknown, field: string): Record<string, unknown>[] {

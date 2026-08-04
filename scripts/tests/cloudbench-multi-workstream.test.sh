@@ -1562,7 +1562,8 @@ CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_DATA_PROXY_READY_TIMEOUT=4 \
     autoscaler-must-start --timeout 240 || autoscale_status=$?
 [ "$autoscale_status" -ne 0 ] ||
     fail "a fleet must fail when its mandatory autoscaler cannot attach"
-grep -qF "mandatory autoscaler failed to start" "$TMP_ROOT/controller-autoscaler-required.log" ||
+grep -Eq "mandatory autoscaler (failed to start|startup timed out)" \
+    "$TMP_ROOT/controller-autoscaler-required.log" ||
     fail "mandatory autoscaler startup failure must be explicit"
 rm -f "$FAKE_DIR/fail-metrics-proxy"
 echo "PASS: scenario 2b — a fleet fails closed when mandatory autoscaling cannot attach"

@@ -198,16 +198,36 @@ read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
-if PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" python3 - "${BENCH_TASK_LIST[@]}" <<'PY'
+TASK_GATE_PYTHON="${CLOUDBENCH_TASK_GATE_PYTHON:-}"
+if [ -z "$TASK_GATE_PYTHON" ] && [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
+    TASK_GATE_PYTHON="$REPO_DIR/agents/venv/bin/python"
+fi
+if [ -z "$TASK_GATE_PYTHON" ]; then
+    TASK_GATE_PYTHON="$(command -v python3 || true)"
+fi
+if [ -z "$TASK_GATE_PYTHON" ]; then
+    echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
+    exit 1
+fi
+PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" "$TASK_GATE_PYTHON" - "${BENCH_TASK_LIST[@]}" <<'PY'
 import sys
 
 from benchmarks.benchmark_tasks import selected_tasks_require_gate_type
 
-raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 1)
+raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 10)
 PY
-then
-    TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
-fi
+task_gate_status=$?
+case "$task_gate_status" in
+    0)
+        TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+        ;;
+    10)
+        ;;
+    *)
+        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+        exit "$task_gate_status"
+        ;;
+esac
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
         agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)

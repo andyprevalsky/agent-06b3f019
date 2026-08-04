@@ -1,6 +1,6 @@
 # Admin purchase/credit bypass + descend daily-bench fixes
 
-Status: **active** — design approved in-chat (Andy), payment code pending implementation.
+Status: **completed** — implemented on main in `39e412053`; the sandbox payment lifecycle was subsequently pinned to a non-admin identity and stabilized in PR #918.
 
 ## Origin
 
