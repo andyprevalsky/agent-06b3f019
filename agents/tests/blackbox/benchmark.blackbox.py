@@ -1172,8 +1172,24 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "tx.credit.create" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
-    assert "const callerDatabaseUrl = process.env.DATABASE_URL" in fixture
-    assert "process.env.DATABASE_URL = callerDatabaseUrl" in fixture
+    assert "loadDotenvWithCallerOverrides()" in fixture
+    bootstrap = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "bootstrap.ts"
+    ).read_text()
+    assert "loadDotenvWithCallerOverrides()" in bootstrap
+    dotenv_helper = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "providers"
+        / "loadDotenvWithCallerOverrides.ts"
+    ).read_text()
+    assert "'PORT'" in dotenv_helper
+    assert "'DATABASE_URL'" in dotenv_helper
+    assert "'TEMPORAL_TASK_QUEUE'" in dotenv_helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():

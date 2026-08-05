@@ -1,4 +1,3 @@
-import dotenv from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
@@ -8,22 +7,15 @@ import {
 } from '../src/providers/agentcard/benchmark-float';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
+import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
 
 // Cursor Cloud injects per-key secrets into the process env. A truncated
 // BENCHMARK_AGENTCARD_ORG_ID (seen as 7 chars) would otherwise beat the full
 // value in back-end/.env because dotenv defaults to non-override mode.
-// Isolated benchmark stacks pass DATABASE_URL/DIRECT_URL explicitly; preserve
-// those caller overrides so payment fixtures seed the stack database.
-const callerDatabaseUrl = process.env.DATABASE_URL;
-const callerDirectUrl = process.env.DIRECT_URL;
-dotenv.config({ override: true });
-if (callerDatabaseUrl) {
-  process.env.DATABASE_URL = callerDatabaseUrl;
-}
-if (callerDirectUrl) {
-  process.env.DIRECT_URL = callerDirectUrl;
-}
+// Isolated stacks also inject PORT / DATABASE_URL / TEMPORAL_TASK_QUEUE —
+// preserve those so payment seed and health probes hit the stack DB/port.
+loadDotenvWithCallerOverrides();
 applyResolvedBenchmarkAgentCardIds();
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
