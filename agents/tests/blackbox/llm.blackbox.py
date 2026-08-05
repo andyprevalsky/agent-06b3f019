@@ -271,6 +271,142 @@ def test_convert_context_to_messages_with_declared_tool_call():
     assert "tool_calls" in assistant_msg
 
 
+def test_tool_result_name_pairs_with_the_declared_call_not_the_display_name():
+    """A tool result must be named for the function the ASSISTANT declared.
+
+    metadata["toolName"] is the UI DISPLAY name and legitimately differs from the
+    declared call (spawn_agent renders as spawn_browser_agent). Gemini pairs a
+    tool result to its call by NAME, not by tool_call_id, so emitting the display
+    name made it reject the request with 400 INVALID_ARGUMENT — which took out the
+    only non-Anthropic waterfall route and failed 36/36 execute_loop calls.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {"role": "USER", "text": "order dinner", "timestamp": "2024-01-01T00:00:00Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "delegating",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "9ryenvug"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "browser agent finished",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                "toolCallId": "9ryenvug",
+                # The display name the UI shows — deliberately NOT the declared name.
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    assistant_msg = next(m for m in messages if m["role"] == "assistant")
+    declared = assistant_msg["tool_calls"][0]["function"]["name"]
+
+    assert tool_msg["name"] == declared, (
+        f"tool result name {tool_msg['name']!r} must match the declared call {declared!r}; "
+        "a display-name mismatch is rejected by Gemini as an invalid argument"
+    )
+    assert tool_msg["name"] == "spawn_agent"
+
+
+def test_missing_tool_call_id_fails_closed_instead_of_being_synthesized():
+    """An id-less tool call must RAISE, never get a synthesized id.
+
+    A fresh uuid4 per conversion can never pair with the persisted terminal
+    result, so the real result is silently replaced by a synthetic placeholder —
+    and the id the bookkeeping recorded disagrees with the one actually sent to
+    the model. Failing closed surfaces the malformed row at its source instead.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "calling without an id",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "web_search"}]},
+        },
+    ]
+
+    try:
+        convert_context_to_messages(context, include_system=False, include_assistant=True)
+    except ValueError as error:
+        assert "tool_call_id" in str(error), f"error must name the missing field, got {error!r}"
+        assert "web_search" in str(error), f"error must name the offending tool, got {error!r}"
+    else:
+        raise AssertionError(
+            "an ASSISTANT tool_call with no tool_call_id must raise, not silently "
+            "synthesize an id that can never pair with its persisted result"
+        )
+
+
+def test_null_tool_call_ids_do_not_collide_on_the_string_none():
+    """A present-but-null id must fail closed, not collapse onto the literal "None".
+
+    `dict.get(key, default)` returns None when the key EXISTS and is null, so a
+    `.get(k, uuid4())` default never fires: every such call became the string
+    "None" and they all collided onto one another. Fail closed instead.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "two null-id calls",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": None},
+                    {"tool": "grep", "tool_call_id": None},
+                ]
+            },
+        },
+    ]
+
+    try:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    except ValueError as error:
+        assert "tool_call_id" in str(error), f"error must name the missing field, got {error!r}"
+        return
+    ids = [tc["id"] for tc in next(m for m in messages if m["role"] == "assistant")["tool_calls"]]
+    assert "None" not in ids, f'null ids must never collapse onto the literal "None": {ids}'
+    assert len(set(ids)) == 2, f"each null-id call needs its own unique id, got {ids}"
+
+
+def test_tool_result_omits_name_when_no_declaration_is_known():
+    """An unknown declaration must omit `name` rather than guess the display name.
+
+    A wrong name is worse than no name: it is what the provider rejects.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "declared one call",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "tc-known"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "result for the known call",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {"toolCallId": "tc-known", "toolName": "web_search_display", "toolStatus": "FINISHED"},
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msg = next(m for m in messages if m["role"] == "tool")
+    # Declared name wins over the display name.
+    assert tool_msg["name"] == "web_search"
+
+
 def test_convert_context_to_messages_includes_structured_values_not_schema():
     """Terminal tool results include structured values without repeating raw output_schema."""
     from helpers.llm import convert_context_to_messages
@@ -6857,6 +6993,22 @@ async def run_all_tests():
     )
     r.record(
         "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
+    )
+    r.record(
+        "tool_result_name_pairs_with_declared_call",
+        test_tool_result_name_pairs_with_the_declared_call_not_the_display_name,
+    )
+    r.record(
+        "tool_result_omits_name_when_no_declaration_known",
+        test_tool_result_omits_name_when_no_declaration_is_known,
+    )
+    r.record(
+        "missing_tool_call_id_fails_closed",
+        test_missing_tool_call_id_fails_closed_instead_of_being_synthesized,
+    )
+    r.record(
+        "null_tool_call_ids_do_not_collide",
+        test_null_tool_call_ids_do_not_collide_on_the_string_none,
     )
     r.record(
         "convert_context_to_messages_includes_structured_values_not_schema",

@@ -62,20 +62,12 @@ The global payment-card schema and merchant-label instructions are unchanged.
 This avoids both duplicate validation and teaching agents an evaluator-specific
 string.
 
-## Verification
+## Human feedback
 
-The permanent blackboxes prove the task has no static receipt contract, the
-unresolved card request remains visible in benchmark state without being
-answered, and the receipt's literal values reach the LLM judge that controls
-pass/fail.
-
-The authorized exact live rerun on 2026-08-03 did not reproduce the old false
-negative or reach semantic evaluation. The root sent the browser to DoorDash,
-then Google and Uber Eats, where challenge recovery consumed the 600-second
-task budget. The run failed with no `payment_approval`, and its archived
-`payment_lifecycle` is null. It therefore placed no order and entered no card;
-this is a separate pre-checkout product-navigation failure, not evidence that
-literal receipt validation remains.
+None recorded. A later authorized exact live rerun (2026-08-03) did not
+reproduce the old false negative or reach semantic evaluation — the root routed
+to DoorDash / Uber Eats instead (see case
+`2026-08-04-toast-task-never-named-the-ordering-surface`).
 
 ## Human feedback
 

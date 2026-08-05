@@ -17,10 +17,17 @@ import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
 import { sendSms } from '../smsQueue';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
-import { commitPendingWrites, dispatchToolCall, PendingOp, ToolResult } from './supervisorTools';
+import {
+  commitPendingWrites,
+  dispatchToolCall,
+  PendingOp,
+  type ToolCall,
+  ToolResult,
+} from './supervisorTools';
 import { createLogger } from '../logger';
 import { getComputeToken } from './supervisorComputeToken';
-import { appendOutboundSms } from './sessionStore';
+import { isProductionEnvironment } from '../productionEnvironment';
+import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
 import {
@@ -43,6 +50,44 @@ const log = createLogger('SmsSupervisor');
 // with a short backoff turns "Sorry, something went wrong" into a real answer.
 const SUPERVISOR_LLM_ATTEMPTS = 3;
 const SUPERVISOR_LLM_RETRY_BASE_DELAY_MS = 400;
+
+// How many rounds in a row the model may return zero tool calls before the run
+// gives up on it. One empty round is usually a transient stream hiccup worth a
+// re-ask; a model that has decided the thread needs nothing will keep declining,
+// and nudging it ten times just buys ten LLM calls and ~40s of latency to reach
+// the same place. Observed on the SMS bench: "Chill" burned all ten rounds and
+// still ended in the fallback apology.
+const MAX_CONSECUTIVE_EMPTY_ROUNDS = 2;
+const TOOL_TRACE_RESULT_LIMIT = 2_000;
+
+interface SupervisorToolTraceEntry {
+  sequence: number;
+  round: number;
+  phase: 'dispatch' | 'commit' | 'completion';
+  tool: string;
+  arguments: Record<string, unknown>;
+  success: boolean;
+  result: string;
+  resultTruncated: boolean;
+  error?: string;
+}
+
+/**
+ * Drop user content from a trace entry while keeping it useful as evidence.
+ *
+ * Tool arguments are the model's own words (a search query, a goal) and are the
+ * point of the audit, so they stay. Results are whatever the tool read back on
+ * the user's behalf and never belong in a shipped log.
+ */
+function redactTraceEntry(entry: SupervisorToolTraceEntry): SupervisorToolTraceEntry {
+  return {
+    ...entry,
+    result: `[redacted ${String(entry.result.length)} chars]`,
+    ...(entry.error === undefined
+      ? {}
+      : { error: `[redacted ${String(entry.error.length)} chars]` }),
+  };
+}
 
 // User-facing last-resort line when a run genuinely cannot produce a reply after
 // exhausting retries. Deliberately warmer + actionable than a bare "something
@@ -177,7 +222,8 @@ export async function handleSmsSupervisorMessage(config: {
     durationMs: Date.now() - contextStart,
   });
 
-  // 2. Fetch Claude token for direct Anthropic passthrough
+  // 2. Fetch the user's compute token. Only used off the default Cerebras
+  // route; `callSupervisorLlm` gates it on providerRoute.
   const computeToken = await getComputeToken(userId);
 
   // 3. Build messages for the LLM. The volatile runtime environment is a
@@ -196,11 +242,32 @@ export async function handleSmsSupervisorMessage(config: {
   // 4. LLM call loop. Writes remain deferred behind the sequence gate. SMS
   // delivery is explicit and does not terminate the loop.
   const allToolsExecuted: string[] = [];
+  const toolTrace: SupervisorToolTraceEntry[] = [];
   const pendingWrites: PendingOp[] = [];
   const sentMessages: string[] = [];
   let sideEffectEvidence = emptySmsRunSideEffectEvidence();
   let completionAccepted = false;
+  let consecutiveEmptyRounds = 0;
   let inboundStoredForRun = inboundAlreadyPersisted;
+
+  const recordToolTrace = (
+    round: number,
+    toolCall: ToolCall,
+    result: ToolResult,
+    phase: SupervisorToolTraceEntry['phase']
+  ): void => {
+    toolTrace.push({
+      sequence: toolTrace.length,
+      round,
+      phase,
+      tool: toolCall.tool,
+      arguments: toolCall.arguments,
+      success: result.success,
+      result: result.result.substring(0, TOOL_TRACE_RESULT_LIMIT),
+      resultTruncated: result.result.length > TOOL_TRACE_RESULT_LIMIT,
+      ...(result.error === undefined ? {} : { error: result.error }),
+    });
+  };
 
   const runStillOwnsReply = async (): Promise<boolean> => {
     if (abortSignal?.aborted) return false;
@@ -212,21 +279,34 @@ export async function handleSmsSupervisorMessage(config: {
     return commitGuard === undefined || (await commitGuard());
   };
 
-  const flushPendingWrites = async (): Promise<ToolResult[]> => {
+  const flushPendingWrites = async (round: number): Promise<ToolResult[]> => {
     if (pendingWrites.length === 0) return [];
     return withCommitLock(userId, async () => {
       if (!(await runStillOwnsReply())) {
-        return [
-          {
-            tool: 'pending_writes',
-            success: false,
-            result: '',
-            error: 'A newer inbound SMS superseded this run',
-          },
-        ];
+        const superseded: ToolResult = {
+          tool: 'pending_writes',
+          success: false,
+          result: '',
+          error: 'A newer inbound SMS superseded this run',
+        };
+        recordToolTrace(round, { tool: 'pending_writes', arguments: {} }, superseded, 'commit');
+        return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      return commitPendingWrites(queued, userId);
+      const results = await commitPendingWrites(queued, userId);
+      results.forEach((result, index) => {
+        const operation = queued[index];
+        recordToolTrace(
+          round,
+          {
+            tool: operation?.kind ?? result.tool,
+            arguments: (operation?.args as unknown as Record<string, unknown>) ?? {},
+          },
+          result,
+          'commit'
+        );
+      });
+      return results;
     });
   };
 
@@ -281,7 +361,43 @@ export async function handleSmsSupervisorMessage(config: {
       };
     });
 
+  // Newest thread entry already reflected in `messages`. Starts at run open so
+  // the first poll picks up anything that landed after the context was composed.
+  let threadWatermark = new Date().toISOString();
+
   for (let round = 0; round < environment.MAX_TOOL_ROUNDS; round++) {
+    // Catch the model's view of the thread up to the user's phone. Anything
+    // that landed since the last round — an agent announcing itself, a sibling
+    // finishing — is replayed verbatim, in order, with the role it was stored
+    // under. No wrapper and no commentary: the conversation should read exactly
+    // as it does on the handset.
+    try {
+      const since = await fetchSessionMessagesSince(userId, threadWatermark);
+      if (since.length > 0) {
+        // Advance to the MAXIMUM timestamp, not the last element. Storage order
+        // is insertion order, not sort order; taking the tail would move the
+        // watermark backwards if any entry landed out of order and replay
+        // everything after it next round — the duplicate traffic this poll
+        // exists to prevent.
+        threadWatermark = since.reduce(
+          (latest, entry) => (entry.timestamp > latest ? entry.timestamp : latest),
+          threadWatermark
+        );
+        for (const entry of since) {
+          messages.push({ role: entry.role, content: entry.content });
+        }
+        log.info('[SmsSupervisor] Caught thread up', { userId, round, count: since.length });
+      }
+    } catch (error) {
+      // A failed poll must not kill the run — worst case is the pre-existing
+      // blind spot for this round.
+      log.warn('[SmsSupervisor] Thread catch-up poll failed', {
+        userId,
+        round,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
     log.info('[SmsSupervisor] LLM call round', {
       round,
       messageCount: messages.length,
@@ -360,6 +476,7 @@ export async function handleSmsSupervisorMessage(config: {
       );
       toolResults.push(result);
       allToolsExecuted.push(toolCall.tool);
+      recordToolTrace(round, toolCall, result, 'dispatch');
 
       log.info('[SmsSupervisor] Tool dispatched', {
         round,
@@ -379,7 +496,7 @@ export async function handleSmsSupervisorMessage(config: {
 
     const dispatchFailures = toolResults.filter((result) => !result.success);
     if (sendCalls.length > 0 && dispatchFailures.length === 0) {
-      const commitResults = await flushPendingWrites();
+      const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       toolResults.push(...commitResults);
       for (const committed of commitResults) {
@@ -396,50 +513,66 @@ export async function handleSmsSupervisorMessage(config: {
       } else {
         for (const toolCall of sendCalls) {
           const resolved = resolveSendUserMessage(toolCall.arguments?.message, sideEffectEvidence);
+          let sendResult: ToolResult;
           if (!resolved.ok) {
             log.warn('[SmsSupervisor] Blocked ungrounded send_user_message', {
               round,
               error: resolved.error,
               sideEffectEvidence,
             });
-            toolResults.push({
+            sendResult = {
               tool: 'send_user_message',
               success: false,
               result: '',
               error: resolved.error,
-            });
+            };
           } else {
-            toolResults.push(await deliverUserMessage(resolved.text));
+            sendResult = await deliverUserMessage(resolved.text);
           }
+          toolResults.push(sendResult);
           allToolsExecuted.push(toolCall.tool);
+          recordToolTrace(round, toolCall, sendResult, 'dispatch');
         }
       }
     } else if (sendCalls.length > 0) {
       for (const toolCall of sendCalls) {
-        toolResults.push({
+        const result: ToolResult = {
           tool: toolCall.tool,
           success: false,
           result: '',
           error: 'Not sent because another tool in this response failed',
-        });
+        };
+        toolResults.push(result);
         allToolsExecuted.push(toolCall.tool);
+        recordToolTrace(round, toolCall, result, 'dispatch');
       }
     }
 
     const failedToolResults = toolResults.filter((result) => !result.success);
+    const blockingFailures = failedToolResults;
 
     // attempt_completion sends nothing. It is a valid stop signal only after
     // this run has successfully delivered at least one user message.
     if (completionCall) {
       if (terminalFailureReported) {
         completionAccepted = true;
+        recordToolTrace(
+          round,
+          completionCall,
+          {
+            tool: 'attempt_completion',
+            success: true,
+            result: 'Completion accepted after a terminal tool failure was reported to the user',
+          },
+          'completion'
+        );
         break;
       }
       const purchaseCompletionError = purchaseIntentCompletionError(
         inboundText,
         sideEffectEvidence
       );
-      if (sentMessages.length === 0 || failedToolResults.length > 0 || purchaseCompletionError) {
+      if (sentMessages.length === 0 || blockingFailures.length > 0 || purchaseCompletionError) {
         const completionFailure: ToolResult = {
           tool: 'attempt_completion',
           success: false,
@@ -451,6 +584,7 @@ export async function handleSmsSupervisorMessage(config: {
               : 'Rejected: at least one tool failed'),
         };
         toolResults.push(completionFailure);
+        recordToolTrace(round, completionCall, completionFailure, 'completion');
         log.warn('[SmsSupervisor] attempt_completion rejected', {
           round,
           sentMessageCount: sentMessages.length,
@@ -464,41 +598,60 @@ export async function handleSmsSupervisorMessage(config: {
           .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
           .join('\n');
 
-        messages.push({
-          role: 'assistant',
-          content: JSON.stringify({
-            reasoning: llmResponse.reasoning,
-            tool_calls: llmResponse.tool_calls,
-          }),
-        });
-        messages.push({
-          role: 'user',
-          content: `Tool results:\n${toolResultSummary}\n[attempt_completion] ERROR: ${completionFailure.error}\n\nCorrect the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.`,
-        });
+        messages.push(
+          ...environment.buildToolFeedbackMessages({
+            round,
+            assistantPayload: JSON.stringify({
+              reasoning: llmResponse.reasoning,
+              tool_calls: llmResponse.tool_calls,
+            }),
+            toolResultSummary: `Tool results:\n${toolResultSummary}\n[attempt_completion] ERROR: ${completionFailure.error}`,
+            guidance:
+              'Correct the failed call. Use send_user_message for anything the user should see. attempt_completion accepts no information and can only stop after a successful send_user_message in this run.',
+          })
+        );
         continue;
       }
 
-      const commitResults = await flushPendingWrites();
+      const commitResults = await flushPendingWrites(round);
       const commitFailures = commitResults.filter((result) => !result.success);
       if (commitFailures.length > 0) {
         const failureMessage = buildToolFailureMessage(commitFailures, 'commit');
         const delivery = await deliverUserMessage(failureMessage);
         toolResults.push(...commitResults, delivery);
-        messages.push({
-          role: 'assistant',
-          content: JSON.stringify({
-            reasoning: llmResponse.reasoning,
-            tool_calls: llmResponse.tool_calls,
-          }),
-        });
-        messages.push({
-          role: 'user',
-          content: `Tool results:\n${toolResults.map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`).join('\n')}\n\nThe write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.`,
-        });
+        recordToolTrace(
+          round,
+          completionCall,
+          {
+            tool: 'attempt_completion',
+            success: false,
+            result: '',
+            error: 'Rejected: at least one pending write failed to commit',
+          },
+          'completion'
+        );
+        messages.push(
+          ...environment.buildToolFeedbackMessages({
+            round,
+            assistantPayload: JSON.stringify({
+              reasoning: llmResponse.reasoning,
+              tool_calls: llmResponse.tool_calls,
+            }),
+            toolResultSummary: `Tool results:\n${toolResults.map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`).join('\n')}`,
+            guidance:
+              'The write did not complete. Continue only if it can be corrected; otherwise call attempt_completion because the failure was sent to the user.',
+          })
+        );
         continue;
       }
 
       completionAccepted = true;
+      recordToolTrace(
+        round,
+        completionCall,
+        { tool: 'attempt_completion', success: true, result: 'Completion accepted' },
+        'completion'
+      );
       log.info('[SmsSupervisor] attempt_completion accepted', {
         round,
         sentMessageCount: sentMessages.length,
@@ -507,37 +660,61 @@ export async function handleSmsSupervisorMessage(config: {
       break;
     }
 
-    // No attempt_completion and no tool calls — nudge the LLM
+    // No attempt_completion and no tool calls. Two different situations wear
+    // this shape: a transient empty/garbled stream (retry is right), and a model
+    // that has decided the thread needs nothing more (retrying is pure waste —
+    // it will keep declining). Bound the retries so the second case costs two
+    // LLM calls instead of ten, and make the nudge state the actual requirement
+    // rather than restating the tool menu.
     if (llmResponse.tool_calls.length === 0) {
-      log.warn('[SmsSupervisor] No tool calls and no attempt_completion', { round });
-      messages.push({
-        role: 'assistant',
-        content: JSON.stringify({ reasoning: llmResponse.reasoning, tool_calls: [] }),
+      consecutiveEmptyRounds += 1;
+      log.warn('[SmsSupervisor] No tool calls and no attempt_completion', {
+        round,
+        consecutiveEmptyRounds,
       });
-      messages.push({
-        role: 'user',
-        content:
-          'Use send_user_message for user-visible text. When the work is complete, call argument-free attempt_completion().',
-      });
+      if (consecutiveEmptyRounds >= MAX_CONSECUTIVE_EMPTY_ROUNDS) {
+        log.warn('[SmsSupervisor] Ending run early: model kept returning no tool calls', {
+          round,
+          consecutiveEmptyRounds,
+          sentMessageCount: sentMessages.length,
+        });
+        break;
+      }
+      messages.push(
+        ...environment.buildToolFeedbackMessages({
+          round,
+          assistantPayload: JSON.stringify({
+            reasoning: llmResponse.reasoning,
+            tool_calls: [],
+          }),
+          toolResultSummary: '',
+          guidance:
+            sentMessages.length === 0
+              ? 'That response contained no tool calls, so nothing reached the user. They texted you and are waiting on an answer; staying silent is not an option this run. Call send_user_message once with a short reply in your own words, then attempt_completion.'
+              : 'That response contained no tool calls. This run has already replied, so call argument-free attempt_completion now.',
+        })
+      );
       continue;
     }
+    consecutiveEmptyRounds = 0;
 
     // Append tool results to messages for next LLM call
     const toolResultSummary = toolResults
       .map((r) => `[${r.tool}] ${r.success ? 'OK' : 'ERROR'}: ${r.result || r.error}`)
       .join('\n');
 
-    messages.push({
-      role: 'assistant',
-      content: JSON.stringify({
-        reasoning: llmResponse.reasoning,
-        tool_calls: llmResponse.tool_calls,
-      }),
-    });
-    messages.push({
-      role: 'user',
-      content: `Tool results:\n${toolResultSummary}\n\nIncorporate these results. Use send_user_message for anything the user should see, continue working as needed, and call argument-free attempt_completion only when the run is complete.`,
-    });
+    messages.push(
+      ...environment.buildToolFeedbackMessages({
+        round,
+        assistantPayload: JSON.stringify({
+          reasoning: llmResponse.reasoning,
+          tool_calls: llmResponse.tool_calls,
+        }),
+        toolResultSummary: `Tool results:\n${toolResultSummary}`,
+        guidance:
+          'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.',
+      })
+    );
 
     if (round === environment.MAX_TOOL_ROUNDS - 1) {
       log.warn('[SmsSupervisor] Hit safety cap without attempt_completion');
@@ -550,6 +727,24 @@ export async function handleSmsSupervisorMessage(config: {
 
   const committed = sentMessages.length > 0;
   const responseText = sentMessages.join('\n\n');
+
+  // Stable machine-readable audit consumed by the SMS benchmark runner. Keep
+  // the trace as a JSON string because the dev logger otherwise renders arrays
+  // as "[object Object]". The report can now prove whether web_search happened,
+  // with which arguments, and what result preceded an irreversible action.
+  //
+  // Tool RESULTS carry user content — grep hits over the user's own data, search
+  // snippets, SMS bodies. The logger redacts by key, so a serialized blob slips
+  // straight past it. In production the shape is preserved (every call, its
+  // order, its arguments, whether it succeeded) but result/error bodies are
+  // replaced by their length, which is what the evidence actually needs.
+  log.info('[SmsSupervisor] TOOL_TRACE', {
+    userId,
+    mySeq,
+    toolTrace: JSON.stringify(
+      isProductionEnvironment(process.env) ? toolTrace.map(redactTraceEntry) : toolTrace
+    ),
+  });
 
   log.info('[SmsSupervisor] === END ===', {
     userId,

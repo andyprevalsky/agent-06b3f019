@@ -58,14 +58,15 @@ done
 COVERAGE_RUN_LOCK_FILE="${BACKEND_COVERAGE_RUN_LOCK_FILE:-${BACKEND_COVERAGE_RUN_LOCK_DIR:-$BACKEND_DIR/coverage/.run-lock}}"
 COVERAGE_RUN_LOCK_KEEPER_PID=""
 COV_PORT_LOCK_KEEPER_PID=""
-COVERAGE_PROCESS_GROUPS_FILE="${BACKEND_COVERAGE_PROCESS_GROUPS_FILE:-$(mktemp -t navi-backend-coverage-groups)}"
+# Linux mktemp -t requires ≥3 trailing X's in the template; macOS is looser.
+COVERAGE_PROCESS_GROUPS_FILE="${BACKEND_COVERAGE_PROCESS_GROUPS_FILE:-$(mktemp -t navi-backend-coverage-groups.XXXXXX)}"
 : >"$COVERAGE_PROCESS_GROUPS_FILE"
 
 acquire_process_lock() {
   local lock_file="$1"
   local process_groups_file="${2:-}"
   local status_file lock_keeper_pid lock_status
-  status_file="$(mktemp -t navi-backend-coverage-lock)"
+  status_file="$(mktemp -t navi-backend-coverage-lock.XXXXXX)"
   if [[ -n "$process_groups_file" ]]; then
     python3 "$SCRIPT_DIR/coverage-process-lock.py" \
       "$lock_file" "$status_file" "$$" "$process_groups_file" &

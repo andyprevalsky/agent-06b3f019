@@ -52,11 +52,28 @@ export async function completeBenchmarkAgentCardSetup(
 }
 
 export async function findLatestPurchaseLifecycleByAgentId(agentId: string) {
-  return prisma.purchaseSpend.findFirst({
-    where: { agentId },
+  // Prefer AgentCard-funded rows over later structured-output GMV stubs
+  // (`provider: order_confirmation`). A completion harvest that records the wrong
+  // amount/merchant must not shadow the real payment lifecycle used by benches.
+  const agentCardPurchase = await prisma.purchaseSpend.findFirst({
+    where: {
+      agentId,
+      OR: [
+        { cardId: { not: null } },
+        { stripePaymentIntentId: { not: null } },
+        { walletFunding: { isNot: null } },
+        { provider: 'agentcard' },
+      ],
+    },
     include: { walletFunding: true },
     // `id` is a stable secondary key so ties on createdAt (concurrent inserts)
     // still resolve to a single deterministic row.
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  });
+  if (agentCardPurchase !== null) return agentCardPurchase;
+  return prisma.purchaseSpend.findFirst({
+    where: { agentId },
+    include: { walletFunding: true },
     orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
   });
 }

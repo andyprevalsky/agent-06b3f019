@@ -49,19 +49,17 @@ export async function assertToastPromptMigration(
         } as Prisma.InputJsonObject,
       },
     });
-    // The current Toast contract is produced by the real migration chain, in
-    // order: 20260803204500 removed the static receipt evaluator and installed
-    // the semantic-only contract (but wrote the superseded short prompt), and
-    // 20260804185235 then upgraded the prompt to name the Toast ordering
-    // surface. Both are applied to prod, so the DB truth is their composition.
-    // Applying only the first would assert the superseded short prompt; apply
-    // both to reproduce the current truth and guard the whole chain.
-    const migrationFiles = [
-      'prisma/migrations/20260803204500_simplify_toast_nopa_prompt/migration.sql',
-      'prisma/migrations/20260804185235_toast_nopa_prompt_names_toast_site/migration.sql',
-    ];
-    for (const migrationFile of migrationFiles) {
-      const migration = readFileSync(resolve(migrationFile), 'utf8');
+    // Apply the semantic-receipt simplification, then the Toast-site naming
+    // follow-up — Hub DB truth is the chained migration result, not either
+    // SQL file alone.
+    for (const migrationName of [
+      '20260803204500_simplify_toast_nopa_prompt',
+      '20260804185235_toast_nopa_prompt_names_toast_site',
+    ]) {
+      const migration = readFileSync(
+        resolve(`prisma/migrations/${migrationName}/migration.sql`),
+        'utf8'
+      );
       await prisma.$executeRawUnsafe(migration);
     }
 

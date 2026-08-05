@@ -13,3 +13,16 @@
 export interface ShaderTileProps {
   size: number;
 }
+
+/**
+ * Local (not-yet-uploaded) file held in the launcher until submit.
+ * Upload happens in the main window after IPC — the launcher has no HTTP boundary.
+ *
+ * STATE MACHINE (per file):
+ *   [held] --remove--> (gone)
+ *   [held] --submit--> serialized into QuickQueryAttachment
+ */
+export interface LauncherLocalAttachment {
+  id: string;
+  file: File;
+}

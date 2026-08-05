@@ -358,13 +358,14 @@ def test_logged_command_streams_output_before_child_exit() -> None:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        deadline = time.monotonic() + 1.0
-        while time.monotonic() < deadline:
-            if log_path.exists() and "early output" in log_path.read_text():
-                break
-            time.sleep(0.05)
+        # Reading the wrapper's stdout is the synchronization primitive: if it
+        # buffers until child exit, poll() is already terminal when readline()
+        # returns. This stays deterministic under coverage CPU load without a
+        # one-second scheduling race.
+        early_line = process.stdout.readline() if process.stdout is not None else ""
         streamed_while_running = (
-            log_path.exists()
+            "early output" in early_line
+            and log_path.exists()
             and "early output" in log_path.read_text()
             and process.poll() is None
         )

@@ -15,6 +15,7 @@ import {
   codexSmokeCreditSkipReason,
   testCreditExhaustion_neverOverridesSuccessSentinel,
   testDetectCreditExhaustion_negative,
+  testDetectCreditExhaustion_observedOpenAiWording,
   testDetectCreditExhaustion_positive,
 } from './codex-credit-skip';
 config();
@@ -605,6 +606,10 @@ async function runAll() {
     {
       name: 'smoke-skip -- credit exhaustion detected across output and events',
       fn: async () => testDetectCreditExhaustion_positive(),
+    },
+    {
+      name: 'smoke-skip -- observed OpenAI $0-balance wording is detected',
+      fn: async () => testDetectCreditExhaustion_observedOpenAiWording(),
     },
     {
       name: 'smoke-skip -- healthy run and bare re-auth error are NOT fundless skips',

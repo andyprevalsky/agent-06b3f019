@@ -3,16 +3,29 @@
  *
  * Listens for QUICK_QUERY_EVENT from the global quick-launcher and for
  * OPEN_AGENT_EVENT from desktop deep links, routing both into the chat view.
+ *
+ * STATE MACHINE:
+ *   [idle] --quick-query(text|files)--> [auth_gate]
+ *     [auth_gate] --!canSubmit--> [login_modal] --> stop
+ *     [auth_gate] --ok--> [uploading_attachments?] --> [creating_agent]
+ *       [creating_agent] --ok--> [agent_selected]
+ *       [creating_agent] --err--> [toast_error] --> [idle]
  */
 
 import { useEffect, useRef } from 'react';
 
 import * as analytics from '@/lib/analytics';
 import { OPEN_AGENT_EVENT } from '@/lib/openAgent';
-import { QUICK_QUERY_EVENT, type QuickLauncherPayload } from '@/lib/quickQuery';
+import {
+  QUICK_QUERY_EVENT,
+  fileFromQuickLauncherAttachment,
+  goalFromQuickLauncherPayload,
+  type QuickLauncherPayload,
+} from '@/lib/quickQuery';
 import type { useToast } from '@/hooks/use-toast';
+import type { FilePointer } from '@/lib/api/types';
 
-import { createAgent } from '../api';
+import { createAgent, uploadAttachment } from '../api';
 import type { TerminalView } from '../types';
 
 export interface QuickQueryDeps {
@@ -37,8 +50,11 @@ export function useQuickQuery(deps: QuickQueryDeps) {
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<QuickLauncherPayload>).detail;
-      if (!detail?.query?.trim()) return;
-      void handleQuickQuery(depsRef.current, detail.query.trim());
+      if (!detail) return;
+      const goal = goalFromQuickLauncherPayload(detail);
+      const hasAttachments = (detail.attachments?.length ?? 0) > 0;
+      if (!goal && !hasAttachments) return;
+      void handleQuickQuery(depsRef.current, detail, goal);
     };
     const handleOpenAgent = () => depsRef.current.setCurrentView('agents');
     window.addEventListener(QUICK_QUERY_EVENT, handler as EventListener);
@@ -50,13 +66,14 @@ export function useQuickQuery(deps: QuickQueryDeps) {
   }, []);
 }
 
-async function handleQuickQuery(d: QuickQueryDeps, trimmed: string) {
+async function handleQuickQuery(d: QuickQueryDeps, payload: QuickLauncherPayload, goal: string) {
   d.setCurrentView('agents');
-  d.setMessageInput(trimmed);
+  d.setMessageInput(goal);
   analytics.track('goal_submitted', {
-    goal_length: trimmed.length,
+    goal_length: goal.length,
     model: d.selectedModel,
     source: 'quick_launcher',
+    has_attachments: (payload.attachments?.length ?? 0) > 0,
   });
 
   if (!d.canSubmitGoals) {
@@ -68,11 +85,16 @@ async function handleQuickQuery(d: QuickQueryDeps, trimmed: string) {
   try {
     d.setIsSendingMessage(true);
     d.setIsLoadingNetwork(true);
+
+    const attachments = await uploadQuickLauncherAttachments(payload, d.toast);
+    if (attachments === null) return;
+
     const newAgent = await createAgent({
-      goal: trimmed,
+      goal,
       model: d.selectedModel,
-      source: d.clientSource,
+      source: d.clientSource as 'WEB' | 'MAC_APP',
       price_limit_cents: d.pendingPriceLimitCents,
+      attachments: attachments.length > 0 ? attachments : undefined,
     });
     await d.loadAgents();
     d.setCurrentView('agents');
@@ -92,4 +114,35 @@ async function handleQuickQuery(d: QuickQueryDeps, trimmed: string) {
     d.setIsSendingMessage(false);
     d.setIsLoadingNetwork(false);
   }
+}
+
+/**
+ * Upload launcher file bytes in the main window (auth + /api/upload live here).
+ * Returns [] when there are no attachments, null when an upload failed (toast already shown).
+ */
+async function uploadQuickLauncherAttachments(
+  payload: QuickLauncherPayload,
+  toast: QuickQueryDeps['toast'],
+): Promise<FilePointer[] | null> {
+  const pending = payload.attachments ?? [];
+  if (pending.length === 0) return [];
+
+  const pointers: FilePointer[] = [];
+  for (const attachment of pending) {
+    try {
+      const file = fileFromQuickLauncherAttachment(attachment);
+      pointers.push(await uploadAttachment(file));
+    } catch (error: unknown) {
+      toast({
+        title: 'Attachment upload failed',
+        description:
+          error instanceof Error
+            ? `${attachment.name}: ${error.message}`
+            : `Failed to upload ${attachment.name}`,
+        variant: 'destructive',
+      });
+      return null;
+    }
+  }
+  return pointers;
 }

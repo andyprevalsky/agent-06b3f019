@@ -78,6 +78,10 @@ def _require_frontend_started(
     while time.monotonic() < deadline:
         exit_code = frontend.poll()
         if exit_code is not None:
+            # Reap the dedicated session even when npm/Vite already exited — a
+            # dead group leader can leave orphaned children that keep the port
+            # (or disk) busy for the next supervisor.
+            _stop_frontend(frontend, grace_seconds=0.5)
             tail = ""
             try:
                 tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-15:])
