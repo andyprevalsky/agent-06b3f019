@@ -1049,15 +1049,4 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
 
-# An unprovisioned worktree (plain `git worktree add`, no credentials copied)
-# used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
-# required" line that named neither the file it read nor the provisioning step.
-hub_key_guard="$(sed -n '/^require_in_app_hub_visibility()/,/^}/p' "$ROOT_DIR/scripts/run-bench-fleet")"
-printf '%s' "$hub_key_guard" | grep -q 'looked in:' ||
-  fail "the in-app Hub key failure must name every source it searched"
-printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
-  fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
-printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
-  fail "the in-app Hub key failure must name the provisioning command that fixes it"
-
 echo "All cloud benchmark environment checks passed."

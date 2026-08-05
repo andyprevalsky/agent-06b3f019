@@ -2589,7 +2589,7 @@
     "name": "browser-bing-search-single-result",
     "title": "Browser Bing Search Single Result",
     "description": "Use the browser agent to perform a Bing search and return one result.",
-    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [

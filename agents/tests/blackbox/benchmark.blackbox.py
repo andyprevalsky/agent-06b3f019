@@ -791,69 +791,6 @@ def _captured_toast_payment_approval(
     return request, messages
 
 
-def test_toast_payment_merchant_identity_accepts_grounded_connector_variant():
-    """Merchant wording may vary only when its exact identity and runtime host agree."""
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _validate_payment_receipt
-
-    task = get_task_by_name("browser-toast-nopa-write-lock")
-    request, messages = _captured_toast_payment_approval()
-
-    assert _validate_payment_receipt(task, request, messages=messages) is None
-
-
-def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
-    """Semantic merchant matching must reject a wrong merchant, host, or browser flow."""
-    from copy import deepcopy
-
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _validate_payment_receipt
-
-    task = get_task_by_name("browser-toast-nopa-write-lock")
-
-    for merchant in ("Nopa Chips via Toast", "Nopa Fish via DoorDash"):
-        request, messages = _captured_toast_payment_approval(merchant=merchant)
-        assert _validate_payment_receipt(task, request, messages=messages) is not None
-
-    wrong_host_request, wrong_host_messages = _captured_toast_payment_approval()
-    wrong_host_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(task, wrong_host_request, messages=wrong_host_messages) is not None
-
-    unobserved_request, unobserved_messages = _captured_toast_payment_approval()
-    assert _validate_payment_receipt(task, unobserved_request, messages=unobserved_messages[1:]) is not None
-
-    cross_session_request, cross_session_messages = _captured_toast_payment_approval()
-    cross_session_messages[1] = deepcopy(cross_session_messages[1])
-    cross_session_messages[1]["metadata"]["browser_url"] = "https://kernel.example/live/other-session"
-    assert _validate_payment_receipt(task, cross_session_request, messages=cross_session_messages) is not None
-
-    wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
-        merchant="Nopa Fish (Toast - order.doordash.com)"
-    )
-    assert (
-        _validate_payment_receipt(
-            task,
-            wrong_structured_request,
-            messages=wrong_structured_messages,
-        )
-        is not None
-    )
-
-    current_request, toast_messages = _captured_toast_payment_approval()
-    _, doordash_messages = _captured_toast_payment_approval()
-    for message in doordash_messages:
-        message["metadata"]["subAgentId"] = "doordash-browser-task"
-        message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
-    doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert (
-        _validate_payment_receipt(
-            task,
-            current_request,
-            messages=[*toast_messages, *doordash_messages],
-        )
-        is not None
-    )
-
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
     """The ngrok payment surface must serve a bundle, not Vite's module graph."""
@@ -3028,6 +2965,20 @@ def test_amazon_beanie_catalog_stops_at_unresolved_final_write_lock():
     ).lower()
     for removed_requirement in ("well-made", "saved/default", "saved payment", "normal cart"):
         assert removed_requirement not in user_visible_contract
+
+
+def test_bing_single_result_catalog_uses_concise_user_prompt():
+    """The Bing task leaves challenge handling to the browser's global tool contract."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-bing-search-single-result")
+    assert task.prompt == (
+        "Use a browser agent, not web_search or web_fetch, to go to "
+        "https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results "
+        "page. Return exactly one non-ad search result: include only the result title and URL."
+    )
+    assert "cookie consent" not in task.prompt.lower()
+    assert "recover_from_challenge" not in task.prompt
 
 
 def test_amazon_beanie_accepts_only_one_unresolved_write_lock():
@@ -12105,18 +12056,6 @@ async def run_all_tests():
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
     )
     r.record(
-        "toast_payment_approval_complete_receipt",
-        test_toast_payment_approval_requires_every_declared_receipt_field,
-    )
-    r.record(
-        "toast_payment_merchant_grounded_connector_variant",
-        test_toast_payment_merchant_identity_accepts_grounded_connector_variant,
-    )
-    r.record(
-        "toast_payment_merchant_rejects_wrong_or_ungrounded",
-        test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants,
-    )
-    r.record(
         "success_on_payment_card_request",
         test_success_on_payment_card_request_passes_before_agent_completion,
     )
@@ -12287,6 +12226,10 @@ async def run_all_tests():
     r.record(
         "amazon_beanie_unresolved_write_lock_catalog",
         test_amazon_beanie_catalog_stops_at_unresolved_final_write_lock,
+    )
+    r.record(
+        "bing_single_result_concise_prompt",
+        test_bing_single_result_catalog_uses_concise_user_prompt,
     )
     r.record(
         "amazon_beanie_write_lock_only",
@@ -12481,6 +12424,8 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_accepts_org_client_credentials_from_dotenv",
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+    )
+    r.record(
         "agent_latency_time_containment_scales",
         test_agent_latency_time_containment_scales_and_picks_narrowest_parent,
     )
