@@ -143,7 +143,13 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
    fresh provider/IP candidates (keep auth + opaque). Transplanting
    `cf_clearance` from the blocked exit poisoned Eventim Turnstile probes
    (`47cdeb21-…`: steel_managed `0/2`, kernel_mobile `1/2`, then
-   `No stable browser configuration`).
+   `No stable browser configuration`). After the strip,
+   `a949133c-…` got `kernel_residential_city` + `steel_managed` both `2/2`.
+7. Preloaded promote must not re-run origin restore: the restore script
+   `localStorage.clear()` + rewrite of the challenged capture poisoned the
+   clean winner, so live nav verify failed
+   (`Promoted kernel_residential_city … live tab is still challenged`) despite
+   two clean candidate probes.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests.
 Exact-bench outcome still required before status=`fixed`.

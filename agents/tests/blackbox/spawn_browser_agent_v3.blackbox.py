@@ -5364,7 +5364,8 @@ async def test_rotation_storage_state_survives_provider_switch():
     )
 
 
-async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state():
+async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
+    """Helper still supports restore_cookies=False for non-recovery callers."""
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
 
     captured = {
@@ -5385,7 +5386,6 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
         ],
     }
     context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
-    # Same-host live URL: preloaded restore must not re-navigate (WAF re-trigger).
     page = SimpleNamespace(
         context=context,
         evaluate=AsyncMock(),
@@ -5406,7 +5406,7 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
     page.evaluate.assert_awaited_once()
 
 
-async def test_preloaded_recovery_navigates_with_probe_timeout_when_host_differs():
+async def test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs():
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
 
     context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
@@ -5440,17 +5440,20 @@ def test_recovery_requires_live_tab_verify_before_success():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
+    preloaded_guard = recovery_block.index('storage_state_preloaded')
     restore_offset = recovery_block.index("await _restore_rotation_storage_state(")
     verify_offset = recovery_block.index("await verify_live_page_cleared_challenge(")
     success_offset = recovery_block.index('title="Browser challenge recovered"')
-    assert restore_offset < verify_offset < success_offset
+    assert preloaded_guard < restore_offset < verify_offset < success_offset
     assert "passed candidate probes but the live tab" in recovery_block
     assert "is still challenged" in recovery_block
     assert "configKey" in recovery_block
+    # Preloaded winners must not rewrite challenged origin state onto the clean session.
+    assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():
-    """A replacement session without restored origin state must not run actions."""
+    """A non-preloaded replacement session must restore state without suppress()."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -5475,8 +5478,8 @@ def test_recovery_restore_failure_is_not_suppressed():
     restore_await = restore_awaits[0]
     restore_call = restore_await.value
     restore_keywords = {keyword.arg: keyword.value for keyword in restore_call.keywords}
-    assert "restore_cookies" in restore_keywords
-    assert "storage_state_preloaded" in ast.unparse(restore_keywords["restore_cookies"])
+    assert restore_keywords.get("restore_cookies") is not None
+    assert ast.unparse(restore_keywords["restore_cookies"]) in {"True", "true"}
 
     ancestor = parents.get(restore_await)
     while ancestor is not None:
@@ -13181,7 +13184,8 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert "tool_call_id=recovery_call_id" in recovery_branch
     assert "recovery_call_id = str(uuid_module.uuid4())" not in recovery_branch
     assert "status=MessageStatus.IN_PROGRESS" in recovery_branch
-    assert 'restore_cookies=not bool(config_result.get("storage_state_preloaded"))' in recovery_branch
+    assert 'if not bool(config_result.get("storage_state_preloaded")):' in recovery_branch
+    assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "pop_provider_exit_rejection()" in activity_source
     assert '"provider_exit_rejected": True' in activity_source
@@ -13803,11 +13807,11 @@ async def run_all_tests():
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
-        test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
+        test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite,
     )
     await r.record_async(
         "recovery_preloaded_navigates_when_host_differs",
-        test_preloaded_recovery_navigates_with_probe_timeout_when_host_differs,
+        test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs,
     )
     r.record(
         "recovery_requires_live_tab_verify_before_success",

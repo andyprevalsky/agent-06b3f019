@@ -6436,12 +6436,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_session_metadata,
                             dict(config_result),
                         )
-                        await _restore_rotation_storage_state(
-                            input_page,
-                            recovery_storage_state,
-                            current_url=current_url,
-                            restore_cookies=not bool(config_result.get("storage_state_preloaded")),
-                        )
+                        # Preloaded winners already applied auth/origin state during
+                        # candidate probes. Re-running origin restore clears
+                        # localStorage and rewrites the challenged capture onto the
+                        # clean session (Eventim Cloudflare false-stable after promote).
+                        if not bool(config_result.get("storage_state_preloaded")):
+                            await _restore_rotation_storage_state(
+                                input_page,
+                                recovery_storage_state,
+                                current_url=current_url,
+                                restore_cookies=True,
+                            )
                         # The rotated target came up with a fresh, empty virtual
                         # authenticator. Re-seed the passkeys we already hold so
                         # passkey auth survives the reset exactly like the cookies
