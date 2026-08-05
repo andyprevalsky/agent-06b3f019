@@ -224,6 +224,7 @@ function buildSystemAndUpdateBridge(
   | 'checkAutoFillSettings'
   | 'submitQuickQuery'
   | 'hideQuickQuery'
+  | 'resizeQuickQuery'
   | 'checkForUpdates'
   | 'downloadUpdate'
   | 'restartToUpdate'
@@ -244,6 +245,8 @@ function buildSystemAndUpdateBridge(
     submitQuickQuery: (payload: string | QuickQueryPayload) =>
       ipcRenderer.invoke('quick-query:submit', payload) as Promise<{ success: boolean }>,
     hideQuickQuery: () => ipcRenderer.invoke('quick-query:hide') as Promise<{ success: boolean }>,
+    resizeQuickQuery: (payload) =>
+      ipcRenderer.invoke('quick-query:resize', payload) as Promise<{ success: boolean }>,
     checkForUpdates: () => ipcRenderer.invoke('updates:check') as Promise<{ success: boolean }>,
     downloadUpdate: () => ipcRenderer.invoke('updates:download') as Promise<{ success: boolean }>,
     restartToUpdate: () => ipcRenderer.invoke('updates:install') as Promise<{ success: boolean }>,

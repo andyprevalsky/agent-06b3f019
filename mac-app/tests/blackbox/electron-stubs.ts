@@ -1,6 +1,17 @@
 import { vi } from 'vitest';
 
 /**
+ * Darwin-only native addon. Vitest on Linux still imports messaging barrels that
+ * transitively require it — stub at module scope so hoisting covers those graphs.
+ */
+vi.mock('node-mac-contacts', () => ({
+  authorizationStatus: vi.fn(() => 'authorized'),
+  getAllContacts: vi.fn(() => []),
+  getContactsByName: vi.fn(() => []),
+  requestAccess: vi.fn(async () => true),
+}));
+
+/**
  * Default stubs for Electron modules used by main-process domains.
  *
  * Main-process tests call these before importing the domain under test so the
@@ -48,6 +59,8 @@ export function makeBrowserWindowStub(): Record<string, unknown> {
     getSize: vi.fn(() => [1800, 800]),
     getContentSize: vi.fn(() => [1800, 800]),
     setContentSize: vi.fn(),
+    setMinimumSize: vi.fn(),
+    setMaximumSize: vi.fn(),
     setPosition: vi.fn(),
     setVisibleOnAllWorkspaces: vi.fn(),
     setAlwaysOnTop: vi.fn(),
