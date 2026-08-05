@@ -2,11 +2,12 @@ import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
+import { normalizeQuickQueryPayload } from './quickQueryPayload';
+import type { QuickQueryResizePayload } from '../../shared/types/ipc';
 
-interface QuickQueryPayload {
-  query: string;
-  submittedAt: number;
-}
+const LAUNCHER_WINDOW_WIDTH = 500;
+const LAUNCHER_WINDOW_HEIGHT = 100;
+const LAUNCHER_WINDOW_MAX_HEIGHT = 480;
 
 interface QuickQueryControllerOptions {
   getMainWindow: () => BrowserWindow | null;
@@ -29,12 +30,12 @@ export class QuickQueryController {
 
   createWindow(): BrowserWindow {
     this.quickQueryWindow = new BrowserWindow({
-      width: 500,
-      height: 100,
-      minWidth: 500,
-      maxWidth: 500,
-      minHeight: 100,
-      maxHeight: 100,
+      width: LAUNCHER_WINDOW_WIDTH,
+      height: LAUNCHER_WINDOW_HEIGHT,
+      minWidth: LAUNCHER_WINDOW_WIDTH,
+      maxWidth: LAUNCHER_WINDOW_WIDTH,
+      minHeight: LAUNCHER_WINDOW_HEIGHT,
+      maxHeight: LAUNCHER_WINDOW_MAX_HEIGHT,
       useContentSize: true,
       resizable: false,
       movable: true,
@@ -65,11 +66,13 @@ export class QuickQueryController {
 
   registerIpc(): void {
     ipcMain.handle('quick-query:submit', (_event, payload: unknown) => {
-      const queryPayload = this.normalizePayload(payload);
+      const queryPayload = normalizeQuickQueryPayload(payload);
       this.hideWindow({ focusMain: true });
 
       const mainWindow = this.options.getMainWindow();
-      if (mainWindow !== null && queryPayload.query.trim().length > 0) {
+      const hasContent =
+        queryPayload.query.trim().length > 0 || (queryPayload.attachments?.length ?? 0) > 0;
+      if (mainWindow !== null && hasContent) {
         mainWindow.show();
         mainWindow.focus();
         mainWindow.webContents.send('quick-query:submit', queryPayload);
@@ -81,6 +84,10 @@ export class QuickQueryController {
     ipcMain.handle('quick-query:hide', () => {
       this.hideWindow({ focusMain: true });
       return { success: true };
+    });
+
+    ipcMain.handle('quick-query:resize', (_event, payload: unknown) => {
+      return this.resizeWindow(payload);
     });
 
     ipcMain.handle('shortcut:enable', () => {
@@ -135,7 +142,7 @@ export class QuickQueryController {
   }
 
   private configureWindow(quickWindow: BrowserWindow): void {
-    quickWindow.setContentSize(500, 100);
+    this.applyWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
     quickWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     quickWindow.setAlwaysOnTop(true, 'screen-saver');
     if (process.platform === 'darwin') {
@@ -181,6 +188,7 @@ export class QuickQueryController {
 
     this.blurEnabled = false;
     this.shownAt = Date.now();
+    this.applyWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
     this.positionWindow(quickWindow);
     app.focus({ steal: true });
     quickWindow.show();
@@ -253,7 +261,7 @@ export class QuickQueryController {
         void quickWindow.webContents
           .executeJavaScript(
             `
-          const input = document.querySelector('input');
+          const input = document.querySelector('textarea, input');
           if (input) {
             input.click();
             input.focus();
@@ -291,21 +299,31 @@ export class QuickQueryController {
     this.focusTimeouts = [];
   }
 
-  private normalizePayload(payload: unknown): QuickQueryPayload {
-    if (typeof payload === 'string') {
-      return { query: payload, submittedAt: Date.now() };
+  private resizeWindow(payload: unknown): { success: boolean } {
+    const quickWindow = this.quickQueryWindow;
+    if (quickWindow === null || quickWindow.isDestroyed()) {
+      return { success: false };
     }
 
-    if (payload !== null && typeof payload === 'object') {
-      const maybePayload = payload as Record<string, unknown>;
-      return {
-        query: typeof maybePayload.query === 'string' ? maybePayload.query : '',
-        submittedAt:
-          typeof maybePayload.submittedAt === 'number' ? maybePayload.submittedAt : Date.now(),
-      };
-    }
+    const height =
+      payload !== null &&
+      typeof payload === 'object' &&
+      typeof (payload as QuickQueryResizePayload).height === 'number'
+        ? (payload as QuickQueryResizePayload).height
+        : LAUNCHER_WINDOW_HEIGHT;
 
-    return { query: '', submittedAt: Date.now() };
+    this.applyWindowHeight(quickWindow, height);
+    return { success: true };
+  }
+
+  private applyWindowHeight(quickWindow: BrowserWindow, height: number): void {
+    const clamped = Math.max(
+      LAUNCHER_WINDOW_HEIGHT,
+      Math.min(LAUNCHER_WINDOW_MAX_HEIGHT, Math.round(height))
+    );
+    quickWindow.setMinimumSize(LAUNCHER_WINDOW_WIDTH, LAUNCHER_WINDOW_HEIGHT);
+    quickWindow.setMaximumSize(LAUNCHER_WINDOW_WIDTH, LAUNCHER_WINDOW_MAX_HEIGHT);
+    quickWindow.setContentSize(LAUNCHER_WINDOW_WIDTH, clamped);
   }
 
   private getDevLauncherUrl(): string {

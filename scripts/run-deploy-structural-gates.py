@@ -68,6 +68,10 @@ GATES = (
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
+    Gate(
+        "run-isolated-cloud-kill",
+        ("bash", "scripts/tests/run-isolated-cloud-kill.test.sh"),
+    ),
     Gate("run-seed-exit-code", ("bash", "scripts/tests/run-seed-exit-code.test.sh")),
     Gate(
         "run-public-tunnel-routing",
