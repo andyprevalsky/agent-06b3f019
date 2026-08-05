@@ -33,10 +33,11 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
-from domains.request_payment_card.contracts import (
+from utils.payment_card import (
     MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    build_payment_question,
+    normalize_payment_payload,
 )
-from domains.request_payment_card.handler import build_payment_question, normalize_payment_payload
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,

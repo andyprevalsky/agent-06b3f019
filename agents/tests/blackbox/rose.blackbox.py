@@ -3067,7 +3067,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3158,7 +3158,7 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3735,7 +3735,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3785,7 +3785,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 

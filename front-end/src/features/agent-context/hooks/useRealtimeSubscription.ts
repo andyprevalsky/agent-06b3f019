@@ -257,7 +257,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         if (cancelled) return;
         console.error('Failed to subscribe:', error);
         isReconnectingRef.current = false;
-        scheduleReconnect();
+        if (!cancelled) scheduleReconnect();
       }
     };
 

@@ -2,7 +2,7 @@ import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
-import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import { ensureAgentCardSandboxFloat, ensureBenchmarkOrgCardholder } from '../src/providers/agentcard/benchmark-float';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
 
@@ -209,12 +209,20 @@ async function main(): Promise<void> {
 
     await seedAgentCardConnection(prisma, userId);
 
+    const cardholderId =
+      process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+
     // The org identity now travels in the client-credential token itself
     // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
     const sandboxFloat = await ensureAgentCardSandboxFloat();
     console.log(
       `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
         `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
+    );
+
+    const cardholder = await ensureBenchmarkOrgCardholder(cardholderId);
+    console.log(
+      `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholder.verificationStatus})`
     );
 
     console.log(
