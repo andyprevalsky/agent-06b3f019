@@ -102,6 +102,7 @@ assert_alive() {
     assert_controller_match 1 'python benchmarks/local.py --port 3001'
     assert_controller_match 1 'python /tmp/work/agents/benchmarks/run_benchmark.py --task chat'
     assert_controller_match 1 'python benchmarks/run_eval_suite.py --port 3001'
+    assert_controller_match 1 'python3 /workspace/scripts/run_deploy_stage.py smoke -- true'
 
     assert_controller_match 0 'bash scripts/run-predeploy-local-helper'
     assert_controller_match 0 'bash scripts/run-predeploy-cloud-old'
@@ -110,6 +111,39 @@ assert_alive() {
     assert_controller_match 0 'python benchmarks/run_benchmark.py.bak'
     assert_controller_match 0 'python otherbenchmarks/local.py'
     assert_controller_match 0 'bash notrun-predeploy-local'
+    assert_controller_match 0 'python3 scripts/run_deploy_stage_helper.py'
+
+    # Foreign controller trees (isolated smoke under run-predeploy-local) must
+    # be protected from a shared-stack kill-services sweep.
+    sleep 1000 &
+    fake_controller_pid=$!
+    MATCH_CMD='bash scripts/run-predeploy-local'
+    cmd_of() {
+        if [ "$1" = "$fake_controller_pid" ]; then
+            printf '%s\n' "$MATCH_CMD"
+        else
+            ps -p "$1" -o command= 2>/dev/null | head -1
+        fi
+    }
+    sleep 1000 &
+    fake_child_pid=$!
+    # Re-parent is not possible here; simulate ancestry by temporarily wrapping
+    # benchmark_controller_for_pid via is_protected_benchmark_tree on the
+    # controller PID itself (always protected) and asserting the helper returns
+    # the controller for that PID.
+    found_controller=$(benchmark_controller_for_pid "$fake_controller_pid")
+    if [ "$found_controller" != "$fake_controller_pid" ]; then
+        echo "FAIL: benchmark_controller_for_pid did not identify controller" >&2
+        kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+        exit 1
+    fi
+    if ! is_protected_benchmark_tree "$fake_controller_pid"; then
+        echo "FAIL: controller PID must be a protected benchmark tree" >&2
+        kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+        exit 1
+    fi
+    kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+    wait "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
 )
 
 # A mismatched OS-native birth identity models PID reuse deterministically: the
