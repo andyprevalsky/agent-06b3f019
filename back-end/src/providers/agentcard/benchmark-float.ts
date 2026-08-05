@@ -18,11 +18,93 @@ const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
+const BENCHMARK_CARDHOLDER_EMAIL = 'agentcard-benchmark@roselabs.ai';
 
 export interface AgentCardSandboxFloat {
   balanceCents: number;
   availableCents: number;
   committedCents: number;
+}
+
+export interface AgentCardSandboxCardholder {
+  id: string;
+  email?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function extractCardholders(result: unknown): AgentCardSandboxCardholder[] {
+  const outer = asRecord(result);
+  const structured = asRecord(outer?.structuredContent) ?? outer;
+  const raw = structured?.cardholders;
+  if (!Array.isArray(raw)) {
+    throw new Error('AgentCard list_cardholders returned no cardholders array');
+  }
+  return raw.flatMap((item) => {
+    const record = asRecord(item);
+    const id = optionalString(record?.id);
+    if (id === undefined) return [];
+    return [
+      {
+        id,
+        ...(optionalString(record?.email) !== undefined
+          ? { email: optionalString(record?.email) }
+          : {}),
+      },
+    ];
+  });
+}
+
+function preferredBenchmarkCardholderIds(
+  env: Record<string, string | undefined> = process.env
+): string[] {
+  const preferred = [
+    env.BENCHMARK_AGENTCARD_CARDHOLDER_ID,
+    env.AGENTCARD_CARDHOLDER_ID,
+  ]
+    .map((value) => value?.trim())
+    .filter((value): value is string => value !== undefined && value !== '');
+  return [...new Set(preferred)];
+}
+
+/**
+ * Resolve a sandbox org cardholder that actually exists for the OAuth client.
+ *
+ * Stale `BENCHMARK_AGENTCARD_CARDHOLDER_ID` values previously seeded Integration
+ * rows that made every `create_card` return "Cardholder not found", which the
+ * purchase path then rewrote as a funding-in-progress retry loop.
+ */
+export async function resolveBenchmarkCardholderId(
+  preferredIds: string[] = preferredBenchmarkCardholderIds(),
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<string> {
+  const cardholders = extractCardholders(await callOrgTool('list_cardholders', {}));
+  if (cardholders.length === 0) {
+    throw new Error(
+      'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
+        `${AGENTCARD_DASHBOARD_URL} (auth uses AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET).`
+    );
+  }
+
+  for (const preferredId of preferredIds) {
+    if (cardholders.some((cardholder) => cardholder.id === preferredId)) {
+      return preferredId;
+    }
+  }
+
+  const byEmail = cardholders.find(
+    (cardholder) => cardholder.email?.toLowerCase() === BENCHMARK_CARDHOLDER_EMAIL
+  );
+  if (byEmail !== undefined) return byEmail.id;
+  return cardholders[0].id;
 }
 
 function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {

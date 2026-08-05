@@ -342,9 +342,21 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const status = optionalString(record, ['status'])?.toLowerCase();
   const hasExplicitError = (result as McpResult).isError === true || status === 'error';
   if (hasExplicitError) {
-    throw new AgentCardProviderError(
-      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed')
-    );
+    const message =
+      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed');
+    // Deterministic pre-commit rejections must keep a typed safe code. Otherwise
+    // classifyFundingResumeFailure treats providerCallStarted + untyped errors as
+    // ambiguous funding and loops forever on "Cardholder not found".
+    if (/\bcardholder not found\b/i.test(message)) {
+      throw new AgentCardProviderError(
+        message,
+        409,
+        undefined,
+        'agentcard_cardholder_not_found',
+        { agentcardStatus: 'cardholder_not_found', agentcardResult: record }
+      );
+    }
+    throw new AgentCardProviderError(message);
   }
 }
 

@@ -2,7 +2,10 @@ import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
-import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  resolveBenchmarkCardholderId,
+} from '../src/providers/agentcard/benchmark-float';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
 
@@ -11,11 +14,19 @@ const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 // intentionally non-admin so benchmarks exercise Stripe hold, capture, and refund behavior.
 const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
-const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
-async function seedAgentCardConnection(prisma: PrismaClient, userId: string): Promise<void> {
-  const cardholderId =
-    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+async function seedAgentCardConnection(
+  prisma: PrismaClient,
+  userId: string,
+  cardholderId: string
+): Promise<void> {
+  const configured = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
+  if (configured !== undefined && configured !== '' && configured !== cardholderId) {
+    console.warn(
+      `BENCHMARK_AGENTCARD_CARDHOLDER_ID=${configured} is not present in the sandbox org; ` +
+        `seeding live cardholder ${cardholderId} instead`
+    );
+  }
   const config = { orgManaged: true, cardholderId };
   await prisma.integration.upsert({
     where: { userId_name: { userId, name: 'agentcard' } },
@@ -207,8 +218,6 @@ async function main(): Promise<void> {
       },
     });
 
-    await seedAgentCardConnection(prisma, userId);
-
     // The org identity now travels in the client-credential token itself
     // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
     const sandboxFloat = await ensureAgentCardSandboxFloat();
@@ -216,6 +225,11 @@ async function main(): Promise<void> {
       `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
         `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
     );
+
+    // Verify cardholder against list_cardholders so a stale BENCHMARK_* override cannot
+    // seed Integration with an id the org MCP will reject as "Cardholder not found".
+    const cardholderId = await resolveBenchmarkCardholderId();
+    await seedAgentCardConnection(prisma, userId, cardholderId);
 
     console.log(
       `Seeded Stripe, Rose credit, and AgentCard payment fixtures for benchmark user ${userId}`

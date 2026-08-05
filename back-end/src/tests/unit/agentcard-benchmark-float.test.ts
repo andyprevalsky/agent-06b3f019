@@ -2,7 +2,10 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  resolveBenchmarkCardholderId,
+} from '../../providers/agentcard/benchmark-float';
 
 function walletResult(cents: {
   balance: number;
@@ -20,6 +23,18 @@ function walletResult(cents: {
         available_cents: cents.available,
         stablecoin: 'usdc',
       },
+    },
+  };
+}
+
+function cardholdersResult(
+  cardholders: Array<{ id: string; email?: string }>
+): unknown {
+  return {
+    structuredContent: {
+      message: `${cardholders.length} cardholder(s); showing ${cardholders.length}.`,
+      cardholders,
+      total: cardholders.length,
     },
   };
 }
@@ -108,6 +123,43 @@ async function main(): Promise<void> {
       assert.match(message, /sandbox/i);
       return true;
     });
+  }
+
+  // Stale BENCHMARK_AGENTCARD_CARDHOLDER_ID must not win over a live AGENTCARD_CARDHOLDER_ID.
+  {
+    const calls: string[] = [];
+    const callOrgTool = async (name: string) => {
+      calls.push(name);
+      return cardholdersResult([
+        { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
+        { id: 'ch-other', email: 'a@roselabs.ai' },
+      ]);
+    };
+    const resolved = await resolveBenchmarkCardholderId(
+      ['ch-stale-missing', 'ch-live'],
+      callOrgTool
+    );
+    assert.equal(resolved, 'ch-live');
+    assert.deepEqual(calls, ['list_cardholders']);
+  }
+
+  // When every configured id is missing, fall back to the benchmark email cardholder.
+  {
+    const resolved = await resolveBenchmarkCardholderId(['ch-stale'], async () =>
+      cardholdersResult([
+        { id: 'ch-live', email: 'agentcard-benchmark@roselabs.ai' },
+        { id: 'ch-other', email: 'a@roselabs.ai' },
+      ])
+    );
+    assert.equal(resolved, 'ch-live');
+  }
+
+  // An empty org fails closed with an actionable message.
+  {
+    await assert.rejects(
+      resolveBenchmarkCardholderId(['ch-stale'], async () => cardholdersResult([])),
+      /no cardholders/i
+    );
   }
 
   console.log('AgentCard benchmark sandbox float tests passed');
