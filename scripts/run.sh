@@ -313,6 +313,19 @@ run_kill_stale_same_task_queue_workers "$PWD" "$TEMPORAL_TASK_QUEUE" "$BACKEND_A
 
 is_current_process_family() {
     local pid=$1
+    local walk
+
+    # Walk our ancestors: the Cursor/agent wrapper that launched
+    # `bash scripts/run.sh --benchmark ...` also matches pgrep -f for that
+    # pattern. Killing it would SIGTERM this run.sh (observed as exit -15 /
+    # "Killing stale benchmark process ... PID <parent>" right after Ports:).
+    walk=$$
+    while [ -n "$walk" ] && [ "$walk" != "0" ]; do
+        [ "$walk" = "$pid" ] && return 0
+        walk=$(ps -p "$walk" -o ppid= 2>/dev/null | tr -d ' ') || break
+    done
+
+    # Walk the candidate's ancestors in case a child of this run matched.
     while [ -n "$pid" ] && [ "$pid" != "0" ]; do
         [ "$pid" = "$$" ] && return 0
         pid=$(ps -p "$pid" -o ppid= 2>/dev/null | tr -d ' ') || return 1
