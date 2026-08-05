@@ -7301,6 +7301,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     original_prime = local_bench._prime_local_seed_dump_from_shared_stack
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
     prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
+    prior_cf_attempts = os.environ.pop("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", None)
+    prior_cf_timeout = os.environ.pop("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", None)
     os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
     try:
         local_bench.subprocess.Popen = fake_popen
@@ -7328,6 +7330,9 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
+            assert captured["env"]["CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"] == "1"
+            assert captured["env"]["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] == "10"
+            assert "TEMPORAL_TASK_QUEUE" not in captured["env"]
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen
@@ -7339,6 +7344,14 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ.pop("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL", None)
         else:
             os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
+        if prior_cf_attempts is None:
+            os.environ.pop("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", None)
+        else:
+            os.environ["CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"] = prior_cf_attempts
+        if prior_cf_timeout is None:
+            os.environ.pop("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", None)
+        else:
+            os.environ["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] = prior_cf_timeout
 
 
 def test_local_cold_seed_bootstrap_extends_service_start_timeout():

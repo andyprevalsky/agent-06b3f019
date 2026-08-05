@@ -12454,6 +12454,15 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     approval_calls = []
     start_calls = []
 
+    purchase_notification = {
+        "trigger_type": "purchase",
+        "service": {"name": "Blick Art Materials", "domain": "dickblick.com"},
+        "purchase": {
+            "items": [{"title": "R&F Drawing Oil Stick", "price": "$12.00"}],
+            "totals": {"total": "$12.00"},
+            "payment_method": "Visa ending in 4242",
+        },
+    }
     first = _FakeActivityHandle(
         {
             "status": "awaiting_write_approval",
@@ -12471,6 +12480,7 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
                 "text": "Checkout Now",
                 "attrs": {"name": "placeOrder"},
             },
+            "write_lock_notification": purchase_notification,
             "write_lock_approvals": {},
             "action_history": [
                 {
@@ -12556,6 +12566,8 @@ async def test_manager_write_approval_after_hour_wait_resumes_and_finishes():
     assert approval_calls[0]["question"] == "Approve checkout?"
     assert approval_calls[0]["metadata"]["url"] == "https://www.dickblick.com/cart/"
     assert len(start_calls) == 2
+    # Write-lock approval alone is not GMV — paid-order capture requires
+    # structured_response with amount + confirmation id (backend path).
 
     resumed_args = start_calls[1][1]["args"]
     assert resumed_args[4] == "task-1"

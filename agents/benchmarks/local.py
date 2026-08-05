@@ -1009,12 +1009,24 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
+        # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
+        # parent shell; if that leaks into an isolated run, every local smoke /
+        # AgentCard stack collapses onto one shared queue (and often the wrong
+        # backend). Force run.sh to derive the queue from this stack's workspace.
+        env.pop("TEMPORAL_TASK_QUEUE", None)
         # Isolated stacks can start in the same second and share a long
         # workspace-name prefix. Stable ngrok domains truncate that prefix,
         # which can collapse distinct runs onto one public endpoint. Give each
         # isolated stack a provider-assigned quick tunnel instead; the shared
         # dev stack keeps its stable ngrok domain.
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "1"
+        # trycloudflare quick tunnels often never route from cloud VMs (edge
+        # probe stays at curl status 000 for the full timeout). Fail the CF
+        # provider after one short attempt so the existing ngrok fallback can
+        # take over without burning ~3 minutes of stack startup.
+        env.setdefault("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", "1")
+        env.setdefault("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", "10")
         # Every isolated run starts with an empty per-run database. Opt into
         # run.sh's schema/day-keyed R2 seed cache so startup restores the same
         # prod snapshot in seconds instead of row-syncing tens of thousands of

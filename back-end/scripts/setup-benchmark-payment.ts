@@ -10,6 +10,7 @@ import { isAdminUser } from '../src/utils/adminAccess';
 import {
   ensureAgentCardSandboxFloat,
   ensureBenchmarkOrgCardholder,
+  resolveBenchmarkCardholderId,
 } from '../src/providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
 import {
@@ -24,7 +25,6 @@ import {
   assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
   assertUserMatchesMode,
-  DEFAULT_SANDBOX_CARDHOLDER_ID,
   isStripeResourceMissing,
   requireLiveCardholderId,
   requireStripeLiveKey,
@@ -46,10 +46,6 @@ const LIVE_CARD_SETUP_RETURN_URL = 'https://roselabs.ai/?benchmark-payment-card-
  */
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 
-function resolveSandboxCardholderId(): string {
-  return process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim() || DEFAULT_SANDBOX_CARDHOLDER_ID;
-}
-
 /**
  * The org-managed AgentCard integration the mint path reads (`getOrgManagedCardholderId`). Without
  * it a `company_flow` mint throws 409 `agentcard_setup_required` instead of issuing a card. The
@@ -60,6 +56,13 @@ async function seedAgentCardConnection(
   userId: string,
   cardholderId: string
 ): Promise<void> {
+  const configured = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim();
+  if (configured !== undefined && configured !== '' && configured !== cardholderId) {
+    console.warn(
+      `BENCHMARK_AGENTCARD_CARDHOLDER_ID=${configured} is not present in the sandbox org; ` +
+        `seeding live cardholder ${cardholderId} instead`
+    );
+  }
   const config = { orgManaged: true, cardholderId };
   await prisma.integration.upsert({
     where: { userId_name: { userId, name: 'agentcard' } },
@@ -153,7 +156,7 @@ function assertDedicatedBenchmarkUser(userId: string): void {
 }
 
 /**
- * The lifecycle benchmarks assert a personal Stripe hold, which only the non-admin funding path
+ * The lifecycle benchmarks assert a [REDACTED] Stripe hold, which only the non-admin funding path
  * produces. Seeding an admin here would silently re-route every benchmark purchase to
  * `issueAdminCompanyCard` and make those assertions unsatisfiable, so fail loudly instead.
  */
@@ -396,7 +399,10 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
   await prisma.purchaseSpend.deleteMany({
     where: { userId, merchant: 'Rose Labs Test Payment' },
   });
-  const cardholderId = resolveSandboxCardholderId();
+
+  // Verify cardholder against list_cardholders so a stale BENCHMARK_* override cannot
+  // seed Integration with an id the org MCP will reject as "Cardholder not found".
+  const cardholderId = await resolveBenchmarkCardholderId();
   await seedAgentCardConnection(prisma, userId, cardholderId);
 
   // The org identity now travels in the client-credential token itself

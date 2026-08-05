@@ -132,16 +132,17 @@ fi
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
 # specs import the frontend's @playwright/test singleton, making every suite
 # fail during discovery with a misleading duplicate-version error.
-# npm may hoist/dedupe @playwright/test to the workspace root, which removes the
-# frontend-local .bin symlink. Fall back to the CLI declared by the exact
-# @playwright/test the specs resolve, invoked via node. Resolving the package's
-# own bin entry (rather than any .bin symlink) keeps the original guarantee: a
-# shared .bin is flat and unnamespaced, so a same-named binary from another
-# package can win there and silently run a different Playwright than the one
-# the specs import.
-PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
+# Prefer frontend-local .bin, then the CLI declared by the exact @playwright/test
+# the specs resolve (via node), then a repo-root hoist as last resort. Resolving
+# the package's own bin entry keeps the original guarantee: a shared .bin is
+# flat and unnamespaced, so a same-named binary from another package can win
+# there and silently run a different Playwright than the one the specs import.
+PLAYWRIGHT_BIN=""
+if [[ -x "$FRONTEND_DIR/node_modules/.bin/playwright" ]]; then
+  PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
+fi
 PLAYWRIGHT_CLI=""
-if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
+if [[ -z "$PLAYWRIGHT_BIN" ]]; then
   PLAYWRIGHT_CLI="$(cd "$FRONTEND_DIR" && node -e "
     const path = require('path');
     const pkgPath = require.resolve('@playwright/test/package.json');
@@ -151,8 +152,11 @@ if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
     console.log(path.join(path.dirname(pkgPath), rel));
   " 2>/dev/null || true)"
 fi
-if [[ ! -x "$PLAYWRIGHT_BIN" && ! -f "$PLAYWRIGHT_CLI" ]]; then
-  echo "FAIL: Frontend Playwright is not installed (resolved from $FRONTEND_DIR)" >&2
+if [[ -z "$PLAYWRIGHT_BIN" && ! -f "$PLAYWRIGHT_CLI" && -x "$REPO_DIR/node_modules/.bin/playwright" ]]; then
+  PLAYWRIGHT_BIN="$REPO_DIR/node_modules/.bin/playwright"
+fi
+if [[ -z "$PLAYWRIGHT_BIN" && ! -f "$PLAYWRIGHT_CLI" ]]; then
+  echo "FAIL: Frontend Playwright is not installed (checked front-end/, @playwright/test package, and repo-root .bin)" >&2
   exit 1
 fi
 

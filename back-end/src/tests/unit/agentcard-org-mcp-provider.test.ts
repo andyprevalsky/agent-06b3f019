@@ -526,6 +526,9 @@ async function main(): Promise<void> {
       error instanceof Error && error.message === 'AgentCard Organization MCP failed'
   );
 
+  // "Cardholder not found" structured errors are covered with thrown MCP errors below
+  // (agentcard_cardholder_not_found) so the funding-resume classifier stays fail-closed.
+
   const proseKycCalls: string[] = [];
   const proseKycProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
     proseKycCalls.push(name);
@@ -610,8 +613,9 @@ async function main(): Promise<void> {
 
   await assertTransferVisibilityPollSharesOneRetryBudget();
 
-  // A missing cardholder must surface as setup-required (not a raw MCP failure) whether the
-  // organization MCP throws or returns an isError result.
+  // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
+  // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
+  // Covers both thrown MCP errors and isError structured results.
   const missingCardholderProvider = new AgentCardOrgMcpProvider(
     'cardholder-missing',
     async (name) => {
@@ -631,7 +635,8 @@ async function main(): Promise<void> {
     (error: unknown) =>
       error instanceof Error &&
       'code' in error &&
-      error.code === 'agentcard_setup_required' &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
       'details' in error &&
       error.details.agentcardStatus === 'cardholder_not_found'
   );
@@ -658,7 +663,8 @@ async function main(): Promise<void> {
     (error: unknown) =>
       error instanceof Error &&
       'code' in error &&
-      error.code === 'agentcard_setup_required' &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
       'details' in error &&
       error.details.agentcardStatus === 'cardholder_not_found'
   );

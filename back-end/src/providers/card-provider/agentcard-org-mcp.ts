@@ -230,14 +230,12 @@ function isCardholderNotFoundMessage(message: string): boolean {
 
 function throwIfCardholderNotFound(message: string): void {
   if (!isCardholderNotFoundMessage(message)) return;
-  throw new AgentCardProviderError(
-    'AgentCard organization cardholder does not exist in the configured OAuth org; ' +
-      'verify BENCHMARK_AGENTCARD_CARDHOLDER_ID matches AGENTCARD_ORG_OAUTH_CLIENT credentials',
-    409,
-    undefined,
-    'agentcard_setup_required',
-    { agentcardStatus: 'cardholder_not_found' }
-  );
+  // Deterministic pre-commit rejection: keep the typed safe code so
+  // classifyFundingResumeFailure does not rewrite providerCallStarted + untyped
+  // errors as ambiguous funding and loop forever on "Cardholder not found".
+  throw new AgentCardProviderError(message, 409, undefined, 'agentcard_cardholder_not_found', {
+    agentcardStatus: 'cardholder_not_found',
+  });
 }
 
 function providerErrorFromUnknown(error: unknown): AgentCardProviderError {
