@@ -1081,13 +1081,20 @@ ensure_ngrok_domain_reserved() {
                 exit 1
             }
         fi
+        # ngrok CLI may prefix JSON with an HTTP status line (e.g. "200 OK");
+        # locate the first JSON object before parsing.
         page_parse=$(printf '%s\n' "$page_body" | python3 -c '
 import json
 import sys
 
 requested_domain = sys.argv[1]
+raw = sys.stdin.read()
+brace = raw.find("{")
+if brace < 0:
+    print("malformed:no JSON object in reserved-domains listing", file=sys.stderr)
+    sys.exit(2)
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(raw[brace:])
 except json.JSONDecodeError as exc:
     print(f"malformed:{exc}", file=sys.stderr)
     sys.exit(2)
