@@ -6688,6 +6688,13 @@ def _run_ngrok_reservation(stub_body: str, **env: str) -> subprocess.CompletedPr
         stub.write_text(f"#!/usr/bin/env bash\n{stub_body}\n")
         stub.chmod(0o755)
 
+        # Callers that omit NGROK_API_KEY mean "absent key" — not "inherit the
+        # host secret". Cloud/Cursor inject NGROK_API_KEY into the process env,
+        # which otherwise makes test_ngrok_domain_reservation_skips_without_an_api_key
+        # call the stub and fail even though the production skip path is fine.
+        if "NGROK_API_KEY" not in env:
+            env = {**env, "NGROK_API_KEY": ""}
+
         exports = "".join(f"export {key}={value!r}\n" for key, value in env.items())
         command = (
             "set -eo pipefail\n"
