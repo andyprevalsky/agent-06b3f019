@@ -25,8 +25,8 @@ tags:
 sources:
   - agent ee191cc8-cecf-4ad2-bebf-08e960be0ae7
   - commit d0fd1b5bc5ef50d4aa63fe3724ee0b04c1b5cd7d
-repro: none-recorded
-status: mitigated
+repro: scripts/run-bench --local browser-1015-eventim-request-card
+status: fixed
 ---
 
 ## Problem
