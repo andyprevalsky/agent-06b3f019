@@ -32,7 +32,20 @@ PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv
 PAYMENT_CARD_ENTRY_RULE = (
     "Use request_payment_card only if checkout requires you to enter new card details. "
     "If a valid saved payment method is already selected and no card entry is required, "
-    "do not call request_payment_card; continue with that saved method."
+    "do not call request_payment_card; continue with that saved method. "
+    "When Payment Details / card-entry markers are visible — including empty Stripe "
+    "Element shells with no mounted card-number fields — call request_payment_card "
+    "immediately with the itemized receipt; do not keep debugging iframe mounts."
+)
+
+PAYMENT_CARD_EMPTY_SHELL_NUDGE = (
+    "CHECKOUT CARD ENTRY REQUIRED: The page already shows Payment Details / card-entry "
+    "markers (including empty Stripe Element shells). Do NOT keep debugging iframe "
+    "mounts or waiting for card number fields to become visible. Extract the itemized "
+    "receipt from Order Details now and call request_payment_card with merchant as "
+    "'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') "
+    "or 'Business via Platform' (e.g. '1015 Folsom via Eventim'). Empty Stripe shells "
+    "still count as needing a payment card."
 )
 
 
@@ -938,6 +951,38 @@ def page_requires_new_card_entry(
             chunks.append(str(value).lower())
     blob = "\n".join(chunks)
     return any(marker in blob for marker in _CARD_ENTRY_PAGE_MARKERS)
+
+
+def payment_card_already_requested(action_entries: Optional[List[Dict[str, Any]]]) -> bool:
+    """True when the browser action history already includes request_payment_card."""
+    for entry in action_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        action = entry.get("action") or entry.get("name") or entry.get("tool") or ""
+        if str(action).startswith("request_payment_card"):
+            return True
+    return False
+
+
+def build_payment_card_request_nudge(
+    *,
+    current_url: str,
+    browser_state: Optional[Dict[str, Any]] = None,
+    action_entries: Optional[List[Dict[str, Any]]] = None,
+    payment_card_ready: bool = False,
+) -> Optional[str]:
+    """Mid-loop nudge so empty Payment Details shells trigger request_payment_card.
+
+    Bench13 (`e16297f6-…`) reached Eventim checkout with Payment Details visible
+    and empty Stripe mounts, then burned the 1200s budget debugging iframes
+    instead of calling request_payment_card (bench12's passing path once merchant
+    identity is correct).
+    """
+    if payment_card_ready or payment_card_already_requested(action_entries):
+        return None
+    if not page_requires_new_card_entry(current_url=current_url, browser_state=browser_state):
+        return None
+    return PAYMENT_CARD_EMPTY_SHELL_NUDGE
 
 
 def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) -> str:

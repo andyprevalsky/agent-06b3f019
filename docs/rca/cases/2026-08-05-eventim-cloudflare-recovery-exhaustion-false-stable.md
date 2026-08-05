@@ -199,6 +199,12 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     parentheticals (no `Platform - host`) before creating payment_approval,
     and teach `Business (Platform - host)` / `Business via Platform` on every
     LLM-facing surface (tool schema, payment prompt, completion-block error).
+18. `e16297f6-…` reached the same Payment Details shells with empty Stripe
+    mounts (`stripeMounts: 0`), verifier scored 0.5 and re-spawned browser
+    agents to "make card fields visible", burning 1200s without ever calling
+    `request_payment_card`. Mid-loop nudge when `page_requires_new_card_entry`
+    and no card requested yet: extract receipt and call `request_payment_card`
+    immediately — do not debug iframe mounts.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +

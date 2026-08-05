@@ -8067,6 +8067,50 @@ def test_page_requires_new_card_entry_detects_eventim_payment_shells():
     )
 
 
+def test_payment_card_request_nudge_fires_on_empty_eventim_shells():
+    """Bench13: mid-loop nudge must push request_payment_card before Stripe mounts."""
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        PAYMENT_CARD_EMPTY_SHELL_NUDGE,
+        PAYMENT_CARD_ENTRY_RULE,
+        build_payment_card_request_nudge,
+    )
+
+    checkout_state = {
+        "title": "Eventim Checkout",
+        "dom_tree": (
+            "Payment Details Enter your payment details to complete your purchase. "
+            "Order Details General Admission Total Due 31.13"
+        ),
+    }
+    nudge = build_payment_card_request_nudge(
+        current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+        browser_state=checkout_state,
+        action_entries=[{"action": "evaluate"}],
+    )
+    assert nudge == PAYMENT_CARD_EMPTY_SHELL_NUDGE
+    assert "request_payment_card" in nudge
+    assert "1015 Folsom (Eventim - eventim.us)" in nudge
+    assert "debugging iframe" in nudge.lower() or "iframe mounts" in nudge.lower()
+
+    assert (
+        build_payment_card_request_nudge(
+            current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+            browser_state=checkout_state,
+            action_entries=[{"action": "request_payment_card"}],
+        )
+        is None
+    )
+    assert (
+        build_payment_card_request_nudge(
+            current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+            browser_state=checkout_state,
+            payment_card_ready=True,
+        )
+        is None
+    )
+    assert "empty Stripe" in PAYMENT_CARD_ENTRY_RULE or "empty Stripe Element" in PAYMENT_CARD_ENTRY_RULE
+
+
 async def test_execute_action_request_payment_card_requests_workflow_approval():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -14250,6 +14294,10 @@ async def run_all_tests():
     r.record(
         "page_requires_new_card_entry_eventim_shells",
         test_page_requires_new_card_entry_detects_eventim_payment_shells,
+    )
+    r.record(
+        "payment_card_request_nudge_empty_eventim_shells",
+        test_payment_card_request_nudge_fires_on_empty_eventim_shells,
     )
     await r.record_async(
         "execute_action_request_payment_card",
