@@ -279,22 +279,15 @@ Goal: "Generate a logo as a PNG."
 GOOD fields: [{ "name": "logo", "type": "file_pointer" }]
 
 Goal: "Buy me a black beanie on Amazon that costs less than $35 and looks well-made."
-GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "purchase_completion_evidence", "type": "str" }]
+GOOD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "order_confirmation_id", "type": "str" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "added_to_cart", "type": "bool" }, { "name": "checkout_status", "type": "str" }]
 BAD fields: [{ "name": "selected_beanie_url", "type": "str" }, { "name": "selected_beanie_price_usd", "type": "float" }, { "name": "item_acquired", "type": "bool" }]
 
 For shopping goals phrased as "buy", "purchase", "order", or "complete checkout",
-the schema MUST require grounded provider-native purchase completion evidence proving that the item was actually
-acquired. Accept a labeled order/confirmation/receipt identifier when the provider displays one, OR an explicit
-provider confirmation/status page showing that the purchase was placed or completed. Do not require a specific
-identifier unless the user explicitly asks for that identifier.
+the schema MUST require a grounded order/confirmation identifier proving that the item was actually acquired
+(for example, an order id, confirmation id, receipt number, or purchase confirmation number).
 Selecting a product URL, adding an item to cart, or reaching checkout is not enough to verify a purchase goal.
-When the goal explicitly authorizes reporting a blocker instead of purchasing (for example, "if the exact brand is
-unavailable, report the blocker"), preserve both mutually exclusive terminal branches. The completed-purchase branch
-must retain every purchase constraint and provider confirmation field. The authorized-blocker branch must identify
-the exact unmet requirement and ground its unavailability without a substitute; checkout-only fields do not apply
-to that branch.
 
 # YOUR JOB
 
@@ -603,91 +596,6 @@ def _is_purchase_goal(goal: str) -> bool:
     return any(marker in normalized for marker in _PURCHASE_GOAL_MARKERS)
 
 
-def _goal_authorizes_reported_blocker(goal: str) -> bool:
-    """Return whether the purchase goal explicitly makes a reported blocker terminal."""
-    normalized = " ".join(goal.lower().replace("_", " ").replace("-", " ").split())
-    return bool(
-        re.search(
-            r"\bif\b[^.!?]{0,240}\b(?:unavailable|not available|cannot be found|no eligible|none eligible)\b"
-            r"[^.!?]{0,240}\breport\s+(?:the\s+)?(?:blocker|unavailability)\b",
-            normalized,
-        )
-    )
-
-
-def _authorized_blocker_outcome_field(fields: List[Dict[str, Any]]) -> Dict[str, Any]:
-    existing = next(
-        (
-            field
-            for field in fields
-            if "blocker" in f"{field.get('name', '')} {field.get('description', '')}".lower()
-            and any(
-                marker in f"{field.get('name', '')} {field.get('description', '')}".lower()
-                for marker in ("checkout", "completion", "purchase", "outcome")
-            )
-        ),
-        None,
-    )
-    name = (
-        str(existing.get("name"))
-        if isinstance(existing, dict) and existing.get("name")
-        else "purchase_completion_or_authorized_blocker_evidence"
-    )
-    return {
-        "name": name,
-        "type": "str",
-        "required": True,
-        "description": (
-            "Grounded provider-native evidence for either the completed purchase branch or the prompt-authorized blocker "
-            "branch. A completed purchase must show provider confirmation; an authorized blocker must identify "
-            "the exact unmet requirement and ground its unavailability without a substitute."
-        ),
-    }
-
-
-def _authorized_blocker_branch_schema(fields: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Keep full purchase evidence while making a grounded blocker mutually exclusive."""
-    evidence_field = _authorized_blocker_outcome_field(fields)
-    evidence_name = evidence_field["name"]
-    success_fields: List[Dict[str, Any]] = []
-    for source in fields:
-        if source.get("name") == evidence_name:
-            continue
-        field = dict(source)
-        field["required"] = False
-        original_description = str(field.get("description") or "").strip()
-        branch_description = (
-            "Required and non-null only when terminal_outcome is completed_purchase; "
-            "return null when terminal_outcome is authorized_blocker."
-        )
-        field["description"] = (
-            f"{original_description} {branch_description}".strip()
-            if original_description
-            else branch_description
-        )
-        success_fields.append(field)
-
-    outcome_field = {
-        "name": "terminal_outcome",
-        "type": "str",
-        "required": True,
-        "description": (
-            "Exactly completed_purchase or authorized_blocker. Use authorized_blocker only when the prompt explicitly "
-            "permits reporting the exact unmet requirement and provider-native evidence proves it unavailable."
-        ),
-    }
-    return {
-        "fields": [outcome_field, *success_fields, evidence_field],
-        "authorized_blocker_branch": {
-            "outcome_field": "terminal_outcome",
-            "completed_value": "completed_purchase",
-            "blocker_value": "authorized_blocker",
-            "evidence_field": evidence_name,
-            "success_field_names": [field["name"] for field in success_fields],
-        },
-    }
-
-
 def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool:
     fields = schema.get("fields", []) if isinstance(schema, dict) else []
     for field in fields:
@@ -717,64 +625,21 @@ def _schema_has_purchase_confirmation_identifier(schema: Dict[str, Any]) -> bool
     return False
 
 
-def _goal_explicitly_requests_purchase_confirmation_identifier(goal: str) -> bool:
-    normalized = " ".join(goal.lower().replace("_", " ").replace("-", " ").split())
-    return any(
-        phrase in normalized
-        for phrase in (
-            "order id",
-            "order number",
-            "confirmation id",
-            "confirmation number",
-            "receipt id",
-            "receipt number",
-            "purchase confirmation id",
-            "purchase confirmation number",
-        )
-    )
-
-
-def _is_purchase_confirmation_identifier_field(field: Dict[str, Any]) -> bool:
-    return _schema_has_purchase_confirmation_identifier({"fields": [field]})
-
-
 def _normalize_response_schema_for_goal(goal: str, schema: Dict[str, Any]) -> Dict[str, Any]:
     """Ensure goal-critical fields are present when the model under-specifies a schema."""
-    if not _is_purchase_goal(goal):
+    if not _is_purchase_goal(goal) or _schema_has_purchase_confirmation_identifier(schema):
         return schema
 
-    normalized = {**schema, "fields": list(schema.get("fields", []))}
-    if _goal_authorizes_reported_blocker(goal):
-        normalized.update(_authorized_blocker_branch_schema(normalized["fields"]))
-        return normalized
+    normalized = {"fields": list(schema.get("fields", []))}
+    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
 
-    if _goal_explicitly_requests_purchase_confirmation_identifier(goal):
-        if _schema_has_purchase_confirmation_identifier(normalized):
-            return normalized
+    if "order_confirmation_id" not in field_names:
         normalized["fields"].append(
             {
                 "name": "order_confirmation_id",
                 "type": "str",
                 "required": True,
-                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number explicitly requested by the user.",
-            }
-        )
-        return normalized
-
-    normalized["fields"] = [
-        field
-        for field in normalized["fields"]
-        if not _is_purchase_confirmation_identifier_field(field)
-    ]
-    field_names = {str(field.get("name", "")).lower() for field in normalized["fields"]}
-
-    if "purchase_completion_evidence" not in field_names:
-        normalized["fields"].append(
-            {
-                "name": "purchase_completion_evidence",
-                "type": "str",
-                "required": True,
-                "description": "Grounded provider-native proof that the purchase was placed or completed: a labeled order, confirmation, or receipt identifier when displayed, or explicit confirmation/status-page evidence when no identifier is displayed.",
+                "description": "Grounded order id, confirmation id, receipt number, or purchase confirmation number proving the item was actually acquired.",
             }
         )
 
@@ -1415,8 +1280,14 @@ def convert_context_to_messages(
 
     sorted_context = sorted(context, key=sort_key)
 
-    # Track which tool_call_ids have been declared by ASSISTANT messages
+    # Track which tool_call_ids have been declared by ASSISTANT messages, and the
+    # name each was DECLARED under. A tool result must carry the declared name,
+    # never the executed one: spawn_agent can execute as spawn_browser_agent, and
+    # Google validates functionResponse.name against the declared functions and
+    # rejects the entire request with 400 INVALID_ARGUMENT. OpenAI and Anthropic
+    # ignore the mismatch, so this stays latent until a Google model is reached.
     declared_tool_ids = set()
+    declared_tool_names: Dict[str, str] = {}
 
     for msg in sorted_context:
         role = msg.get("role", "ASSISTANT")
@@ -1445,6 +1316,8 @@ def convert_context_to_messages(
                 for tc in metadata["tool_calls"]:
                     tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
+                    if tc.get("tool"):
+                        declared_tool_names[tc_id] = str(tc["tool"])
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
@@ -1502,8 +1375,13 @@ def convert_context_to_messages(
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                if metadata.get("toolName"):
-                    tool_msg["name"] = metadata["toolName"]
+                # Label with the DECLARED name (see declared_tool_names above), not
+                # metadata["toolName"], which records what actually executed. Omit
+                # the label entirely when the declaration is unknown — an absent
+                # name is accepted by every provider, a wrong one is not.
+                declared_name = declared_tool_names.get(tool_call_id)
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
             else:
                 # No matching ASSISTANT tool_call - convert to SYSTEM message
@@ -1683,6 +1561,10 @@ async def build_llm_messages(
 
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
+    # Name each tool_call_id was DECLARED under. Google validates
+    # functionResponse.name against the declared functions and 400s on a
+    # mismatch; the executed name (metadata["toolName"]) can legitimately differ.
+    declared_tool_call_names: Dict[str, str] = {}
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -1838,6 +1720,7 @@ async def build_llm_messages(
                             f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
                         )
                     declared_tool_call_ids.add(str(tool_call_id))
+                    declared_tool_call_names[str(tool_call_id)] = str(tool_name)
                     args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
                     parsed_tool_calls.append(
                         {
@@ -1918,8 +1801,13 @@ async def build_llm_messages(
                     "content": tool_content,
                     "tool_call_id": str(tool_call_id),
                 }
-                if tool_name:
-                    tool_msg["name"] = tool_name
+                # Label with the DECLARED name, not tool_name (which is
+                # metadata["toolName"] — what actually executed). Omit when the
+                # declaration is unknown: an absent name is accepted everywhere,
+                # a mismatched one is rejected by Google.
+                declared_name = declared_tool_call_names.get(str(tool_call_id))
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
                 continue
 
@@ -4139,27 +4027,6 @@ def _structured_response_satisfies_schema(
     fields = response_schema.get("fields", []) if isinstance(response_schema, dict) else []
     if not fields:
         return False
-    branch = response_schema.get("authorized_blocker_branch") if isinstance(response_schema, dict) else None
-    if isinstance(branch, dict):
-        outcome_field = branch.get("outcome_field")
-        evidence_field = branch.get("evidence_field")
-        outcome = structured_response.get(outcome_field)
-        if outcome not in {branch.get("completed_value"), branch.get("blocker_value")}:
-            return False
-        if not _has_schema_value(structured_response.get(evidence_field), "str"):
-            return False
-        fields_by_name = {
-            field.get("name"): field for field in fields if isinstance(field, dict) and field.get("name")
-        }
-        success_field_names = branch.get("success_field_names") or []
-        if outcome == branch.get("completed_value"):
-            for name in success_field_names:
-                field = fields_by_name.get(name) or {}
-                if not _has_schema_value(structured_response.get(name), field.get("type")):
-                    return False
-        elif any(structured_response.get(name) is not None for name in success_field_names):
-            return False
-        return True
     for field in fields:
         if not isinstance(field, dict):
             return False
@@ -4183,12 +4050,6 @@ def _completed_child_task_structured_response(
     already delegated successfully.
     """
     if not context or not response_schema:
-        return None
-    if isinstance(response_schema.get("authorized_blocker_branch"), dict):
-        # A schema can prove branch shape, but only the semantic verifier can
-        # prove that a reported blocker is the exact alternative authorized by
-        # the full goal. Never turn blocker-shaped child output directly into
-        # a perfect parent score.
         return None
 
     for message in reversed(context):
@@ -4228,42 +4089,11 @@ def _build_verifier_response_model(
             if field.get("type") in ("object", "list[object]") and not _nested_fields_for_object_field(field):
                 openai_strict = False
             annotation = _verifier_field_annotation_for_field(field)
-            if field.get("required") is False:
-                annotation = Optional[annotation]
             output_fields[field["name"]] = (
                 annotation,
                 Field(..., description=field.get("description", "")),
             )
-        output_validators: Dict[str, Any] = {}
-        branch = response_schema.get("authorized_blocker_branch")
-        if isinstance(branch, dict):
-            outcome_field = str(branch.get("outcome_field") or "")
-            evidence_field = str(branch.get("evidence_field") or "")
-            completed_value = branch.get("completed_value")
-            blocker_value = branch.get("blocker_value")
-            success_field_names = [str(name) for name in branch.get("success_field_names") or []]
-
-            @model_validator(mode="after")
-            def validate_authorized_blocker_branch(value: Any) -> Any:
-                outcome = getattr(value, outcome_field, None)
-                evidence = getattr(value, evidence_field, None)
-                if not isinstance(evidence, str) or not evidence.strip():
-                    raise ValueError(f"{evidence_field} must contain grounded evidence")
-                if outcome == completed_value:
-                    missing = [name for name in success_field_names if getattr(value, name, None) is None]
-                    if missing:
-                        raise ValueError(f"completed_purchase requires non-null fields: {', '.join(missing)}")
-                elif outcome == blocker_value:
-                    populated = [name for name in success_field_names if getattr(value, name, None) is not None]
-                    if populated:
-                        raise ValueError(f"authorized_blocker requires null success fields: {', '.join(populated)}")
-                else:
-                    raise ValueError(f"{outcome_field} must be {completed_value} or {blocker_value}")
-                return value
-
-            output_validators["validate_authorized_blocker_branch"] = validate_authorized_blocker_branch
-
-        output_model = create_model("VerifierOutput", __validators__=output_validators, **output_fields)
+        output_model = create_model("VerifierOutput", **output_fields)
         fields["output"] = (output_model, ...)
 
     fields["reasoning"] = (
@@ -4497,11 +4327,6 @@ def _build_verifier_json_schema(response_schema: Optional[Dict[str, Any]] = None
             has_open_object = has_open_object or is_open
 
             output_properties[field_name] = json_type
-
-            if field.get("required") is False:
-                output_properties[field_name] = {
-                    "anyOf": [json_type, {"type": "null"}],
-                }
 
             # All fields are required in the output for strict mode
             output_required.append(field_name)

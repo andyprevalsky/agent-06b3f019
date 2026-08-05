@@ -620,28 +620,6 @@ def _append_bounded_verifier_checkpoint(
     return appended
 
 
-def _append_requested_evidence_checkpoint(
-    *,
-    action: Dict[str, Any],
-    browser_state: Dict[str, Any],
-    current_url: str,
-    verifier_checkpoints: List[Dict[str, Any]],
-) -> bool:
-    """Retain bounded browser ground truth when evaluate explicitly requests it."""
-    params = action.get("params") if isinstance(action, dict) else None
-    if action.get("action") != "evaluate" or not isinstance(params, dict) or not params.get("preserve_evidence"):
-        return False
-
-    checkpoint = _browser_ground_truth_checkpoint(
-        browser_state,
-        current_url,
-        kind="preserved_evidence",
-    )
-    if not checkpoint:
-        return False
-    _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
-    return True
-
 
 def _browser_resume_continuity_state(
     *,
@@ -6293,13 +6271,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
             action_name = unified_action.get("action", "")
             thinking = unified_action.get("thinking", "")
-
-            _append_requested_evidence_checkpoint(
-                action=unified_action,
-                browser_state=browser_state,
-                current_url=current_url,
-                verifier_checkpoints=verifier_checkpoints,
-            )
 
             if thinking:
                 reasoning_messages.append(thinking)
