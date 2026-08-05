@@ -192,7 +192,10 @@ export function extractStructuredGmv(structured: unknown): StructuredGmvCapture 
     const confirmationScore = scoreConfirmationKey(key);
     if (confirmationScore > 0) {
       const id = normalizeConfirmation(value);
-      if (id !== null && (bestConfirmation === null || confirmationScore > bestConfirmation.score)) {
+      if (
+        id !== null &&
+        (bestConfirmation === null || confirmationScore > bestConfirmation.score)
+      ) {
         bestConfirmation = { id, key, score: confirmationScore };
       }
     }

@@ -14,7 +14,6 @@ import type {
 export { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 export { buildSeries } from './series';
 
-
 const log = createLogger('AdminHealth');
 
 interface StripeRevenueCharge {

@@ -95,10 +95,7 @@ function testClearPurchaseIntentDetection(): void {
 
 function testPurchaseCompletionRequiresStartNewAgent(): void {
   const evidence = emptySmsRunSideEffectEvidence();
-  const error = purchaseIntentCompletionError(
-    'get me the best lip balm from amazon',
-    evidence
-  );
+  const error = purchaseIntentCompletionError('get me the best lip balm from amazon', evidence);
   assert.ok(error, 'attempt_completion must reject purchase intent without start_new_agent');
   const afterSpawn = purchaseIntentCompletionError(
     'get me the best lip balm from amazon',
