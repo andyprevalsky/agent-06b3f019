@@ -23,7 +23,7 @@ export class CredentialExhaustionSkip extends Error {
 // those are user-fixable by re-authenticating and must stay a hard failure so a
 // real broken-auth regression can never masquerade as a fundless skip.
 const CODEX_CREDIT_EXHAUSTION_PATTERN =
-  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|billing (?:hard )?limit reached/i;
+  /insufficient[_ ]quota|insufficient credits|quota exceeded|check your plan and billing|(?<![\d.])402(?![\d.])|hit your usage limit|purchase more credits|out of credits|no credits remaining|add credits to continue|billing (?:hard )?limit reached/i;
 
 /**
  * Detect whether a Codex smoke run terminated because every available credential
@@ -39,7 +39,11 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
   const haystacks: string[] = [output];
   for (const event of events) {
     const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
-    for (const field of [typed?.message, typed?.reason, typed?.error]) {
+    // `error` arrives as a bare string on some providers and as
+    // `{ message }` on others; only reading the string form let a nested
+    // out-of-funds message slip past the detector and hard-fail the deploy.
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
       if (typeof field === 'string' && field) haystacks.push(field);
     }
   }

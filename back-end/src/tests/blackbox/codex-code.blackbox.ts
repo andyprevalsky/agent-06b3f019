@@ -280,6 +280,51 @@ function testResolveCodexAuthEnvs_apiKeyFallback() {
   assert(envs.CODEX_AUTH_JSON === undefined, 'no OAuth auth.json in fallback');
 }
 
+function testCodexCreditSkip_matchesLiveOutOfCreditsWording() {
+  // Verbatim from the 2026-08-05 deploy: the pattern had "out of credits" but
+  // OpenAI emits "no credits remaining", so the smoke hard-failed a pure
+  // funding state and forced a manual BLACKBOX_TEST_SKIP_DOMAINS bypass.
+  const message =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    codexSmokeCreditSkipReason(message, []) !== null,
+    'live "no credits remaining" wording must be recognized as credit exhaustion'
+  );
+}
+
+function testCodexCreditSkip_readsNestedErrorObject() {
+  // The provider sends `{"error": {"message": "..."}}`; the detector only read
+  // `error` when it was a bare string, so the nested funding signal was missed
+  // even once the wording matched.
+  const events = [
+    {
+      type: 'error',
+      error: { message: 'You have no credits remaining. Add credits to continue.' },
+    },
+  ];
+  assert(
+    codexSmokeCreditSkipReason('no sentinel here', events) !== null,
+    'nested error.message must be searched for funding-exhaustion signals'
+  );
+}
+
+function testCodexCreditSkip_successStillWins() {
+  assert(
+    codexSmokeCreditSkipReason('CODEX_E2B_DONE', [
+      { type: 'error', error: { message: 'You have no credits remaining.' } },
+    ]) === null,
+    'a run that produced the success sentinel can never be downgraded to a skip'
+  );
+}
+
+function testCodexCreditSkip_authRevocationStillFailsHard() {
+  assert(
+    codexSmokeCreditSkipReason('401 Unauthorized: please log out and sign in again', []) === null,
+    'auth/OAuth revocation is user-fixable and must remain a hard failure, not a funding skip'
+  );
+}
+
 function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {
   let threw = false;
   try {
@@ -551,6 +596,22 @@ async function runAll() {
     {
       name: 'auth -- falls back to OPENAI_API_KEY when token unavailable/rate-limited',
       fn: async () => testResolveCodexAuthEnvs_apiKeyFallback(),
+    },
+    {
+      name: 'credit-skip -- live "no credits remaining" wording is recognized',
+      fn: async () => testCodexCreditSkip_matchesLiveOutOfCreditsWording(),
+    },
+    {
+      name: 'credit-skip -- nested error.message is searched',
+      fn: async () => testCodexCreditSkip_readsNestedErrorObject(),
+    },
+    {
+      name: 'credit-skip -- success sentinel always wins over skip',
+      fn: async () => testCodexCreditSkip_successStillWins(),
+    },
+    {
+      name: 'credit-skip -- auth revocation still fails hard',
+      fn: async () => testCodexCreditSkip_authRevocationStillFailsHard(),
     },
     {
       name: 'auth -- throws when no credential and no funded key',

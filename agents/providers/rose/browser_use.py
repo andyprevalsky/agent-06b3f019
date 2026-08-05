@@ -335,9 +335,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                                 "title": {
                                     "type": "string",
                                     "description": (
-                                        "Visible item title. When the purchase is tied to a specific date — an "
+                                        "Visible item title. When the purchase is tied to a specific date, such as an "
                                         "event or movie ticket, a reservation, a flight, a hotel night, an "
-                                        "appointment, a delivery window — include that date, and the time when "
+                                        "appointment, or a delivery window, include that date, and the time when "
                                         "the booking is time-specific, in the title or the description, for "
                                         "example 'Spider-Man: Brand New Day - Fri Jul 31, 2026, 7:15pm'. "
                                         "Someone approving the charge must be able to see which day they are "
