@@ -26,6 +26,9 @@ import { formatTaskLabel, type PendingOp, type ToolResult } from './supervisorTo
 
 const log = createLogger('SmsSupervisorCommits');
 
+/** Ceiling for a single agent's price limit; keeps newLimitCents inside Prisma's Int column. */
+const MAX_PRICE_LIMIT_CENTS = 100_000_00;
+
 // ============================================
 // Commit Implementations — run inside the commit gate, exactly once per run
 // ============================================
@@ -121,14 +124,26 @@ export async function commitReplyToAgent(
   if (attention_request_id) {
     try {
       const userResponse = reject ? '__REJECTED__' : message || 'Approved';
-      await prisma.agentAttentionRequest.update({
-        where: { id: attention_request_id },
+      // Scope by agent AND user, not request id alone. validateReplyToAgent
+      // accepts any attention_request_id when currentSmsMatches is true, so an
+      // id belonging to another agent or user would otherwise be written here —
+      // recording an approval its real owner never gave.
+      const resolved = await prisma.agentAttentionRequest.updateMany({
+        where: { id: attention_request_id, agentId: agent.id, userId },
         data: { userResponse },
       });
+      if (resolved.count === 0) {
+        log.warn('Attention request not resolved: not owned by this agent/user', {
+          phase: 'reply',
+          requestId: attention_request_id,
+          agentId: agent.id,
+        });
+      }
 
       log.info('Resolved attention request', {
         phase: 'reply',
         requestId: attention_request_id,
+        resolvedCount: resolved.count,
         reject: !!reject,
       });
     } catch (error) {
@@ -205,8 +220,27 @@ export async function commitIncreaseBudget(
     };
   }
 
+  // A sub-cent amount rounds to 0 and would report an increase that never
+  // happened; an enormous one overflows the Prisma `Int` column and throws
+  // AFTER the SMS commit gate. Bound both ends here.
   const addCents = Math.round(amount_dollars * 100);
+  if (addCents < 1) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase of $${amount_dollars} rounds to $0.00; use at least $0.01`,
+    };
+  }
   const newLimitCents = agent.priceLimitCents + addCents;
+  if (!Number.isSafeInteger(newLimitCents) || newLimitCents > MAX_PRICE_LIMIT_CENTS) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
 
   log.info('Increasing budget', {
     phase: 'budget',
@@ -327,6 +361,18 @@ export async function commitStartNewAgent(
       'code' in error &&
       (error as { code: string }).code === 'P2002'
     ) {
+      // P2002 names neither the model nor the constraint, and this transaction
+      // creates Agent, Verifier and Message. A collision on any of them rolls
+      // the whole transaction back, so reporting success here could hand the
+      // user a tracking link for an agent that does not exist.
+      const existing = await prisma.agent.findUnique({
+        where: { id: provisionalId },
+        select: { id: true },
+      });
+      if (!existing) {
+        log.error('start_new_agent P2002 without a committed agent row', { provisionalId });
+        throw error;
+      }
       log.info('start_new_agent commit already done (PK collision)', { provisionalId });
       return {
         tool: 'start_new_agent',

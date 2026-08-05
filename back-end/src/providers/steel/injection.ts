@@ -639,15 +639,25 @@ export async function injectUserData(
     // a session silently missing localStorage/IndexedDB/permissions is harder
     // to diagnose than a loud, bounded failure. Do not soften this without
     // changing that invariant first.
-    await withTimeout(
-      (async () => {
-        for (const injectState of injectionTasks) {
-          await injectState();
-        }
-      })(),
-      stateTimeoutMs,
-      `Browser state injection timed out after ${stateTimeoutMs}ms`
-    );
+    // withTimeout is a Promise.race and cannot cancel the IIFE, so without this
+    // flag the serial loop keeps writing localStorage/IndexedDB/permission/cache
+    // state into a context the caller already treats as failed.
+    let injectionAborted = false;
+    try {
+      await withTimeout(
+        (async () => {
+          for (const injectState of injectionTasks) {
+            if (injectionAborted) break;
+            await injectState();
+          }
+        })(),
+        stateTimeoutMs,
+        `Browser state injection timed out after ${stateTimeoutMs}ms`
+      );
+    } catch (error) {
+      injectionAborted = true;
+      throw error;
+    }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
     return {
       cookies: cookieResult,

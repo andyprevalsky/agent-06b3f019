@@ -73,17 +73,22 @@ _CHALLENGE_TEXT_MARKERS = (
 # Cloudflare only. A DataDome interstitial therefore read as a clean page, so
 # `recover_from_challenge` reported success and the caller looped -- four cycles
 # and 312s on one Expedia run, each "recovery" followed by the same challenge.
+# Only challenge-specific tokens belong here. Vendor sensor/orchestration hosts
+# (captcha-delivery.com, perimeterx.net, /cdn-cgi/challenge-platform) also load
+# on ORDINARY pages, so matching them made page_looks_challenged() return True
+# for a clean page — inverting the recovery contract, since the post-recovery
+# clean-page wait could then never converge.
 _CHALLENGE_HTML_MARKERS = (
     # Cloudflare
-    "/cdn-cgi/challenge-platform",
     "cf-chl-",
     "challenges.cloudflare.com/turnstile",
+    "cf-challenge-running",
     # DataDome
-    "captcha-delivery.com",
     "ddchallengebody",
+    "dd-captcha",
     # PerimeterX
-    "perimeterx.net",
     "px-captcha",
+    "_pxcaptcha",
     # Imperva / Incapsula
     "_incapsula_resource",
     "incapsula incident id",

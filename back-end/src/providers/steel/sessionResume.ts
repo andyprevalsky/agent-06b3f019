@@ -41,7 +41,11 @@ function hasValue(value: string | null | undefined): value is string {
 export function reusableSteelRecordedProfileId(oldSession: {
   provider: string;
   providerProfileId?: string | null;
-  providerProfileSource?: string | null;
+  // Required on purpose: an object literal that omits this compiles with
+  // `undefined`, which passes the invalidated-source check below and reuses a
+  // profile that was explicitly invalidated. Every caller reads a Prisma row,
+  // so they can all supply it.
+  providerProfileSource: string | null;
 }): string | null {
   const wasSteel = oldSession.provider !== 'kernel';
   return wasSteel &&

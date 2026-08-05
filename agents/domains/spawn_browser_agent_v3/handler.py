@@ -6548,6 +6548,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             playwright_browser = None
                             playwright_instance = None
                             playwright_driver_pid = None
+                            # The backend already swapped the provider session
+                            # (browser_stack_replacement_started only becomes True
+                            # after _restart_after_failed_steel_auth returns), so the
+                            # OLD identifiers now point at a released session. We
+                            # never attached to the replacement, but handing the user
+                            # a live view for the session that actually exists beats
+                            # one the backend has already torn down.
+                            session_id = pending_session_id
+                            browser_url = pending_browser_url
+                            cdp_url = new_cdp_url
+                            fingerprint_injection = pending_fingerprint_injection
+                            session_credential_ref = pending_session_credential_ref
+                            auth_realm = pending_auth_realm
+                            browser_session_metadata = pending_browser_session_metadata
                         logger.warning(
                             "Failed to replace signed-out Steel session before user assistance",
                             auth_realm=auth_realm or base_site,

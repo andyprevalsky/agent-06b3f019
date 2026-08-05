@@ -66,7 +66,10 @@ router.post(
         userId,
         req.params.id,
         reason,
-        typeof preserveBrowserSessionId === 'string' ? preserveBrowserSessionId : undefined
+        // Forward the trimmed value the guard above validated. Passing the raw
+        // string sends a padded id like " abc " downstream, where it fails the
+        // binding check and surfaces as a 500 instead of the 400 we just proved.
+        typeof preserveBrowserSessionId === 'string' ? preserveBrowserSessionId.trim() : undefined
       );
       if (result === null) {
         res.status(404).json({ error: 'Steel session auth not found' });
