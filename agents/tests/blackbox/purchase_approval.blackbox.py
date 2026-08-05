@@ -75,12 +75,36 @@ def test_markup_and_whitespace_are_still_rejected():
         raise AssertionError(f"malformed URL was accepted: {value!r}")
 
 
-def test_page_context_no_longer_constrains_the_url():
-    """Trajectory grounding was removed by decision; pin it so it cannot creep back silently."""
+def test_page_context_constrains_the_host_only():
+    """Page context constrains the HOST; path/query inference stays removed.
+
+    Replaces test_page_context_no_longer_constrains_the_url, which pinned that an
+    unvisited host was accepted. The approval renders this URL as a clickable
+    link, so an unconstrained host is an open-redirect primitive (CWE-601).
+    """
     unvisited = "https://never-visited.example/p?x=1"
-    assert validate_product_url_for_pages(unvisited, ["https://other.example/a"]) == unvisited
+    visited = ["https://other.example/a"]
+
+    for call in (
+        lambda: validate_product_url_for_pages(unvisited, visited),
+        lambda: validate_product_url_for_page(unvisited, "https://other.example/a"),
+    ):
+        try:
+            call()
+        except ValueError:
+            continue
+        raise AssertionError("an unvisited product host must be rejected")
+
+    # No page context at all leaves the structural result intact: there is
+    # nothing to compare against, and failing here would break legitimate
+    # call sites that never captured a trajectory.
     assert validate_product_url_for_pages(unvisited, []) == unvisited
-    assert validate_product_url_for_page(unvisited, "https://other.example/a") == unvisited
+
+    # A visited host still passes regardless of path/query shape.
+    assert (
+        validate_product_url_for_pages("https://other.example/cart?itemId=1", visited)
+        == "https://other.example/cart?itemId=1"
+    )
 
 
 def test_page_context_helpers_still_reject_non_urls():
@@ -103,7 +127,7 @@ async def run_all_tests():
     r.record("url_returned_unchanged", test_url_is_returned_unchanged)
     r.record("non_urls_rejected", test_non_urls_are_still_rejected)
     r.record("markup_rejected", test_markup_and_whitespace_are_still_rejected)
-    r.record("page_context_unconstraining", test_page_context_no_longer_constrains_the_url)
+    r.record("page_context_constrains_host", test_page_context_constrains_the_host_only)
     r.record("wrappers_reject_non_urls", test_page_context_helpers_still_reject_non_urls)
     return r.all_passed
 

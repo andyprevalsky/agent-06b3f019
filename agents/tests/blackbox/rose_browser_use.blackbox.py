@@ -573,42 +573,64 @@ def test_write_lock_purchase_schema_accepts_current_page_as_product_link():
         ) from error
 
 
-def test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser():
+def test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser():
+    """An unobserved product host must be rejected (CWE-601).
+
+    Replaces test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser,
+    which asserted that https://phishing.example/products/beanie was accepted
+    while the browser had only visited example.com. The write-lock notification
+    renders product_url to the user as a clickable link, so accepting an
+    arbitrary host is a destination-author primitive.
+
+    Only the HOST is constrained; the path/query heuristics that rejected
+    receipts from working checkouts stay removed.
+    """
     from pydantic import ValidationError
 
     from browser_tools.schemas import GenerateWriteLockNotificationTool
 
-    payload = {
-        "tool": "generate_write_lock_notification",
-        "trigger_type": "purchase",
-        "action": "buy item",
-        "service": {
-            "name": "Example Shop",
-            "domain": "example.com",
-            "url": "https://example.com/checkout",
-        },
-        "purchase": {
-            "items": [
-                {
-                    "title": "Beanie",
-                    "rating": "4.8 stars",
-                    "review_count": "312 reviews",
-                    "product_url": "https://phishing.example/products/beanie",
-                }
-            ]
-        },
+    def payload_with(product_url: str) -> dict:
+        return {
+            "tool": "generate_write_lock_notification",
+            "trigger_type": "purchase",
+            "action": "buy item",
+            "service": {
+                "name": "Example Shop",
+                "domain": "example.com",
+                "url": "https://example.com/checkout",
+            },
+            "purchase": {
+                "items": [
+                    {
+                        "title": "Beanie",
+                        "rating": "4.8 stars",
+                        "review_count": "312 reviews",
+                        "product_url": product_url,
+                    }
+                ]
+            },
+        }
+
+    trusted = {
+        "trusted_page_urls": [
+            "https://example.com/products/beanie",
+            "https://example.com/checkout",
+        ]
     }
 
+    # A host the browser actually visited still validates.
+    GenerateWriteLockNotificationTool.model_validate(
+        payload_with("https://example.com/products/beanie"), context=trusted
+    )
+
+    # An unrelated host must now fail closed.
     try:
         GenerateWriteLockNotificationTool.model_validate(
-            payload,
-            context={"trusted_page_urls": ["https://example.com/products/beanie", "https://example.com/checkout"]},
+            payload_with("https://phishing.example/products/beanie"), context=trusted
         )
-    except ValidationError as error:  # pragma: no cover - documents the removed rule
-        raise AssertionError(
-            "browser-trajectory grounding was removed by decision; an unobserved product "
-            f"host must be accepted: {error}"
-        ) from error
+    except ValidationError:
+        return
+    raise AssertionError("an unobserved product host must be rejected")
 
 
 def test_normalize_write_lock_notification_tool_call_preserves_params():
@@ -1764,8 +1786,8 @@ async def run_all_tests():
         test_write_lock_purchase_schema_accepts_current_page_as_product_link,
     )
     r.record(
-        "write_lock_notification_accepts_unobserved_product_host",
-        test_write_lock_purchase_schema_accepts_product_host_not_observed_by_browser,
+        "write_lock_notification_rejects_unobserved_product_host",
+        test_write_lock_purchase_schema_rejects_product_host_not_observed_by_browser,
     )
 
     r.record("messages_text_only_no_screenshot", test_build_messages_text_only_when_no_screenshot)

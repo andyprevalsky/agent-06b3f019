@@ -63,8 +63,17 @@ def test_normalize_payload_builds_receipt_metadata_and_fingerprint():
     assert len(payload["fingerprint"]) == 64
 
 
-def test_product_url_does_not_match_browser_trajectory():
-    """Product links are structurally validated without trajectory matching."""
+def test_product_url_host_must_match_a_visited_page():
+    """The approval renders product_url as a clickable link, so the host is constrained.
+
+    Replaces test_product_url_does_not_match_browser_trajectory, which asserted
+    that any well-formed absolute URL - including https://evil.com/products/x -
+    was accepted. That was an open-redirect primitive (CWE-601).
+
+    Only the HOST is checked. The path/query heuristics stay removed: those were
+    the unguaranteeable part that rejected receipts from working checkouts, and
+    the cases below pin that they remain accepted.
+    """
     from utils.purchase_approval import validate_product_url_for_pages
 
     visited = [
@@ -79,22 +88,31 @@ def test_product_url_does_not_match_browser_trajectory():
     )
     assert validate_product_url_for_pages(product_url, visited) == product_url
 
-    # An observed product page whose path carries no "product"/"item"/"p" marker
-    # must pass: the old _looks_like_product_route word list rejected these.
+    # No "product"/"item"/"p" marker in the path must still pass: the old
+    # _looks_like_product_route word list rejected these and cost a benchmark run.
     assert (
         validate_product_url_for_pages("https://order.toasttab.com/lok-lak", visited)
         == "https://order.toasttab.com/lok-lak"
     )
 
-    # Browser context is accepted for call-site compatibility but cannot reject
-    # a well-formed URL based on whether the host appeared in a trajectory.
+    # A subdomain of a visited host is legitimate - merchants serve the product
+    # page from menu.* while checkout lives on order.*.
     assert validate_product_url_for_pages("https://menu.order.toasttab.com/lok-lak", visited)
-    for unobserved in (
-        "https://www.toasttab.com/local/lunette-cambodia/item-lok-lak",
-        "https://toasttab.com/local/lunette",
+
+    # A parent host of the visited host is still the same merchant.
+    assert validate_product_url_for_pages("https://toasttab.com/local/lunette", visited)
+
+    # An unrelated host must be rejected: this is the open-redirect case.
+    for untrusted in (
         "https://evil.com/products/x",
+        "https://toasttab.com.attacker.example/products/x",
     ):
-        assert validate_product_url_for_pages(unobserved, visited) == unobserved
+        try:
+            validate_product_url_for_pages(untrusted, visited)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected {untrusted} to be rejected as an untrusted host")
+
 
 
 def test_payment_line_item_requires_reviews_and_a_product_detail_url():
@@ -746,8 +764,8 @@ async def run_all_tests():
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
     result.record(
-        "product_url_does_not_match_browser_trajectory",
-        test_product_url_does_not_match_browser_trajectory,
+        "product_url_host_must_match_a_visited_page",
+        test_product_url_host_must_match_a_visited_page,
     )
     result.record(
         "reviewless_bookings_pass_with_zero",

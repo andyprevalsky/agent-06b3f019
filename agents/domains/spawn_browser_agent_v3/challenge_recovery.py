@@ -78,17 +78,25 @@ _CHALLENGE_TEXT_MARKERS = (
 # on ORDINARY pages, so matching them made page_looks_challenged() return True
 # for a clean page — inverting the recovery contract, since the post-recovery
 # clean-page wait could then never converge.
+# Vendor sensor hosts are INTENTIONALLY included. CodeRabbit flagged them as a
+# false-positive risk (they also load on ordinary pages), but
+# `challenge_recovery.blackbox.py::test_challenge_page_classifier_detects_non_cloudflare_vendors`
+# cements the opposite tradeoff from a measured incident: without them a
+# DataDome/PerimeterX interstitial read as a clean page and one Expedia run
+# burned four cycles / 312s looping on false recoveries. The false-negative cost
+# here was paid for real; the false-positive one is theoretical. Incidental
+# captcha PROSE is handled separately by the classifier's prose guard.
 _CHALLENGE_HTML_MARKERS = (
     # Cloudflare
+    "/cdn-cgi/challenge-platform",
     "cf-chl-",
     "challenges.cloudflare.com/turnstile",
-    "cf-challenge-running",
     # DataDome
+    "captcha-delivery.com",
     "ddchallengebody",
-    "dd-captcha",
     # PerimeterX
+    "perimeterx.net",
     "px-captcha",
-    "_pxcaptcha",
     # Imperva / Incapsula
     "_incapsula_resource",
     "incapsula incident id",

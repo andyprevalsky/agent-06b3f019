@@ -48,16 +48,60 @@ def validate_product_detail_url(value: Any) -> str:
     return text
 
 
+def _registrable_host(url: Any) -> str:
+    """Lowercased host without a leading 'www.', or '' when unparseable."""
+    try:
+        host = (urlparse(str(url or "")).hostname or "").lower()
+    except ValueError:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def _host_is_trusted(candidate: str, trusted_hosts: set[str]) -> bool:
+    """Accept the trusted host itself and any subdomain of it.
+
+    Subdomains matter: a merchant routinely serves the product page from
+    `menu.order.example.com` while the browser only visited
+    `order.example.com`. Rejecting that was the false-negative that got
+    host matching removed in the first place.
+    """
+    if not candidate:
+        return False
+    return any(
+        candidate == trusted or candidate.endswith(f".{trusted}") or trusted.endswith(f".{candidate}")
+        for trusted in trusted_hosts
+        if trusted
+    )
+
+
 def validate_product_url_for_page(value: Any, current_page_url: Any) -> str:
-    """Retained for call-site compatibility; page context no longer constrains the URL."""
-    del current_page_url
-    return validate_product_detail_url(value)
+    """Validate structure, then require the host to match the current page."""
+    return validate_product_url_for_pages(value, [current_page_url])
 
 
 def validate_product_url_for_pages(value: Any, trusted_page_urls: Iterable[Any]) -> str:
-    """Retained for call-site compatibility; trajectory no longer constrains the URL."""
-    del trusted_page_urls
-    return validate_product_detail_url(value)
+    """Validate structure, then require a host the browser actually visited.
+
+    The approval renders this URL to the user as a clickable link, so an
+    unconstrained absolute URL is a destination-author primitive (CWE-601): the
+    agent could be steered into surfacing an attacker's link inside a purchase
+    approval the user trusts.
+
+    Only the HOST is constrained. Path and query heuristics stay removed - those
+    were the unguaranteeable part that rejected receipts from working checkouts.
+    """
+    text = validate_product_detail_url(value)
+    trusted_hosts = {_registrable_host(url) for url in (trusted_page_urls or [])}
+    trusted_hosts.discard("")
+    # No page context at all: nothing to check against, so keep the structural
+    # result rather than failing a legitimate call site.
+    if not trusted_hosts:
+        return text
+    if not _host_is_trusted(_registrable_host(text), trusted_hosts):
+        raise ValueError(
+            "product_url host must match a page the browser actually visited"
+        )
+    return text
 
 
 def validate_product_rating(value: Any) -> str:
