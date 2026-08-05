@@ -26,13 +26,13 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-terra',
-    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k2.7-code'],
+    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k3'],
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-fable-5',
     gptAuthModel: 'gpt-5.6-sol',
-    waterfall: ['anthropic/claude-opus-4.8', 'google/gemini-3.1-pro-preview'],
+    waterfall: ['anthropic/claude-opus-4.8', 'openai/gpt-5.6-terra'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',

@@ -18,6 +18,7 @@ import {
   RoseStallError,
 } from './errors';
 import { parseOpenAISSE } from './streaming';
+import { normalizeOpenAiToolCalls } from './transforms';
 import { postCerebrasStream } from './transport';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
@@ -48,7 +49,7 @@ export function clearsChatStallGuard(kind: RoseStreamChunk['kind']): boolean {
 export function buildCerebrasChatBody(options: CompletionOptions): Record<string, unknown> {
   return {
     model: CEREBRAS_CHAT_MODEL,
-    messages: options.messages,
+    messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
     clear_thinking: true,

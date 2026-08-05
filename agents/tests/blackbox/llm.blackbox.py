@@ -96,6 +96,50 @@ def test_convert_context_to_messages():
     assert "Search result" in result[1]["content"]
 
 
+def test_tool_result_uses_declared_not_executed_tool_name():
+    """A tool result must be labelled with the DECLARED tool name.
+
+    spawn_agent legitimately executes as spawn_browser_agent, and the TOOL
+    message records the executed name in metadata["toolName"]. Google validates
+    functionResponse.name against the declared functions and rejects the whole
+    request with 400 INVALID_ARGUMENT on a mismatch; OpenAI and Anthropic ignore
+    it, so this stayed latent until Google was the only reachable model and it
+    killed real agent runs whose work had already succeeded.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "call_1"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "browser agent finished",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                # What actually ran — deliberately different from the declaration.
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "call_1",
+            },
+        },
+    ]
+
+    # include_assistant=True so the tool_call is actually declared; without a
+    # declaration the result degrades to a system message and never exercises
+    # the tool-name labelling at all.
+    result = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msgs = [m for m in result if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"expected one tool message, got {result}"
+    assert tool_msgs[0]["name"] == "spawn_agent", (
+        "tool result must carry the DECLARED name; labelling it with the executed "
+        f"name is rejected by Google. Got: {tool_msgs[0].get('name')}"
+    )
+
+
 def test_convert_context_to_messages_empty():
     """Empty context returns empty list."""
     from helpers.llm import convert_context_to_messages
@@ -2185,6 +2229,10 @@ async def test_build_llm_messages_skips_empty_file_output_assistant():
     # Both tool messages should immediately follow (no empty assistant in between).
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert len(tool_msgs) == 2, f"Expected 2 tool messages, got {len(tool_msgs)}"
+    assert {m["tool_call_id"]: m.get("name") for m in tool_msgs} == {
+        tc_a: "spawn_agent",
+        tc_b: "spawn_agent",
+    }
 
     # Verify NO empty assistant message ended up in the final list — file-output
     # rows should be filtered out entirely.
@@ -2400,6 +2448,7 @@ def _anthropic_sse_body(
 
 async def test_call_llm_structured_streaming_happy_path():
     """Structured streaming parses accumulated content into a Pydantic response."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2458,7 +2507,7 @@ async def test_call_llm_structured_streaming_happy_path():
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
     # Waterfall path uses the first model in rose-1-lite's fallback list.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["pool_name"] == "rose-1-lite"
     assert usage["cancelled"] is False
     assert detected == []
@@ -2516,6 +2565,7 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
 
 async def test_call_llm_structured_streaming_model_detected_callback():
     """on_model_detected fires with the actual_model from the first chunk."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2558,11 +2608,12 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     )
 
     # No claude_token → routes through waterfall → first model from rose-1-lite.
-    assert seen_models == ["google/gemini-3.5-flash"]
+    assert seen_models == [get_pool("rose-1-lite").waterfall[0]]
 
 
 async def test_call_llm_verifier_streaming_parses_score():
     """_call_llm_verifier parses JSON score from SSE stream."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import _call_llm_verifier
@@ -2592,7 +2643,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert result["reasoning"] == "looks good"
     assert usage["prompt_tokens"] == 100
     # Waterfall path → first model from rose-1-lite.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["pool_name"] == "rose-1-lite"
 
 
@@ -3656,6 +3707,38 @@ async def test_call_llm_activity_rejects_wrong_required_tool_non_retryably():
     assert error.type == "LLMStructuredOutputError"
     assert "Got: ['web_search']" in str(error)
     assert completion_calls == 1
+
+
+async def test_call_llm_activity_forces_required_tool_at_provider():
+    """Completion-only handoffs should constrain generation, not just reject it later."""
+    from helpers.llm import call_llm_activity
+
+    captured: dict = {}
+
+    async def fake_structured_streaming(**kwargs):
+        captured.update(kwargs)
+        response_model = kwargs["response_model"]
+        return (
+            response_model(response="", tool_calls=[{"tool": "attempt_completion"}]),
+            {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            [],
+        )
+
+    with (
+        patch("helpers.llm.call_llm_structured_streaming", fake_structured_streaming),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        result = await call_llm_activity(
+            messages_or_agent_id=[{"role": "user", "content": "Finish from the completed child"}],
+            model="rose-labs/rose-1-lite",
+            tool_names=["web_search", "attempt_completion"],
+            reasoning_max_tokens=0,
+            call_site="required-tool-provider-contract-test",
+            required_tool="attempt_completion",
+        )
+
+    assert captured.get("tool_choice") == {"name": "attempt_completion"}
+    assert result["tool_calls"][0]["tool"] == "attempt_completion"
 
 
 async def test_call_llm_activity_with_agent_id_reads_shared_context():
@@ -5205,6 +5288,36 @@ async def test_call_llm_structured_streaming_openrouter_path():
     assert len(chunks_received) >= 1
 
 
+async def test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice():
+    """Missing or alternate direct-OpenRouter tools cannot bypass a required tool."""
+    import pytest
+    from unittest.mock import MagicMock, patch
+    from helpers.llm import LLMStructuredOutputError, call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    AgentAction = create_agent_action_model(["web_search", "attempt_completion"])
+    from_openai = MagicMock()
+
+    async def on_chunk(_text: str, _tokens: int):
+        raise AssertionError("a rejected direct OpenRouter request must not stream")
+
+    with patch("helpers.llm.AsyncOpenAI") as async_openai, patch("helpers.llm.instructor.from_openai", from_openai):
+        with pytest.raises(LLMStructuredOutputError, match="unsupported for direct OpenRouter"):
+            await call_llm_structured_streaming(
+                messages=[{"role": "user", "content": "Finish from the completed child"}],
+                model="anthropic/claude-sonnet-4",
+                temperature=0.5,
+                max_tokens=256,
+                response_model=AgentAction,
+                on_chunk=on_chunk,
+                call_site="openrouter-required-tool-contract",
+                tool_choice={"name": "attempt_completion"},
+            )
+
+    async_openai.assert_not_called()
+    from_openai.assert_not_called()
+
+
 async def test_call_llm_structured_streaming_openrouter_exception_raises():
     """OpenRouter streaming propagates exceptions from instructor."""
     from unittest.mock import MagicMock, patch
@@ -6026,6 +6139,7 @@ async def test_call_llm_structured_streaming_attention_stream_without_question_f
 
 async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
     """Verifier surfaces partial JSON parse when stream terminates early with accumulated content."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import _call_llm_verifier
@@ -6067,7 +6181,7 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
         )
     assert parsed["score"] == 0.9
     # Waterfall path → first model from rose-1-lite pool.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 1
 
@@ -6281,6 +6395,10 @@ async def run_all_tests():
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
+    r.record(
+        "tool_result_uses_declared_not_executed_tool_name",
+        test_tool_result_uses_declared_not_executed_tool_name,
+    )
     r.record("convert_context_to_messages_empty", test_convert_context_to_messages_empty)
     r.record(
         "convert_context_to_messages_one_tool_result_per_tool_use",
@@ -6637,10 +6755,18 @@ async def run_all_tests():
         "call_llm_activity_required_tool_non_retryable",
         test_call_llm_activity_rejects_wrong_required_tool_non_retryably,
     )
+    await r.record_async(
+        "call_llm_activity_required_tool_forced_at_provider",
+        test_call_llm_activity_forces_required_tool_at_provider,
+    )
     await r.record_async("mark_claude_token_rate_limited_exception", test_mark_claude_token_rate_limited_exception_path)
     await r.record_async("fetch_claude_max_token_exception", test_fetch_claude_max_token_exception_path)
     await r.record_async("call_llm_openrouter_exception", test_call_llm_openrouter_exception_path)
     await r.record_async("stream_openrouter_path", test_call_llm_structured_streaming_openrouter_path)
+    await r.record_async(
+        "stream_openrouter_required_tool_fails_closed",
+        test_call_llm_structured_streaming_rejects_unenforced_openrouter_tool_choice,
+    )
     await r.record_async("stream_openrouter_exception", test_call_llm_structured_streaming_openrouter_exception_raises)
     await r.record_async(
         "stream_rose_cancelled_propagates",

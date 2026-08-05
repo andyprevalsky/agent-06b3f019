@@ -2,13 +2,13 @@ import 'dotenv/config';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
-import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import { ensureAgentCardSandboxFloat, ensureBenchmarkOrgCardholder } from '../src/providers/agentcard/benchmark-float';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-// Keep payment settlement on the normal Stripe-backed path. The shared benchmark identity is a
-// production admin and intentionally receives company-funded cards without a personal Stripe hold.
+// Keep payment settlement on the normal Stripe-backed path. The dedicated lifecycle identity is
+// intentionally non-admin so benchmarks exercise Stripe hold, capture, and refund behavior.
 const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
@@ -209,12 +209,20 @@ async function main(): Promise<void> {
 
     await seedAgentCardConnection(prisma, userId);
 
+    const cardholderId =
+      process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID?.trim() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+
     // The org identity now travels in the client-credential token itself
     // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
     const sandboxFloat = await ensureAgentCardSandboxFloat();
     console.log(
       `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
         `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
+    );
+
+    const cardholder = await ensureBenchmarkOrgCardholder(cardholderId);
+    console.log(
+      `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholder.verificationStatus})`
     );
 
     console.log(

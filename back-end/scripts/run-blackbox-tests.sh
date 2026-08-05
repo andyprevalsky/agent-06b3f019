@@ -141,7 +141,11 @@ if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
     exit 1
   fi
-  if psql "$EXPLICIT_TEST_DB_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+  # Prisma accepts connection-pool tuning in the URL query string, but libpq
+  # rejects those Prisma-only parameters. Probe the same local database with
+  # the plain URL while preserving the bounded URL for Prisma test children.
+  EXPLICIT_TEST_PSQL_URL="${EXPLICIT_TEST_DB_URL%%\?*}"
+  if psql "$EXPLICIT_TEST_PSQL_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     DB_FOUND=true
     SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
     echo "Using database explicitly provided by the existing backend launcher"
@@ -287,6 +291,27 @@ SQL
           echo "   Run codex login, seed the integration, configure a funded key, or set BACKEND_CODEX_TOKEN_SYNC_SKIP=1 only when the caller already seeded it." >&2
           exit 1
         fi
+      fi
+    fi
+
+    # Real-LLM blackbox users are freshly provisioned and own no compute
+    # credential, so without a pooled token every claudeAuth path in the suite
+    # silently degrades to the paid waterfall — a different model than
+    # production runs, which makes model-behavior acceptances meaningless.
+    # Seed the local Claude Code envelope the same way gpt_code is seeded, and
+    # mark it poolable so provisioned test users can draw it. Best-effort: no
+    # keychain (CI, Linux) leaves the previous waterfall behavior untouched.
+    if [[ "${BACKEND_CLAUDE_TOKEN_SYNC_SKIP:-0}" != "1" ]] &&
+      security find-generic-password -s "Claude Code-credentials" -w >/dev/null 2>&1; then
+      echo "Syncing local Claude Code credentials to local test database..."
+      # The seeder owns the pooling flag: its upsert is scoped to the single
+      # {userId, claude_code} row, so no follow-up SQL is needed here. Shelling
+      # out to psql would also have put the DB password in the process table.
+      if DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
+        npx tsx scripts/seed-claude-code-token-from-keychain.ts >/dev/null 2>&1; then
+        :
+      else
+        echo "   Claude Code credential sync failed; claudeAuth paths will use the waterfall."
       fi
     fi
   fi

@@ -13,12 +13,12 @@ Model contract (P1):
     rose-1-lite:
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-terra
-        waterfall  = google/gemini-3.5-flash -> moonshotai/kimi-k2.7-code
+        waterfall  = google/gemini-3.6-flash -> moonshotai/kimi-k3
 
     rose-1-ultra:
         claudeAuth = claude-fable-5
         gptAuth    = gpt-5.6-sol
-        waterfall  = anthropic/claude-opus-4.8 -> google/gemini-3.1-pro-preview
+        waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.6-terra
 
     rose-1-browser-use:
         claudeAuth = claude-fable-5
@@ -70,8 +70,8 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         claude_auth_model="claude-sonnet-5",
         gpt_auth_model="gpt-5.6-terra",
         waterfall=(
-            "google/gemini-3.5-flash",
-            "moonshotai/kimi-k2.7-code",
+            "google/gemini-3.6-flash",
+            "moonshotai/kimi-k3",
         ),
     ),
     "rose-1-ultra": PoolSpec(
@@ -80,7 +80,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-sol",
         waterfall=(
             "anthropic/claude-opus-4.8",
-            "google/gemini-3.1-pro-preview",
+            "openai/gpt-5.6-terra",
         ),
     ),
     # Browser-use shares the claudeAuth + waterfall machinery; the only

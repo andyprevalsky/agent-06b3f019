@@ -50,15 +50,6 @@ export const DATA_SOURCE_CONFIGS = {
     connector: 'whatsapp',
     channel: 'WHATSAPP',
   },
-  sms: {
-    description: 'SMS conversation threads',
-    table: 'MessageRecord' as const,
-    searchField: 'message',
-    groupBy: 'personId',
-    filters: ['person', 'since', 'path'] as const,
-    connector: 'sms',
-    channel: 'SMS',
-  },
   network: {
     description: 'Contact network records',
     table: 'Person' as const,
@@ -113,9 +104,13 @@ export const DEFAULT_GREP_SOURCES: ValidSource[] = ['messages', 'network', 'agen
 
 /**
  * Message-family sources all search `MessageRecord`. The channel-specific ones
- * (email/imessage/whatsapp/sms) additionally restrict to a single
+ * (email/imessage/whatsapp) additionally restrict to a single
  * `MessageRecord.channel` value; the umbrella `messages` and legacy `gmail`
  * keep their existing search behavior.
+ *
+ * There is no separate `sms` grep source: macOS SMS lives in the Messages DB
+ * and is ingested as `IMESSAGE` via the iMessage connector. `MessageChannel`
+ * has no SMS variant.
  */
 export const MESSAGE_FAMILY_SOURCES: readonly ValidSource[] = [
   'messages',
@@ -123,7 +118,6 @@ export const MESSAGE_FAMILY_SOURCES: readonly ValidSource[] = [
   'email',
   'imessage',
   'whatsapp',
-  'sms',
 ];
 
 export function isMessageFamilySource(source: ValidSource): boolean {

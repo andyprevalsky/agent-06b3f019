@@ -61,7 +61,6 @@ const GrepResponse = z.object({
       'email',
       'imessage',
       'whatsapp',
-      'sms',
       'network',
       'agent_network',
       'transactions',
@@ -1270,13 +1269,20 @@ async function testSourceStatus(userId: string): Promise<void> {
   }
 
   // A non-gmail connector-backed source returns the stub connect URL.
-  const smsRes = await requestSourceStatus(userId, 'sms');
-  assertStatus(smsRes.status, 200, smsRes.data);
-  const smsBody = SourceStatusResponse.parse(smsRes.data);
-  const sms = smsBody.statuses[0];
-  if (sms?.connectUrl !== 'https://roselabs.ai/connect/sms' || sms.connected !== false) {
-    throw new Error(`Expected sms stub connect URL, got ${JSON.stringify(smsBody)}`);
+  const whatsappRes = await requestSourceStatus(userId, 'whatsapp');
+  assertStatus(whatsappRes.status, 200, whatsappRes.data);
+  const whatsappBody = SourceStatusResponse.parse(whatsappRes.data);
+  const whatsapp = whatsappBody.statuses[0];
+  if (
+    whatsapp?.connectUrl !== 'https://roselabs.ai/connect/whatsapp' ||
+    whatsapp.connected !== false
+  ) {
+    throw new Error(`Expected whatsapp stub connect URL, got ${JSON.stringify(whatsappBody)}`);
   }
+
+  // sms is not a grep source (Mac SMS is ingested via imessage / IMESSAGE).
+  const smsRes = await requestSourceStatus(userId, 'sms');
+  assertStatus(smsRes.status, 400, smsRes.data);
 
   // Documents is an umbrella grep source; concrete document providers are
   // separate connector keys for source-connect gates.

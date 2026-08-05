@@ -12,6 +12,66 @@ function run(): void {
     true,
     'a provably linear single-wildcard pattern must not depend on analyzer scheduling'
   );
+  for (const pattern of ['\\$[0-9,]+(\\.[0-9]{2})?', '[\\w.]+@[\\w.]+', '\\bphase-[0-9]+\\b']) {
+    assert.equal(
+      checkPatternSafety(pattern, '', 0).ok,
+      true,
+      `a syntactically proven degree-at-most-two pattern must not depend on analyzer scheduling: ${pattern}`
+    );
+  }
+
+  // Postgres resolves a bracket range like `0-9` against the active collation,
+  // and no regex sink pins `COLLATE "C"`, so the local proof cannot know a
+  // range's real membership. It must fail closed rather than separate two
+  // repetition frontiers on an assumed ASCII ordering.
+  for (const pattern of [
+    '(invoice|receipt|order)\\s+#?[0-9]+',
+    'v[0-9]+\\.[0-9]+\\.[0-9]+',
+    '[A-Z]{2,4}-[0-9]{2,5}',
+    '[A-Z]{1,5}[0-9]{1,5}X',
+    '[A-Z]+[0-9]+[A-Z]+[0-9]+X',
+  ]) {
+    assert.equal(
+      checkPatternSafety(pattern, '', 0).ok,
+      false,
+      `a collation-dependent range must never be locally proven disjoint: ${pattern}`
+    );
+  }
+  // Failing closed hands the pattern to the analyzer, so realistic queries are
+  // still accepted end to end — the fast path narrows, the capability does not.
+  for (const pattern of [
+    '(invoice|receipt|order)\\s+#?[0-9]+',
+    'v[0-9]+\\.[0-9]+\\.[0-9]+',
+    '[A-Z]{2,4}-[0-9]{2,5}',
+  ]) {
+    assert.equal(
+      checkPatternSafety(pattern, '').ok,
+      true,
+      `a realistic range-based query must stay usable via the analyzer: ${pattern}`
+    );
+  }
+  for (const pattern of [
+    '(a|aa){500}X',
+    '(a|aa){1,500}X',
+    'a+aa+a+X',
+    '.*a.*a.*X',
+    'a{1,500}a{1,500}a{1,500}X',
+    '(a{1,500}a{1,500}a{1,500}X)',
+    'a{0,500}a{0,500}a{0,500}X',
+    '[a]{1,500}a[a]{1,500}a[a]{1,500}X',
+    'a{0,1}'.repeat(30) + 'a'.repeat(30) + 'X',
+    '[a]{0,500}b',
+    '[a]{1,500}b',
+    '[a]{0,500}b[a]{0,500}b[a]{0,500}X',
+    '[a]{1,20}b[a]{1,20}b[a]{1,20}X',
+    '[A-\\w]+x[A-\\w]+x[A-\\w]+X',
+  ]) {
+    assert.equal(
+      checkPatternSafety(pattern, '', 0).ok,
+      false,
+      `an ambiguous repetition chain must remain analyzer-owned and fail closed: ${pattern}`
+    );
+  }
 
   // An invalid runtime value makes recheck throw synchronously, exercising the
   // same fail-closed branch used when its bounded analysis times out.

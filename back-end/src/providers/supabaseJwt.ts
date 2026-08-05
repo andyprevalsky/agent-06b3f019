@@ -63,6 +63,22 @@ function getJwks(): ReturnType<typeof createRemoteJWKSet> {
 type JwksResolver = Parameters<typeof jwtVerify>[1];
 
 /**
+ * The operator acting on behalf of `sub`, from the RFC 8693 `act` claim.
+ *
+ * This repo has TWO authentication middlewares over the same tokens
+ * (providers/auth.ts and providers/hybridAuth.ts). When only one of them read
+ * this claim, impersonated sessions were invisible to every route behind the
+ * other — which is how an admin's machine data reached another user's account.
+ * Both MUST derive the actor here so they cannot drift apart again.
+ *
+ * Returns undefined for an ordinary login.
+ */
+export function impersonatorFromPayload(payload: jwt.JwtPayload): string | undefined {
+  const actor = (payload as { act?: { sub?: unknown } }).act?.sub;
+  return typeof actor === 'string' && actor !== '' ? actor : undefined;
+}
+
+/**
  * Verify a Supabase access token and return its payload, or throw if the token
  * is invalid/expired/wrong-issuer. Accepts both the backend's HS256 tokens and
  * Supabase's asymmetric (ES256) tokens.

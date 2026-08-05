@@ -63,3 +63,31 @@ echo "PASS: run.sh passes the exact database and Docker container to the helper"
 RESTORE_FAILURE="$(grep -A7 'restore failed — falling back' "$RUN_SH")"
 echo "$RESTORE_FAILURE" | grep -q 'rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash"'
 echo "PASS: run.sh invalidates an archive already proven unrestorable"
+# ngrok reserved-domains list page size must stay <= 100 (ERR_NGROK_233).
+grep -qE -- '--limit 100\b' "$RUN_SH" || { echo "FAIL: run.sh must list reserved domains with --limit 100" >&2; exit 1; }
+! grep -qE -- '--limit 1000\b' "$RUN_SH" || { echo "FAIL: run.sh still requests --limit 1000 from ngrok" >&2; exit 1; }
+echo "PASS: run.sh respects ngrok reserved-domains page-size cap"
+
+# Domain existence checks must compare JSON values literally — interpolating
+# $domain into grep treats dots as regex wildcards and can false-match.
+if grep -nE 'grep -q.*"domain".*"\$domain"' "$RUN_SH" >/dev/null; then
+  echo "FAIL: run.sh must not regex-match reserved domain names via grep" >&2
+  exit 1
+fi
+grep -q 'item.get("domain") == requested_domain' "$RUN_SH" \
+  || { echo "FAIL: run.sh must literally compare reserved domain JSON values" >&2; exit 1; }
+echo "PASS: run.sh compares reserved domains as exact JSON values"
+
+# Reserved-domain API calls must use the NGROK_API_KEY env (not --api-key argv)
+# and must fail closed on malformed listing JSON instead of creating a domain.
+ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
+echo "$ensure_fn" | grep -q 'export NGROK_API_KEY' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must export NGROK_API_KEY" >&2; exit 1; }
+if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -qE -- '--api-key[[:space:]]'; then
+  echo "FAIL: ensure_ngrok_domain_reserved must not pass --api-key on argv" >&2
+  exit 1
+fi
+echo "$ensure_fn" | grep -q 'malformed' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must fail on malformed listing JSON" >&2; exit 1; }
+echo "PASS: run.sh reserved-domain listing uses env key and fails closed on bad JSON"
+

@@ -697,6 +697,49 @@ async def test_status_needs_user_help_returned_from_tool():
     assert result["message"] == "Please log in"
 
 
+async def test_failed_llm_call_does_not_consume_iteration_budget():
+    """A failed LLM call is a retry of the turn, not a turn.
+
+    Regression for agent 16ae3e8f-1e0f-4004-9c58-b74fe34c8a1e: its explore
+    sub-agent completed 18 turns of real work, then two failed structured-output
+    parses consumed iterations 19 and 20 and it died on "Reached max iterations
+    (20)" without ever acting again. `iteration += 1` runs before the LLM call,
+    so a call that produced no assistant turn, no tool call and no context
+    growth still spent a turn.
+
+    With max_iterations=2 and two transient failures ahead of a good response,
+    the agent must still get to execute its tool. Counting the failures leaves
+    zero turns for work.
+    """
+    calls = {"n": 0}
+
+    def factory():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise RuntimeError("transient provider failure")
+        return [{"tool": "web_search", "query": "real work"}]
+
+    with patch("loop.run_agent.asyncio.sleep", new=AsyncMock(return_value=None)):
+        result, _posted, executed = await _run_single_iteration(
+            [{"tool": "web_search", "query": "real work"}],
+            [("web_search", "tc-budget-1", 1.0)],
+            skip_verification=True,
+            max_iterations=2,
+            llm_tool_calls_factory=factory,
+        )
+
+    assert calls["n"] > 2, (
+        f"agent never got past the 2 transient failures — only {calls['n']} LLM "
+        "calls made, so the failures consumed the whole iteration budget"
+    )
+    assert executed, (
+        "agent never executed a tool: both iterations were consumed by failed "
+        "LLM calls, leaving no budget for real work"
+    )
+    assert executed[0]["tool_name"] == "web_search"
+    assert result["status"] != "error"
+
+
 async def test_status_completed_from_tool():
     """Tool result with status='completed' should short-circuit with status='completed'."""
     tool_calls = [{"tool": "web_fetch", "url": "x"}]
@@ -1093,8 +1136,12 @@ async def test_fast_cache_position_retries_same_step_after_llm_failure():
             goal_text="stable fast cache goal",
         )
 
-    assert len(llm_calls) == 2
-    assert cache_steps == [1, 1]
+    # 3 calls: the failed attempt is retried without spending an iteration
+    # (see failed_llm_call_does_not_consume_iteration_budget), so both of
+    # max_iterations=2's turns remain available for real work.
+    assert len(llm_calls) == 3
+    # The invariant under test: the retry reuses the SAME fast-cache step.
+    assert cache_steps[:2] == [1, 1]
     assert result["status"] in {"max_iterations", "error"}
 
 
@@ -1148,7 +1195,8 @@ async def test_run_agent_refusal_retry_excludes_anthropic_without_backoff():
             skip_status_updates=True,
         )
 
-    assert len(llm_calls) == 2
+    # 3 calls: the refused attempt is retried without spending an iteration.
+    assert len(llm_calls) == 3
     assert llm_calls[0]["_exclude_anthropic_family"] is False
     assert llm_calls[1]["_exclude_anthropic_family"] is True
     assert not any(call.args == (2,) for call in sleep_mock.await_args_list)
@@ -1944,6 +1992,10 @@ async def run_all_tests():
     )
     await r.record_async(
         "tool_exception_continues_loop_and_posts_error", test_tool_exception_continues_loop_and_posts_error
+    )
+    await r.record_async(
+        "failed_llm_call_does_not_consume_iteration_budget",
+        test_failed_llm_call_does_not_consume_iteration_budget,
     )
     await r.record_async("status_needs_user_help_returned_from_tool", test_status_needs_user_help_returned_from_tool)
     await r.record_async("status_completed_from_tool", test_status_completed_from_tool)

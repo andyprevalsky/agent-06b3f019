@@ -1365,8 +1365,14 @@ def convert_context_to_messages(
 
     sorted_context = sorted(context, key=sort_key)
 
-    # Track which tool_call_ids have been declared by ASSISTANT messages
+    # Track which tool_call_ids have been declared by ASSISTANT messages, and the
+    # name each was DECLARED under. A tool result must carry the declared name,
+    # never the executed one: spawn_agent can execute as spawn_browser_agent, and
+    # Google validates functionResponse.name against the declared functions and
+    # rejects the entire request with 400 INVALID_ARGUMENT. OpenAI and Anthropic
+    # ignore the mismatch, so this stays latent until a Google model is reached.
     declared_tool_ids = set()
+    declared_tool_names: Dict[str, str] = {}
 
     # Excluded / sub-agent-internal / cloud-lifecycle rows were already removed by
     # drop_rows_never_sent_to_model above — do not re-filter them here.
@@ -1390,6 +1396,8 @@ def convert_context_to_messages(
                 for tc in metadata["tool_calls"]:
                     tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
                     declared_tool_ids.add(tc_id)
+                    if tc.get("tool"):
+                        declared_tool_names[tc_id] = str(tc["tool"])
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
@@ -1446,8 +1454,13 @@ def convert_context_to_messages(
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                if metadata.get("toolName"):
-                    tool_msg["name"] = metadata["toolName"]
+                # Label with the DECLARED name (see declared_tool_names above), not
+                # metadata["toolName"], which records what actually executed. Omit
+                # the label entirely when the declaration is unknown — an absent
+                # name is accepted by every provider, a wrong one is not.
+                declared_name = declared_tool_names.get(tool_call_id)
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
             else:
                 # No matching ASSISTANT tool_call - convert to SYSTEM message
@@ -1581,6 +1594,10 @@ async def build_llm_messages(
 
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
+    # Name each tool_call_id was DECLARED under. Google validates
+    # functionResponse.name against the declared functions and 400s on a
+    # mismatch; the executed name (metadata["toolName"]) can legitimately differ.
+    declared_tool_call_names: Dict[str, str] = {}
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -1736,6 +1753,7 @@ async def build_llm_messages(
                             f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
                         )
                     declared_tool_call_ids.add(str(tool_call_id))
+                    declared_tool_call_names[str(tool_call_id)] = str(tool_name)
                     args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
                     parsed_tool_calls.append(
                         {
@@ -1816,8 +1834,13 @@ async def build_llm_messages(
                     "content": tool_content,
                     "tool_call_id": str(tool_call_id),
                 }
-                if tool_name:
-                    tool_msg["name"] = tool_name
+                # Label with the DECLARED name, not tool_name (which is
+                # metadata["toolName"] — what actually executed). Omit when the
+                # declaration is unknown: an absent name is accepted everywhere,
+                # a mismatched one is rejected by Google.
+                declared_name = declared_tool_call_names.get(str(tool_call_id))
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
                 continue
 
@@ -2080,6 +2103,7 @@ async def call_llm_structured_streaming(
     call_site: str = "unknown",  # Label identifying the caller (e.g., plan_loop, execute_loop, planner)
     thinking: Optional[Dict[str, Any]] = None,  # Override thinking config (e.g. {"type": "adaptive"})
     effort: Optional[str] = None,  # Anthropic effort level ("low", "medium", "high", "max")
+    tool_choice: Any = None,  # Optional native-tool choice, including a forced {"name": ...} selection
     deadline_s: Optional[float] = None,  # Override Rose top-level deadline; None uses Rose default
     ttft_timeout_s: Optional[float] = None,  # Override Rose TTFT timeout
     idle_timeout_s: Optional[float] = None,  # Override Rose idle/inter-chunk timeout (-1 disables)
@@ -2230,6 +2254,7 @@ async def call_llm_structured_streaming(
                     "pool": pool,
                     "messages": messages,
                     "response_model": response_model,
+                    "tool_choice": tool_choice,
                     "temperature": temperature,
                     "max_tokens": max_tokens,
                     "seed": model_seed,
@@ -2274,6 +2299,7 @@ async def call_llm_structured_streaming(
             pool=pool,
             messages=messages,
             response_model=response_model,
+            tool_choice=tool_choice,
             temperature=temperature,
             max_tokens=max_tokens,
             seed=model_seed,
@@ -2661,6 +2687,7 @@ async def call_llm_structured_streaming(
                 on_model_detected=on_model_detected,
                 skip_cache_write=skip_cache_write,
                 call_site=call_site,
+                tool_choice=tool_choice,
                 _is_escalation=True,
             )
         elif final_finish_reason == "length" and max_tokens < 32768 and not _is_escalation and elapsed >= 180:
@@ -2898,6 +2925,7 @@ async def call_llm_structured_streaming(
                     call_site=call_site,
                     thinking=thinking,
                     effort=effort,
+                    tool_choice=tool_choice,
                     deadline_s=deadline_s,
                     ttft_timeout_s=ttft_timeout_s,
                     idle_timeout_s=idle_timeout_s,
@@ -3025,6 +3053,17 @@ async def call_llm_structured_streaming(
         object.__setattr__(response, "codex_reasoning_items", codex_reasoning_items)
 
         return response, usage, detected_tools_ordered
+
+    # The direct OpenRouter/Instructor path below parses JSON content and does
+    # not consume provider-native tool calls. Dispatching it with a forced tool
+    # choice would therefore pretend to constrain generation while only
+    # validating the result after the fact. Fail closed before the provider
+    # request; Rose models project AgentAction into native tools and are the
+    # supported path for required-tool calls.
+    if tool_choice is not None:
+        raise LLMStructuredOutputError(
+            "Required native tool selection is unsupported for direct OpenRouter models; use a Rose model"
+        )
 
     # For OpenRouter models, use Instructor's partial streaming
     base_client = AsyncOpenAI(api_key=config.openrouter.api_key, base_url=config.openrouter.base_url)
@@ -5015,6 +5054,7 @@ async def call_llm_activity(
                 call_site=call_site,
                 skip_cache_write=skip_cache_write,
                 cache_sequence_id=cache_sequence_id,
+                tool_choice={"name": required_tool} if required_tool else None,
             )
         finally:
             # Guarantee the background drainer never leaks if streaming raises.

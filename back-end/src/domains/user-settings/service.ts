@@ -12,7 +12,9 @@ import * as repo from './repo';
 /** Default response when no user record exists. */
 const DEFAULT_SETTINGS: UserSettingsResponse = {
   name: null,
+  email: null,
   phone: null,
+  deliveryRecipientName: null,
   addressLine1: null,
   addressLine2: null,
   city: null,
@@ -30,7 +32,9 @@ const DEFAULT_SETTINGS: UserSettingsResponse = {
 /** Map a Prisma user record to the response shape (GET includes phone + onboarding). */
 function toGetResponse(user: {
   name: string | null;
+  email: string | null;
   phone: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;
@@ -46,7 +50,9 @@ function toGetResponse(user: {
 }): UserSettingsResponse {
   return {
     name: user.name,
+    email: user.email,
     phone: user.phone,
+    deliveryRecipientName: user.deliveryRecipientName,
     addressLine1: user.addressLine1,
     addressLine2: user.addressLine2,
     city: user.city,
@@ -65,6 +71,8 @@ function toGetResponse(user: {
 /** Map a Prisma user record to the response shape (PUT/PATCH omits phone + onboarding). */
 function toMutationResponse(user: {
   name: string | null;
+  email: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;
@@ -79,6 +87,8 @@ function toMutationResponse(user: {
 }): Omit<UserSettingsResponse, 'phone' | 'onboardingCompletedAt'> {
   return {
     name: user.name,
+    email: user.email,
+    deliveryRecipientName: user.deliveryRecipientName,
     addressLine1: user.addressLine1,
     addressLine2: user.addressLine2,
     city: user.city,

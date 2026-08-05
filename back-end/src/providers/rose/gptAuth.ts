@@ -26,6 +26,11 @@ import {
   RoseServerError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import {
+  boundedRateLimitBackoffMs,
+  extractRateLimitedUntil,
+  providerRequiredWaitMs,
+} from './rateLimitReset';
 import { parseResponsesSSE } from './streaming';
 import { postCodexStream, postOpenAIResponsesStream } from './transport';
 import type { CompletionMessage, ContentBlock, ResponseFormat, RoseStreamChunk } from './types';
@@ -394,11 +399,25 @@ export async function* gptAuthComplete(opts: GptAuthOptions): AsyncIterable<Rose
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+      // Carry the provider's own reset through to the credential cooldown —
+      // see the identical capture in claudeAuth.ts and rateLimitReset.ts.
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      // Retry in place only when the provider's wait fits inside our sleep cap;
+      // otherwise rotate. See the matching comment in claudeAuth.ts.
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
+        await sleep(
+          boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
+          opts.abortSignal
+        );
         continue;
       }
-      throw new RoseRateLimitError(`Codex 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `Codex 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -497,11 +516,23 @@ export async function* openAiApiKeyComplete(
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      // Retry in place only when the provider's wait fits inside our sleep cap;
+      // otherwise rotate. See the matching comment in claudeAuth.ts.
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
+        await sleep(
+          boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
+          opts.abortSignal
+        );
         continue;
       }
-      throw new RoseRateLimitError(`OpenAI 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `OpenAI 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -525,17 +556,6 @@ export async function* openAiApiKeyComplete(
 
   if (lastError) throw new RoseServerError(`OpenAI exhausted retries: ${lastError.message}`);
   throw new RoseServerError('OpenAI exhausted retries');
-}
-
-function backoffFor429(headers: Headers, attempt: number): number {
-  const retryAfter = headers.get('retry-after');
-  if (retryAfter) {
-    const parsed = Number.parseFloat(retryAfter);
-    if (!Number.isNaN(parsed)) {
-      return Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
-    }
-  }
-  return Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
 }
 
 function sleep(ms: number, abortSignal?: AbortSignal): Promise<void> {

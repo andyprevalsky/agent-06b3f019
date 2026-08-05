@@ -50,6 +50,11 @@ RUNS_DIR = AGENTS_DIR / "benchmarks" / "runs"
 # run.sh can publish services.json. That fixture currently includes 10k messages
 # and 20k+ browser cookies, so a healthy first start can exceed three minutes.
 SERVICE_START_TIMEOUT_SECONDS = 600
+# An explicitly opted-in cold seed can spend the entire warm-start budget
+# copying browser state before run.sh starts the public tunnel and publishes its
+# manifest. Keep the normal bound for cached starts, but give that one-time
+# bootstrap enough room to finish cleanly.
+COLD_SEED_SERVICE_START_TIMEOUT_SECONDS = 1200
 AGENT_PAYMENT_TEST_SHOP_TASK_NAME = "agent-payment-test-shop"
 AGENT_PAYMENT_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
@@ -515,14 +520,32 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
     if database.get("use_system_postgres") or not database.get("owned_by_run_sh"):
         return
     container = database.get("container")
+    # Always issue the docker teardown argv (tests assert the calls). Catch
+    # FileNotFoundError so hosts without a docker binary still tear down cleanly.
     if isinstance(container, str) and container:
-        subprocess.run(["docker", "rm", "-f", container], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
             volume = f"victoria-pgdata-{container[len('victoria-db-'):]}"
     if isinstance(volume, str) and volume:
-        subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "volume", "rm", volume],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
 
 
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
@@ -531,20 +554,23 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
-    subprocess.run(
-        ["docker", "rm", "-f", container],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    subprocess.run(
-        ["docker", "volume", "rm", volume],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(
+            ["docker", "volume", "rm", volume],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -727,6 +753,13 @@ def validate_agentcard_org_credentials(
 
 
 def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
+    # The local runner owns both the isolated stack and the later benchmark
+    # subprocesses. Keep their isolation view aligned so credential refreshes
+    # can safely enable synthetic-user pooling only for the per-run database.
+    if isolated:
+        os.environ["BENCHMARK_ISOLATED_RUN"] = "true"
+    else:
+        os.environ.pop("BENCHMARK_ISOLATED_RUN", None)
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
@@ -993,10 +1026,14 @@ def start_services(
                 start_new_session=True,
             )
         try:
+            service_start_timeout = SERVICE_START_TIMEOUT_SECONDS
+            if stack.isolated and env.get("BENCHMARK_REQUIRE_SEED_DUMP") == "0":
+                service_start_timeout = COLD_SEED_SERVICE_START_TIMEOUT_SECONDS
             manifest = wait_for_services(
                 stack.manifest_path,
                 process=process,
                 service_log=stack.service_log,
+                timeout_seconds=service_start_timeout,
             )
         except BaseException:
             # Ownership transfers to the caller only after readiness succeeds.

@@ -13,6 +13,13 @@ from utils.purchase_approval import (
     validate_product_review_count,
 )
 
+# Workflow-safe payment-card timeout constants (single source of truth). Shared
+# by the request_payment_card domain and the browser agent; kept in utils/ so
+# cross-domain consumers import from a lower layer instead of another domain.
+MINT_PURCHASE_CARD_BACKEND_RETRY_BUDGET_SECONDS = 60.0
+MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS = 90.0
+MINT_PURCHASE_CARD_HTTP_TIMEOUT_SECONDS = 85.0
+
 
 def _to_list(value: Any) -> list:
     if isinstance(value, list):

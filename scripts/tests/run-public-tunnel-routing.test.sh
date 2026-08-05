@@ -22,6 +22,7 @@
 #   case 4 — edge always 000              → NOT routing, bounded by the timeout
 #   case 5 — edge 000 then 502            → routing (recovers within the window)
 #   case 6 — run.sh actually recycles a dead tunnel and backs off
+#   case 7 — prefers IPv4 (curl -4) + localtunnel fallback + NXDOMAIN skip
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -33,13 +34,18 @@ trap 'rm -rf "$TMP"' EXIT
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# Extract the real function from run.sh so this test exercises shipped code
+# Extract the real helpers from run.sh so this test exercises shipped code
 # rather than a copy that could drift.
-awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
+awk '/^public_tunnel_hostname_resolves\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
+awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/fn.sh" \
   || fail "could not extract cloudflare_tunnel_edge_is_routing from run.sh"
+grep -q 'public_tunnel_hostname_resolves' "$TMP/fn.sh" \
+  || fail "could not extract public_tunnel_hostname_resolves from run.sh"
 grep -q '000' "$TMP/fn.sh" \
   || fail "extracted routing check no longer distinguishes the 000 no-response case"
+grep -qE 'curl -4 ' "$TMP/fn.sh" \
+  || fail "extracted routing check no longer prefers IPv4 (curl -4) for trycloudflare probes"
 
 # Drive the extracted function with a stub curl whose status sequence we control.
 # STATUS_FILE holds one status per line; the stub pops one per invocation and
@@ -63,9 +69,11 @@ STUB
 
   TMPDIR_FOR_STUB="$TMP" PATH="$TMP:$PATH" \
     CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS="$timeout" \
+    CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK=1 \
     bash -c "
       set -euo pipefail
       CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS=$timeout
+      CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK=1
       source '$TMP/fn.sh'
       cloudflare_tunnel_edge_is_routing https://stub.trycloudflare.com
     "
@@ -118,5 +126,29 @@ grep -q "unset 'PIDS\[" "$TMP/start.sh" \
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/start.sh" \
   || fail "case 6: tunnel startup no longer verifies the edge routes"
 echo "PASS: run.sh bounds, backs off, recycles, and de-registers dead quick tunnels"
+
+# --- case 7: NXDOMAIN skip + localtunnel last-resort fallback --------------
+grep -q 'skipping remaining quick-tunnel attempts' "$RUN_SH" \
+  || fail "case 7: run.sh no longer skips remaining quick tunnels on NXDOMAIN"
+grep -q 'start_localtunnel_public_tunnel' "$RUN_SH" \
+  || fail "case 7: run.sh no longer defines localtunnel fallback"
+awk '/^start_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_public.sh"
+grep -q 'start_localtunnel_public_tunnel && return 0' "$TMP/start_public.sh" \
+  || fail "case 7: start_public_tunnel no longer calls localtunnel before hard-fail"
+grep -q 'ngrok has no authtoken; trying localtunnel' "$TMP/start_public.sh" \
+  || fail "case 7: start_public_tunnel no longer short-circuits to localtunnel when ngrok is unconfigured"
+grep -q 'loca\.lt' "$RUN_SH" \
+  || fail "case 7: localtunnel URL parser no longer accepts loca.lt"
+# Bare `exit 1` on missing authtoken must not remain — it skipped localtunnel.
+awk '/^start_ngrok_public_tunnel\(\) \{$/,/^}$/' "$RUN_SH" > "$TMP/start_ngrok.sh"
+grep -q 'ngrok_public_tunnel_fail.*missing an authtoken' "$TMP/start_ngrok.sh" \
+  || fail "case 7: start_ngrok_public_tunnel must use ngrok_public_tunnel_fail for missing authtoken"
+if grep -nE '^\s*exit 1\s*$' "$TMP/start_ngrok.sh" | grep -vq 'ngrok_public_tunnel_fail'; then
+  # Allow only exits inside ngrok_public_tunnel_fail itself (not in this fn).
+  :
+fi
+! grep -nE 'echo .*missing an authtoken' -A1 "$TMP/start_ngrok.sh" | grep -q 'exit 1' \
+  || fail "case 7: start_ngrok_public_tunnel still bare-exits on missing authtoken"
+echo "PASS: NXDOMAIN skip + localtunnel fallback are wired into start_public_tunnel"
 
 echo "ALL PASS — public quick-tunnel routing verification and recycling"

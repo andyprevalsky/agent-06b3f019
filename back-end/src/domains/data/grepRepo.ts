@@ -173,7 +173,7 @@ export async function resolvePersonId(userId: string, identifier: string): Promi
 /**
  * Optional messages narrowing: scope to one contact, a time cutoff, and/or a
  * single channel. `channel` is only set by the fine-grained channel sources
- * (email/imessage/whatsapp/sms); when undefined the emitted SQL is byte-
+ * (email/imessage/whatsapp); when undefined the emitted SQL is byte-
  * identical to the pre-channel query used by messages/gmail.
  */
 function messageFilters(
