@@ -604,7 +604,9 @@ export async function testRealLlm_purchaseRequestSpawnsAgent(prisma: PrismaClien
       );
     }
     const goal = agent.goal.toLowerCase();
-    if (!goal.includes('lip balm')) {
+    // Product titles often insert adjectives ("Lip Glowy Balm"); require both
+    // tokens rather than the contiguous phrase "lip balm".
+    if (!(goal.includes('lip') && goal.includes('balm'))) {
       throw new Error(`Expected agent goal to mention lip balm, got: "${agent.goal}"`);
     }
     if (!/amazon|purchas|buy|order/.test(goal)) {
