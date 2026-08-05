@@ -312,22 +312,6 @@ export async function handleSmsSupervisorMessage(config: {
 
   const deliverUserMessage = async (message: string): Promise<ToolResult> =>
     withCommitLock(userId, async () => {
-      // Blast-radius cap. Delivery is what the user actually experiences, so the
-      // budget is enforced here rather than at the call sites — every path
-      // (model-requested send, tool-failure report, terminal fallback) is bounded.
-      if (sentMessages.length >= environment.MAX_USER_MESSAGES_PER_RUN) {
-        log.warn('[SmsSupervisor] send_user_message refused: per-run budget exhausted', {
-          userId,
-          mySeq,
-          sentMessageCount: sentMessages.length,
-        });
-        return {
-          tool: 'send_user_message',
-          success: false,
-          result: '',
-          error: environment.SEND_BUDGET_EXHAUSTED_ERROR,
-        };
-      }
       if (!(await runStillOwnsReply())) {
         return {
           tool: 'send_user_message',
@@ -565,12 +549,7 @@ export async function handleSmsSupervisorMessage(config: {
     }
 
     const failedToolResults = toolResults.filter((result) => !result.success);
-    // A budget refusal is the loop telling the model to stop, not a broken tool.
-    // Counting it as a failure would reject the very attempt_completion the
-    // refusal asked for, and spin the run to the round cap for nothing.
-    const blockingFailures = failedToolResults.filter(
-      (result) => result.error !== environment.SEND_BUDGET_EXHAUSTED_ERROR
-    );
+    const blockingFailures = failedToolResults;
 
     // attempt_completion sends nothing. It is a valid stop signal only after
     // this run has successfully delivered at least one user message.
@@ -736,19 +715,6 @@ export async function handleSmsSupervisorMessage(config: {
           'Incorporate these results. Use send_user_message only for text the user still needs, and call argument-free attempt_completion as soon as the run is complete.',
       })
     );
-
-    // Budget spent: nothing further this run can reach the user, so keep going
-    // only long enough to commit queued writes, then stop. Every extra round
-    // past this point is pure cost with no observable effect.
-    if (sentMessages.length >= environment.MAX_USER_MESSAGES_PER_RUN) {
-      const budgetCommitResults = await flushPendingWrites(round);
-      log.warn('[SmsSupervisor] Ending run early: per-run SMS budget exhausted', {
-        round,
-        sentMessageCount: sentMessages.length,
-        committedWrites: budgetCommitResults.length,
-      });
-      break;
-    }
 
     if (round === environment.MAX_TOOL_ROUNDS - 1) {
       log.warn('[SmsSupervisor] Hit safety cap without attempt_completion');

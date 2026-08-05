@@ -182,16 +182,15 @@ runCheck(
   'tool-specific delivery mechanics leaked into the SMS overlay'
 );
 runCheck(
-  'send_user_message tool owns immediate irreversible delivery and send budget',
+  'send_user_message tool owns immediate irreversible delivery',
   Boolean(
     sendUserMessage &&
     /real SMS/i.test(sendUserMessage.description) &&
     /immediately/i.test(sendUserMessage.description) &&
     /cannot be undone/i.test(sendUserMessage.description) &&
-    /does not end the run/i.test(sendUserMessage.description) &&
-    /at most two successful sends/i.test(sendUserMessage.description)
+    /does not end the run/i.test(sendUserMessage.description)
   ),
-  'send_user_message description is missing delivery or budget mechanics'
+  'send_user_message description is missing delivery mechanics'
 );
 runCheck(
   'attempt_completion tool owns the no-message completion contract',

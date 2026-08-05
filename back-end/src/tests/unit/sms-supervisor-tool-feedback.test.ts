@@ -18,11 +18,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { SMS_SURFACE_OVERLAY } from '../../providers/smsSupervisor/contextBuilder';
-import {
-  MAX_USER_MESSAGES_PER_RUN,
-  SEND_BUDGET_EXHAUSTED_ERROR,
-  buildToolFeedbackMessages,
-} from '../../providers/smsSupervisor/environmentMessages';
+import { buildToolFeedbackMessages } from '../../providers/smsSupervisor/environmentMessages';
 import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
 const HANDLER_SOURCE = readFileSync(
@@ -106,7 +102,6 @@ test('describes the runtime the model is actually running in', () => {
 
   const sendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
   const attemptCompletion = TOOL_SCHEMAS.find((tool) => tool.name === 'attempt_completion');
-  assert.match(sendUserMessage?.description ?? '', /at most two successful sends per run/i);
   assert.match(
     attemptCompletion?.description ?? '',
     /rejects it unless this run has already successfully called send_user_message/i
@@ -116,7 +111,6 @@ test('describes the runtime the model is actually running in', () => {
   assert.ok(
     HANDLER_SOURCE.includes('Rejected: this run has not successfully called send_user_message')
   );
-  assert.equal(MAX_USER_MESSAGES_PER_RUN, 2);
 });
 
 test('stops nudging a model that keeps returning nothing', () => {
@@ -128,11 +122,4 @@ test('stops nudging a model that keeps returning nothing', () => {
   assert.ok(HANDLER_SOURCE.includes('MAX_CONSECUTIVE_EMPTY_ROUNDS = 2'));
   assert.ok(HANDLER_SOURCE.includes('consecutiveEmptyRounds >= MAX_CONSECUTIVE_EMPTY_ROUNDS'));
   assert.ok(HANDLER_SOURCE.includes('staying silent is not an option this run'));
-});
-
-test('enforces the per-run send budget at the delivery boundary', () => {
-  assert.ok(HANDLER_SOURCE.includes('environment.MAX_USER_MESSAGES_PER_RUN'));
-  assert.ok(HANDLER_SOURCE.includes('environment.SEND_BUDGET_EXHAUSTED_ERROR'));
-  assert.ok(MAX_USER_MESSAGES_PER_RUN < 4);
-  assert.ok(SEND_BUDGET_EXHAUSTED_ERROR.includes('attempt_completion'));
 });

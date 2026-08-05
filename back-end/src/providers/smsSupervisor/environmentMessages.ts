@@ -5,22 +5,6 @@ import type { ToolInvocationContext } from './supervisorTools';
 export const MAX_TOOL_ROUNDS = 10;
 
 /**
- * Hard ceiling on outbound SMS that ONE inbound SMS may produce.
- *
- * `send_user_message` deliberately does not end the run, so without a budget a
- * single inbound can fan out to one SMS per round. Two is "a short ack plus the
- * substantive result", which is the most a human ever wants from one text.
- */
-export const MAX_USER_MESSAGES_PER_RUN = 2;
-
-/** Refusal handed back to the model once the per-run send budget is spent. */
-export const SEND_BUDGET_EXHAUSTED_ERROR =
-  `Refused: this run already sent ${String(MAX_USER_MESSAGES_PER_RUN)} SMS, which is the ` +
-  'per-inbound limit. Do not try to send again in this run. Call argument-free ' +
-  'attempt_completion now — agents you started report their own progress and results to ' +
-  'the user directly.';
-
-/**
  * Feed a round's tool results back to the model as a TOOL turn, never a USER turn.
  *
  * In this transcript `role: 'user'` means exactly one thing: an SMS the human
