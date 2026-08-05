@@ -726,8 +726,26 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # below cold-syncs exactly as before (then repopulates the cache); the schemahash
 # guard + pg_restore fallback catch any mismatch/corruption, so it can never break
 # a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
-# + UTC day (bounds staleness to 24h). Local dev leaves BENCHMARK_SEED_DUMP unset.
-_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+# + pg_dump major (compatibility) + UTC day (bounds staleness to 24h). Local dev
+# leaves BENCHMARK_SEED_DUMP unset.
+#
+# The pg major belongs in the token because a custom-format archive is NOT
+# backward compatible: a PG18 client emits header format 1.16, which the pinned
+# postgres:16-alpine pg_restore rejects outright ("unsupported version (1.16) in
+# file header"). Without it every publisher shares one token, so a single
+# neighbour on a newer client poisons the shared cache for every consumer — each
+# of which then fails its restore and, under BENCHMARK_REQUIRE_SEED_DUMP=1,
+# refuses to boot at all. Keying by major lets mismatched clients coexist rather
+# than clobber each other.
+_SEED_DUMP_CLIENT_MAJOR="$(
+    if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
+        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+    else
+        echo 16 # the pinned postgres:16-alpine container below writes the archive
+    fi
+)"
+[ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
+_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-pg${_SEED_DUMP_CLIENT_MAJOR}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
