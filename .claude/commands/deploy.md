@@ -720,6 +720,7 @@ in one assistant message with separate parallel Bash tool calls:
 2. Smoke benchmarks (Step 6; skip only under its documented classifier).
 3. AgentCard lifecycle (Step 6a; skip only when its classifier is empty).
 4. Semantic tests (Step 6b; never skip).
+5. Claude Code E2B sandbox smoke (Step 6c; NEVER skip — runs on every deploy).
 
 Matching Group 4 rows in `/factory-review` therefore share a real start phase.
 Do not wait for one lane before starting another. All applicable lanes must be
@@ -1045,6 +1046,58 @@ After all Group 4 lanes pass, run the mandatory Step 5 teardown. If any lane
 fails, preserve the failed agent long enough to collect diagnostics, complete
 any payment lifecycle cleanup, then tear down before restarting the Test Loop.
 
+## Step 6c: Claude Code E2B sandbox smoke (NO SKIP — real E2B sandbox)
+
+**This gate is NON-SKIPPABLE. It runs on every `/deploy` regardless of the change
+classifier or which paths changed.** It is the only gate that proves the Claude
+Code agent path works end-to-end through a real E2B sandbox: DB credential read →
+decrypt → sandbox create → `ws-server.mjs` overlay → Claude Code CLI invocation →
+Anthropic → completion. A regression here (e.g. a CLI-arg contract break like the
+2026-08-05 "Input must be provided … when using --print" incident, where the CLI
+ignored the positional prompt under `--output-format stream-json` and every
+session exited 1) is invisible to the ordinary back-end blackbox suite because
+Step 4a's coverage run deliberately keeps `BLACKBOX_SMOKE` unset and never spins a
+real sandbox. Do NOT downgrade this to WARN, gate it behind a change classifier,
+or skip it because "claude-code wasn't touched."
+
+With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB on
+`$LOCAL_DB_PORT`), run the claude-code blackbox with the smoke phase enabled
+against the existing backend:
+
+```bash
+cd back-end && BLACKBOX_SMOKE=1 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 \
+  TEST_BASE_URL="http://localhost:$CONDUCTOR_PORT" \
+  BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
+  bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
+  bash scripts/run-blackbox-tests.sh claude-code
+```
+
+### Pass criteria
+
+The domain must report `ALL CLAUDE-CODE BLACK-BOX TESTS PASSED`, and the summary
+must include `PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox)`. The
+smoke phase (`BLACKBOX_SMOKE=1`) actually creating a sandbox and observing
+`CLAUDE_E2B_DONE` is mandatory — a run that prints `Skipping Claude Code smoke
+tests (BLACKBOX_SMOKE!=1)` does NOT satisfy this gate.
+
+### Requirements (surface, do not mask)
+
+- `E2B_API_KEY` must be set (backend `.env`).
+- A usable Claude credential for `DEV_USER_ID` must be resolvable — on macOS the
+  smoke syncs it from the `Claude Code-credentials` Keychain item; otherwise a
+  pooled `claude_code` integration must exist. If the credential is genuinely
+  unavailable this gate FAILS (it is not a silent skip); resolve the credential
+  rather than bypassing the gate.
+
+### On failure
+
+Follow RCA: reproduce the claude-code session locally (a faithful harness that
+overlays `e2b-templates/claude-code/ws-server.mjs` onto a real sandbox and runs
+the CLI reproduces sandbox-level failures the standard blackbox cannot), fix the
+root cause, and re-run this exact command until it is green. The permanent
+structural guard `back-end/src/tests/structural/claude-code-ws-prompt-stdin.test.ts`
+cements the prompt-delivery contract this smoke exercises.
+
 Finalize and print the timing summary before evaluating the Phase 2 hard gate. The interval-union metrics separate true parallel overlap from untimed gaps:
 
 ```bash
@@ -1104,6 +1157,12 @@ bash scripts/run-deploy-stage --finish
 # ║ Includes four concurrent chat paths × five full-lifecycle samples, ║
 
 # ║ with every sample below the five-second ratchet. ║
+
+# ║ 6c. Claude Code E2B sandbox smoke: PASS on every /deploy; never ║
+
+# ║ skipped. Real sandbox; `smoke -- Claude Code answers 2+2` must ║
+
+# ║ PASS (a BLACKBOX_SMOKE!=1 skip does NOT satisfy this gate). ║
 
 # ║ ║
 

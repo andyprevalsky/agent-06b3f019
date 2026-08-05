@@ -436,8 +436,13 @@ async function runClaudeCli() {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
-  args.push(prompt);
 
+  // The prompt is delivered on stdin, NOT as a positional argument.
+  // Claude Code CLI (>=2.x) ignores a positional prompt when
+  // `--output-format stream-json` is set and reads the prompt from stdin
+  // instead; passing it positionally makes the CLI exit 1 immediately with
+  // "Input must be provided either through stdin or as a prompt argument when
+  // using --print". (Default `--input-format text` reads raw text from stdin.)
   const child = spawn("claude", args, {
     cwd: workDir,
     env: {
@@ -445,8 +450,10 @@ async function runClaudeCli() {
       HOME: home,
       NO_COLOR: "1",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
+  child.stdin.write(prompt);
+  child.stdin.end();
 
   let stdoutRemainder = "";
   let sawResult = false;
