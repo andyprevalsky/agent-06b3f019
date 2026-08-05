@@ -96,6 +96,50 @@ def test_convert_context_to_messages():
     assert "Search result" in result[1]["content"]
 
 
+def test_tool_result_uses_declared_not_executed_tool_name():
+    """A tool result must be labelled with the DECLARED tool name.
+
+    spawn_agent legitimately executes as spawn_browser_agent, and the TOOL
+    message records the executed name in metadata["toolName"]. Google validates
+    functionResponse.name against the declared functions and rejects the whole
+    request with 400 INVALID_ARGUMENT on a mismatch; OpenAI and Anthropic ignore
+    it, so this stayed latent until Google was the only reachable model and it
+    killed real agent runs whose work had already succeeded.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": "call_1"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "browser agent finished",
+            "timestamp": "2024-01-01T00:00:02Z",
+            "metadata": {
+                # What actually ran — deliberately different from the declaration.
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "FINISHED",
+                "toolCallId": "call_1",
+            },
+        },
+    ]
+
+    # include_assistant=True so the tool_call is actually declared; without a
+    # declaration the result degrades to a system message and never exercises
+    # the tool-name labelling at all.
+    result = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    tool_msgs = [m for m in result if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"expected one tool message, got {result}"
+    assert tool_msgs[0]["name"] == "spawn_agent", (
+        "tool result must carry the DECLARED name; labelling it with the executed "
+        f"name is rejected by Google. Got: {tool_msgs[0].get('name')}"
+    )
+
+
 def test_convert_context_to_messages_empty():
     """Empty context returns empty list."""
     from helpers.llm import convert_context_to_messages
@@ -6008,6 +6052,10 @@ async def run_all_tests():
     r.record("prepare_schema_for_openai", test_prepare_schema_for_openai)
     r.record("prepare_schema_for_openai_nested_and_array", test_prepare_schema_for_openai_nested_and_array)
     r.record("convert_context_to_messages", test_convert_context_to_messages)
+    r.record(
+        "tool_result_uses_declared_not_executed_tool_name",
+        test_tool_result_uses_declared_not_executed_tool_name,
+    )
     r.record("convert_context_to_messages_empty", test_convert_context_to_messages_empty)
     r.record(
         "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
