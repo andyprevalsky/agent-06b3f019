@@ -252,7 +252,7 @@ router.post(
 /** POST /api/integrations/whatsapp/connect */
 router.post(
   '/whatsapp/connect',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const integration = await service.processWhatsAppConnect(userId);
