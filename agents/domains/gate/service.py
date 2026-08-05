@@ -137,7 +137,17 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
 
     # Park until the backend signals this request's resolution (same inbox the
     # approval flow uses; the backend fans a resolve out to every waiter).
-    await workflow.wait_condition(lambda: request_id in workflow_instance._signal_responses)
+    # Also wake on pause: pause does not populate _signal_responses, so a
+    # response-only wait would block forever past the caller's pause branch.
+    await workflow.wait_condition(
+        lambda: request_id in workflow_instance._signal_responses
+        or bool(getattr(workflow_instance, "is_paused", False))
+    )
+    # Pause wins over a queued resolution: if both arrived before this waiter
+    # resumed, leave any response in the inbox and keep the gate PENDING.
+    if bool(getattr(workflow_instance, "is_paused", False)):
+        logger.info("Gate wait interrupted by pause", request_id=request_id, gate_key=gate_key)
+        raise GateRejectedError(gate_key, request_id)
     signal_response = workflow_instance._signal_responses.pop(request_id)
 
     declined = bool(signal_response) and signal_response.strip() == REJECTION_SENTINEL

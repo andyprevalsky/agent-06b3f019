@@ -114,6 +114,159 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertTrue(status.terminal)
         self.assertFalse(status.successful)
 
+    def test_commit_status_rollup_maps_rest_payload(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_gh_json(command: list[str], timeout=None) -> object:
+            del timeout
+            calls.append(command)
+            if command[:2] == ["gh", "api"] and any(
+                part.startswith("repos/acme/rose/commits/abc/status") for part in command
+            ):
+                # GitHub returns newest-first; rollup reverses so newest is last.
+                return {
+                    "statuses": [
+                        {"context": "CodeRabbit", "state": "success"},
+                        {"context": "Vercel", "state": "pending"},
+                        {"context": None, "state": "success"},
+                    ]
+                }
+            raise AssertionError(command)
+
+        original = MODULE._gh_json
+        MODULE._gh_json = fake_gh_json
+        try:
+            rollup = MODULE.gh_commit_status_rollup("abc", repo="acme/rose")
+        finally:
+            MODULE._gh_json = original
+
+        self.assertEqual(
+            rollup,
+            [
+                {
+                    "__typename": "StatusContext",
+                    "context": "Vercel",
+                    "state": "PENDING",
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
+                },
+            ],
+        )
+        self.assertEqual(len(calls), 1)
+        entry = MODULE.coderabbit_entry({"statusCheckRollup": rollup})
+        self.assertEqual(entry and entry.get("state"), "SUCCESS")
+
+    def test_commit_status_rollup_bounds_pages_and_shares_timeout_budget(self) -> None:
+        timeouts: list[float | None] = []
+
+        def fake_gh_json(command: list[str], timeout=None) -> object:
+            timeouts.append(timeout)
+            if command[:2] == ["gh", "api"] and any(
+                part.startswith("repos/acme/rose/commits/abc/status") for part in command
+            ):
+                # Always return a full page so pagination would loop forever
+                # without the max_pages bound.
+                return {
+                    "statuses": [
+                        {"context": f"ctx-{len(timeouts)}", "state": "success"}
+                        for _ in range(100)
+                    ]
+                }
+            raise AssertionError(command)
+
+        original = MODULE._gh_json
+        MODULE._gh_json = fake_gh_json
+        try:
+            rollup = MODULE.gh_commit_status_rollup(
+                "abc", repo="acme/rose", timeout=30.0
+            )
+        finally:
+            MODULE._gh_json = original
+
+        self.assertEqual(len(rollup), 20 * 100)
+        self.assertEqual(len(timeouts), 20)
+        self.assertTrue(all(t is not None and 0 < float(t) <= 30.0 for t in timeouts))
+
+    def test_gh_api_json_rejects_untrusted_hostname(self) -> None:
+        with self.assertRaises(MODULE.ReviewWaitError) as ctx:
+            MODULE._gh_api_json(
+                "repos/acme/rose/commits/abc/status",
+                repo="evil.example/acme/rose",
+                timeout=5.0,
+            )
+        self.assertIn("untrusted GitHub host", str(ctx.exception))
+
+    def test_gh_payload_rejects_untrusted_hostname_before_gh(self) -> None:
+        calls: list[object] = []
+
+        def boom(*_args, **_kwargs):
+            calls.append((_args, _kwargs))
+            raise AssertionError("gh must not run for untrusted hosts")
+
+        original = MODULE.subprocess.run
+        MODULE.subprocess.run = boom
+        try:
+            with self.assertRaises(MODULE.ReviewWaitError) as ctx:
+                MODULE.gh_payload("1", repo="evil.example/acme/rose", timeout=5.0)
+        finally:
+            MODULE.subprocess.run = original
+        self.assertIn("untrusted GitHub host", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
+        head = "c" * 40
+        calls: list[list[str]] = []
+
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
+            calls.append(list(command))
+            if command[-1] == "headRefOid,statusCheckRollup":
+                return MODULE.subprocess.CompletedProcess(
+                    command,
+                    1,
+                    stdout="",
+                    stderr=(
+                        "GraphQL: Resource not accessible by access token "
+                        "(repository.pullRequest.statusCheckRollup)"
+                    ),
+                )
+            if command[-1] == "headRefOid":
+                return MODULE.subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=MODULE.json.dumps({"headRefOid": head}),
+                    stderr="",
+                )
+            raise AssertionError(command)
+
+        original_run = MODULE.subprocess.run
+        original_rollup = MODULE.gh_commit_status_rollup
+
+        def fake_rollup(_head, repo=None, timeout=None):
+            del _head, repo, timeout
+            return [
+                {
+                    "__typename": "StatusContext",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
+                }
+            ]
+
+        MODULE.subprocess.run = fake_run
+        MODULE.gh_commit_status_rollup = fake_rollup
+        try:
+            payload = MODULE.gh_payload("938", repo="acme/rose")
+        finally:
+            MODULE.subprocess.run = original_run
+            MODULE.gh_commit_status_rollup = original_rollup
+
+        self.assertEqual(payload["headRefOid"], head)
+        self.assertEqual(payload["statusCheckRollup"][0]["context"], "CodeRabbit")
+        self.assertGreaterEqual(len(calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

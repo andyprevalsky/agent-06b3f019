@@ -15,6 +15,7 @@ import {
   compareFunnelSteps,
   fetchStripeRevenueByPeriod,
 } from './metrics';
+import * as costRepo from './costRepo';
 import * as repo from './repo';
 import { fetchStripeSubscribersByPeriod } from './stripeSubscribers';
 import { buildPeriods, startOfNextUtcDay, startOfWeek, utcDayKey } from './time';
@@ -101,6 +102,8 @@ async function fetchInputs(
     );
   const [
     tasks,
+    rootAgentRuns,
+    rootAgentRunUsage,
     firstTasks,
     waitlistSignups,
     verifiedUsers,
@@ -113,6 +116,8 @@ async function fetchInputs(
     gmvRecords,
   ] = await Promise.all([
     repo.findRootTasksBetween(startOfWeek(historyStart), historyEnd),
+    costRepo.findRootAgentRunsBetween(historyStart, historyEnd),
+    costRepo.findRootAgentRunUsageBetween(historyStart, historyEnd),
     repo.findFirstRootTasksByUserBetween(startOfWeek(historyStart), historyEnd),
     repo.findWaitlistSignupsBetween(historyStart, historyEnd),
     repo.findVerifiedUsersCreatedBefore(historyEnd, Array.from(ADMIN_USER_IDS)),
@@ -130,6 +135,8 @@ async function fetchInputs(
   ]);
   return {
     tasks,
+    rootAgentRuns,
+    rootAgentRunUsage,
     firstTasks,
     waitlistSignups,
     verifiedUsers,
@@ -159,7 +166,9 @@ async function loadAdminHealth(
     input.subscribers,
     input.revenue,
     input.velocity.buckets,
-    input.gmvRecords
+    input.gmvRecords,
+    input.rootAgentRuns,
+    input.rootAgentRunUsage
   );
   const latest = series[series.length - 1];
   const currentCohort = buildSignupCohort(input.verifiedUsers, input.tasks, currentPeriod);
@@ -197,6 +206,7 @@ async function loadAdminHealth(
       outputTokensPerTask: latest.outputTokensPerTask,
       gmvPerTask: latest.gmvPerTask,
       taskCompletionRate: latest.taskCompletionRate,
+      costPerTask: latest.costPerTask,
     },
     series,
     retentionCohorts: buildRetentionCohorts(retentionFirstTasks, retentionTasks, retentionThrough),

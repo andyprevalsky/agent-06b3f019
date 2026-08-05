@@ -76,6 +76,9 @@ function assertRollingPeriods(
   if (body.historyRange.start !== first.start || body.historyRange.end !== latest.end) {
     throw new Error('History range must span every rolling period');
   }
+  if (JSON.stringify(body.summary.costPerTask) !== JSON.stringify(latest.costPerTask)) {
+    throw new Error('Summary cost per task must match the latest rolling period');
+  }
   const generatedAt = new Date(body.generatedAt);
   // The latest period ends at the START OF TOMORROW so the in-progress day is
   // included dashboard-wide (current bucket = "this period so far").

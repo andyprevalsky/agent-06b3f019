@@ -1,5 +1,5 @@
 import { Router, type Response } from 'express';
-import { authenticate, type AuthRequest } from '../../providers/auth';
+import { type AuthRequest, authenticateMachineUpload } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import {
@@ -13,7 +13,7 @@ const router = Router();
 
 router.post(
   '/',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler<AuthRequest>(async (req: AuthRequest, res: Response) => {
     if (req.user === undefined) {
       res.status(401).json({ error: 'Not authenticated' });

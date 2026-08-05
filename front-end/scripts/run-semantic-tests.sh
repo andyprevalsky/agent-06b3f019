@@ -128,12 +128,22 @@ if ! [[ "$SEMANTIC_WORKERS" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+# Resolve the test runner from this package explicitly. In the root npm
+# workspace, `npx playwright` can select the backend's Playwright CLI while the
+# specs import the frontend's @playwright/test singleton, making every suite
+# fail during discovery with a misleading duplicate-version error.
+PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
+if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
+  echo "FAIL: Frontend Playwright is not installed at $PLAYWRIGHT_BIN" >&2
+  exit 1
+fi
+
 if [[ $# -eq 0 ]]; then
   PLAYWRIGHT_ARGS=(--reporter=list --workers="$SEMANTIC_WORKERS")
   if [[ -n "${SEMANTIC_GREP_INVERT:-}" ]]; then
     PLAYWRIGHT_ARGS+=(--grep-invert="$SEMANTIC_GREP_INVERT")
   fi
-  exec npx playwright test "${PLAYWRIGHT_ARGS[@]}"
+  exec "$PLAYWRIGHT_BIN" test "${PLAYWRIGHT_ARGS[@]}"
 fi
 
 TEST_NAME="$1"
@@ -148,4 +158,4 @@ if [[ ! -f "$TEST_FILE" ]]; then
   exit 1
 fi
 
-exec npx playwright test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"
+exec "$PLAYWRIGHT_BIN" test "$TEST_FILE" --reporter=list --workers="$SEMANTIC_WORKERS"

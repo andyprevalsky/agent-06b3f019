@@ -7,8 +7,8 @@ import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/co
 import { isAdminUser } from '../src/utils/adminAccess';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-// Keep payment settlement on the normal Stripe-backed path. The shared benchmark identity is a
-// production admin and intentionally receives company-funded cards without a personal Stripe hold.
+// Keep payment settlement on the normal Stripe-backed path. The dedicated lifecycle identity is
+// intentionally non-admin so benchmarks exercise Stripe hold, capture, and refund behavior.
 const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 const BENCHMARK_CREDIT_HEADROOM_CENTS = 100_000;
 const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';

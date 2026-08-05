@@ -1144,15 +1144,13 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                 )
                 await recorder.mark("post-recovery checkout", action="recovery")
 
-                assert any(
-                    frame["label"] == "post-recovery checkout" for frame in recorder.frames
-                ), "the promoted Steel half of the recording was dropped"
+                assert any(frame["label"] == "post-recovery checkout" for frame in recorder.frames), (
+                    "the promoted Steel half of the recording was dropped"
+                )
                 assert recorder.uses_kernel_replay is False
                 assert recorder._closed is False
                 assert recorder.session_id == "steel-after"
-                assert recorder.replay_view_urls == [
-                    "https://kernel.example/view/kernel-before"
-                ]
+                assert recorder.replay_view_urls == ["https://kernel.example/view/kernel-before"]
                 inline = recorder.export_inline_html_bytes()
                 assert inline is not None
                 html_text = inline.decode("utf-8")
@@ -1171,10 +1169,7 @@ async def test_browser_agent_recording_survives_kernel_to_steel_recovery():
                 )
                 assert parsed.returncode == 0, parsed.stderr
                 await recorder.close(include_steel_media=False)
-                stop_url = (
-                    "https://kernel.example/browsers/kernel-before/"
-                    "replays/rep-kernel-before/stop"
-                )
+                stop_url = "https://kernel.example/browsers/kernel-before/replays/rep-kernel-before/stop"
                 assert calls.count(("POST", stop_url)) == 1
     finally:
         restore()
@@ -1321,14 +1316,10 @@ async def test_browser_agent_hybrid_player_advances_all_segments_and_rebases_tim
                 "timelineDisabled": True,
                 "source": "data:video/mp4;base64,AAAA",
             }
-            await page.evaluate(
-                "skipIdle.checked = false; skipIdle.dispatchEvent(new Event('change'))"
-            )
+            await page.evaluate("skipIdle.checked = false; skipIdle.dispatchEvent(new Event('change'))")
 
             await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
-            assert await page.evaluate("prefixVideo.getAttribute('src')") == (
-                "data:video/mp4;base64,BBBB"
-            )
+            assert await page.evaluate("prefixVideo.getAttribute('src')") == ("data:video/mp4;base64,BBBB")
 
             await page.evaluate("prefixVideo.dispatchEvent(new Event('ended'))")
             final = await page.evaluate(
@@ -3266,9 +3257,7 @@ async def test_browser_network_recording_captures_response_body():
             )
             second_session = SimpleNamespace(
                 cdp_client=second_client,
-                get_or_create_cdp_session=AsyncMock(
-                    return_value=SimpleNamespace(session_id="cdp-2")
-                ),
+                get_or_create_cdp_session=AsyncMock(return_value=SimpleNamespace(session_id="cdp-2")),
             )
             await recorder.transition_browser(
                 browser_session=second_session,
@@ -3312,9 +3301,7 @@ async def test_browser_network_recording_captures_response_body():
             index = json.loads(index_path.read_text())
             assert index["session_id"] == "kernel-2"
             assert index["entry_count"] == 2
-            same_id_entries = [
-                item for item in index["entries"] if item["request_id"] == "123.4"
-            ]
+            same_id_entries = [item for item in index["entries"] if item["request_id"] == "123.4"]
             assert len(same_id_entries) == 2
             entry = next(item for item in same_id_entries if item["url"] == url)
             assert entry["url"] == url
@@ -3322,13 +3309,9 @@ async def test_browser_network_recording_captures_response_body():
             assert entry["body_file"].endswith(".json")
             body = json.loads((index_path.parent / entry["body_file"]).read_text())
             assert body["errors"][0]["message"] == "unexpected error"
-            promoted = next(
-                item for item in same_id_entries if item["url"] == promoted_url
-            )
+            promoted = next(item for item in same_id_entries if item["url"] == promoted_url)
             assert promoted["url"] == promoted_url
-            promoted_body = json.loads(
-                (index_path.parent / promoted["body_file"]).read_text()
-            )
+            promoted_body = json.loads((index_path.parent / promoted["body_file"]).read_text())
             assert promoted_body == {"phase": "promoted"}
     finally:
         if previous_enabled is None:
@@ -4420,6 +4403,29 @@ def test_resume_context_from_session_info_prefers_resumed_state():
 
     assert auth_realm == "amazon.com"
     assert user_profile["addressLine1"] == "1 Main St"
+
+
+def test_browser_profile_separates_owner_from_delivery_recipient():
+    from domains.spawn_browser_agent_v3.handler import build_browser_user_profile_sections
+
+    sections = build_browser_user_profile_sections(
+        {
+            "name": "Andy Prevalsky",
+            "email": "andy@roselabs.ai",
+            "phone": "+19729777432",
+            "deliveryRecipientName": "Aman Gottumukkala",
+            "addressLine1": "88 Howard St",
+            "city": "San Francisco",
+            "state": "CA",
+            "postalCode": "94105",
+            "country": "US",
+        }
+    )
+
+    context = "\n\n".join(sections)
+    assert "## Personal Information\nFull Name: Andy Prevalsky" in context
+    assert "## Delivery Address\nRecipient Name: Aman Gottumukkala" in context
+    assert context.index("Full Name: Andy Prevalsky") < context.index("Recipient Name: Aman Gottumukkala")
 
 
 def test_build_auth_options_prompt_section_minted_account_ref():
@@ -7306,9 +7312,7 @@ def test_network_recorder_captures_every_resource_and_full_detail():
         None,
     )
     redirected = recorder.query_requests(url_pattern="/2fa")[0]
-    assert redirected["redirects"] == [
-        {"url": "https://shop.test/login", "status": 302, "location": None}
-    ]
+    assert redirected["redirects"] == [{"url": "https://shop.test/login", "status": 302, "location": None}]
 
 
 def test_network_recorder_body_cache_is_byte_bounded():
@@ -13598,6 +13602,10 @@ async def run_all_tests():
         test_resume_context_from_session_info_prefers_resumed_state,
     )
     r.record(
+        "browser_profile_identity_delivery_split",
+        test_browser_profile_separates_owner_from_delivery_recipient,
+    )
+    r.record(
         "auth_runtime_state_guard",
         test_auth_runtime_state_blocks_assistance_until_observable_ladder_exhausted,
     )
@@ -13899,8 +13907,13 @@ async def run_all_tests():
     await r.record_async("execute_action_element_not_found", test_execute_action_element_not_found)
     await r.record_async("execute_action_unknown", test_execute_action_unknown_action)
     r.record("read_network_requests_advertised", test_read_network_requests_tool_is_advertised)
-    r.record("captured_request_body_redaction", test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged)
-    r.record("humanized_click_cdp_press_release", test_humanized_click_presses_and_releases_via_cdp_without_post_click_move)
+    r.record(
+        "captured_request_body_redaction",
+        test_captured_request_bodies_are_redacted_truncated_by_bytes_and_omission_tagged,
+    )
+    r.record(
+        "humanized_click_cdp_press_release", test_humanized_click_presses_and_releases_via_cdp_without_post_click_move
+    )
     r.record("network_recorder_query_requests", test_network_recorder_query_requests_filters_and_shapes)
     r.record("network_recorder_updates_at_capacity", test_network_recorder_updates_status_at_capacity)
     r.record("network_recorder_full_detail", test_network_recorder_captures_every_resource_and_full_detail)

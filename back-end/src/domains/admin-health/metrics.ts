@@ -13,7 +13,7 @@ import type {
 
 export { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 export { buildSeries } from './series';
-export { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskMetrics';
+
 
 const log = createLogger('AdminHealth');
 

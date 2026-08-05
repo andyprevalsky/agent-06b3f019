@@ -3,7 +3,7 @@ import { runTransactionWithRetry } from './database';
 import {
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   incomingWorkflowGeneration,
-  lockAgentWorkflowGeneration,
+  lockAgentWorkflowGenerationShared,
   messageWorkflowGeneration,
 } from './workflowGeneration';
 import type { CreateMessageParams } from './messages';
@@ -206,7 +206,7 @@ export async function persistLockedToolLifecycleMessage(
   params: CreateMessageParams,
   identity: { toolCallId: string; workflowGeneration: string }
 ): Promise<{ message: Message; created: boolean; accepted: boolean }> {
-  await lockAgentWorkflowGeneration(tx, params.agentId);
+  await lockAgentWorkflowGenerationShared(tx, params.agentId);
   await lockToolCallLifecycle(tx, params.agentId, identity.workflowGeneration, identity.toolCallId);
   const allCandidates = await tx.message.findMany({
     where: {

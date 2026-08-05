@@ -314,7 +314,7 @@ export function cleanupSubscription(
 
   setStreamingBubbles((prev) => {
     for (const [, bubble] of prev) {
-      if (bubble.timeoutId) window.clearTimeout(bubble.timeoutId);
+      if (bubble.timeoutId) globalThis.clearTimeout(bubble.timeoutId);
     }
     return new Map();
   });

@@ -68,6 +68,12 @@ function makeSeries() {
     outputTokensPerTask: 1200 + index * 80,
     gmvPerTask: 400 + index * 25,
     taskCompletionRate: 0.7 + index / 100,
+    costPerTask: {
+      zeroLlmCostDollars: 0.02 + index / 1_000,
+      apiRateDollars: 0.5 + index / 100,
+      computeTokenRateDollars: 0.044 + index / 1_000,
+      sampleSize: 20 + index,
+    },
     andyLinearPoints: 3 + index,
     githubCommits: 12 + index,
     tamaraLinearPoints: 2 + index,
@@ -130,6 +136,12 @@ function adminHealthPayload(timeSlice = 'monthly') {
       outputTokensPerTask: 1840,
       gmvPerTask: 200,
       taskCompletionRate: 0.82,
+      costPerTask: {
+        zeroLlmCostDollars: 0.0384,
+        apiRateDollars: 0.7594,
+        computeTokenRateDollars: 0.0745,
+        sampleSize: 332,
+      },
     },
     series: makeSeries(),
     retentionCohorts: [
@@ -253,6 +265,16 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
+    expect(screen.getByText('LLM at $0')).toBeInTheDocument();
+    expect(screen.getByText('$0.0384')).toBeInTheDocument();
+    expect(screen.getByText('API rates (cache-aware)')).toBeInTheDocument();
+    expect(screen.getByText('$0.7594')).toBeInTheDocument();
+    expect(screen.getByText('Compute-token rates')).toBeInTheDocument();
+    expect(screen.getByText('$0.0745')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Cost per root task over time' })).toBeInTheDocument();
+    expect(
+      screen.getByText((text) => text.includes('Current sample: 332 real root runs')),
+    ).toBeInTheDocument();
     const connectorAdoption = screen.getByRole('region', { name: 'Connector Adoption' });
     expect(within(connectorAdoption).getByText('Browser Sync')).toBeInTheDocument();
     expect(within(connectorAdoption).getByText('Passwords')).toBeInTheDocument();

@@ -359,8 +359,20 @@ for workflow in "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED
   done < <(sed -nE 's/^[[:space:]]*uses:[[:space:]]+([^ #]+).*/\1/p' "$workflow")
 done
 
-ruby -e 'require "yaml"; ARGV.each { |file| YAML.parse_file(file) }' "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || \
-  fail "workflow YAML must parse"
+# Prefer python3+PyYAML (always present in this repo's cloud/dev images); fall
+# back to ruby when available. Hard-requiring ruby broke deploy structural gates
+# on hosts that only ship python3.
+if command -v python3 >/dev/null 2>&1 && python3 -c 'import yaml' >/dev/null 2>&1; then
+  python3 -c 'import sys, yaml; [yaml.safe_load(open(p)) for p in sys.argv[1:]]' \
+    "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || \
+    fail "workflow YAML must parse"
+elif command -v ruby >/dev/null 2>&1; then
+  ruby -e 'require "yaml"; ARGV.each { |file| YAML.parse_file(file) }' \
+    "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || \
+    fail "workflow YAML must parse"
+else
+  fail "workflow YAML must parse (need python3+PyYAML or ruby)"
+fi
 if command -v actionlint >/dev/null 2>&1; then
   actionlint "$WORKFLOW" "$SHIPPED_WORKFLOW" "$RECONCILE_WORKFLOW" "$APPROVED_DEPLOY_WORKFLOW" "$SLACK_FEEDBACK_WORKFLOW" || fail "actionlint rejected an Auto RCA workflow"
 fi

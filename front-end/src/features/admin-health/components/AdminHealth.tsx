@@ -9,11 +9,15 @@
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
  *         -> Stripe charges + Prisma waitlist/task/user/GMV metrics + Linear/GitHub velocity
+ *         -> real root-loop runs (live + archived telemetry), excluding child agents
+ *         -> current model/cache pricing -> three cost-per-run scenarios + sample size
+
  *         -> active connectors grouped into six onboarding subtype adoption rates
  *      -> Primary: Revenue
  *      -> Secondary: people/tasks + GMV + GMV/task (next to output tokens/task) + funnels
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
+ *      -> root-agent-run cost summary cards -> three-line history chart
  *
  * GMV SOURCES:
  *   PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
@@ -62,6 +66,7 @@ import ConnectorAdoptionSection from './ConnectorAdoptionSection';
 import EfficiencyCharts from './EfficiencyCharts';
 import GmvSection from './GmvSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
+import TaskCostSection from './TaskCostSection';
 import VelocitySection from './VelocitySection';
 import UsersSection from './UsersSection';
 import WaitlistSignupsChart from './WaitlistSignupsChart';
@@ -537,6 +542,7 @@ export default function AdminHealth() {
               />
               <SecondaryMetricGrid data={data} />
               <GmvSection data={data} />
+              <TaskCostSection data={data} />
               <EfficiencyCharts data={data} />
               <ConnectorAdoptionSection adoption={data.connectorAdoption} />
               <FunnelSection data={data} />

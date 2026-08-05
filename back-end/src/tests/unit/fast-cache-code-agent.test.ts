@@ -25,6 +25,7 @@ function test(name: string, fn: () => void): void {
 
 test('Claude Code sandbox enables Fast Mode through a live Claude Code model alias', () => {
   const e2bProvider = readFileSync(join(process.cwd(), 'src', 'providers', 'e2b.ts'), 'utf8');
+  const e2bWorkDir = readFileSync(join(process.cwd(), 'src', 'providers', 'e2bWorkDir.ts'), 'utf8');
   const wsServer = readFileSync(
     join(process.cwd(), '..', 'e2b-templates', 'claude-code', 'ws-server.mjs'),
     'utf8'
@@ -57,7 +58,7 @@ test('Claude Code sandbox enables Fast Mode through a live Claude Code model ali
     'backend must overlay the checked-in server before launch'
   );
   assert.ok(
-    e2bProvider.includes("const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace'"),
+    e2bWorkDir.includes("const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace'"),
     'backend must use a stable repo workdir for cache replay'
   );
   assert.ok(

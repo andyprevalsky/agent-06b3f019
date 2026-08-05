@@ -1,10 +1,16 @@
 import { dedupeInternalRepeatTasks } from './benchmarkDedup';
-import { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskMetrics';
+import { calculateTaskCostPerTask } from './costs';
 import { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 import type * as repo from './repo';
 import type { SubscriberSeriesPoint } from './subscriberMetrics';
+import { averageOutputTokens, taskCompletionRate, tasksIssuedPerUser } from './taskStats';
 import { findPeriodIndex } from './time';
-import type { AdminHealthPeriod, AdminHealthSeriesPoint } from './types';
+import type {
+  AdminHealthPeriod,
+  AdminHealthSeriesPoint,
+  RootAgentRunRecord,
+  RootAgentRunUsageRecord,
+} from './types';
 
 export function buildSeries(
   periods: AdminHealthPeriod[],
@@ -17,14 +23,21 @@ export function buildSeries(
     githubCommits: number | null;
     tamaraLinearPoints: number | null;
   }>,
-  gmvRecords: repo.GmvRecord[] = []
+  gmvRecords: repo.GmvRecord[] = [],
+  rootAgentRuns: RootAgentRunRecord[] = [],
+  rootAgentRunUsage: RootAgentRunUsageRecord[] = []
 ): AdminHealthSeriesPoint[] {
   const tasksByPeriod = periods.map(() => [] as repo.RootTaskRecord[]);
+  const rootAgentRunsByPeriod = periods.map(() => [] as RootAgentRunRecord[]);
   const waitlistSignupsByPeriod = periods.map(() => 0);
   const gmvByPeriod = periods.map(() => [] as repo.GmvRecord[]);
   for (const task of tasks) {
     const index = findPeriodIndex(periods, task.createdAt);
     if (index >= 0) tasksByPeriod[index].push(task);
+  }
+  for (const run of rootAgentRuns) {
+    const index = findPeriodIndex(periods, run.createdAt);
+    if (index >= 0) rootAgentRunsByPeriod[index].push(run);
   }
   for (const signup of waitlistSignups) {
     const index = findPeriodIndex(periods, signup.createdAt);
@@ -57,6 +70,7 @@ export function buildSeries(
       outputTokensPerTask: averageOutputTokens(periodTasks),
       gmvPerTask: gmvPerTaskCents(gmvCents, periodTasks.length),
       taskCompletionRate: taskCompletionRate(periodTasks),
+      costPerTask: calculateTaskCostPerTask(rootAgentRunsByPeriod[index], rootAgentRunUsage),
     };
   });
 }

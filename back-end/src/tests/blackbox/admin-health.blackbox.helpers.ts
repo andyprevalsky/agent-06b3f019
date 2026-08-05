@@ -144,6 +144,12 @@ export const VelocityMetricSchema = z.object({
   status: MetricStatusSchema,
   detail: z.string().optional(),
 });
+export const TaskCostPerTaskSchema = z.object({
+  zeroLlmCostDollars: z.number().nonnegative().nullable(),
+  apiRateDollars: z.number().nonnegative().nullable(),
+  computeTokenRateDollars: z.number().nonnegative().nullable(),
+  sampleSize: z.number().int().nonnegative(),
+});
 export const AdminHealthResponseSchema = z.object({
   timeSlice: z.union([
     z.literal('weekly'),
@@ -163,6 +169,7 @@ export const AdminHealthResponseSchema = z.object({
     outputTokensPerTask: z.number(),
     gmvPerTask: z.number(),
     taskCompletionRate: z.number(),
+    costPerTask: TaskCostPerTaskSchema,
   }),
   series: z.array(
     z.object({
@@ -179,6 +186,7 @@ export const AdminHealthResponseSchema = z.object({
       outputTokensPerTask: z.number(),
       gmvPerTask: z.number(),
       taskCompletionRate: z.number(),
+      costPerTask: TaskCostPerTaskSchema,
       andyLinearPoints: z.number().nullable(),
       githubCommits: z.number().nullable(),
       tamaraLinearPoints: z.number().nullable(),

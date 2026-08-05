@@ -1,5 +1,4 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 /**
  * Detect drift between prisma/migrations/*.sql and prisma/schema.prisma.
  *

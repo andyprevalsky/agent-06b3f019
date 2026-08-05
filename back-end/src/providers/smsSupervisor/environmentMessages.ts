@@ -17,6 +17,7 @@ export function buildEnvironmentToolMessages(
       tool_calls: [
         {
           id: callId,
+          type: 'function',
           function: { name: 'get_environment', arguments: '{}' },
         },
       ],
