@@ -176,6 +176,15 @@ runCheck(
     SMS_SURFACE_OVERLAY.includes('Sending a message does not end your run'),
   'SMS send/completion contract missing from the overlay'
 );
+runCheck(
+  'block 3 states prior tool calls are erased from session history',
+  SMS_SURFACE_OVERLAY.includes('Tool calls from previous runs') &&
+    SMS_SURFACE_OVERLAY.includes('erased from this context to save space') &&
+    SMS_SURFACE_OVERLAY.includes(
+      'Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it'
+    ),
+  'SMS session-history tool-erasure rule missing from the overlay'
+);
 
 // The SMS prompt must NOT contain main-agent phase/grader prose.
 const fullPrompt = blocksA.join('\n');

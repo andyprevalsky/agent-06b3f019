@@ -2,7 +2,7 @@ import assert from 'assert';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { computeProdConnectionLimit, FAST_CACHE_POOL_LIMIT } from '../../providers/database';
+import { computeProdConnectionLimit } from '../../providers/database';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const backendDir = path.resolve(__dirname, '../../..');
@@ -22,6 +22,10 @@ const backendDir = path.resolve(__dirname, '../../..');
 // connections; a rolling deploy is the only time two backend instances run at
 // once.
 const DEPLOY_OVERLAP = 2;
+// Pin the code-default fast-cache size (database.ts intEnv fallback). Do NOT
+// read FAST_CACHE_POOL_LIMIT / process.env here — cloud shells inject
+// FAST_CACHE_DB_POOL=150 which would poison these hardcoded 400-cap scenarios.
+const CANONICAL_FAST_CACHE_POOL = 75;
 
 function totalFootprint(maxClientConn: number, backendInstances: number, reserved: number): number {
   const limit = computeProdConnectionLimit({
@@ -29,9 +33,9 @@ function totalFootprint(maxClientConn: number, backendInstances: number, reserve
     backendInstances,
     reserved,
     deployOverlap: DEPLOY_OVERLAP,
-    fastCachePool: FAST_CACHE_POOL_LIMIT,
+    fastCachePool: CANONICAL_FAST_CACHE_POOL,
   });
-  return backendInstances * DEPLOY_OVERLAP * (limit + FAST_CACHE_POOL_LIMIT) + reserved;
+  return backendInstances * DEPLOY_OVERLAP * (limit + CANONICAL_FAST_CACHE_POOL) + reserved;
 }
 
 // The invariant must hold across our real config and plausible near-term
@@ -64,12 +68,12 @@ function testCurrentProdTopologySurvivesDeployOverlap() {
     backendInstances: 1,
     reserved,
     deployOverlap: DEPLOY_OVERLAP,
-    fastCachePool: FAST_CACHE_POOL_LIMIT,
+    fastCachePool: CANONICAL_FAST_CACHE_POOL,
   });
   assert(limit >= 40, `Single-instance limit should leave real request headroom, got ${limit}`);
   assert(
-    2 * (limit + FAST_CACHE_POOL_LIMIT) + reserved <= maxClientConn,
-    `Deploy overlap 2 x (${limit} + ${FAST_CACHE_POOL_LIMIT}) + reserved ${reserved} must fit under ${maxClientConn}`
+    2 * (limit + CANONICAL_FAST_CACHE_POOL) + reserved <= maxClientConn,
+    `Deploy overlap 2 x (${limit} + ${CANONICAL_FAST_CACHE_POOL}) + reserved ${reserved} must fit under ${maxClientConn}`
   );
 }
 
@@ -116,14 +120,22 @@ function testThrowsWhenFleetCannotFitUnderCap() {
   );
 }
 
-// The prod default (no env overrides) must land on a deploy-safe, non-trivial
-// value — guards against someone re-hardcoding a cap-busting number like 250.
+// The canonical prod defaults (400-cap pooler, 1 instance, 75 fast-cache) must
+// land on a deploy-safe, non-trivial main-pool size — guards against someone
+// re-hardcoding a cap-busting number like 250. Explicit opts so a cloud shell's
+// FAST_CACHE_DB_POOL / POOLER_MAX_CLIENT_CONN injections cannot poison the gate.
 function testDefaultProdLimitIsDeploySafe() {
-  const limit = computeProdConnectionLimit();
+  const limit = computeProdConnectionLimit({
+    maxClientConn: 400,
+    backendInstances: 1,
+    reserved: 40,
+    deployOverlap: DEPLOY_OVERLAP,
+    fastCachePool: CANONICAL_FAST_CACHE_POOL,
+  });
   assert(limit > 10, `Default prod limit should be well above the floor, got ${limit}`);
   assert(
-    2 * (limit + FAST_CACHE_POOL_LIMIT) <= 400,
-    `Default prod limit ${limit} + fast-cache ${FAST_CACHE_POOL_LIMIT} must survive a 2x deploy overlap under a 400 cap`
+    2 * (limit + CANONICAL_FAST_CACHE_POOL) <= 400,
+    `Default prod limit ${limit} + fast-cache ${CANONICAL_FAST_CACHE_POOL} must survive a 2x deploy overlap under a 400 cap`
   );
 }
 

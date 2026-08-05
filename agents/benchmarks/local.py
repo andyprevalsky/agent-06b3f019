@@ -515,14 +515,32 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
     if database.get("use_system_postgres") or not database.get("owned_by_run_sh"):
         return
     container = database.get("container")
+    # Always issue the docker teardown argv (tests assert the calls). Catch
+    # FileNotFoundError so hosts without a docker binary still tear down cleanly.
     if isinstance(container, str) and container:
-        subprocess.run(["docker", "rm", "-f", container], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "rm", "-f", container],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
     volume = database.get("volume")
     if not isinstance(volume, str) or not volume:
         if isinstance(container, str) and container.startswith("victoria-db-"):
             volume = f"victoria-pgdata-{container[len('victoria-db-'):]}"
     if isinstance(volume, str) and volume:
-        subprocess.run(["docker", "volume", "rm", volume], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            subprocess.run(
+                ["docker", "volume", "rm", volume],
+                cwd=REPO_ROOT,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError:
+            return
 
 
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
@@ -531,20 +549,23 @@ def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"
-    subprocess.run(
-        ["docker", "rm", "-f", container],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    subprocess.run(
-        ["docker", "volume", "rm", volume],
-        cwd=REPO_ROOT,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    try:
+        subprocess.run(
+            ["docker", "rm", "-f", container],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        subprocess.run(
+            ["docker", "volume", "rm", volume],
+            cwd=REPO_ROOT,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return
 
 
 def _descendant_pids(root: int) -> set[int]:

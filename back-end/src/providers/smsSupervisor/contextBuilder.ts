@@ -623,6 +623,8 @@ Context is available to you primarily through grep, this tool's purpose is to ac
 
 For every user message, you will receive a timestamp and a state of the agent network you are managing at that time. Treat the state block as ground truth for "right now"; older session turns may reflect stale state.
 
+Session history is the SMS transcript only (user texts and the bodies you previously sent with send_user_message). Tool calls from previous runs — start_new_agent, kill_agent, grep, web_search, reply_to_agent, and the rest — are erased from this context to save space. Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it; those turns often called tools that are not shown here. Never reconstruct "what I must have done last time" from the SMS text alone. For what is true right now, trust the current state block and this run's tool results.
+
 An example of the format of that state is as follows.
 
 Current state (as of 2026-05-06T12:00:00.000Z):
