@@ -1281,10 +1281,11 @@ def convert_context_to_messages(
     sorted_context = sorted(context, key=sort_key)
 
     # Track which tool_call_ids have been declared by ASSISTANT messages, and the
-    # function name each one was declared under. Gemini pairs a tool result to its
-    # call by NAME (not by tool_call_id), so a result whose `name` disagrees with
-    # the declared `function.name` is rejected with 400 INVALID_ARGUMENT and takes
-    # the whole waterfall step down with it.
+    # name each was DECLARED under. A tool result must carry the declared name,
+    # never the executed one: spawn_agent can execute as spawn_browser_agent, and
+    # Google validates functionResponse.name against the declared functions and
+    # rejects the entire request with 400 INVALID_ARGUMENT. OpenAI and Anthropic
+    # ignore the mismatch, so this stays latent until a Google model is reached.
     declared_tool_ids = set()
     declared_tool_names: Dict[str, str] = {}
 
@@ -1383,11 +1384,10 @@ def convert_context_to_messages(
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                # Pair by the name the ASSISTANT actually declared this call under.
-                # metadata["toolName"] is the UI DISPLAY name and can legitimately
-                # differ (spawn_agent renders as spawn_browser_agent), which Gemini
-                # rejects. Omit `name` entirely when the declaration is unknown —
-                # a wrong name is worse than no name.
+                # Label with the DECLARED name (see declared_tool_names above), not
+                # metadata["toolName"], which records what actually executed. Omit
+                # the label entirely when the declaration is unknown — an absent
+                # name is accepted by every provider, a wrong one is not.
                 declared_name = declared_tool_names.get(tool_call_id)
                 if declared_name:
                     tool_msg["name"] = declared_name
@@ -1570,6 +1570,10 @@ async def build_llm_messages(
 
     messages = [{"role": "system", "content": system_prompt}]
     declared_tool_call_ids: set[str] = set()
+    # Name each tool_call_id was DECLARED under. Google validates
+    # functionResponse.name against the declared functions and 400s on a
+    # mismatch; the executed name (metadata["toolName"]) can legitimately differ.
+    declared_tool_call_names: Dict[str, str] = {}
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -1725,6 +1729,7 @@ async def build_llm_messages(
                             f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
                         )
                     declared_tool_call_ids.add(str(tool_call_id))
+                    declared_tool_call_names[str(tool_call_id)] = str(tool_name)
                     args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
                     parsed_tool_calls.append(
                         {
@@ -1805,8 +1810,13 @@ async def build_llm_messages(
                     "content": tool_content,
                     "tool_call_id": str(tool_call_id),
                 }
-                if tool_name:
-                    tool_msg["name"] = tool_name
+                # Label with the DECLARED name, not tool_name (which is
+                # metadata["toolName"] — what actually executed). Omit when the
+                # declaration is unknown: an absent name is accepted everywhere,
+                # a mismatched one is rejected by Google.
+                declared_name = declared_tool_call_names.get(str(tool_call_id))
+                if declared_name:
+                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
                 continue
 

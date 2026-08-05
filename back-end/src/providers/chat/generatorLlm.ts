@@ -555,6 +555,8 @@ async function callGeneratorLlmCore(
     total_tokens: 0,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
+    model: '',
+    from_fast_cache: false,
   };
   let actualModel = '';
   let usageData:
@@ -735,6 +737,9 @@ async function callGeneratorLlmCore(
   });
 
   await attention.complete(parsed.response || '');
+
+  usage.model = actualModel || params.model;
+  usage.from_fast_cache = fcCacheWon;
 
   return {
     reasoning: parsed.reasoning || '',

@@ -60,6 +60,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Cursor cloud agents trigger this fallback via workflow_dispatch /
+          # label; the action rejects non-human actors unless listed here.
+          allowed_bots: cursor[bot]
           plugin_marketplaces: https://github.com/anthropics/claude-code.git
           plugins: code-review@claude-code-plugins
           prompt: /code-review:code-review ${{ github.repository }}/pull/${{ env.PR_NUMBER }} --comment

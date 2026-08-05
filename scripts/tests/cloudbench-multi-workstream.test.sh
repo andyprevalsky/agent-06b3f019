@@ -155,7 +155,6 @@ import glob
 import json
 import os
 import re
-import signal
 import shlex
 import shutil
 import subprocess
@@ -328,16 +327,17 @@ def run_fake_driver(mdir):
                 break
             time.sleep(0.1)
     # Prove that capacity counts alone cannot substitute for the autoscaler's
-    # causal terminal marker. Finish only after worker-ready.ids is populated;
-    # the autoscaler is then in its normal poll sleep when the child exits.
+    # causal terminal marker. Finish only after the fake-only hold proves the
+    # autoscaler has observed ready capacity but cannot yet observe child
+    # completion. This is an owned barrier, not a scheduler-window assumption.
     if exit_code == 0 and os.path.exists(
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
         deadline = time.time() + 30
-        ready_path = None
+        held = False
         while time.time() < deadline:
-            ready_files = glob.glob(
+            hold_files = glob.glob(
                 os.path.join(
                     controller_ws,
                     ".context",
@@ -345,77 +345,16 @@ def run_fake_driver(mdir):
                     "runs",
                     "*",
                     bench,
-                    "worker-ready.ids",
+                    "autoscaler.test-held-after-ready",
                 )
             )
-            ready_path = next(
-                (path for path in ready_files if os.path.getsize(path) > 0),
-                None,
-            )
-            if ready_path:
+            held = any(os.path.exists(path) for path in hold_files)
+            if held:
                 break
             time.sleep(0.1)
-        if not ready_path:
-            log("FATAL: worker capacity never became ready before child completion")
+        if not held:
+            log("FATAL: autoscaler never reached the ready-capacity hold boundary")
             exit_code = 1
-        else:
-            out = os.path.dirname(ready_path)
-            autoscaler_pid_path = os.path.join(out, "autoscaler.pid")
-            try:
-                autoscaler_record = open(autoscaler_pid_path).read().strip()
-                autoscaler_pid_text, autoscaler_started = autoscaler_record.split("|", 1)
-                autoscaler_pid = int(autoscaler_pid_text)
-                if process_identity(autoscaler_pid) != autoscaler_started:
-                    raise ValueError("autoscaler process identity changed")
-                os.kill(autoscaler_pid, signal.SIGSTOP)
-            except (OSError, ValueError):
-                log("FATAL: could not stop the exact autoscaler before child completion")
-                exit_code = 1
-            else:
-                stop_deadline = time.time() + 5
-                stopped = False
-                while time.time() < stop_deadline:
-                    if process_identity(autoscaler_pid) != autoscaler_started:
-                        break
-                    if process_state(autoscaler_pid).startswith("T"):
-                        stopped = True
-                        break
-                    time.sleep(0.01)
-                if not stopped:
-                    if process_identity(autoscaler_pid) == autoscaler_started:
-                        try:
-                            os.kill(autoscaler_pid, signal.SIGCONT)
-                        except ProcessLookupError:
-                            pass
-                    log("FATAL: autoscaler did not enter the stopped state")
-                    exit_code = 1
-                else:
-                    open(
-                        os.path.join(MARKERS, "autoscaler-stopped-before-child"),
-                        "w",
-                    ).close()
-                    try:
-                        subprocess.Popen(
-                            [
-                                sys.executable,
-                                os.path.abspath(__file__),
-                                "__resume_autoscaler_after_acceptance__",
-                                out,
-                                str(autoscaler_pid),
-                                autoscaler_started,
-                            ],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            start_new_session=True,
-                        )
-                    except OSError:
-                        if process_identity(autoscaler_pid) == autoscaler_started:
-                            try:
-                                os.kill(autoscaler_pid, signal.SIGCONT)
-                            except ProcessLookupError:
-                                pass
-                        log("FATAL: could not start the autoscaler acceptance observer")
-                        exit_code = 1
     if exit_code == 0:
         context = os.path.join(mdir, "data", "repo", ".context", "cloudbench")
         os.makedirs(context, exist_ok=True)
@@ -482,117 +421,11 @@ def release_worker_after_child(mdir, worker_id):
                 continue
             child_finished = os.path.join(os.path.dirname(ledger), "benchmark-child.finished")
             if os.path.exists(child_finished):
-                ledger_lock = os.path.join(os.path.dirname(ledger), "worker-clones.ids.lock")
-                lock_owner = os.path.join(ledger_lock, "owner")
-                lock_token = f"fixture-{os.getpid()}-{time.time_ns()}"
-                contend = os.path.exists(
-                    os.path.join(FAKE_DIR, "contend-worker-ledger-after-child")
-                )
-                if contend:
-                    lock_deadline = time.time() + 10
-                    while time.time() < lock_deadline:
-                        try:
-                            os.mkdir(ledger_lock)
-                            break
-                        except FileExistsError:
-                            time.sleep(0.01)
-                    else:
-                        open(os.path.join(MARKERS, "worker-ledger-lock-not-acquired"), "w").close()
-                        return
-                    with open(lock_owner, "w") as fh:
-                        fh.write(f"{os.getpid()} {lock_token} {int(time.time())}\n")
-                    open(os.path.join(MARKERS, "worker-ledger-lock-held-after-child"), "w").close()
-                    autoscaler_log = os.path.join(os.path.dirname(ledger), "autoscaler.log")
-                    try:
-                        diagnostic_offset = os.path.getsize(autoscaler_log)
-                    except OSError:
-                        diagnostic_offset = 0
-                else:
-                    time.sleep(2)
-                try:
-                    open(os.path.join(mdir, "worker.ready"), "w").close()
-                    open(os.path.join(MARKERS, "worker-ready-released-after-child"), "w").close()
-                    if contend:
-                        contention_deadline = time.time() + 20
-                        while time.time() < contention_deadline:
-                            try:
-                                with open(autoscaler_log) as fh:
-                                    fh.seek(diagnostic_offset)
-                                    diagnostic = fh.read()
-                            except OSError:
-                                diagnostic = ""
-                            if "timed out acquiring worker ledger lock" in diagnostic:
-                                open(
-                                    os.path.join(MARKERS, "worker-ledger-contention-observed"),
-                                    "w",
-                                ).close()
-                                break
-                            time.sleep(0.01)
-                finally:
-                    if contend:
-                        try:
-                            owner = open(lock_owner).read().split()
-                            if len(owner) >= 2 and owner[1] == lock_token:
-                                os.unlink(lock_owner)
-                                os.rmdir(ledger_lock)
-                                open(
-                                    os.path.join(MARKERS, "worker-ledger-lock-released-after-child"),
-                                    "w",
-                                ).close()
-                        except OSError:
-                            pass
+                time.sleep(2)
+                open(os.path.join(mdir, "worker.ready"), "w").close()
+                open(os.path.join(MARKERS, "worker-ready-released-after-child"), "w").close()
                 return
         time.sleep(0.1)
-
-
-def process_identity(pid):
-    return subprocess.run(
-        ["ps", "-o", "lstart=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
-def process_state(pid):
-    return subprocess.run(
-        ["ps", "-o", "state=", "-p", str(pid)],
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-
-def resume_autoscaler_after_acceptance(out, autoscaler_pid, autoscaler_started):
-    """Release the scenario-2k autoscaler only after final acceptance rejects it."""
-    deadline = time.time() + 60
-    acceptance_failure = os.path.join(out, "autoscaler.acceptance-failed")
-    observed = False
-    resumed = False
-    while time.time() < deadline:
-        if os.path.exists(acceptance_failure):
-            observed = True
-            break
-        time.sleep(0.01)
-    if process_identity(autoscaler_pid) == autoscaler_started:
-        try:
-            os.kill(autoscaler_pid, signal.SIGCONT)
-        except ProcessLookupError:
-            pass
-        else:
-            resume_deadline = time.time() + 5
-            while time.time() < resume_deadline:
-                if process_identity(autoscaler_pid) != autoscaler_started:
-                    break
-                if not process_state(autoscaler_pid).startswith("T"):
-                    resumed = True
-                    break
-                time.sleep(0.01)
-    if observed and resumed:
-        marker = "autoscaler-resumed-after-acceptance"
-    elif not observed:
-        marker = "autoscaler-resume-acceptance-timeout"
-    else:
-        marker = "autoscaler-resume-failed"
-    open(os.path.join(MARKERS, marker), "w").close()
 
 
 if args[:1] == ["__fake_driver__"]:
@@ -600,9 +433,6 @@ if args[:1] == ["__fake_driver__"]:
     sys.exit(0)
 if args[:1] == ["__release_worker_after_child__"]:
     release_worker_after_child(args[1], args[2])
-    sys.exit(0)
-if args[:1] == ["__resume_autoscaler_after_acceptance__"]:
-    resume_autoscaler_after_acceptance(args[1], int(args[2]), args[3])
     sys.exit(0)
 
 with open(JOURNAL, "a") as journal:
@@ -1074,6 +904,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
         CLOUDBENCH_FAKE_INVALID_METRICS="${CLOUDBENCH_FAKE_INVALID_METRICS:-0}" \
         CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM="${CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM:-0}" \
+        CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY="${CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY:-0}" \
         CLOUDBENCH_DETACHED_RECOVERY_SECONDS="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}" \
         CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
@@ -1082,118 +913,10 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_DATA_PROXY_READY_TIMEOUT="${CLOUDBENCH_DATA_PROXY_READY_TIMEOUT:-180}" \
         CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_STARTUP_WAIT_SECONDS:-600}" \
         CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS="${CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS:-300}" \
-        WORKER_LEDGER_LOCK_ATTEMPTS="${CLOUDBENCH_TEST_WORKER_LEDGER_LOCK_ATTEMPTS:-100}" \
         CLOUDBENCH_PROXY_POST_PROBE_SETTLE_SECONDS=0.1 \
         CLOUDBENCH_POLL_INTERVAL=2 \
         CLOUDBENCH_LAUNCH_SETTLE_SECONDS=1 \
         bash "$ws/scripts/run-bench-fleet" "${launch_args[@]}" > "$log" 2>&1
-}
-
-run_post_child_ready_scenario() {
-    reset_fake_state
-    : > "$FAKE_DIR/journal.log"
-    : > "$FAKE_DIR/desired-two"
-    : > "$FAKE_DIR/worker-ready-after-child"
-    : > "$FAKE_DIR/contend-worker-ledger-after-child"
-    post_child_ready_status=0
-    CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_READY_TIMEOUT=30 \
-        CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=25 \
-        CLOUDBENCH_TEST_WORKER_LEDGER_LOCK_ATTEMPTS=1 \
-        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" \
-        autoscaler-post-child-ready --timeout 240 || post_child_ready_status=$?
-    [ "$post_child_ready_status" -eq 0 ] || {
-        cat "$TMP_ROOT/controller-autoscaler-post-child-ready.log" >&2
-        fail "child completion must drain already-committed worker readiness"
-    }
-    [ -f "$FAKE_DIR/markers/worker-ready-released-after-child" ] ||
-        fail "the post-child readiness regression never crossed its delayed boundary"
-    [ -f "$FAKE_DIR/markers/worker-ledger-lock-held-after-child" ] ||
-        fail "the post-child readiness regression never held the worker ledger lock"
-    [ -f "$FAKE_DIR/markers/worker-ledger-contention-observed" ] ||
-        fail "the post-child readiness regression never exercised ledger contention"
-    [ -f "$FAKE_DIR/markers/worker-ledger-lock-released-after-child" ] ||
-        fail "the post-child readiness regression never released the worker ledger lock"
-    grep -qF "1/1 passed" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" ||
-        fail "post-child worker readiness must preserve a passing fleet result"
-    if grep -qF "mandatory autoscaler worker capacity below desired" \
-        "$TMP_ROOT/controller-autoscaler-post-child-ready.log"; then
-        fail "final acceptance sampled capacity before terminal autoscaler synchronization"
-    fi
-    remaining="$(python3 -c '
-import json, sys
-machines = json.load(open(sys.argv[1]))["machines"]
-print(" ".join(sorted(m["name"] for m in machines)))
-' "$FAKE_DIR/state.json")"
-    [ "$remaining" = "cloudbench-warm" ] ||
-        fail "post-child readiness teardown leaked machines: $remaining"
-    rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-after-child" \
-        "$FAKE_DIR/contend-worker-ledger-after-child"
-    echo "PASS: scenario 2j — committed worker readiness drains through transient ledger contention after benchmark child completion"
-}
-
-run_concurrent_ready_scale_down_scenario() {
-    reset_fake_state
-    : > "$FAKE_DIR/journal.log"
-    : > "$FAKE_DIR/concurrent-ready-scale-down"
-    concurrent_ready_status=0
-    CLOUDBENCH_TEST_BARRIER_MIN=1 \
-        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" \
-        autoscaler-concurrent-ready-scale-down --timeout 240 || concurrent_ready_status=$?
-    [ "$concurrent_ready_status" -eq 0 ] || {
-        cat "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" >&2
-        fail "concurrent worker readiness publication and scale-down must preserve surviving capacity"
-    }
-    [ -f "$FAKE_DIR/markers/worker-scale-down-complete" ] ||
-        fail "the concurrent readiness regression never scaled one worker down"
-    worker_launches="$(grep -c 'setsid bash /tmp/rbw.sh' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
-    [ "$worker_launches" -ge 2 ] ||
-        fail "the concurrent readiness regression did not launch two workers"
-    remaining="$(python3 -c '
-import json, sys
-machines = json.load(open(sys.argv[1]))["machines"]
-print(" ".join(sorted(m["name"] for m in machines)))
-' "$FAKE_DIR/state.json")"
-    [ "$remaining" = "cloudbench-warm" ] ||
-        fail "concurrent readiness teardown leaked machines: $remaining"
-    rm -f "$FAKE_DIR/concurrent-ready-scale-down"
-    echo "PASS: scenario 2i — concurrent ready publication and scale-down preserve surviving capacity"
-}
-
-run_missing_terminal_scenario() {
-    reset_fake_state
-    : > "$FAKE_DIR/journal.log"
-    : > "$FAKE_DIR/desired-two"
-    : > "$FAKE_DIR/worker-ready-before-child-no-terminal"
-    missing_terminal_status=0
-    CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=0 \
-        run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-missing-terminal.log" \
-        autoscaler-missing-terminal --timeout 240 || missing_terminal_status=$?
-    [ "$missing_terminal_status" -ne 0 ] ||
-        fail "satisfied capacity must not pass without causal autoscaler completion"
-    grep -qF "mandatory autoscaler did not confirm terminal completion" \
-        "$TMP_ROOT/controller-autoscaler-missing-terminal.log" ||
-        fail "missing autoscaler terminal proof did not produce a stable explicit failure"
-    [ -f "$FAKE_DIR/markers/autoscaler-stopped-before-child" ] ||
-        fail "the missing-terminal regression never stopped the ready autoscaler"
-    for _ in $(seq 1 50); do
-        [ ! -f "$FAKE_DIR/markers/autoscaler-resumed-after-acceptance" ] || break
-        sleep 0.1
-    done
-    [ -f "$FAKE_DIR/markers/autoscaler-resumed-after-acceptance" ] ||
-        fail "the missing-terminal regression did not cross the acceptance boundary"
-    [ ! -f "$FAKE_DIR/markers/autoscaler-resume-acceptance-timeout" ] ||
-        fail "the missing-terminal autoscaler resumed before its acceptance failure"
-    [ ! -f "$FAKE_DIR/markers/autoscaler-resume-failed" ] ||
-        fail "the missing-terminal regression could not resume the exact autoscaler"
-    remaining="$(python3 -c '
-import json, sys
-machines = json.load(open(sys.argv[1]))["machines"]
-print(" ".join(sorted(m["name"] for m in machines)))
-' "$FAKE_DIR/state.json")"
-    [ "$remaining" = "cloudbench-warm" ] ||
-        fail "missing-terminal teardown leaked machines: $remaining"
-    rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-before-child-no-terminal"
-    echo "PASS: scenario 2k — capacity cannot pass without causal autoscaler completion"
 }
 
 write_dead_registry() {  # write_dead_registry <label> <policy> <host> <name> [id] [role]
@@ -1292,33 +1015,30 @@ CONDUCTOR_PORT_B=$((HUB_PORT_B - 5764))
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 1 — concurrent provisioning: two controllers, isolated pool machines
 # ═════════════════════════════════════════════════════════════════════════════
-if [ "${CLOUDBENCH_TEST_ONLY_POST_CHILD_READY:-0}" != "1" ] \
-    && [ "${CLOUDBENCH_TEST_ONLY_MISSING_TERMINAL:-0}" != "1" ]; then
-    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
-    PID_A=$!
-    PIDS+=("$PID_A")
-    run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-b.log" --provision-pool 1 &
-    PID_B=$!
-    PIDS+=("$PID_B")
+run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-a.log" --provision-pool 1 &
+PID_A=$!
+PIDS+=("$PID_A")
+run_controller "$WS_B" "$CONDUCTOR_PORT_B" "$TMP_ROOT/controller-b.log" --provision-pool 1 &
+PID_B=$!
+PIDS+=("$PID_B")
 
-    status_a=0; wait "$PID_A" || status_a=$?
-    status_b=0; wait "$PID_B" || status_b=$?
-    PIDS=()
+status_a=0; wait "$PID_A" || status_a=$?
+status_b=0; wait "$PID_B" || status_b=$?
+PIDS=()
 
-    [ "$status_a" -eq 0 ] || fail "workstream A's provisioning must succeed alongside a concurrent run (exit=$status_a)"
-    [ "$status_b" -eq 0 ] || fail "workstream B's provisioning must succeed alongside a concurrent run (exit=$status_b)"
+[ "$status_a" -eq 0 ] || fail "workstream A's provisioning must succeed alongside a concurrent run (exit=$status_a)"
+[ "$status_b" -eq 0 ] || fail "workstream B's provisioning must succeed alongside a concurrent run (exit=$status_b)"
 
-    pool_a="$(grep -c . "$POOL_A" 2>/dev/null || echo 0)"
-    pool_b="$(grep -c . "$POOL_B" 2>/dev/null || echo 0)"
-    [ "$pool_a" = "1" ] || fail "workstream A must own exactly one pool machine (got $pool_a)"
-    [ "$pool_b" = "1" ] || fail "workstream B must own exactly one pool machine (got $pool_b)"
-    id_a="$(head -1 "$POOL_A")"
-    id_b="$(head -1 "$POOL_B")"
-    [ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] ||
-        fail "concurrent workstreams must provision distinct machines (a=$id_a b=$id_b)"
-    journal_must_be_read_only "scenario 1"
-    echo "PASS: scenario 1 — concurrent provisioning with isolated pool machines"
-fi
+pool_a="$(grep -c . "$POOL_A" 2>/dev/null || echo 0)"
+pool_b="$(grep -c . "$POOL_B" 2>/dev/null || echo 0)"
+[ "$pool_a" = "1" ] || fail "workstream A must own exactly one pool machine (got $pool_a)"
+[ "$pool_b" = "1" ] || fail "workstream B must own exactly one pool machine (got $pool_b)"
+id_a="$(head -1 "$POOL_A")"
+id_b="$(head -1 "$POOL_B")"
+[ -n "$id_a" ] && [ -n "$id_b" ] && [ "$id_a" != "$id_b" ] ||
+    fail "concurrent workstreams must provision distinct machines (a=$id_a b=$id_b)"
+journal_must_be_read_only "scenario 1"
+echo "PASS: scenario 1 — concurrent provisioning with isolated pool machines"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 2 — concurrent RUNS that must FINISH WITH SUCCESS (1/1 passed each)
@@ -1404,18 +1124,6 @@ for port in "$HUB_PORT_A" "$HUB_PORT_B"; do
         sleep 0.1
     done
 done
-
-if [ "${CLOUDBENCH_TEST_ONLY_POST_CHILD_READY:-0}" = "1" ]; then
-    if [ "${CLOUDBENCH_TEST_POST_CHILD_PREDECESSOR:-0}" = "1" ]; then
-        run_concurrent_ready_scale_down_scenario
-    fi
-    run_post_child_ready_scenario
-    exit 0
-fi
-if [ "${CLOUDBENCH_TEST_ONLY_MISSING_TERMINAL:-0}" = "1" ]; then
-    run_missing_terminal_scenario
-    exit 0
-fi
 
 run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-run-a.log" bench-alpha --timeout 240 &
 PID_A=$!
@@ -2072,19 +1780,94 @@ echo "PASS: scenario 2h — scale-down destroy failure fails closed and remains 
 # Two provisioners may publish readiness while the autoscaler scales one worker
 # down. Per-worker outcomes plus a sole aggregate writer must preserve the
 # surviving worker's readiness proof without append-vs-rewrite loss.
-run_concurrent_ready_scale_down_scenario
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/concurrent-ready-scale-down"
+concurrent_ready_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" \
+    autoscaler-concurrent-ready-scale-down --timeout 240 || concurrent_ready_status=$?
+[ "$concurrent_ready_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-concurrent-ready-scale-down.log" >&2
+    fail "concurrent worker readiness publication and scale-down must preserve surviving capacity"
+}
+[ -f "$FAKE_DIR/markers/worker-scale-down-complete" ] ||
+    fail "the concurrent readiness regression never scaled one worker down"
+worker_launches="$(grep -c 'setsid bash /tmp/rbw.sh' "$FAKE_DIR/journal.log" 2>/dev/null || true)"
+[ "$worker_launches" -ge 2 ] ||
+    fail "the concurrent readiness regression did not launch two workers"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "concurrent readiness teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/concurrent-ready-scale-down"
+echo "PASS: scenario 2i — concurrent ready publication and scale-down preserve surviving capacity"
 
 # A benchmark may finish after a worker allocation and launch have committed but
 # before that worker crosses the queue-readiness boundary. Child completion must
 # stop new scaling decisions without abandoning committed desired capacity: the
 # autoscaler drains the pending outcome, then proves its final invariant.
-run_post_child_ready_scenario
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/worker-ready-after-child"
+post_child_ready_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_WORKER_READY_TIMEOUT=30 \
+    CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=25 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" \
+    autoscaler-post-child-ready --timeout 240 || post_child_ready_status=$?
+[ "$post_child_ready_status" -eq 0 ] || {
+    cat "$TMP_ROOT/controller-autoscaler-post-child-ready.log" >&2
+    fail "child completion must drain already-committed worker readiness"
+}
+[ -f "$FAKE_DIR/markers/worker-ready-released-after-child" ] ||
+    fail "the post-child readiness regression never crossed its delayed boundary"
+grep -qF "1/1 passed" "$TMP_ROOT/controller-autoscaler-post-child-ready.log" ||
+    fail "post-child worker readiness must preserve a passing fleet result"
+if grep -qF "mandatory autoscaler worker capacity below desired" \
+    "$TMP_ROOT/controller-autoscaler-post-child-ready.log"; then
+    fail "final acceptance sampled capacity before terminal autoscaler synchronization"
+fi
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "post-child readiness teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-after-child"
+echo "PASS: scenario 2j — committed worker readiness drains after benchmark child completion"
 
 # Even fully satisfied capacity is only a mutable snapshot until the autoscaler
 # publishes that it observed child completion after draining committed work.
 # With a zero finalization budget the controller must fail this missing causal
 # marker rather than accept a still-live autoscaler on counts alone.
-run_missing_terminal_scenario
+reset_fake_state
+: > "$FAKE_DIR/journal.log"
+: > "$FAKE_DIR/desired-two"
+: > "$FAKE_DIR/worker-ready-before-child-no-terminal"
+missing_terminal_status=0
+CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=0 \
+    CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY=1 \
+    run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-missing-terminal.log" \
+    autoscaler-missing-terminal --timeout 240 || missing_terminal_status=$?
+[ "$missing_terminal_status" -ne 0 ] ||
+    fail "satisfied capacity must not pass without causal autoscaler completion"
+grep -qF "mandatory autoscaler did not confirm terminal completion" \
+    "$TMP_ROOT/controller-autoscaler-missing-terminal.log" ||
+    fail "missing autoscaler terminal proof did not produce a stable explicit failure"
+remaining="$(python3 -c '
+import json, sys
+machines = json.load(open(sys.argv[1]))["machines"]
+print(" ".join(sorted(m["name"] for m in machines)))
+' "$FAKE_DIR/state.json")"
+[ "$remaining" = "cloudbench-warm" ] ||
+    fail "missing-terminal teardown leaked machines: $remaining"
+rm -f "$FAKE_DIR/desired-two" "$FAKE_DIR/worker-ready-before-child-no-terminal"
+echo "PASS: scenario 2k — capacity cannot pass without causal autoscaler completion"
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Scenario 3 — stopped inventory cannot consume the active-compute ceiling

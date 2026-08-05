@@ -1566,7 +1566,7 @@ registry_record_is_stale_phantom() {  # <record-file>; 0 = absent long enough to
     ttl="${CLOUDBENCH_PHANTOM_RECORD_TTL_SECONDS:-900}"
     case "$ttl" in ''|*[!0-9]*) ttl=900 ;; esac
     now="$(date +%s)"
-    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    mt="$(stat -c %Y "$record" 2>/dev/null || stat -f %m "$record" 2>/dev/null || echo "$now")"
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
@@ -1583,7 +1583,7 @@ registry_record_is_stale_pre_volume_id() {  # <record-file>; 0 = old enough for 
     ttl="${CLOUDBENCH_LEGACY_VOLUME_RECORD_TTL_SECONDS:-${CLOUDBENCH_VOLUME_ORPHAN_GRACE_SECONDS:-3600}}"
     case "$ttl" in ''|*[!0-9]*) ttl=3600 ;; esac
     now="$(date +%s)"
-    mt="$(stat -f %m "$record" 2>/dev/null || stat -c %Y "$record" 2>/dev/null || echo "$now")"
+    mt="$(stat -c %Y "$record" 2>/dev/null || stat -f %m "$record" 2>/dev/null || echo "$now")"
     [ $(( now - mt )) -ge "$ttl" ]
 }
 
@@ -2243,7 +2243,7 @@ worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
         if [ -n "$observed" ]; then
             read -r owner_pid owner_token owner_started < "$owner" 2>/dev/null || true
         else
-            owner_started="$(stat -f %m "$lock" 2>/dev/null || stat -c %Y "$lock" 2>/dev/null || true)"
+            owner_started="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null || true)"
         fi
         now="$(date +%s)"
         case "$owner_started" in ''|*[!0-9]*) owner_started="$now" ;; esac
@@ -4868,6 +4868,34 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         fi
         reconcile_worker_failure_outcomes "$bench" "$out" \
             || fail_autoscaler "could not reconcile worker failure outcomes"
+        # The fake-controller regression for terminal proof needs to hold the
+        # exact state "capacity fully accepted, child not yet complete" without
+        # relying on this loop's scheduler timing. This branch is unreachable
+        # outside the explicit fake Fly environment used by the harness.
+        if [ -n "${CLOUDBENCH_FAKE_DIR:-}" ] \
+            && [ "${CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY:-0}" = "1" ]; then
+            local test_ready_workers test_tracked_workers
+            test_ready_workers="$(_ready_pool_ids "$out")"
+            test_tracked_workers="$(_pool_ids "$out")"
+            if [ "$test_ready_workers" -ge "$want" ] \
+                && [ "$test_tracked_workers" = "$test_ready_workers" ] \
+                && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
+                    -print -quit 2>/dev/null | grep -q . \
+                && ready_workers_operational "$out"; then
+                # The boundary must survive the controller's whole final
+                # acceptance pass, so the normal path holds here until teardown
+                # signals this process. The release marker is the harness's
+                # explicit escape hatch, and the deadline is only an anti-wedge
+                # backstop far beyond any scenario's runtime — never the
+                # synchronization this case depends on.
+                : > "$out/autoscaler.test-held-after-ready"
+                local test_hold_deadline=$((SECONDS + 600))
+                while [ ! -e "$out/autoscaler.test-release-after-ready" ] \
+                    && [ "$SECONDS" -lt "$test_hold_deadline" ]; do
+                    sleep 0.2
+                done
+            fi
+        fi
         sleep "$AUTOSCALE_POLL"
     done
 }

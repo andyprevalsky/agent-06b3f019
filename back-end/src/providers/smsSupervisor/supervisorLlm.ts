@@ -2,43 +2,25 @@
  * SMS Supervisor LLM call.
  *
  * Owns exactly one thing: turn a list of messages into a `SupervisorResponse`.
- * Streams a rose-1-lite completion, honours the per-user blackbox fixture
- * override, and shapes the consumed stream into `{ reasoning, tool_calls }`
- * whether the model answered with native tool_use blocks or with the
- * structured-output JSON envelope as content.
+ * Streams a rose-1-lite completion (Cerebras-first), honours the per-user
+ * blackbox fixture override, and shapes the consumed stream into
+ * `{ reasoning, tool_calls }` whether the model answered with native tool_use
+ * blocks or with the structured-output JSON envelope as content.
  *
- * Split out of supervisorHandler.ts so the handler file stays about the tool
- * loop (rounds, delivery, commit gating) and nothing else.
+ * Split out of supervisorHandler.ts so the handler stays about the tool loop.
  */
 
-import { createStreamingCompletion, CompletionMessage } from '../rose';
+import { createStreamingCompletion, CompletionMessage, CompletionOptions } from '../rose';
 import { StructuredOutputAccumulator } from '../rose/structuredOutput';
 import { createLogger } from '../logger';
 import { SUPERVISOR_RESPONSE_MODEL } from './schema';
 import { loadBlackboxSupervisorResponseFixture } from './supervisorFixtures';
+import type { SupervisorComputeToken } from './supervisorComputeToken';
 import type { ToolCall } from './supervisorTools';
 
 const log = createLogger('SmsSupervisor');
 
 export const SMS_SUPERVISOR_MODEL = 'rose-labs/rose-1-lite';
-
-/**
- * Benchmark-only model/route override.
- *
- * Lets an eval ask "is this defect ours or this model's?" by running the exact
- * same task against a different model with everything else identical. Unset in
- * prod, where the supervisor always takes the Cerebras route below.
- */
-function supervisorModelAndRoute(): { model: string; providerRoute: string } {
-  const override = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
-  if (override !== undefined && override !== '') {
-    return {
-      model: override,
-      providerRoute: process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE ?? 'openrouter-waterfall',
-    };
-  }
-  return { model: SMS_SUPERVISOR_MODEL, providerRoute: 'direct-cerebras' };
-}
 
 export interface SupervisorResponse {
   reasoning: string;
@@ -47,15 +29,39 @@ export interface SupervisorResponse {
 
 export async function callSupervisorLlm(
   messages: CompletionMessage[],
+  computeToken: SupervisorComputeToken | null,
   userId: string
 ): Promise<SupervisorResponse> {
   const startTime = Date.now();
+  const claudeToken = computeToken?.type === 'claude' ? computeToken.accessToken : null;
+  const gptToken = computeToken?.type === 'gpt' ? computeToken.accessToken : null;
+  const gptAccountId = computeToken?.type === 'gpt' ? computeToken.accountId : undefined;
 
-  // Log the full request
+  // Same provider path as chat: Cerebras GLM first, with that route's own
+  // failover (quota/rate → OpenRouter unpinned same-model → generic waterfall).
+  // Do not prefer claudeAuth here — SMS reliability must not depend on a user
+  // OAuth token / funded Anthropic key / Anthropic union-schema ceiling.
+  // BENCHMARK_SMS_SUPERVISOR_MODEL(+_ROUTE) overrides for eval isolation only.
+  const modelOverride = process.env.BENCHMARK_SMS_SUPERVISOR_MODEL;
+  const activeModel =
+    modelOverride !== undefined && modelOverride !== '' ? modelOverride : SMS_SUPERVISOR_MODEL;
+  const routeOverride = process.env.BENCHMARK_SMS_SUPERVISOR_ROUTE;
+  const providerRoute: NonNullable<CompletionOptions['provider_route']> =
+    modelOverride !== undefined && modelOverride !== ''
+      ? routeOverride === 'direct-cerebras' ||
+        routeOverride === 'openrouter-cerebras' ||
+        routeOverride === 'shared-openai-priority' ||
+        routeOverride === 'openrouter-waterfall'
+        ? routeOverride
+        : 'openrouter-waterfall'
+      : 'direct-cerebras';
+
   log.info('[SmsSupervisorLLM] Request', {
-    model: SMS_SUPERVISOR_MODEL,
+    model: activeModel,
+    providerRoute,
     messageCount: messages.length,
-    providerRoute: 'direct-cerebras',
+    hasClaudeToken: !!claudeToken && providerRoute !== 'direct-cerebras',
+    hasGptToken: !!gptToken && providerRoute !== 'direct-cerebras',
     systemPromptLength: messages[0]?.content
       ? typeof messages[0].content === 'string'
         ? messages[0].content.length
@@ -82,25 +88,16 @@ export async function callSupervisorLlm(
     return blackboxFixture.response;
   }
 
-  // Consume streaming response fully (no FE broadcast needed)
-  // Same provider path as the backend chat loop: Cerebras GLM-4.7 first, with
-  // the route's own failover behind it — quota/rate (402/429) spills to the
-  // same model via OpenRouter with the provider unpinned, and stalls/5xx/empty
-  // streams fall through to the generic waterfall. The SMS agent must not break
-  // on a single provider having a bad minute.
-  //
-  // Deliberately NOT claudeAuth. Routing SMS straight to Anthropic made this
-  // surface's reliability depend on the user's OAuth token, an API key with a
-  // credit balance, and a schema small enough for Anthropic's union-type
-  // ceiling. On 2026-07-28 all three failed at once and every supervisor turn
-  // degraded silently to a waterfall model, with nothing surfacing the switch.
-  const { model: activeModel, providerRoute } = supervisorModelAndRoute();
   const stream = await createStreamingCompletion({
     model: activeModel,
     messages,
     temperature: 0.3,
     response_model: SUPERVISOR_RESPONSE_MODEL,
-    provider_route: providerRoute as never,
+    provider_route: providerRoute,
+    ...(providerRoute !== 'direct-cerebras' && claudeToken ? { claude_token: claudeToken } : {}),
+    ...(providerRoute !== 'direct-cerebras' && gptToken
+      ? { gpt_token: gptToken, gpt_account_id: gptAccountId }
+      : {}),
   });
 
   let accumulatedContent = '';
@@ -127,9 +124,6 @@ export async function callSupervisorLlm(
         if (!name) continue;
         try {
           const parsedInput = argsStr ? JSON.parse(argsStr) : {};
-          // Native-tool path: the response_format envelope nests real args under
-          // `arguments`, so the tool_use input is `{ arguments: {...} }` and we
-          // unwrap it; if the model emitted the args flat, take them as-is.
           const innerArgs =
             parsedInput && typeof parsedInput === 'object' && 'arguments' in parsedInput
               ? (parsedInput as { arguments: Record<string, unknown> }).arguments
@@ -179,16 +173,14 @@ export async function callSupervisorLlm(
  * When the model emits NEITHER — a reasoning-only or empty stream — the
  * structured-output extractor cannot select a single item. That extraction is
  * wrapped in the same try/catch as JSON parsing so a StructuredOutputCardinality
- * error degrades to the deliberate "never send raw garbage to the user" fallback
- * instead of throwing out of the supervisor turn.
+ * error degrades to nudge-and-retry instead of throwing out of the supervisor turn.
  */
 export function finalizeSupervisorResponse(
   accumulatedToolCalls: ToolCall[],
   structuredOutput: StructuredOutputAccumulator,
   accumulatedReasoning: string
 ): SupervisorResponse {
-  // Native tool path (claudeAuth + response_model extracted to tools): each
-  // tool_use block came through as a tool_calls delta. Use those directly.
+  // Native tool path: each tool_use block came through as a tool_calls delta.
   if (accumulatedToolCalls.length > 0) {
     log.info('[SmsSupervisorLLM] Native tool calls received', {
       tools: accumulatedToolCalls.map((tc) => tc.tool),
@@ -199,28 +191,17 @@ export function finalizeSupervisorResponse(
     };
   }
 
-  // The structured-output JSON envelope arrived as content (Codex / waterfall
-  // path, or claudeAuth when extraction didn't fit the schema shape). finalText()
-  // is INSIDE the try: a reasoning-only / empty / ambiguous stream makes the
-  // extractor throw StructuredOutputCardinalityError — the same "the model gave
-  // us nothing actionable this round" condition as a JSON parse failure.
-  //
-  // On that failure we return NO tool calls rather than throwing (which crashed
-  // the whole turn) or injecting an apology (which gave up on the first empty
-  // round). An empty tool_calls response routes into the supervisor loop's
-  // existing nudge-and-retry ("No tool calls and no attempt_completion" →
-  // re-prompt), so a transient empty stream gets another round to actually
-  // answer. If every round stays empty, the loop's terminal net delivers one
-  // friendly apology. Bounded by MAX_TOOL_ROUNDS.
+  // Content-path envelope (Codex / waterfall). finalText() is INSIDE the try:
+  // a reasoning-only / empty / ambiguous stream makes the extractor throw
+  // StructuredOutputCardinalityError — same "nothing actionable" condition as
+  // a JSON parse failure. Empty tool_calls → supervisor loop nudge-and-retry.
   let accumulatedContent = '';
   let parsed: SupervisorResponse;
   try {
     accumulatedContent = structuredOutput.finalText();
     const candidate: unknown = JSON.parse(accumulatedContent);
-    // `JSON.parse` happily returns `null`, `"Red"`, or `3`. Reading
-    // `.reasoning` off those either throws or silently yields an empty turn,
-    // so treat any non-object envelope as a parse failure and take the
-    // existing nudge-retry path.
+    // JSON.parse happily returns null / primitives / arrays. Treat non-objects
+    // as parse failure so we take the nudge-retry path instead of throwing.
     if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
       throw new Error(`Structured output was not a JSON object (got ${typeof candidate})`);
     }
@@ -235,9 +216,8 @@ export function finalizeSupervisorResponse(
   }
 
   const reasoning = typeof parsed.reasoning === 'string' ? parsed.reasoning : '';
-  // Entries come from provider JSON, so an array is no guarantee its members are
-  // objects with a `tool`. Drop malformed entries here rather than letting them
-  // reach the dispatcher (or throw inside this log call).
+  // Provider JSON is untrusted: drop entries without a string `tool` rather
+  // than letting them reach the dispatcher (or throw inside this log call).
   const rawToolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
   const toolCalls = rawToolCalls.filter(
     (tc): tc is (typeof rawToolCalls)[number] =>

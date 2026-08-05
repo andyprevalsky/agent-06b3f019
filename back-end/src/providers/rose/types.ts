@@ -27,14 +27,9 @@ export interface CompletionMessage {
     id?: string;
     call_id?: string;
     /**
-     * OpenAI's discriminator, required by OpenAI-compatible providers. Two
-     * separate outages traced back to omitting it — the Anthropic path tolerates
-     * its absence, so the defect stayed hidden until traffic moved elsewhere:
-     *  - Cerebras rejects the request outright ("tool_calls.0.type: Field
-     *    required", code=wrong_api_format), surfaced when SMS moved onto the
-     *    Cerebras route.
-     *  - Google via OpenRouter fails the ENTIRE transcript as malformed, which
-     *    silently removed the strongest waterfall leg.
+     * OpenAI's discriminator. Cerebras and strict OpenRouter validators (e.g.
+     * Google) reject assistant tool_calls that omit it; Anthropic tolerated
+     * absence, so the bug only surfaces off the Anthropic path.
      */
     type?: 'function';
     name?: string;

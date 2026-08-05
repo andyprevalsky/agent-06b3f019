@@ -14,11 +14,11 @@ async def test_fetch_pricing_pool_average():
         result = await fetch_model_pricing("rose-1-ultra")
 
     # rose-1-ultra waterfall: anthropic/claude-opus-4.8 ($5/$25 per M) +
-    # google/gemini-3.1-pro-preview ($2/$12 per M).
-    # Average input: (5+2)/2 = $3.5/M -> 0.35 cents/1k
-    assert abs(result["input_cents_per_1k"] - 0.35) < 1e-9
-    # Average output: (25+12)/2 = $18.5/M -> 1.85 cents/1k
-    assert abs(result["output_cents_per_1k"] - 1.85) < 1e-9
+    # openai/gpt-5.6-terra ($2.50/$15 per M).
+    # Average input: (5+2.5)/2 = $3.75/M -> 0.375 cents/1k
+    assert abs(result["input_cents_per_1k"] - 0.375) < 1e-9
+    # Average output: (25+15)/2 = $20/M -> 2.0 cents/1k
+    assert abs(result["output_cents_per_1k"] - 2.0) < 1e-9
 
 
 def test_get_anthropic_pricing_claude():

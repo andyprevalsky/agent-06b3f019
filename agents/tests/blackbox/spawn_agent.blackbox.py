@@ -741,6 +741,55 @@ async def test_handler_explore_failed_result_forwards_error_reason():
     assert error_event.metadata["error_reason"] == reason
 
 
+async def test_handler_explore_unavailable_sources_still_finished():
+    """Disconnected sources stay on the event for gates but do not ERROR the explore UI."""
+    from domains.spawn_agent.handler import SpawnAgentManager
+    from tools.base import MessageStatus
+
+    summary = (
+        "Found iMessage mentions of almond butter.\n\n"
+        "⚠️ Source(s) not connected: email. These were skipped — do NOT retry them."
+    )
+    unavailable = [
+        {
+            "source": "email",
+            "connector": "gmail",
+            "connected": False,
+            "connectUrl": "https://roselabs.ai/connect/gmail",
+        }
+    ]
+    fake = _FakeSpawnWF(
+        activity_results={"fetch_full_network_metadata": "", "fetch_local_data_summary": ""},
+        start_activity_result=_Activity(
+            result={
+                "status": "completed",
+                "result": summary,
+                "unavailable_sources": unavailable,
+                "accumulated_usage": [],
+                "llm_iteration_usage": [],
+            }
+        ),
+    )
+    restore = _patch_spawn_workflow(fake)
+    try:
+        events = await _collect(
+            SpawnAgentManager()._spawn_explore(
+                workflow_instance=_FakeWFInstance(),
+                tool_call={"type": "explore", "goal": "find brands"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    finished = next(event for event in events if event.status == MessageStatus.FINISHED and event.data)
+    assert finished.message == summary
+    assert finished.data["result"] == summary
+    assert finished.data["unavailable_sources"] == unavailable
+    assert "error_reason" not in (finished.data or {})
+    assert not any(event.status == MessageStatus.ERROR for event in events)
+
+
 async def test_handler_explore_cancelled_yields_error():
     """Explore activity CancelledError -> ERROR event."""
     import asyncio as _a
@@ -1929,6 +1978,98 @@ async def test_spawn_explore_agent_activity_error_status_returned():
     assert result["structured_response"] == {"topic": "partial"}
 
 
+async def test_spawn_explore_agent_activity_unavailable_sources_still_completed():
+    """Unavailable grep sources append a notice but do not force explore status=error."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    unavailable = [
+        {
+            "source": "email",
+            "connector": "gmail",
+            "connected": False,
+            "connectUrl": "https://roselabs.ai/connect/gmail",
+        }
+    ]
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "⚠️ Source(s) not connected: email.",
+            "usage": {"llm": [], "service": []},
+            "unavailable_sources": unavailable,
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("grep", {"pattern": "amazon", "sources": ["email"]}, "tc1")
+        return {
+            "status": "completed",
+            "final_response": "No Amazon orders in reachable sources.",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(False, "g", True, None)),
+        ),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
+
+    assert result["status"] == "completed"
+    assert result["error_reason"] is None
+    assert result["unavailable_sources"] == unavailable
+    assert "No Amazon orders in reachable sources." in result["result"]
+    assert "Source(s) not connected: email" in result["result"]
+
+
+async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_sources():
+    """Scalar unavailable_sources entries become {source: ...} records for notices/gates."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "partial",
+            "usage": {"llm": [], "service": []},
+            "unavailable_sources": ["email", {"source": "email"}],
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("grep", {"pattern": "amazon", "sources": ["email"]}, "tc1")
+        return {
+            "status": "completed",
+            "final_response": "partial research",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(False, "g", True, None)),
+        ),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
+
+    assert result["status"] == "completed"
+    assert result["unavailable_sources"] == [{"source": "email"}]
+    assert "Source(s) not connected: email" in result["result"]
+
+
 async def test_spawn_explore_agent_activity_rejects_tool_free_completion():
     """A child cannot report successful research without any tool evidence."""
     from unittest.mock import patch
@@ -2450,6 +2591,10 @@ async def run_all_tests():
         "handler_explore_failed_result_forwards_error_reason",
         test_handler_explore_failed_result_forwards_error_reason,
     )
+    await r.record_async(
+        "handler_explore_unavailable_sources_still_finished",
+        test_handler_explore_unavailable_sources_still_finished,
+    )
     await r.record_async("handler_explore_cancelled", test_handler_explore_cancelled_yields_error)
     await r.record_async("handler_explore_exception", test_handler_explore_exception_yields_error)
     await r.record_async("handler_browser_delegates", test_handler_browser_delegates)
@@ -2517,6 +2662,14 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds,
     )
     await r.record_async("explore_activity_error", test_spawn_explore_agent_activity_error_status_returned)
+    await r.record_async(
+        "explore_activity_unavailable_sources_still_completed",
+        test_spawn_explore_agent_activity_unavailable_sources_still_completed,
+    )
+    await r.record_async(
+        "explore_activity_normalizes_scalar_unavailable_sources",
+        test_spawn_explore_agent_activity_normalizes_scalar_unavailable_sources,
+    )
     await r.record_async(
         "explore_activity_rejects_tool_free_completion",
         test_spawn_explore_agent_activity_rejects_tool_free_completion,

@@ -7,6 +7,11 @@ import { z } from 'zod';
 // Validation schema for user data updates (PUT and PATCH)
 export const updateUserSchema = z.object({
   name: z.string().optional(),
+  email: z
+    .union([z.string().trim().email(), z.literal('')])
+    .transform((value) => (value === '' ? null : value.toLowerCase()))
+    .optional(),
+  deliveryRecipientName: z.string().optional(),
   addressLine1: z.string().optional(),
   addressLine2: z.string().optional(),
   city: z.string().optional(),
@@ -26,7 +31,9 @@ export type UpdateUserBody = z.infer<typeof updateUserSchema>;
 /** Shape returned by GET / PUT / PATCH endpoints. */
 export interface UserSettingsResponse {
   name: string | null;
+  email: string | null;
   phone?: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;

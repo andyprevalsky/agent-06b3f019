@@ -6,10 +6,19 @@ cd "$ROOT_DIR/agents"
 
 # Use the agents venv interpreter so subprocesses (run_benchmark.py) inherit the full
 # dependency set — notably boto3 for R2 world-model/trace-archive reads under --simulate.
-# The system/asdf python may lack these. Fall back to PATH python if the venv is absent.
-PY="python"
+# The system/asdf python may lack these. Fall back to PATH python3/python if the venv
+# is absent. Prefer python3: many cloud images ship python3 without a `python`
+# symlink (bare `exec python` exits 127).
+PY=""
 if [ -x "venv/bin/python" ]; then
     PY="venv/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+else
+    echo "❌ No Python interpreter found (venv/bin/python, python3, or python)." >&2
+    exit 127
 fi
 
 if [[ "${1:-}" == "list" || "${1:-}" == "--list" ]]; then

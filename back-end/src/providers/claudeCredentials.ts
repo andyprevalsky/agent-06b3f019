@@ -378,6 +378,33 @@ function resolveRateLimitedUntil(
 }
 
 /**
+ * Only ever EXTEND a backoff window — never shorten one.
+ *
+ * A token has exactly one `rateLimitedUntil`, but several independent consumers
+ * write it: the Rose completions waterfall, the Claude Code CLI exhaustion
+ * scanner, and the compute-token rotation endpoint. Some of those calls carry
+ * the precise reset Anthropic reported ("resets 2026-07-30T22:00Z"); others
+ * carry nothing and fall back to the generic short cooldown above.
+ *
+ * Before this guard the writes raced and the LAST one won, so a generic 5-minute
+ * default could clobber a real multi-day reset. Observed in prod 2026-07-28:
+ * 16:54:51 marked the user token until 2026-07-30T22:00:00Z, then 16:55:06
+ * overwrote it with 17:00:06Z — so five minutes later the still-exhausted token
+ * was served again, 429'd again, and in between the Claude Code path saw NO
+ * usable credential and fell through to the unfunded shared ANTHROPIC_API_KEY
+ * ("credit balance is too low" / 500 "No Claude Code credentials available").
+ *
+ * Expressed as a WHERE clause rather than read-modify-write so it stays a single
+ * statement with no lost-update race, regardless of how many agents back the
+ * same token off concurrently.
+ */
+function notAlreadyBackedOffLonger(until: Date) {
+  return {
+    OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: until } }],
+  };
+}
+
+/**
  * Fetch an available pool token from Integrations with poolingEnabled=true.
  * Selects the least-recently-used token that isn't rate-limited.
  * @param excludeIds - Integration IDs to skip (e.g. already tried and got 429)
@@ -425,10 +452,29 @@ export async function markPoolTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
-  await prisma.integration.update({
-    where: { id: poolTokenId },
+  const { count } = await prisma.integration.updateMany({
+    where: { id: poolTokenId, ...notAlreadyBackedOffLonger(until) },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    // `updateMany` matched nothing, which has TWO causes: the row already has a
+    // longer window (expected, benign), or the id does not exist (a stale-ID bug
+    // the previous single-record `update` would have thrown on). Disambiguate so
+    // the guard cannot silently swallow the second case.
+    const existing = await prisma.integration.findUnique({
+      where: { id: poolTokenId },
+      select: { rateLimitedUntil: true },
+    });
+    if (existing === null) {
+      log.warn(`Pool token ${poolTokenId} not found; cannot rate-limit (stale integration id?)`);
+      return;
+    }
+    log.info(
+      `Pool token ${poolTokenId} already backed off past ${until.toISOString()} ` +
+        `(until ${existing.rateLimitedUntil?.toISOString() ?? 'null'}) — keeping the longer window`
+    );
+    return;
+  }
   log.info(`Pool token ${poolTokenId} rate-limited until ${until.toISOString()}`);
 }
 
@@ -465,14 +511,30 @@ export async function markUserTokenRateLimited(
   }
 
   const until = resolveRateLimitedUntil(options?.rateLimitedUntil, options?.cooldownMs);
-  await prisma.integration.updateMany({
+  const { count } = await prisma.integration.updateMany({
     where: {
       userId,
       name: 'claude_code',
       status: { in: ['CONNECTED', 'EXPIRED'] },
+      ...notAlreadyBackedOffLonger(until),
     },
     data: { rateLimitedUntil: until },
   });
+  if (count === 0) {
+    // Same disambiguation as the pool path: no match means either an existing
+    // longer window (benign) or no claude_code row at all for this user.
+    const existing = await prisma.integration.count({
+      where: { userId, name: 'claude_code', status: { in: ['CONNECTED', 'EXPIRED'] } },
+    });
+    if (existing === 0) {
+      log.warn(`No claude_code integration for ${userId}; nothing to rate-limit`);
+      return;
+    }
+    log.info(
+      `User token for ${userId} already backed off past ${until.toISOString()} — keeping the longer window`
+    );
+    return;
+  }
   log.info(`User token for ${userId} rate-limited until ${until.toISOString()}`);
 }
 

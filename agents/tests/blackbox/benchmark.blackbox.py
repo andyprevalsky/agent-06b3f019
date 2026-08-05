@@ -946,6 +946,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "BENCHMARK_FAST_MODE_CACHE",
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
+        "BENCHMARK_AGENT_PAYMENT_USER_ID",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -955,9 +956,83 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert (
+            os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"]
+            == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        )
+        assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
+
+
+def test_payment_benchmark_seeds_non_admin_fixture_identity():
+    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+    from benchmarks import run_benchmark as bench
+
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+    assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
+
+    manifest = {"ports": {"local_db": 5432}, "database": {"name": "victoria"}}
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop(local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, None)
+        with patch.object(local.subprocess, "run") as run:
+            local.seed_payment_fixture(manifest)
+
+    command = run.call_args.args[0]
+    assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+
+
+async def test_agentcard_setup_targets_effective_benchmark_user():
+    """Setup reset/complete must mutate the same synthetic user that owns the agent."""
+    import os
+    from unittest.mock import patch
+
+    import benchmarks.run_benchmark as bench
+
+    requests = []
+
+    class FakeResponse:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {"status": "connected"}
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            return FakeResponse()
+
+    async def fake_headers():
+        return {"X-API-Key": "test"}
+
+    with patch.dict(
+        os.environ,
+        {"BENCHMARK_RUN_USER_ID": bench.AGENT_PAYMENT_BENCHMARK_USER_ID},
+        clear=False,
+    ):
+        with patch.object(bench, "_api_headers", fake_headers):
+            with patch.object(bench.httpx, "AsyncClient", FakeClient):
+                await bench.configure_benchmark_agentcard_setup("http://localhost:3001", "complete")
+
+    assert requests[0][2] == {
+        "userId": bench.AGENT_PAYMENT_BENCHMARK_USER_ID,
+        "action": "complete",
+    }
 
 
 def test_payment_benchmark_rejects_retired_agentcard_api_key(tmp_path):
@@ -1064,6 +1139,39 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
     assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "scripts"
+        / "setup-benchmark-payment.ts"
+    ).read_text()
+    purchase_config = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "domains"
+        / "purchases"
+        / "config.ts"
+    ).read_text()
+    assert (
+        "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106'"
+        in purchase_config
+    )
+    assert "import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID }" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
+    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "pg_advisory_xact_lock" in fixture
+    assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
+    assert "await prisma.$transaction" in fixture
+    assert "await tx.$queryRaw" in fixture
+    assert "tx.$executeRaw" not in fixture
+    assert "tx.credit.aggregate" in fixture
+    assert "tx.toolUsage.aggregate" in fixture
+    assert "if (deficitCents > 0)" in fixture
+    assert "tx.credit.create" in fixture
+    assert "prisma.credit.deleteMany" not in fixture
+    assert "if (isAdminUser(userId))" in fixture
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -1236,6 +1344,102 @@ def test_payment_lifecycle_validation_cross_checks_nested_provider_state():
         _validate_payment_lifecycle(task, {"_benchmark": {"payment_lifecycle": lifecycle}})
         == "payment_lifecycle.orgTransfer.releasedCents mismatch: expected 0, got 4396"
     )
+
+
+async def test_payment_cleanup_reuses_an_already_valid_terminal_snapshot():
+    """Finalization must not re-abandon a lifecycle the task already reconciled."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import ensure_payment_lifecycle_cleanup
+
+    task = get_task_by_name("agent-payment-abandonment")
+    abandon_calls = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        raise AssertionError("an already-valid lifecycle was abandoned twice")
+
+    lifecycle = await ensure_payment_lifecycle_cleanup(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        current_lifecycle=task.expected_payment_lifecycle,
+        abandon_payment=abandon_payment,
+    )
+
+    assert lifecycle == task.expected_payment_lifecycle
+    assert abandon_calls == 0
+
+
+async def test_abandonment_recovers_a_disconnected_response_without_reposting():
+    """An accepted POST with a lost response is reconciled by GET, not repeated mutation calls."""
+    import httpx
+
+    from benchmarks.run_benchmark import _start_payment_abandonment_with_recovery
+
+    abandon_calls = 0
+    lifecycle_reads = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response")
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal lifecycle_reads
+        lifecycle_reads += 1
+        return {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        }
+
+    lifecycle = await _start_payment_abandonment_with_recovery(
+        "http://localhost:55120",
+        "agent-123",
+        retry_delay_seconds=0,
+        abandon_payment=abandon_payment,
+        fetch_lifecycle=fetch_lifecycle,
+    )
+
+    assert lifecycle["walletFunding"]["status"] == "RECLAIMING"
+    assert abandon_calls == 1
+    assert lifecycle_reads == 1
+
+
+async def test_payment_cleanup_polls_with_reads_after_one_abandonment_post():
+    """Provider reconciliation polling must not repeatedly invoke the mutation endpoint."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import ensure_payment_lifecycle_cleanup
+
+    task = get_task_by_name("agent-payment-abandonment")
+    abandon_calls = 0
+    lifecycle_reads = 0
+
+    async def abandon_payment(_base_url: str, _agent_id: str) -> dict:
+        nonlocal abandon_calls
+        abandon_calls += 1
+        return {
+            "purchase": {"status": "HELD"},
+            "walletFunding": {"status": "RECLAIMING"},
+        }
+
+    async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal lifecycle_reads
+        lifecycle_reads += 1
+        return task.expected_payment_lifecycle
+
+    lifecycle = await ensure_payment_lifecycle_cleanup(
+        "http://localhost:55120",
+        "agent-123",
+        task,
+        abandon_payment=abandon_payment,
+        fetch_lifecycle=fetch_lifecycle,
+        poll_interval_seconds=0,
+    )
+
+    assert lifecycle == task.expected_payment_lifecycle
+    assert abandon_calls == 1
+    assert lifecycle_reads == 1
 
 
 async def test_abandonment_waits_for_cron_reconciliation():
@@ -1440,8 +1644,8 @@ async def test_abandonment_surfaces_lifecycle_outage_at_reconciliation_deadline(
     assert reads == 3
 
 
-async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
-    """The terminal snapshot gets the same bounded transient tolerance as cleanup reads."""
+async def test_initial_payment_lifecycle_retries_across_eventual_consistency_window():
+    """The terminal snapshot tolerates the provider's multi-read consistency lag."""
     from benchmarks.run_benchmark import _get_initial_payment_lifecycle_with_retry
 
     reads = 0
@@ -1449,7 +1653,7 @@ async def test_initial_payment_lifecycle_retries_one_transient_provider_failure(
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
         nonlocal reads
         reads += 1
-        if reads == 1:
+        if reads <= 4:
             raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
         return {"purchase": {"status": "CLEARED"}}
 
@@ -1461,7 +1665,7 @@ async def test_initial_payment_lifecycle_retries_one_transient_provider_failure(
     )
 
     assert result["purchase"]["status"] == "CLEARED"
-    assert reads == 2
+    assert reads == 5
 
 
 async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
@@ -1481,6 +1685,7 @@ async def test_initial_payment_lifecycle_bounds_persistent_provider_failure():
         await _get_initial_payment_lifecycle_with_retry(
             "http://localhost:55120",
             "agent-123",
+            max_attempts=3,
             retry_delay_seconds=0,
             fetch_lifecycle=fetch_lifecycle,
         )
@@ -1702,7 +1907,7 @@ def test_system_postgres_fixture_sql_targets_manifest_database_name():
             assert bench._local_victoria_database_url() == (
                 "postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"
             )
-            assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_isolated_123"]
+            assert probed_urls == []
 
             probed_urls.clear()
             Path(context_dir, "services.json").write_text(
@@ -6458,28 +6663,73 @@ def test_runner_fixtures_use_isolated_system_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
-def test_runner_fixtures_retry_transient_local_database_probe_timeout():
-    """One bounded psql stall must not abort the benchmark before agent creation."""
+def test_runner_cleanup_uses_manifest_database_without_discovery_probe():
+    """Cleanup must use the exact run DB even when ordinary Conductor DB env is absent."""
     from types import SimpleNamespace
     from unittest.mock import patch
 
     from benchmarks import run_benchmark
 
     manifest = {
+        "status": "running",
         "ports": {"local_db": 55435},
         "database": {
             "use_system_postgres": True,
             "port": 5432,
-            "name": "victoria_bench_transient_probe",
+            "name": "victoria_bench_cleanup_1785821421_68913_38451",
         },
     }
-    database_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_transient_probe"
-    timeout = subprocess.TimeoutExpired(["psql", database_url], 5)
-    prior_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+    expected_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_cleanup_1785821421_68913_38451"
+    saved_env = {
+        key: os.environ.get(key)
+        for key in (
+            "BENCHMARK_CONTEXT_DIR",
+            "CONDUCTOR_WORKSPACE_NAME",
+            "DATABASE_URL",
+            "DIRECT_URL",
+        )
+    }
     try:
         with tempfile.TemporaryDirectory() as context_dir:
             Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            for key in ("CONDUCTOR_WORKSPACE_NAME", "DATABASE_URL", "DIRECT_URL"):
+                os.environ.pop(key, None)
+            with (
+                patch.object(run_benchmark, "_local_victoria_db_container", return_value=None),
+                patch.object(run_benchmark, "_local_database_url_responds", return_value=False) as probe,
+                patch.object(
+                    run_benchmark.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0, stdout="1\n", stderr=""),
+                ) as sql,
+            ):
+                assert run_benchmark._run_local_victoria_sql("SELECT 1;") == "1"
+        probe.assert_not_called()
+        assert sql.call_args.args[0][1] == expected_url
+    finally:
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_runner_fixtures_retry_transient_local_database_probe_timeout():
+    """A fallback env candidate still gets a bounded reachability retry."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from benchmarks import run_benchmark
+
+    database_url = "postgresql://postgres:postgres@localhost:5432/victoria_bench_transient_probe"
+    timeout = subprocess.TimeoutExpired(["psql", database_url], 5)
+    saved_env = {key: os.environ.get(key) for key in ("BENCHMARK_CONTEXT_DIR", "DIRECT_URL", "DATABASE_URL")}
+    try:
+        with tempfile.TemporaryDirectory() as context_dir:
+            os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
+            os.environ["DIRECT_URL"] = database_url
+            os.environ.pop("DATABASE_URL", None)
             with (
                 patch.object(
                     run_benchmark.subprocess,
@@ -6495,10 +6745,11 @@ def test_runner_fixtures_retry_transient_local_database_probe_timeout():
         assert probe.call_count == 2
         sleep.assert_called_once()
     finally:
-        if prior_context is None:
-            os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
-        else:
-            os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def test_compute_token_preflight_uses_credential_source_not_restored_guest_database():
@@ -6556,13 +6807,13 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
             "name": "victoria_bench_unavailable",
         },
     }
-    probed_urls = []
+    sql_urls = []
 
     def probe(command, **_kwargs):
         database_url = command[1]
-        probed_urls.append(database_url)
+        sql_urls.append(database_url)
         return SimpleNamespace(
-            returncode=1 if database_url.endswith("/victoria_bench_unavailable") else 0,
+            returncode=1,
             stdout="",
             stderr="connection failed",
         )
@@ -6572,9 +6823,17 @@ def test_runner_fixtures_fail_closed_when_isolated_database_is_unavailable():
         with tempfile.TemporaryDirectory() as context_dir:
             Path(context_dir, "services.json").write_text(json.dumps(manifest), encoding="utf-8")
             os.environ["BENCHMARK_CONTEXT_DIR"] = context_dir
-            with patch.object(run_benchmark.subprocess, "run", side_effect=probe):
-                assert run_benchmark._local_victoria_database_url() is None
-        assert probed_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
+            with (
+                patch.object(run_benchmark, "_local_victoria_db_container", return_value=None),
+                patch.object(run_benchmark.subprocess, "run", side_effect=probe),
+            ):
+                try:
+                    run_benchmark._run_local_victoria_sql("SELECT 1;")
+                except RuntimeError as exc:
+                    assert str(exc) == "Local DB SQL failed: connection failed"
+                else:
+                    raise AssertionError("unreachable isolated database did not fail closed")
+        assert sql_urls == ["postgresql://postgres:postgres@localhost:5432/victoria_bench_unavailable"]
     finally:
         if prior_context is None:
             os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
@@ -6678,6 +6937,164 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ.pop("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL", None)
         else:
             os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
+
+
+def test_local_cold_seed_bootstrap_extends_service_start_timeout():
+    """An explicitly allowed cold seed must not exhaust the warm-start watchdog."""
+    from unittest.mock import patch
+
+    from benchmarks import local as local_bench
+
+    captured = {}
+
+    class FakeProcess:
+        pass
+
+    def capture_wait(*_args, **kwargs):
+        captured["timeout_seconds"] = kwargs.get("timeout_seconds")
+        return {"ports": {}}
+
+    with (
+        patch.dict(os.environ, {"BENCHMARK_REQUIRE_SEED_DUMP": "0"}, clear=False),
+        patch.object(local_bench.subprocess, "Popen", return_value=FakeProcess()),
+        patch.object(local_bench, "wait_for_services", side_effect=capture_wait),
+        patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack", return_value=False),
+        tempfile.TemporaryDirectory() as tmp,
+    ):
+        context_dir = Path(tmp) / "cold-seed-run"
+        stack = local_bench.ServiceStack(
+            run_id="cold-seed-run",
+            context_dir=context_dir,
+            manifest_path=context_dir / "services.json",
+            service_log=context_dir / "services.log",
+            isolated=True,
+            workspace_name="blackbox-bench-cold-seed-run",
+            base_port=55120,
+        )
+        local_bench.start_services(stack, clean_first=False)
+
+    assert captured["timeout_seconds"] >= 1200
+    assert captured["timeout_seconds"] > local_bench.SERVICE_START_TIMEOUT_SECONDS
+
+def _run_ngrok_reservation(stub_body: str, **env: str) -> subprocess.CompletedProcess:
+    """Drive ensure_ngrok_domain_reserved against a stubbed `ngrok` binary."""
+    helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = Path(tmp, "ngrok")
+        stub.write_text(f"#!/usr/bin/env bash\n{stub_body}\n")
+        stub.chmod(0o755)
+
+        # Callers that omit NGROK_API_KEY mean "absent key" — not "inherit the
+        # host secret". Cloud/Cursor inject NGROK_API_KEY into the process env,
+        # which otherwise makes test_ngrok_domain_reservation_skips_without_an_api_key
+        # call the stub and fail even though the production skip path is fine.
+        if "NGROK_API_KEY" not in env:
+            env = {**env, "NGROK_API_KEY": ""}
+
+        exports = "".join(f"export {key}={value!r}\n" for key, value in env.items())
+        command = (
+            "set -eo pipefail\n"
+            f"source {helper!s}\n"
+            f'export PATH="{tmp}:$PATH"\n'
+            f"{exports}"
+            "ensure_ngrok_domain_reserved rose-testworktree.ngrok.app\n"
+            "echo REACHED_TUNNEL_START\n"
+        )
+        return subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+
+def test_ngrok_domain_reservation_survives_a_rejected_api_key():
+    """A stale NGROK_API_KEY must warn, not tear down the whole stack.
+
+    `--domain` binds with only an agent authtoken on our plan, so pre-reserving
+    the domain is advisory. This path used to `exit 1` on any API rejection,
+    so a rotated-out key killed every run.sh that merely had the variable set —
+    even though the tunnel it was gating would have come up fine. An absent key
+    was tolerated while a stale one was fatal, which is exactly backwards.
+    """
+    result = _run_ngrok_reservation(
+        'echo "ERROR:  HTTP 403: invalid [ERR_NGROK_203]" >&2\nexit 1',
+        # Well-formed FIRSTPART_SECONDPART, so this exercises API rejection
+        # rather than the malformed-key short-circuit above it.
+        NGROK_API_KEY="34D2revokedKeyFirstPart_2revokedKeySecondPart",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    # The rejection is still surfaced — degraded, not silently swallowed.
+    assert "ERR_NGROK_203" in result.stdout
+
+
+def test_ngrok_domain_reservation_survives_a_rejected_create():
+    """A domain that cannot be reserved must still fall through to the bind."""
+    result = _run_ngrok_reservation(
+        'if [ "$2" = "reserved-domains" ] && [ "$3" = "create" ]; then\n'
+        '  echo "ERROR:  HTTP 403: domain unavailable" >&2; exit 1\n'
+        "fi\n"
+        'echo "{\\"reserved_domains\\":[]}"',
+        NGROK_API_KEY="valid-key-unavailable-domain",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+
+
+def _ngrok_key_defect(key: str) -> str:
+    """Return the defect ngrok_api_key_defect reports for a key ('' if clean)."""
+    helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
+    command = f'source {helper!s}\nngrok_api_key_defect "$1" || true\n'
+    result = subprocess.run(
+        ["bash", "-c", command, "_", key], capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def test_ngrok_api_key_defect_names_the_stray_quote():
+    """A quote captured inside the .env value must be named, not left to a 403.
+
+    The real incident: `NGROK_API_KEY="<token>'"` in every workspace's .env. The
+    trailing apostrophe made a valid key return 403 "properly formed, but it is
+    invalid", which got filed as a stale key and left unfixed for a week. The
+    fix was deleting one character, so the defect has to be self-describing.
+    """
+    defect = _ngrok_key_defect("3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx'")
+
+    assert "quote" in defect, defect
+
+
+def test_ngrok_api_key_defect_distinguishes_key_id_from_token():
+    """The dashboard's `ak_...` ID is not the token, and must not be accepted."""
+    defect = _ngrok_key_defect("ak_3EXAMPLEfirstPARTnotAreal01")
+
+    assert "ID" in defect, defect
+
+
+def test_ngrok_api_key_defect_passes_a_well_formed_token():
+    """A clean FIRSTPART_SECONDPART token reports no defect."""
+    assert _ngrok_key_defect("3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx") == ""
+
+
+def test_ngrok_malformed_api_key_skips_reservation_without_an_api_call():
+    """A malformed key must short-circuit before burning an API round-trip."""
+    result = _run_ngrok_reservation(
+        'echo "STUB_SHOULD_NOT_RUN"; exit 1',
+        NGROK_API_KEY="3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx'",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    assert "STUB_SHOULD_NOT_RUN" not in result.stdout
+    assert "quote" in result.stdout, result.stdout
+
+
+def test_ngrok_domain_reservation_skips_without_an_api_key():
+    """No API key is the normal benchmark path: skip silently, never call ngrok."""
+    result = _run_ngrok_reservation('echo "STUB_SHOULD_NOT_RUN"; exit 1')
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    assert "STUB_SHOULD_NOT_RUN" not in result.stdout
 
 
 def test_local_shared_stack_preserves_public_tunnel_mode():
@@ -6871,7 +7288,13 @@ def test_local_start_services_reaps_only_its_real_process_group():
                     (
                         "import pathlib, subprocess, sys, time; "
                         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "pid_path = pathlib.Path(sys.argv[1]); "
+                        "pending_path = pid_path.with_suffix('.tmp'); "
+                        "pid_file = pending_path.open('w'); "
+                        "time.sleep(0.2); "
+                        "pid_file.write(str(child.pid)); "
+                        "pid_file.close(); "
+                        "pending_path.replace(pid_path); "
                         "time.sleep(60)"
                     ),
                     str(child_pid_path),
@@ -7298,7 +7721,9 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     assert reachable_probe in run_script
     assert ownership_probe in run_script
     assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
-    assert run_script.index(reachable_probe) < run_script.index("docker_info_quick; then")
+    workspace_daemon_probe = 'docker_available_for_workspace_db "$DB_CONTAINER"; then'
+    assert workspace_daemon_probe in run_script
+    assert run_script.index(reachable_probe) < run_script.index(workspace_daemon_probe)
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
 
     function_start = run_script.index("workspace_db_container_owns_port() {")
@@ -10631,6 +11056,10 @@ async def run_all_tests():
         test_runner_fixtures_use_isolated_system_database_identity,
     )
     r.record(
+        "runner_cleanup_manifest_database_without_probe",
+        test_runner_cleanup_uses_manifest_database_without_discovery_probe,
+    )
+    r.record(
         "compute_token_preflight_isolated_source",
         test_compute_token_preflight_uses_credential_source_not_restored_guest_database,
     )
@@ -10648,8 +11077,37 @@ async def run_all_tests():
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
+        "local_cold_seed_extended_start_timeout",
+        test_local_cold_seed_bootstrap_extends_service_start_timeout,
+    )
+    r.record(
         "local_shared_public_tunnel_mode",
         test_local_shared_stack_preserves_public_tunnel_mode,
+    )
+    r.record(
+        "ngrok_reservation_survives_rejected_api_key",
+        test_ngrok_domain_reservation_survives_a_rejected_api_key,
+    )
+    r.record(
+        "ngrok_reservation_survives_rejected_create",
+        test_ngrok_domain_reservation_survives_a_rejected_create,
+    )
+    r.record(
+        "ngrok_reservation_skips_without_api_key",
+        test_ngrok_domain_reservation_skips_without_an_api_key,
+    )
+    r.record("ngrok_api_key_defect_stray_quote", test_ngrok_api_key_defect_names_the_stray_quote)
+    r.record(
+        "ngrok_api_key_defect_id_vs_token",
+        test_ngrok_api_key_defect_distinguishes_key_id_from_token,
+    )
+    r.record(
+        "ngrok_api_key_defect_accepts_valid_token",
+        test_ngrok_api_key_defect_passes_a_well_formed_token,
+    )
+    r.record(
+        "ngrok_malformed_key_skips_api_call",
+        test_ngrok_malformed_api_key_skips_reservation_without_an_api_call,
     )
     r.record(
         "local_start_services_readiness_cleanup",
@@ -10813,6 +11271,14 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
+        "payment_benchmark_non_admin_fixture_identity",
+        test_payment_benchmark_seeds_non_admin_fixture_identity,
+    )
+    await r.record_async(
+        "agentcard_setup_effective_benchmark_user",
+        test_agentcard_setup_targets_effective_benchmark_user,
+    )
+    r.record(
         "isolated_benchmark_slow_first_sync",
         test_isolated_benchmark_services_allow_slow_first_sync,
     )
@@ -10853,6 +11319,18 @@ async def run_all_tests():
         test_payment_lifecycle_validation_cross_checks_nested_provider_state,
     )
     await r.record_async(
+        "payment_cleanup_reuses_terminal_snapshot",
+        test_payment_cleanup_reuses_an_already_valid_terminal_snapshot,
+    )
+    await r.record_async(
+        "abandonment_recovers_disconnected_response",
+        test_abandonment_recovers_a_disconnected_response_without_reposting,
+    )
+    await r.record_async(
+        "payment_cleanup_reads_after_one_abandonment",
+        test_payment_cleanup_polls_with_reads_after_one_abandonment_post,
+    )
+    await r.record_async(
         "abandonment_waits_for_cron_reconciliation",
         test_abandonment_waits_for_cron_reconciliation,
     )
@@ -10878,7 +11356,7 @@ async def run_all_tests():
     )
     await r.record_async(
         "initial_payment_lifecycle_tolerates_transient_read",
-        test_initial_payment_lifecycle_retries_one_transient_provider_failure,
+        test_initial_payment_lifecycle_retries_across_eventual_consistency_window,
     )
     await r.record_async(
         "initial_payment_lifecycle_bounds_persistent_outage",

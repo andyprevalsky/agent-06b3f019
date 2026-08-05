@@ -11,6 +11,12 @@ REBUILD_DEPS="${CLOUDBENCH_REBUILD_DEPS:-0}"
 # shellcheck source=lib/cloudbench-env.sh
 source "$REPO_DIR/scripts/lib/cloudbench-env.sh"
 
+if ! command -v rsync >/dev/null 2>&1; then
+    echo "[cloudbench] FATAL: rsync is required to refresh baked dependency trees." >&2
+    echo "[cloudbench] Install rsync (e.g. apt-get install -y rsync) and retry." >&2
+    exit 127
+fi
+
 sync_tree() {
     local label="$1" donor_tree="$2" repo_tree="$3" expected="$4"
     local marker="$repo_tree/.cloudbench-deps-fingerprint"
