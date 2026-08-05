@@ -35,17 +35,24 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # Extract the real helpers from run.sh so this test exercises shipped code
-# rather than a copy that could drift.
-awk '/^public_tunnel_hostname_resolves\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
+# rather than a copy that could drift. Include supervised_edge_probe: the IPv4
+# preference is passed as curl args through that helper (`-4`), not inlined as
+# `curl -4` inside cloudflare_tunnel_edge_is_routing.
+awk '/^supervised_edge_probe\(\) \{$/,/^\}$/' "$RUN_SH" > "$TMP/fn.sh"
+awk '/^public_tunnel_hostname_resolves\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
 awk '/^cloudflare_tunnel_edge_is_routing\(\) \{$/,/^\}$/' "$RUN_SH" >> "$TMP/fn.sh"
+grep -q 'supervised_edge_probe' "$TMP/fn.sh" \
+  || fail "could not extract supervised_edge_probe from run.sh"
 grep -q 'cloudflare_tunnel_edge_is_routing' "$TMP/fn.sh" \
   || fail "could not extract cloudflare_tunnel_edge_is_routing from run.sh"
 grep -q 'public_tunnel_hostname_resolves' "$TMP/fn.sh" \
   || fail "could not extract public_tunnel_hostname_resolves from run.sh"
 grep -q '000' "$TMP/fn.sh" \
   || fail "extracted routing check no longer distinguishes the 000 no-response case"
-grep -qE 'curl -4 ' "$TMP/fn.sh" \
-  || fail "extracted routing check no longer prefers IPv4 (curl -4) for trycloudflare probes"
+grep -qE 'supervised_edge_probe "\$url" -4' "$TMP/fn.sh" \
+  || fail "extracted routing check no longer prefers IPv4 (supervised_edge_probe … -4) for trycloudflare probes"
+grep -qE 'curl "\$@"' "$TMP/fn.sh" \
+  || fail "supervised_edge_probe must forward curl args (including -4) via curl \"\$@\""
 
 # Drive the extracted function with a stub curl whose status sequence we control.
 # STATUS_FILE holds one status per line; the stub pops one per invocation and

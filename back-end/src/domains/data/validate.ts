@@ -7,14 +7,35 @@ import { MAX_RESULTS } from './config';
 import { InvalidGrepParamError, InvalidPatternError, SourceNotFoundError } from './errors';
 import { checkPatternSafety, extractInlineFlags, stripNamedGroups } from './regexSafety';
 import {
-  DATA_SOURCE_CONFIGS,
+  parseBoundedNumber,
+  parseAgentNetworkFilters,
+  parseDocumentFilters,
+  parseMessageFilters,
+  parseNetworkFilters,
+  parseTransactionFilters,
+  rejectUnsupportedFilters,
+  requireFilterObject,
+} from './validate.filters';
+
+function databaseRegexPattern(pattern: string, multiline: boolean): string {
+  if (!multiline) return pattern;
+  return pattern.replace(/(?<!\\)\.\*/g, '(.|\n)*').replace(/(?<!\\)\.\+/g, '(.|\n)+');
+}
+
+interface ResolvedSourceSelection {
+  resolvedSources: ValidSource[];
+  hasMessageFamily: boolean;
+  hasTransactions: boolean;
+  hasDocuments: boolean;
+  hasNetwork: boolean;
+  hasAgentNetwork: boolean;
+  mergeTopLevelNarrowing: boolean;
+}
+import {
   DEFAULT_GREP_SOURCES,
   VALID_SOURCES,
   isMessageFamilySource,
-  type DocumentGrepFilters,
   type GrepParams,
-  type MessageGrepFilters,
-  type TransactionGrepFilters,
   type ValidSource,
   type ValidatedGrepInput,
 } from './types';
@@ -52,181 +73,6 @@ function parseBoolean(value: unknown, defaultValue: boolean): boolean {
   return defaultValue;
 }
 
-function parseFilterBoolean(
-  filters: Record<string, unknown>,
-  key: string,
-  defaultValue: boolean
-): boolean {
-  if (!(key in filters)) return defaultValue;
-  if (typeof filters[key] !== 'boolean') {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  return filters[key];
-}
-
-function parseBoundedNumber(
-  value: unknown,
-  defaultValue: number,
-  min: number,
-  max: number
-): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return defaultValue;
-  return Math.min(Math.max(Math.floor(parsed), min), max);
-}
-
-function databaseRegexPattern(pattern: string, multiline: boolean): string {
-  if (!multiline) return pattern;
-  return pattern.replace(/(?<!\\)\.\*/g, '(.|\n)*').replace(/(?<!\\)\.\+/g, '(.|\n)+');
-}
-
-/**
- * Parse the messages-only `since` cutoff. Accepts ISO 8601, or a relative form
- * like `7d` / `24h` / `30m`. Returns undefined for missing/invalid input.
- */
-function parseSince(value: unknown): Date | undefined {
-  if (typeof value !== 'string' || value.trim() === '') return undefined;
-  const relative = value.trim().match(/^(\d+)\s*([dhm])$/i);
-  if (relative !== null) {
-    const amount = Number(relative[1]);
-    const unit = relative[2].toLowerCase();
-    const unitMs = unit === 'd' ? 86_400_000 : unit === 'h' ? 3_600_000 : 60_000;
-    return new Date(Date.now() - amount * unitMs);
-  }
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
-}
-
-function parseFilterDate(filters: Record<string, unknown>, key: string): Date | undefined {
-  if (!(key in filters)) return undefined;
-  const value = filters[key];
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  const parsed = new Date(value.length === 10 ? `${value}T00:00:00.000Z` : value);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  return parsed;
-}
-
-function parseFilterSince(filters: Record<string, unknown>, key: string): Date | undefined {
-  if (!(key in filters)) return undefined;
-  const value = filters[key];
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  const parsed = parseSince(value);
-  if (parsed === undefined) {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  return parsed;
-}
-
-function parseFilterString(filters: Record<string, unknown>, key: string): string | undefined {
-  if (!(key in filters)) return undefined;
-  const value = filters[key];
-  if (typeof value !== 'string' || value.trim() === '') {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  return value.trim();
-}
-
-function parseFilterNumber(filters: Record<string, unknown>, key: string): number | undefined {
-  if (!(key in filters)) return undefined;
-  const value = filters[key];
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new InvalidGrepParamError(`filters.${key}`);
-  }
-  return value;
-}
-
-function requireFilterObject(params: GrepParams): Record<string, unknown> {
-  if (params.filters === undefined || params.filters === null) return {};
-  if (typeof params.filters !== 'object' || Array.isArray(params.filters)) {
-    throw new InvalidGrepParamError('filters');
-  }
-  return params.filters;
-}
-
-function rejectUnsupportedFilters(source: ValidSource, filters: Record<string, unknown>): void {
-  const allowed = new Set<string>(DATA_SOURCE_CONFIGS[source].filters);
-  for (const key of Object.keys(filters)) {
-    if (!allowed.has(key)) {
-      throw new InvalidGrepParamError(`filters.${key}`);
-    }
-  }
-}
-
-function parseMessageFilters(
-  params: GrepParams,
-  mergeTopLevelNarrowing: boolean
-): MessageGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  const merged = mergeTopLevelNarrowing
-    ? {
-        ...raw,
-        ...(params.person !== undefined ? { person: params.person } : {}),
-        ...(params.since !== undefined ? { since: params.since } : {}),
-      }
-    : raw;
-  if (Object.keys(merged).length === 0) return undefined;
-  rejectUnsupportedFilters('messages', merged);
-  return {
-    person: parseFilterString(merged, 'person'),
-    since: parseFilterSince(merged, 'since'),
-  };
-}
-
-function parseTransactionFilters(params: GrepParams): TransactionGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) {
-    return { includePendingInTotals: false, status: 'all' };
-  }
-  rejectUnsupportedFilters('transactions', raw);
-  const status = 'status' in raw ? parseFilterString(raw, 'status') : 'all';
-  if (status !== 'pending' && status !== 'posted' && status !== 'all') {
-    throw new InvalidGrepParamError('filters.status');
-  }
-  return {
-    since: parseFilterDate(raw, 'since'),
-    until: parseFilterDate(raw, 'until'),
-    account: parseFilterString(raw, 'account'),
-    minAmount: parseFilterNumber(raw, 'min_amount'),
-    maxAmount: parseFilterNumber(raw, 'max_amount'),
-    status,
-    includePendingInTotals: parseFilterBoolean(raw, 'include_pending_in_totals', false),
-  };
-}
-
-function parseDocumentFilters(params: GrepParams): DocumentGrepFilters | undefined {
-  const raw = requireFilterObject(params);
-  if (Object.keys(raw).length === 0) return undefined;
-  rejectUnsupportedFilters('documents', raw);
-  return {
-    documentSource: parseFilterString(raw, 'document_source')
-      ?.toLowerCase()
-      .replace(/[\s-]+/g, '_'),
-    since: parseFilterSince(raw, 'since'),
-    until: parseFilterDate(raw, 'until'),
-    path: parseFilterString(raw, 'path'),
-    tag: parseFilterString(raw, 'tag'),
-  };
-}
-
-interface ResolvedSourceSelection {
-  resolvedSources: ValidSource[];
-  hasMessageFamily: boolean;
-  hasTransactions: boolean;
-  hasDocuments: boolean;
-  mergeTopLevelNarrowing: boolean;
-}
-
-/**
- * Validate the source selection (single `source` or multi `sources`), resolve
- * the effective list, and derive which filter families apply. Also enforces the
- * legacy filter-rejection rules so single-source behavior is unchanged.
- */
 function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const { source, sources } = params;
   if (source !== undefined && !(source in VALID_SOURCES)) {
@@ -259,6 +105,8 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
   const hasMessageFamily = resolvedSources.some(isMessageFamilySource);
   const hasTransactions = resolvedSources.includes('transactions');
   const hasDocuments = resolvedSources.includes('documents');
+  const hasNetwork = resolvedSources.includes('network');
+  const hasAgentNetwork = resolvedSources.includes('agent_network');
 
   // Reject filters that NO resolved source can consume. Message/transaction/
   // document families reject unsupported keys inside their own parse step; the
@@ -276,6 +124,8 @@ function resolveSourceSelection(params: GrepParams): ResolvedSourceSelection {
     hasMessageFamily,
     hasTransactions,
     hasDocuments,
+    hasNetwork,
+    hasAgentNetwork,
     // Merge top-level `person`/`since` into message filters whenever a message-
     // family source is EXPLICITLY selected — via singular `source` OR `sources`.
     // (Not for the implicit default trio, matching historical behavior.)
@@ -300,6 +150,8 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
     hasMessageFamily,
     hasTransactions,
     hasDocuments,
+    hasNetwork,
+    hasAgentNetwork,
     mergeTopLevelNarrowing,
   } = resolveSourceSelection(params);
 
@@ -348,6 +200,8 @@ export function validateGrepInput(params: GrepParams): ValidatedGrepInput {
       messages: hasMessageFamily ? parseMessageFilters(params, mergeTopLevelNarrowing) : undefined,
       transactions: hasTransactions ? parseTransactionFilters(params) : undefined,
       documents: hasDocuments ? parseDocumentFilters(params) : undefined,
+      network: hasNetwork ? parseNetworkFilters(params) : undefined,
+      agentNetwork: hasAgentNetwork ? parseAgentNetworkFilters(params) : undefined,
     },
   };
 }

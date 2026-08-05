@@ -18,24 +18,34 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { executeWebSearch } from '../chat/chatTools';
+import { prisma } from '../database';
+import { getTemporalClient } from '../temporal';
+import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import {
+  deleteAgentRecursive,
   resolveAgentPrefix,
   smsIntendsAgentReply,
   unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 import {
-  commitIncreaseBudget,
-  commitKillAgent,
-  commitReplyToAgent,
   commitStartNewAgent,
-} from './supervisorTools.commit';
+  executeWebSearchTool,
+  type StartNewAgentArgs,
+  type WebSearchArgs,
+} from './supervisorTools.startAgent';
 
 const log = createLogger('SmsSupervisorTools');
 
 export { TOOL_SCHEMAS } from './supervisorTools.schemas';
+
+function formatTaskLabel(goal: string, maxLength = 80): string {
+  const normalized = goal.replace(/\s+/g, ' ').trim();
+  return normalized.length > maxLength
+    ? `${normalized.substring(0, maxLength - 3)}...`
+    : normalized;
+}
 
 // ============================================
 // Tool Call Type
@@ -74,15 +84,6 @@ interface KillAgentArgs {
 interface IncreaseBudgetArgs {
   agent_id_or_prefix: string;
   amount_dollars: number;
-}
-
-interface StartNewAgentArgs {
-  goal: string;
-  budget_dollars?: number;
-}
-
-interface WebSearchArgs {
-  query: string;
 }
 
 // ============================================
@@ -404,31 +405,231 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
 }
 
 // ============================================
-// Commit Implementations live in supervisorTools.commit.ts so this file
-// stays under the max-lines budget. They run inside the commit gate above.
+// Commit Implementations — run inside the commit gate, exactly once per run
 // ============================================
 
-async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
-  const { query } = args;
+async function commitReplyToAgent(
+  op: Extract<PendingOp, { kind: 'reply_to_agent' }>,
+  userId: string
+): Promise<ToolResult> {
+  const { args, agentId } = op;
+  const { message, attention_request_id, reject } = args;
 
-  log.info('Executing web search', { phase: 'search', query });
-  const startTime = Date.now();
+  // Re-fetch the agent in case it changed between validate and commit. If it
+  // was deleted, surface the error in logs but don't try to recover — the SMS
+  // commit is committed by this point.
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, userId, deletedAt: null },
+  });
+  if (!agent) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: `Agent ${agentId.substring(0, 6)} no longer exists`,
+    };
+  }
 
-  const searchResult = await executeWebSearch(query);
-
-  log.info('Search complete', {
-    phase: 'search',
-    query,
-    answerLength: searchResult.answer.length,
-    sourceCount: searchResult.sources.length,
-    durationMs: Date.now() - startTime,
+  log.info('Replying to agent', {
+    phase: 'reply',
+    agentId: agent.id,
+    userId,
+    messagePreview: message?.substring(0, 100),
+    hasAttentionRequest: !!attention_request_id,
+    reject: !!reject,
   });
 
+  // 1. Post USER message to agent's conversation
+  try {
+    await createMessage({
+      agentId: agent.id,
+      text: message,
+      role: 'USER',
+      metadata: { source: 'sms_supervisor' },
+    });
+
+    log.info('Posted USER message', {
+      phase: 'reply',
+      agentId: agent.id,
+    });
+  } catch (error) {
+    log.error('Failed to post message', {
+      phase: 'reply',
+      agentId: agent.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'Failed to post message to agent',
+    };
+  }
+
+  // 2. Signal the workflow to unblock any waiting tool
+  if (agent.temporalWorkflowId) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      const signalValue = attention_request_id
+        ? JSON.stringify({
+            request_id: attention_request_id,
+            response: reject ? '__REJECTED__' : message,
+          })
+        : message;
+      await handle.signal('receive_user_response', signalValue);
+
+      log.info('Signaled workflow', {
+        phase: 'reply',
+        workflowId: agent.temporalWorkflowId,
+        agentId: agent.id,
+        reject: !!reject,
+      });
+    } catch (error) {
+      log.error('Failed to signal workflow', {
+        phase: 'reply',
+        workflowId: agent.temporalWorkflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Don't fail — message is in DB, workflow will poll
+    }
+  }
+
+  // 3. If resolving an attention request, mark it in DB
+  if (attention_request_id) {
+    try {
+      const userResponse = reject ? '__REJECTED__' : message || 'Approved';
+      await prisma.agentAttentionRequest.update({
+        where: { id: attention_request_id },
+        data: { userResponse },
+      });
+
+      log.info('Resolved attention request', {
+        phase: 'reply',
+        requestId: attention_request_id,
+        reject: !!reject,
+      });
+    } catch (error) {
+      log.warn('Failed to resolve attention request', {
+        phase: 'reply',
+        requestId: attention_request_id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      // Don't fail — message is posted, agent will see it
+    }
+  }
+
+  const action = attention_request_id
+    ? reject
+      ? 'Rejected request and replied to'
+      : 'Approved request and replied to'
+    : 'Replied to';
   return {
-    tool: 'web_search',
+    tool: 'reply_to_agent',
     success: true,
-    result: searchResult.answer,
+    result: `${action} agent [${agent.id.substring(0, 6)}]`,
   };
 }
+
+async function commitKillAgent(
+  op: Extract<PendingOp, { kind: 'kill_agent' }>
+): Promise<ToolResult> {
+  const { agentId } = op;
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, deletedAt: null },
+  });
+  if (!agent) {
+    // Already deleted — kill is idempotent, treat as success.
+    return {
+      tool: 'kill_agent',
+      success: true,
+      result: `Agent [${agentId.substring(0, 6)}] already deleted`,
+    };
+  }
+
+  log.info('Killing agent', {
+    phase: 'kill',
+    agentId: agent.id,
+    goal: agent.goal.substring(0, 80),
+  });
+
+  // Recursive delete (same logic as DELETE /api/agents/:id)
+  await deleteAgentRecursive(agent.id);
+
+  log.info('Agent killed', { phase: 'kill', agentId: agent.id });
+
+  return {
+    tool: 'kill_agent',
+    success: true,
+    result: `Killed agent [${agent.id.substring(0, 6)}]: "${agent.goal.substring(0, 50)}"`,
+  };
+}
+
+async function commitIncreaseBudget(
+  op: Extract<PendingOp, { kind: 'increase_budget' }>
+): Promise<ToolResult> {
+  const { args, agentId } = op;
+  const { amount_dollars } = args;
+
+  const agent = await prisma.agent.findFirst({
+    where: { id: agentId, deletedAt: null },
+  });
+  if (!agent) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Agent ${agentId.substring(0, 6)} no longer exists`,
+    };
+  }
+
+  const addCents = Math.round(amount_dollars * 100);
+  const newLimitCents = agent.priceLimitCents + addCents;
+
+  log.info('Increasing budget', {
+    phase: 'budget',
+    agentId: agent.id,
+    currentLimitCents: agent.priceLimitCents,
+    addCents,
+    newLimitCents,
+    treeCostCents: agent.treeCostCents,
+  });
+
+  // Update the agent's price limit
+  await prisma.agent.update({
+    where: { id: agent.id },
+    data: { priceLimitCents: newLimitCents },
+  });
+
+  // If agent was cost-limited, signal workflow to resume
+  if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
+    try {
+      const client = await getTemporalClient();
+      const handle = client.workflow.getHandle(agent.temporalWorkflowId);
+      await handle.signal('price_limit_increased', {
+        new_limit_cents: newLimitCents,
+      });
+      log.info('Signaled price_limit_increased', {
+        phase: 'budget',
+        workflowId: agent.temporalWorkflowId,
+        newLimitCents,
+      });
+    } catch (error) {
+      log.error('Failed to signal workflow', {
+        phase: 'budget',
+        workflowId: agent.temporalWorkflowId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  return {
+    tool: 'increase_budget',
+    success: true,
+    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+  };
+}
+
+// commitStartNewAgent + executeWebSearchTool live in supervisorTools.startAgent.ts
 
 // deleteAgentRecursive moved to supervisorTools.helpers.ts

@@ -8,13 +8,19 @@
  *         -> backend admin check
  *         -> rolling 7|30|90|365-day periods anchored to the UTC retrieval day
  *         -> backend day + time-slice response cache
- *         -> Stripe charges + Prisma waitlist/task/user metrics + Linear/GitHub velocity
+ *         -> Stripe charges + Prisma waitlist/task/user/GMV metrics + Linear/GitHub velocity
  *         -> real root-loop runs (live + archived telemetry), excluding child agents
  *         -> current model/cache pricing -> three cost-per-run scenarios + sample size
+
  *         -> active connectors grouped into six onboarding subtype adoption rates
+ *      -> Primary: Revenue
+ *      -> Secondary: people/tasks + GMV + GMV/task (next to output tokens/task) + funnels
  *      -> ordered website funnel -> horizontal volume BarChart + comparison tiles
  *      -> verified-account activation -> separate BarChart + comparison tiles
  *      -> root-agent-run cost summary cards -> three-line history chart
+ *
+ * GMV SOURCES:
+ *   PurchaseSpend CLEARED (AgentCard mint + order_confirmation from structured outputs)
  *
  * VIEW DATA:
  * [LOADING] <-- loading: true
@@ -28,10 +34,16 @@
  */
 
 import { useMemo, useState } from 'react';
-import { Activity, CircleCheckBig, Loader2, TrendingUp, Users, Zap } from 'lucide-react';
 import {
-  Area,
-  AreaChart,
+  Activity,
+  CircleCheckBig,
+  Loader2,
+  ShoppingBag,
+  TrendingUp,
+  Users,
+  Zap,
+} from 'lucide-react';
+import {
   Bar,
   BarChart,
   CartesianGrid,
@@ -51,6 +63,8 @@ import { useAdminHealthData } from '../hooks';
 import { MetricChange } from './MetricChange';
 import { MetricSectionHeader } from './MetricHierarchy';
 import ConnectorAdoptionSection from './ConnectorAdoptionSection';
+import EfficiencyCharts from './EfficiencyCharts';
+import GmvSection from './GmvSection';
 import PrimaryMetricSection from './PrimaryMetricSection';
 import TaskCostSection from './TaskCostSection';
 import VelocitySection from './VelocitySection';
@@ -80,6 +94,14 @@ function formatPercent(value: number): string {
     style: 'percent',
     maximumFractionDigits: 1,
   }).format(value);
+}
+
+function formatCurrency(cents: number): string {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: cents >= 100_000 ? 0 : 2,
+  }).format(cents / 100);
 }
 
 // People IN THE APP — past the invite gate via a redeemed code OR a paid
@@ -372,7 +394,7 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
   const newUsers = data.series.at(-1)?.newUsers ?? 0;
   const period = PERIOD_COPY[data.timeSlice];
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
       <MetricPanel
         title="# of People in App"
         value={formatNumber(data.summary.userCount)}
@@ -407,6 +429,15 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
         }
       />
       <MetricPanel
+        title="GMV / Task"
+        value={formatCurrency(data.summary.gmvPerTask)}
+        detail="Cleared platform GMV (AgentCard + confirmed orders) / root tasks."
+        icon={<ShoppingBag className="h-5 w-5" />}
+        change={
+          <MetricChange value={seriesMetricChange(data, 'gmvPerTask')} timeSlice={data.timeSlice} />
+        }
+      />
+      <MetricPanel
         title="Task Completion Rate"
         value={formatPercent(data.summary.taskCompletionRate)}
         detail="Completed root tasks / all root tasks issued in the selected period."
@@ -418,101 +449,6 @@ function SecondaryMetricGrid({ data }: { data: AdminHealthData }) {
           />
         }
       />
-    </div>
-  );
-}
-
-function EfficiencyCharts({ data }: { data: AdminHealthData }) {
-  const period = PERIOD_COPY[data.timeSlice];
-  return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-3">
-      <SectionPanel title={`Avg Tasks / User / ${period.title}`}>
-        <ChartFrame>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data.series} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                vertical={false}
-                stroke="rgba(148,163,184,0.32)"
-              />
-              <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-              <YAxis tickLine={false} axisLine={false} fontSize={12} />
-              <Tooltip />
-              <Line
-                type="monotone"
-                dataKey="tasksIssuedPerUser"
-                name={`Avg tasks / user / ${period.range}`}
-                stroke="#7c3aed"
-                strokeWidth={2}
-                dot={{ r: 3 }}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </ChartFrame>
-      </SectionPanel>
-
-      <SectionPanel title="Output Tokens Per Task">
-        <ChartFrame>
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={data.series} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                vertical={false}
-                stroke="rgba(148,163,184,0.32)"
-              />
-              <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-              <YAxis tickLine={false} axisLine={false} fontSize={12} />
-              <Tooltip />
-              <Area
-                type="monotone"
-                dataKey="outputTokensPerTask"
-                name="Output tokens / task"
-                stroke="#d97706"
-                strokeWidth={2}
-                fill="#f59e0b"
-                fillOpacity={0.16}
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        </ChartFrame>
-      </SectionPanel>
-
-      <SectionPanel title="Task Completion Rate">
-        <ChartFrame>
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data.series} margin={{ top: 12, right: 12, left: 0, bottom: 0 }}>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                vertical={false}
-                stroke="rgba(148,163,184,0.32)"
-              />
-              <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={12} />
-              <YAxis
-                domain={[0, 1]}
-                tickFormatter={(value) => formatPercent(Number(value))}
-                tickLine={false}
-                axisLine={false}
-                fontSize={12}
-              />
-              <Tooltip
-                formatter={(value) =>
-                  value === null || value === undefined
-                    ? 'Unavailable'
-                    : formatPercent(Number(value))
-                }
-              />
-              <Line
-                type="monotone"
-                dataKey="taskCompletionRate"
-                name="Completion rate"
-                stroke="#059669"
-                strokeWidth={2}
-                dot={{ r: 3 }}
-              />
-            </LineChart>
-          </ResponsiveContainer>
-        </ChartFrame>
-      </SectionPanel>
     </div>
   );
 }
@@ -605,6 +541,7 @@ export default function AdminHealth() {
                 description="The customer and product signals that compound into revenue."
               />
               <SecondaryMetricGrid data={data} />
+              <GmvSection data={data} />
               <TaskCostSection data={data} />
               <EfficiencyCharts data={data} />
               <ConnectorAdoptionSection adoption={data.connectorAdoption} />

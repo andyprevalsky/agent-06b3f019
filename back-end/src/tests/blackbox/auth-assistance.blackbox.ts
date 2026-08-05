@@ -9,6 +9,7 @@
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { prisma } from '../../providers/database';
+import { authAssistanceProviderCompletionTests } from './auth-assistance.provider-cases';
 
 config();
 
@@ -565,6 +566,7 @@ async function main(): Promise<void> {
       'POST /api/auth-assistance/:id/complete upserts Steel auth idempotently',
       testCompleteLiveViewUpsertsSteelAuthAndIsIdempotent,
     ],
+    ...authAssistanceProviderCompletionTests,
     [
       'POST /api/attention-requests/:id/respond completes auth assistance',
       testAttentionRespondCompletesAuthAssistance,

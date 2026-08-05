@@ -184,7 +184,18 @@ def isolated_stack_log_dirs() -> List[str]:
     return dirs
 
 
-def _log_paths(shared: str, isolated_glob: str) -> List[str]:
+def _log_paths(shared: str, isolated_glob: str, env_var: str) -> List[str]:
+    """Resolve an explicit runner-provided log set or discover recent stacks."""
+    raw = os.environ.get(env_var, "").strip()
+    if raw:
+        patterns = [part.strip() for part in raw.replace(os.pathsep, ",").split(",") if part.strip()]
+        explicit: List[str] = []
+        for pattern in patterns:
+            matches = sorted(glob.glob(pattern)) if glob.has_magic(pattern) else [pattern]
+            explicit.extend(path for path in matches if path not in explicit)
+        if explicit:
+            return explicit
+
     paths = [shared] if os.path.exists(shared) else []
     for log_dir in isolated_stack_log_dirs():
         paths.extend(sorted(glob.glob(os.path.join(log_dir, isolated_glob))))
@@ -194,7 +205,9 @@ def _log_paths(shared: str, isolated_glob: str) -> List[str]:
 def _read_worker_raw() -> List[_RawEvent]:
     out: List[_RawEvent] = []
     # An isolated stack runs several worker processes, each with its own file.
-    for path in _log_paths(WORKER_LOG, "worker*.log"):
+    for path in _log_paths(WORKER_LOG, "worker*.log", "NAVI_WORKER_LOGS"):
+        if not os.path.exists(path):
+            continue
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
@@ -208,6 +221,7 @@ def _read_worker_raw() -> List[_RawEvent]:
                 if not ts_str:
                     continue
                 out.append(_RawEvent(parse_ts(ts_str), "worker", d.get("event", ""), d))
+    out.sort(key=lambda event: event.ts)
     return out
 
 
@@ -217,8 +231,11 @@ def _read_backend_raw() -> List[_RawEvent]:
     head = re.compile(
         r"\[(?P<ts>[^\]]+)\]\s+(?P<level>\w+)\s+\[(?P<comp>[^\]]+)\]\s+(?P<rest>.*)"
     )
-    for path in _log_paths(BACKEND_LOG, "backend*.log"):
+    for path in _log_paths(BACKEND_LOG, "backend*.log", "NAVI_BACKEND_LOGS"):
+        if not os.path.exists(path):
+            continue
         out.extend(_parse_backend_lines(path, head))
+    out.sort(key=lambda event: event.ts)
     return out
 
 

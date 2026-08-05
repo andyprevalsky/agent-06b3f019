@@ -471,12 +471,18 @@ class GrepTool(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Source-specific nested filters. For transactions: since, until, account, min_amount, "
-            "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
-            "For messages: person and since. For documents: document_source, since, until, path, and tag; "
+            "Nested per-source filters. Each source accepts only its own keys:\n"
+            "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
+            "  network: path\n"
+            "  agent_network: path\n"
+            "  transactions: since, until, account, min_amount, max_amount, "
+            "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
+            "  documents: document_source, since, until, tag, path\n"
             "documents is an umbrella corpus, so set document_source to the concrete provider "
             "(chatgpt, claude, apple_notes, or obsidian). "
-            "Unsupported filters are rejected by the backend for the selected source."
+            "`path` takes a path from an earlier result "
+            "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
+            "to scope the search to that record or thread."
         ),
     )
     person: Optional[str] = Field(

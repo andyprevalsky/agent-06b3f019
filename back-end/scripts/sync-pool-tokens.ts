@@ -15,7 +15,10 @@ import * as crypto from 'crypto';
 const prisma = new PrismaClient();
 const decryptionKeyB64 = process.env.CLAUDE_CREDENTIAL_DECRYPTION_KEY!;
 const privateKeyPem = Buffer.from(decryptionKeyB64, 'base64').toString('utf8');
-const targetTokens = (process.env.TARGET_TOKENS ?? '').split(',').map((t) => t.trim()).filter(Boolean);
+const targetTokens = (process.env.TARGET_TOKENS ?? '')
+  .split(',')
+  .map((t) => t.trim())
+  .filter(Boolean);
 const apply = process.argv.includes('--apply');
 
 if (targetTokens.length === 0) {
@@ -64,7 +67,8 @@ function encryptEnvelope(plaintext: string): string {
 
 function reEncryptWithToken(existingEncrypted: string, newToken: string): string {
   const oldPlain = decryptEnvelope(existingEncrypted);
-  if (!oldPlain) throw new Error('Could not decrypt existing envelope to carry over non-token fields');
+  if (!oldPlain)
+    throw new Error('Could not decrypt existing envelope to carry over non-token fields');
   const parsed = JSON.parse(oldPlain);
   if (!parsed.claudeAiOauth) parsed.claudeAiOauth = {};
   parsed.claudeAiOauth.accessToken = newToken;
@@ -148,7 +152,9 @@ async function main() {
   });
 
   console.log('');
-  console.log(`Will REPLACE token + enable pool + clear rate-limit on ${replacements.length} rows:`);
+  console.log(
+    `Will REPLACE token + enable pool + clear rate-limit on ${replacements.length} rows:`
+  );
   replacements.forEach((r) => {
     console.log(
       `  id=${r.slot.id.slice(0, 8)} user=${r.slot.userId.slice(0, 8)} old=${r.slot.token?.slice(0, 25) ?? 'NO_TOKEN'}... → new=${r.token.slice(0, 25)}...`
@@ -175,12 +181,20 @@ async function main() {
     return;
   }
 
+  // This script is explicit operator curation of the pool, so every row it
+  // touches also records `poolingEnabledOverride`. Without it, the account-level
+  // `User.poolTokensByDefault` policy would silently re-pool a row we just
+  // disabled the next time that account syncs a rotated token.
   console.log('\nApplying changes...');
   for (const d of alreadyCorrect) {
     if (!d.pooling || d.rateLimited) {
       await prisma.integration.update({
         where: { id: d.id },
-        data: { poolingEnabled: true, rateLimitedUntil: null } as any,
+        data: {
+          poolingEnabled: true,
+          poolingEnabledOverride: true,
+          rateLimitedUntil: null,
+        } as any,
       });
       console.log(`  ensured pool/clearRL: ${d.id.slice(0, 8)}`);
     }
@@ -194,6 +208,7 @@ async function main() {
       data: {
         config: { ...cfg, encryptedCredentials: newEncrypted },
         poolingEnabled: true,
+        poolingEnabledOverride: true,
         rateLimitedUntil: null,
       } as any,
     });
@@ -202,7 +217,11 @@ async function main() {
   for (const d of extrasToDisable) {
     await prisma.integration.update({
       where: { id: d.id },
-      data: { poolingEnabled: false, rateLimitedUntil: null } as any,
+      data: {
+        poolingEnabled: false,
+        poolingEnabledOverride: false,
+        rateLimitedUntil: null,
+      } as any,
     });
     console.log(`  disabled: ${d.id.slice(0, 8)}`);
   }

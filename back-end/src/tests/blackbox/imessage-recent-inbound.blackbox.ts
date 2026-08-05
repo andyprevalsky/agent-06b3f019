@@ -25,6 +25,7 @@ import { randomUUID } from 'node:crypto';
 import { MessageChannel } from '@prisma/client';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 
 config();
 
@@ -53,10 +54,18 @@ async function request(
   url: string,
   options: RequestInit = {}
 ): Promise<{ status: number; data: unknown }> {
-  const response = await fetch(url, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-  });
+  const response = await retryWithBackoff(
+    () =>
+      fetch(url, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', ...options.headers },
+      }),
+    {
+      maxRetries: 3,
+      fixedDelays: [100, 250],
+      component: 'iMessageRecentInboundBlackbox',
+    }
+  );
   const ct = response.headers.get('content-type');
   const data = ct?.includes('application/json') ? await response.json() : await response.text();
   return { status: response.status, data };

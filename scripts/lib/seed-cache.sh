@@ -40,10 +40,12 @@ benchmark_seed_dump_path() {
 }
 
 # Immutable R2 object identity for the canonical benchmark base fixture. Unlike
-# setup-db.sh's daily developer snapshot, this changes only when either the
-# schema or the explicitly reviewed base-image revision changes.
+# setup-db.sh's daily developer snapshot, this changes only when the schema, the
+# pg_dump major that wrote the archive, or the explicitly reviewed base-image
+# revision changes.
 benchmark_base_cache_token() {
     local schema_path="$1"
+    local pg_major="${2:-}"
     local lib_dir
     local repo_root
     local python_bin
@@ -56,8 +58,13 @@ benchmark_base_cache_token() {
     repo_root="$(cd "$lib_dir/../.." && pwd)"
     python_bin="$repo_root/agents/venv/bin/python"
     [ -x "$python_bin" ] || python_bin="$(command -v python3)"
-    "$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
-        --cache-token "$schema_path"
+    if [ -n "$pg_major" ]; then
+        "$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+            --cache-token --pg-major "$pg_major" "$schema_path"
+    else
+        "$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+            --cache-token "$schema_path"
+    fi
 }
 
 # Producers and consumers hold the same per-dump directory lock across every
