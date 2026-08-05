@@ -171,7 +171,15 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
         return True
     normalized_html = html.lower()
-    visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
+    # Drop script/style/noscript CONTENT before stripping tags. Tag-only
+    # stripping leaves their text nodes in `visible_markup`, and a challenge
+    # interstitial is precisely the page that ships a large inline script with
+    # almost no rendered text — so it would clear the substantive-content bar
+    # and read as clean.
+    stripped_html = re.sub(
+        r"<(script|style|noscript)\b[^>]*>.*?</\1>", " ", normalized_html, flags=re.S
+    )
+    visible_markup = re.sub(r"<[^>]+>", "", stripped_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True
     if not any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS):

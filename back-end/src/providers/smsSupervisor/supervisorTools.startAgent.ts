@@ -42,7 +42,7 @@ export async function commitStartNewAgent(
     priceLimitCents,
   });
 
-  let agent;
+  let agent: { id: string } | undefined;
   try {
     agent = await runTransactionWithRetry(async (tx) => {
       const newAgent = await tx.agent.create({
@@ -95,26 +95,52 @@ export async function commitStartNewAgent(
       // user a tracking link for an agent that does not exist.
       const existing = await prisma.agent.findUnique({
         where: { id: provisionalId },
-        select: { id: true },
+        select: { id: true, temporalWorkflowId: true, status: true },
       });
       if (!existing) {
         log.error('start_new_agent P2002 without a committed agent row', { provisionalId });
         throw error;
       }
-      log.info('start_new_agent commit already done (PK collision)', { provisionalId });
-      return {
-        tool: 'start_new_agent',
-        success: true,
-        result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
-      };
+      // The row existing is not the same as the agent RUNNING. If the previous
+      // attempt committed the transaction and died before startAgentWorkflow,
+      // the agent sits in STARTING_UP with no temporalWorkflowId forever. Fall
+      // through and (re)start the workflow rather than reporting success for an
+      // agent nothing is driving; startAgentWorkflow is itself idempotent on
+      // workflow id.
+      if (
+        existing.temporalWorkflowId === null ||
+        existing.temporalWorkflowId === undefined ||
+        existing.temporalWorkflowId === ''
+      ) {
+        log.warn('start_new_agent found a committed agent with no workflow; resuming startup', {
+          provisionalId,
+          status: existing.status,
+        });
+        // Adopt the committed row so the workflow start below drives the agent
+        // that actually exists.
+        agent = { id: existing.id };
+      } else {
+        log.info('start_new_agent commit already done (PK collision)', { provisionalId });
+        return {
+          tool: 'start_new_agent',
+          success: true,
+          result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
+        };
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
+
+  if (!agent) {
+    throw new Error(`start_new_agent could not resolve an agent row for ${provisionalId}`);
+  }
+  const startedAgent = agent;
 
   // Start Temporal workflow
   try {
     const workflowId = await startAgentWorkflow({
-      agentId: agent.id,
+      agentId: startedAgent.id,
       userId,
       goal,
       model: 'rose-labs/rose-1-lite',
@@ -126,21 +152,21 @@ export async function commitStartNewAgent(
     });
 
     await prisma.agent.update({
-      where: { id: agent.id },
+      where: { id: startedAgent.id },
       data: { temporalWorkflowId: workflowId },
     });
 
     log.info('Agent created and workflow started', {
       phase: 'start',
-      agentId: agent.id,
-      prefix: agent.id.substring(0, 6),
+      agentId: startedAgent.id,
+      prefix: startedAgent.id.substring(0, 6),
       workflowId,
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Failed to start workflow', {
       phase: 'start',
-      agentId: agent.id,
+      agentId: startedAgent.id,
       error: errorMsg,
     });
 

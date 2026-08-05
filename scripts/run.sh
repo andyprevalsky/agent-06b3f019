@@ -413,6 +413,12 @@ process_cwd_in_this_worktree() {
 
 kill_stale_tree() {
     local pid=$1
+    # Recheck EVERY pid, not just the entry point. A stale matching parent must
+    # not take an active isolated benchmark's descendant down with it.
+    if pid_belongs_to_active_isolated_benchmark "$pid"; then
+        echo "⏭️  Preserving ACTIVE isolated benchmark descendant (PID $pid)"
+        return 0
+    fi
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_stale_tree "$child"
     done
@@ -427,26 +433,58 @@ kill_stale_tree() {
 # a live isolated run.
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
-    local manifest
-    for manifest in "$PWD"/.context/benchmarks/*/services.json; do
-        [ -f "$manifest" ] || continue
-        PID="$pid" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
+    # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
+    # recurses into descendants. A child of an ACTIVE isolated run must be just
+    # as protected as its root, or the recursive pass kills the live stack.
+    local probe="$pid" hops=0
+    while [ -n "$probe" ] && [ "$probe" != "0" ] && [ "$probe" != "1" ] && [ "$hops" -lt 12 ]; do
+        local manifest
+        for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+            [ -f "$manifest" ] || continue
+            PID="$probe" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
 import json, os, sys
-pid = int(os.environ["PID"])
+
+# Only `starting` and `running` are live; run.sh emits nothing else that means
+# "in flight". A malformed manifest is a NON-match, never a reason to preserve
+# a stale pid — and it must not raise outside the parse guard.
 try:
     with open(os.environ["MANIFEST"]) as handle:
         data = json.load(handle)
 except Exception:
     sys.exit(1)
-if str(data.get("status", "")).lower() == "stopped":
+if not isinstance(data, dict):
     sys.exit(1)
-pids = {data.get("run_sh_pid")}
+if str(data.get("status", "")).strip().lower() not in {"starting", "running"}:
+    sys.exit(1)
+
+def valid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+pids = set()
+if valid(data.get("run_sh_pid")):
+    pids.add(data["run_sh_pid"])
 for service in data.get("services") or []:
-    if isinstance(service, dict):
-        pids.add(service.get("pid"))
-sys.exit(0 if pid in {p for p in pids if isinstance(p, int)} else 1)
+    if isinstance(service, dict) and valid(service.get("pid")):
+        pids.add(service["pid"])
+try:
+    probe = int(os.environ["PID"])
+except (TypeError, ValueError):
+    sys.exit(1)
+sys.exit(0 if probe in pids else 1)
 PYEOF
+        done
+        probe=$(ps -p "$probe" -o ppid= 2>/dev/null | tr -d ' ')
+        hops=$((hops + 1))
     done
+
+    # Publication race: the isolated runner execs run.sh BEFORE it writes
+    # services.json, so a just-started stack has no manifest to match yet.
+    # Treat very young processes as owned rather than racing them to SIGTERM.
+    local age
+    age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
+    if [ -n "$age" ] && [ "$age" -lt "${BENCHMARK_STARTUP_GRACE_SECONDS:-90}" ]; then
+        return 0
+    fi
     return 1
 }
 

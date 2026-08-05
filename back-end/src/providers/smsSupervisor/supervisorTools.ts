@@ -628,11 +628,25 @@ async function commitIncreaseBudget(
     treeCostCents: agent.treeCostCents,
   });
 
-  // Update the agent's price limit
-  await prisma.agent.update({
-    where: { id: agent.id },
-    data: { priceLimitCents: newLimitCents },
+  // Atomic conditional increment. A read-then-write loses a concurrent increase:
+  // two commits read the same priceLimitCents and the last update overwrites the
+  // other. `commitPendingWrites` only serializes within one invocation, so the
+  // ceiling check and the increment must happen in the same database write.
+  const bumped = await prisma.agent.updateMany({
+    where: {
+      id: agent.id,
+      priceLimitCents: { lte: MAX_PRICE_LIMIT_CENTS - addCents },
+    },
+    data: { priceLimitCents: { increment: addCents } },
   });
+  if (bumped.count === 0) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
 
   // If agent was cost-limited, signal workflow to resume
   if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
