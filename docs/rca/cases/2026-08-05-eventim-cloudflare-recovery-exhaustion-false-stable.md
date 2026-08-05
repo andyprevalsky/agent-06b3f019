@@ -217,12 +217,24 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     `attempt_completion`/`done`, and `needs_user_help` defaulted
     `success=True`. Apply `payment_card_required_before_exit` to
     `send_message_to_user` as well; set `success=False` on needs_user_help.
+21. `23121d54-…` reached grounded `payment_approval` (merchant/host OK) but
+    LLM judge `eventim-1015-payment-boundary-semantics` failed: Tier 2 was
+    selected without a visible tier/price/availability list in the transcript.
+    Browser prompt now requires `evaluate` of every visible tier/variant
+    (incl. sold-out) before checkout so cheapest-tier selection is tool-grounded.
+
+**Exact PASS:** agent `6afec3bf-1eee-469d-8a25-9af434874aa9`
+(`20260805_230459_browser-1015-eventim-request-card.json`, 267.9s).
+Path: Kernel → cart → challenge recovery → `steel_managed` → evaluate tiers
+(Tier 1 SOLD OUT / Tier 2 $31.13 / Tier 3 $37.22) → guest checkout →
+`request_payment_card` → `payment_approval`. FE (during run):
+`http://localhost:62001/?agent-id=6afec3bf-1eee-469d-8a25-9af434874aa9`.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +
 `test_browser_cache` write-through/no-Stripe-cache cases +
-`request_payment_card` / benchmark merchant-identity cases.
-Exact-bench outcome still required before status=`fixed`.
+`request_payment_card` / benchmark merchant-identity cases +
+`build_browser_use_system_prompt_grounds_cheapest_tier_selection`.
 
 ## Human feedback
 
