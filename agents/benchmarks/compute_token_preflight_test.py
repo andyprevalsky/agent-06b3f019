@@ -543,6 +543,13 @@ def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_
     assert calls == ["source-sync", "keychain-overlay"]
 
 
+def _existing_codex_auth() -> Path:
+    """A real on-disk path standing in for a machine that has `codex login`."""
+    path = Path(tempfile.gettempdir()) / "preflight-test-codex-auth.json"
+    path.write_text('{"auth_mode": "chatgpt"}', encoding="utf-8")
+    return path
+
+
 def test_anthropic_excluded_preflight_requires_gpt_only_sync():
     calls: list[str] = []
 
@@ -568,6 +575,7 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=_existing_codex_auth()),
         patch.object(
             rb,
             "_refresh_local_gpt_token_from_codex_auth",
@@ -577,6 +585,64 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
     assert calls == ["source-sync", "codex-overlay"]
+
+
+def test_anthropic_excluded_preflight_tolerates_absent_codex_auth():
+    """A machine with no `codex login` must still run GPT-lane benchmarks.
+
+    `_sync_compute_tokens` above already REQUIRED and obtained a gpt token from
+    the verified shared workspace. Treating an absent local Codex auth file as
+    fatal made unrelated gates unrunnable — the AgentCard payment lifecycle, which
+    touches no Codex at all, could not run on any machine without a Codex login.
+    """
+    calls: list[str] = []
+
+    def fake_sync(*, required_token_types: tuple[str, ...] | None = None, **_kwargs) -> bool:
+        assert required_token_types == ("gpt",)
+        calls.append("source-sync")
+        return True
+
+    missing = Path(tempfile.gettempdir()) / "definitely-absent-codex-auth-for-test.json"
+    if missing.exists():
+        missing.unlink()
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=missing),
+        patch.object(
+            rb,
+            "_refresh_local_gpt_token_from_codex_auth",
+            side_effect=AssertionError("must not attempt an overlay without a local auth file"),
+        ),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+
+    assert calls == ["source-sync"]
+
+
+def test_anthropic_excluded_preflight_still_fails_on_stale_codex_auth():
+    """An auth file that EXISTS but cannot be overlaid is the stale-token signal.
+
+    That case must stay fatal; only the absent-file case is tolerated.
+    """
+
+    def fake_sync(*, required_token_types: tuple[str, ...] | None = None, **_kwargs) -> bool:
+        assert required_token_types == ("gpt",)
+        return True
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=_existing_codex_auth()),
+        patch.object(rb, "_refresh_local_gpt_token_from_codex_auth", return_value=False),
+        pytest.raises(RuntimeError, match="could not refresh GPT credentials"),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
 
 def test_anthropic_excluded_compute_preflight_requests_gpt_token():

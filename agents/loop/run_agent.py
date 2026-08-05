@@ -1005,6 +1005,11 @@ async def run_agent(
         ) = _resolve_current_compute_credentials()
 
         # 7. Call LLM with structured streaming
+        # Only a failure BEFORE a usable response is a retry of this iteration.
+        # Once the provider returns and we accept the response, the turn has
+        # really been spent (tokens are charged in _account_llm_usage below), so
+        # a later failure in accounting/broadcast must NOT refund the iteration.
+        llm_response_accepted = False
         try:
             if is_inside_temporal_activity:
                 # Inside activity (browser agent) - call LLM directly with streaming callback
@@ -1214,6 +1219,12 @@ async def run_agent(
                                 continue
                             raise
 
+                    # Validated provider response in hand. Everything below
+                    # (tool-call normalization, stream close, drainer dispose)
+                    # is post-response bookkeeping, so a failure there must not
+                    # refund the turn — its tokens are already spent.
+                    llm_response_accepted = True
+
                     # Convert Pydantic tool_calls to dicts (same as call_llm_activity does)
                     tool_calls_as_dicts = []
                     if pydantic_result.tool_calls:
@@ -1288,6 +1299,9 @@ async def run_agent(
                     retry_policy=RetryPolicy(maximum_attempts=3),
                     heartbeat_timeout=timedelta(seconds=180),
                 )
+
+                # The activity returned a validated payload; the turn is spent.
+                llm_response_accepted = True
 
                 # Reconstruct result object from activity response
                 class ActivityResult:
@@ -1402,6 +1416,21 @@ async def run_agent(
                     "cache_creation_input_tokens": cache_write_total,
                     "message": f"LLM call failed {consecutive_llm_failures} consecutive times: {error_message}",
                 }
+            # A failed LLM call produced no assistant turn, no tool call, and no
+            # context growth — it is a retry of this iteration, not a new one.
+            # Counting it would let transient provider/schema errors eat the
+            # agent's remaining turns: agent 16ae3e8f's explore sub-agent had
+            # completed 18 turns of real work, then spent iterations 19 and 20
+            # on two failed parses and died on "Reached max iterations (20)"
+            # without ever getting another chance to act. The retry budget
+            # (consecutive_llm_failures, capped at 3 above) bounds this path;
+            # max_iterations bounds productive work.
+            #
+            # Scoped to pre-acceptance failures only: once the provider returned
+            # a usable response the turn really was spent (tokens are charged),
+            # so a later accounting/broadcast error must not refund it.
+            if not llm_response_accepted:
+                iteration -= 1
             if error_chain_has_type(e, "LLMStructuredOutputError"):
                 # call_llm_activity marks schema/required-tool violations
                 # non-retryable so Temporal does not multiply requests. The
