@@ -2782,11 +2782,7 @@
         "testFile": null
       }
     ],
-    "appWiring": [
-      "main/index.ts",
-      "main/preload.ts",
-      "ui/main.tsx"
-    ],
+    "appWiring": ["main/index.ts", "main/preload.ts", "ui/main.tsx"],
     "domainOnly": {
       "main/app/appMenu.ts": "electron-main",
       "main/app/deepLinks.ts": "electron-main",

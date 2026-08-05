@@ -20,17 +20,21 @@ const healthSuite = path.join(backendDir, 'src/tests/blackbox/integration-health
 // A credential probe that cannot observe funding state is not a health check.
 const source = fs.readFileSync(healthSuite, 'utf8');
 
+const writeOut = (text: string): void => {
+  process.stdout.write(`${text}\n`);
+};
+
 function test(name: string, fn: () => void): void {
   try {
     fn();
-    console.log(`  ✅ ${name}`);
+    writeOut(`  \u2705 ${name}`);
   } catch (error) {
-    console.log(`  ❌ ${name}`);
+    writeOut(`  \u274c ${name}`);
     throw error;
   }
 }
 
-console.log('credential-health coverage invariants:');
+writeOut('credential-health coverage invariants:');
 
 test('OpenRouter funding state is probed, not just auth', () => {
   assert.ok(
@@ -63,4 +67,4 @@ test('a low OpenRouter balance is surfaced before it hits zero', () => {
   );
 });
 
-console.log('\nAll credential-health coverage invariants hold.');
+writeOut('\nAll credential-health coverage invariants hold.');

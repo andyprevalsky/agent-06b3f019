@@ -98,8 +98,7 @@ export async function retryWithBackoff<T>(
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const result = await fn();
-      const retryableResult =
-        opts.shouldRetryResult && (await opts.shouldRetryResult(result));
+      const retryableResult = opts.shouldRetryResult && (await opts.shouldRetryResult(result));
 
       if (retryableResult && attempt < maxRetries) {
         await opts.beforeRetryResult?.(result);
