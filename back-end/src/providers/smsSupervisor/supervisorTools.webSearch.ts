@@ -45,23 +45,48 @@ function benchmarkWebSearchFixture(query: string): string | null {
     // No file for this task -- it declared no fixture, so use live search.
     return null;
   }
-  if (raw === '') return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed === 'string') return parsed;
-    if (parsed !== null && typeof parsed === 'object') {
-      const entries = parsed as Record<string, string>;
-      const hit = Object.keys(entries).find((key) =>
-        query.toLowerCase().includes(key.toLowerCase())
-      );
-      // `default` lets a fixture answer every query the model happens to try,
-      // so a benchmark does not hinge on guessing its exact search phrasing.
-      return hit !== undefined ? entries[hit] : (entries.default ?? null);
-    }
-  } catch {
-    log.warn('Ignoring unparseable web-search fixture', { phase: 'search' });
+  // A file that EXISTS but cannot be used is never "no fixture". Falling back to
+  // a live search there is the worst outcome available: the benchmark keeps
+  // running and scores a trajectory built from the open internet while reporting
+  // a clean result. That is not hypothetical — a fixture-blind web_search sent
+  // the closed-store task a San Francisco water-utility PDF instead of the
+  // closure, so it ordered from a restaurant it was never told was shut, and the
+  // run looked healthy. Fail loudly instead.
+  if (raw === '') {
+    throw new Error(
+      `Benchmark web-search fixture at ${path} is empty. A configured fixture must not fall back ` +
+        'to a live search: the run would score an uncontrolled trajectory.'
+    );
   }
-  return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `Benchmark web-search fixture at ${path} is not valid JSON ` +
+        `(${error instanceof Error ? error.message : String(error)}). A configured fixture must ` +
+        'not fall back to a live search: the run would score an uncontrolled trajectory.'
+    );
+  }
+  if (typeof parsed === 'string') return parsed;
+  if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    const entries = parsed as Record<string, unknown>;
+    const hit = Object.keys(entries).find((key) => query.toLowerCase().includes(key.toLowerCase()));
+    // `default` lets a fixture answer every query the model happens to try, so a
+    // benchmark does not hinge on guessing its exact search phrasing.
+    const value = hit !== undefined ? entries[hit] : entries.default;
+    if (value === undefined) return null;
+    if (typeof value !== 'string') {
+      throw new Error(
+        `Benchmark web-search fixture at ${path} maps ${JSON.stringify(hit ?? 'default')} to a ` +
+          `${typeof value}; web_search results must be strings.`
+      );
+    }
+    return value;
+  }
+  throw new Error(
+    `Benchmark web-search fixture at ${path} must be a JSON string or object, got ${typeof parsed}.`
+  );
 }
 
 export async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
