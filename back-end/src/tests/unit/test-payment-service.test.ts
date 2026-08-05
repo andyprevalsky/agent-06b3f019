@@ -338,14 +338,17 @@ async function main(): Promise<void> {
       () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
       /action must be reset or complete/
     );
-    const connected = await configureBenchmarkAgentCardSetup({ userId, action: 'complete' });
+    const connected = await configureBenchmarkAgentCardSetup(
+      { userId, action: 'complete' },
+      { resolveCardholderId: async () => 'cardholder-live-fixture' }
+    );
     assert.equal(connected.status, 'connected');
     const row = await prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'agentcard' } },
     });
     const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
     assert.equal(config?.orgManaged, true);
-    assert.ok((config?.cardholderId ?? '').length > 0);
+    assert.equal(config?.cardholderId, 'cardholder-live-fixture');
     const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
     assert.equal(reset.status, 'connect_required');
     const resetRow = await prisma.integration.findUnique({
@@ -356,6 +359,27 @@ async function main(): Promise<void> {
     };
     assert.equal(resetRow?.status, 'NOT_CONNECTED');
     assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
+  });
+
+  await test('configureBenchmarkAgentCardSetup ignores stale BENCHMARK cardholder override', async () => {
+    const userId = await seedUser();
+    const previous = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
+    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cardholder-stale-missing';
+    try {
+      const connected = await configureBenchmarkAgentCardSetup(
+        { userId, action: 'complete' },
+        { resolveCardholderId: async () => 'cardholder-from-list' }
+      );
+      assert.equal(connected.status, 'connected');
+      const row = await prisma.integration.findUnique({
+        where: { userId_name: { userId, name: 'agentcard' } },
+      });
+      const config = row?.config as { cardholderId?: string };
+      assert.equal(config?.cardholderId, 'cardholder-from-list');
+    } finally {
+      if (previous === undefined) delete process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
+      else process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = previous;
+    }
   });
 
   await test('resolvePublicBaseUrl reflects the configured value', async () => {

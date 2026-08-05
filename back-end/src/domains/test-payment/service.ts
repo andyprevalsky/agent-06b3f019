@@ -7,6 +7,7 @@ import {
   type AgentCardSandboxSettlementInput,
   type AgentCardSandboxSettlementResult,
 } from '../../providers/agentcard/sandbox-settlement';
+import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../../providers/agentcard/org-onboarding';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { stripe } from '../../providers/stripe';
@@ -19,7 +20,6 @@ import {
   paymentMethodIdForBenchmarkCard,
 } from './catalog';
 import {
-  getBenchmarkAgentCardCardholderIdOverride,
   getPhoneBenchmarkPaymentAuditPathOverride,
   isProductionEnv,
   TEST_PAYMENT_PUBLIC_BASE_URL,
@@ -44,13 +44,14 @@ export { findAgentOwnerId } from './repo';
 
 const PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS = 3420;
 const PHONE_BENCHMARK_DEFAULT_ITEM = 'Dozen red roses with delivery';
-const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
 interface TestPaymentDependencies {
   settleAgentCardSandboxPayment?: (
     input: AgentCardSandboxSettlementInput
   ) => Promise<AgentCardSandboxSettlementResult>;
   getCardholderVerificationStatus?: (cardholderId: string) => Promise<string>;
+  /** Override live list_cardholders resolution (unit tests / offline fixtures). */
+  resolveCardholderId?: () => Promise<string>;
 }
 
 export async function configureBenchmarkAgentCardSetup(
@@ -67,9 +68,25 @@ export async function configureBenchmarkAgentCardSetup(
     return { status: 'connect_required' };
   }
   if (input.action === 'complete') {
-    const cardholderIdOverride = getBenchmarkAgentCardCardholderIdOverride();
-    const cardholderId =
-      cardholderIdOverride !== '' ? cardholderIdOverride : DEFAULT_SANDBOX_CARDHOLDER_ID;
+    // Never trust BENCHMARK_AGENTCARD_CARDHOLDER_ID alone — per-task "complete"
+    // previously overwrote setup-benchmark-payment's live resolve with a stale id,
+    // producing create_card "Cardholder not found" loops.
+    let cardholderId: string;
+    try {
+      cardholderId = await (dependencies.resolveCardholderId ?? resolveBenchmarkCardholderId)();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new TestPaymentError(
+        `Benchmark AgentCard cardholder resolution failed: ${message}`,
+        502
+      );
+    }
+    if (cardholderId.trim() === '') {
+      throw new TestPaymentError(
+        'Benchmark AgentCard cardholder resolution returned an empty id',
+        502
+      );
+    }
     const getVerificationStatus =
       dependencies.getCardholderVerificationStatus ??
       (isProductionEnv() ? getOrgCardholderVerificationStatus : undefined);
