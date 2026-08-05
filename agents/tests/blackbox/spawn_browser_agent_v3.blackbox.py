@@ -8091,6 +8091,7 @@ def test_payment_card_request_nudge_fires_on_empty_eventim_shells():
     assert "request_payment_card" in nudge
     assert "1015 Folsom (Eventim - eventim.us)" in nudge
     assert "debugging iframe" in nudge.lower() or "iframe mounts" in nudge.lower()
+    assert "send_message_to_user" in nudge
 
     assert (
         build_payment_card_request_nudge(
@@ -8109,6 +8110,74 @@ def test_payment_card_request_nudge_fires_on_empty_eventim_shells():
         is None
     )
     assert "empty Stripe" in PAYMENT_CARD_ENTRY_RULE or "empty Stripe Element" in PAYMENT_CARD_ENTRY_RULE
+    assert "send_message_to_user" in PAYMENT_CARD_ENTRY_RULE
+
+
+def test_payment_card_required_before_exit_blocks_send_message_bypass():
+    """Bench15: send_message_to_user must not exit checkout without request_payment_card.
+
+    Agent 7edaeabe-… received the empty-shell nudge, then called send_message_to_user
+    with "stopped at the payment card step" and the browser returned success without a
+    payment_approval attention request.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR,
+        payment_card_required_before_exit,
+    )
+
+    checkout_state = {
+        "title": "Eventim Checkout",
+        "dom_tree": (
+            "Payment Details Enter your payment details to complete your purchase. "
+            "__privateStripeFrame js.stripe.com/v3/elements credit card"
+        ),
+        "url": "https://checkout.eventim.us/?afflky=1015Folsom",
+    }
+    blocked = payment_card_required_before_exit(
+        current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+        browser_state=checkout_state,
+        action_entries=[{"action": "evaluate"}, {"action": "screenshot"}],
+    )
+    assert blocked == PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR
+    assert "request_payment_card" in blocked
+    assert "send_message_to_user" in blocked
+
+    assert (
+        payment_card_required_before_exit(
+            current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+            browser_state=checkout_state,
+            action_entries=[{"action": "request_payment_card"}],
+        )
+        is None
+    )
+    assert (
+        payment_card_required_before_exit(
+            current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+            browser_state=checkout_state,
+            action_entries=["request_payment_card(merchant=…)"],
+        )
+        is None
+    )
+    assert (
+        payment_card_required_before_exit(
+            current_url="https://wl.eventim.us/event/lyny/692405",
+            browser_state={"dom_tree": "General Admission"},
+        )
+        is None
+    )
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    send_block = source.split('if action_name == "send_message_to_user":', 1)[1].split(
+        'if action_name in ("attempt_completion", "done"):', 1
+    )[0]
+    assert "payment_card_required_before_exit" in send_block
+    assert 'title="Blocked message: request payment card first"' in send_block
+    assert '"success": False' in send_block
+    completion_block = source.split('if action_name in ("attempt_completion", "done"):', 1)[1]
+    assert "payment_card_required_before_exit" in completion_block[:2500]
 
 
 async def test_execute_action_request_payment_card_requests_workflow_approval():
@@ -14298,6 +14367,10 @@ async def run_all_tests():
     r.record(
         "payment_card_request_nudge_empty_eventim_shells",
         test_payment_card_request_nudge_fires_on_empty_eventim_shells,
+    )
+    r.record(
+        "payment_card_required_before_exit_blocks_send_message",
+        test_payment_card_required_before_exit_blocks_send_message_bypass,
     )
     await r.record_async(
         "execute_action_request_payment_card",

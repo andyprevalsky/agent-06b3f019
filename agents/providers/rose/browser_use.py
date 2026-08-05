@@ -160,7 +160,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {},
     },
     "send_message_to_user": {
-        "description": "Send a message to the user (for updates or asking for help)",
+        "description": (
+            "Send a message to the user (for updates or asking for help). "
+            "Do not use this to report that you reached a payment-card / Payment Details "
+            "step — call request_payment_card instead and wait for approval."
+        ),
         "params": {
             "message": {
                 "type": "string",

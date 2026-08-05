@@ -262,12 +262,17 @@ class AttemptCompletionBrowserTool(BaseModel):
 
 
 class SendMessageToUserBrowserTool(BaseModel):
-    """Request the user to complete an action (login, payment, CAPTCHA, etc.)."""
+    """Request the user to complete an action (login, CAPTCHA, etc.).
+
+    Do not use this to report reaching a payment-card step — call
+    ``request_payment_card`` instead.
+    """
 
     tool: Literal["send_message_to_user"]
     message: str = Field(
         description=user_facing_text_description(
-            "The exact message shown to the user for an update or request for help."
+            "The exact message shown to the user for an update or request for help. "
+            "Not a substitute for request_payment_card when checkout needs card entry."
         )
     )
 

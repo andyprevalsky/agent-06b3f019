@@ -35,7 +35,9 @@ PAYMENT_CARD_ENTRY_RULE = (
     "do not call request_payment_card; continue with that saved method. "
     "When Payment Details / card-entry markers are visible — including empty Stripe "
     "Element shells with no mounted card-number fields — call request_payment_card "
-    "immediately with the itemized receipt; do not keep debugging iframe mounts."
+    "immediately with the itemized receipt; do not keep debugging iframe mounts, and "
+    "do not call send_message_to_user or attempt_completion as a substitute for "
+    "request_payment_card."
 )
 
 PAYMENT_CARD_EMPTY_SHELL_NUDGE = (
@@ -45,7 +47,20 @@ PAYMENT_CARD_EMPTY_SHELL_NUDGE = (
     "receipt from Order Details now and call request_payment_card with merchant as "
     "'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') "
     "or 'Business via Platform' (e.g. '1015 Folsom via Eventim'). Empty Stripe shells "
-    "still count as needing a payment card."
+    "still count as needing a payment card. Do not call send_message_to_user or "
+    "attempt_completion until request_payment_card has been approved."
+)
+
+PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR = (
+    "Checkout still requires new card details. Extract the full itemized "
+    "receipt from the page (ticket line items, fees, subtotal, total), call "
+    "request_payment_card with that receipt, and wait for approval before "
+    "attempt_completion or send_message_to_user. Set merchant to "
+    "'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') "
+    "or 'Business via Platform' (e.g. '1015 Folsom via Eventim') — never a swapped "
+    "venue-only parenthetical like 'Eventim US (1015 Folsom)'. Do not treat empty "
+    "Stripe Element shells as done, and do not report the payment step via "
+    "send_message_to_user instead of request_payment_card."
 )
 
 
@@ -953,9 +968,13 @@ def page_requires_new_card_entry(
     return any(marker in blob for marker in _CARD_ENTRY_PAGE_MARKERS)
 
 
-def payment_card_already_requested(action_entries: Optional[List[Dict[str, Any]]]) -> bool:
+def payment_card_already_requested(action_entries: Optional[List[Any]] = None) -> bool:
     """True when the browser action history already includes request_payment_card."""
     for entry in action_entries or []:
+        if isinstance(entry, str):
+            if entry.startswith("request_payment_card"):
+                return True
+            continue
         if not isinstance(entry, dict):
             continue
         action = entry.get("action") or entry.get("name") or entry.get("tool") or ""
@@ -964,11 +983,32 @@ def payment_card_already_requested(action_entries: Optional[List[Dict[str, Any]]
     return False
 
 
+def payment_card_required_before_exit(
+    *,
+    current_url: str,
+    browser_state: Optional[Dict[str, Any]] = None,
+    action_entries: Optional[List[Any]] = None,
+    payment_card_ready: bool = False,
+) -> Optional[str]:
+    """Error text when checkout still needs ``request_payment_card`` before exiting.
+
+    Covers both ``attempt_completion``/``done`` and ``send_message_to_user``. Bench15
+    (`7edaeabe-…`) received the empty-shell nudge, then exited via
+    ``send_message_to_user`` ("stopped at the payment card step") without ever
+    calling ``request_payment_card`` — the completion gate did not cover that exit.
+    """
+    if payment_card_ready or payment_card_already_requested(action_entries):
+        return None
+    if not page_requires_new_card_entry(current_url=current_url, browser_state=browser_state):
+        return None
+    return PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR
+
+
 def build_payment_card_request_nudge(
     *,
     current_url: str,
     browser_state: Optional[Dict[str, Any]] = None,
-    action_entries: Optional[List[Dict[str, Any]]] = None,
+    action_entries: Optional[List[Any]] = None,
     payment_card_ready: bool = False,
 ) -> Optional[str]:
     """Mid-loop nudge so empty Payment Details shells trigger request_payment_card.

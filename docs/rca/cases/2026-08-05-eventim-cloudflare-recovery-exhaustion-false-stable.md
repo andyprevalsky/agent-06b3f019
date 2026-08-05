@@ -211,6 +211,12 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     GET `/api/attention-requests` flattens `url` onto metadata (no nested
     `requestUserApproval`); `_payment_approval_hosts` only read the nested
     shape. Read top-level `metadata.url` / `writeLockNotification` too.
+20. `7edaeabe-…` received the empty-shell nudge, then exited via
+    `send_message_to_user` ("stopped at the payment card step") without
+    `request_payment_card`. The payment gate only covered
+    `attempt_completion`/`done`, and `needs_user_help` defaulted
+    `success=True`. Apply `payment_card_required_before_exit` to
+    `send_message_to_user` as well; set `success=False` on needs_user_help.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +
