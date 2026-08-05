@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -54,6 +55,55 @@ def _wait_for_process_group_exit(group_id: int, timeout: float) -> bool:
             return True
         time.sleep(0.05)
     return not _process_group_alive(group_id)
+
+
+def _require_frontend_started(
+    frontend: subprocess.Popen,
+    log_path: Path,
+    frontend_dir: Path,
+    host: str,
+    frontend_port: int,
+    *,
+    timeout_seconds: float = 90.0,
+) -> None:
+    """Fail closed unless the archive Vite is actually accepting connections.
+
+    The supervisor used to spawn `npm run dev` and immediately advertise
+    `frontend=http://localhost:<port>` without ever checking it. In a worktree
+    created by a plain `git worktree add`, `front-end/node_modules` is empty, so
+    Vite dies instantly with `sh: vite: command not found` (exit 127) and every
+    /open-agent link for that run is dead while the supervisor reports success.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        exit_code = frontend.poll()
+        if exit_code is not None:
+            tail = ""
+            try:
+                tail = "\n".join(log_path.read_text(errors="replace").splitlines()[-15:])
+            except OSError:
+                pass
+            hint = ""
+            if not (frontend_dir / "node_modules").is_dir():
+                hint = (
+                    f"\n  cause: {frontend_dir}/node_modules is missing — this worktree was never provisioned."
+                    f"\n  fix:   (cd {frontend_dir} && npm install)"
+                )
+            raise SystemExit(
+                f"archive frontend exited with code {exit_code} before serving "
+                f"http://localhost:{frontend_port}; refusing to advertise a dead viewer."
+                f"{hint}\n  log: {log_path}\n{tail}"
+            )
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            if probe.connect_ex((host, frontend_port)) == 0:
+                return
+        time.sleep(0.25)
+    _stop_frontend(frontend)
+    raise SystemExit(
+        f"archive frontend did not accept connections on http://localhost:{frontend_port} "
+        f"within {timeout_seconds:.0f}s; refusing to advertise a dead viewer.\n  log: {log_path}"
+    )
 
 
 def _stop_frontend(frontend: subprocess.Popen, *, grace_seconds: float = 2.0) -> bool:
@@ -111,7 +161,8 @@ def launch(
         "VITE_BACKEND_API_URL": f"http://{host}:{api_port}",
         "VITE_DEV_PORT": str(frontend_port),
     }
-    with open(context_dir / "archive-frontend.log", "a") as frontend_log:
+    frontend_log_path = context_dir / "archive-frontend.log"
+    with open(frontend_log_path, "a") as frontend_log:
         frontend = subprocess.Popen(
             ["npm", "run", "dev", "--", "--host", host],
             cwd=frontend_dir,
@@ -120,6 +171,8 @@ def launch(
             stderr=subprocess.STDOUT,
             start_new_session=True,
         )
+
+    _require_frontend_started(frontend, frontend_log_path, frontend_dir, host, frontend_port)
 
     server: ThreadingHTTPServer | None = None
     try:

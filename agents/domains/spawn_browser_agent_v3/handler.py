@@ -1478,7 +1478,18 @@ def _clear_browser_activity_memory_buffers(
                 setattr(browser_recorder, attr, None)
 
     if browser_network_recorder is not None:
-        for attr in ("entries", "_tasks"):
+        for attr in (
+            "entries",
+            "_diagnostic_entries",
+            "console_entries",
+            "_tasks",
+            "_bodies",
+            "_body_byte_sizes",
+            "_provider_exit_rejections",
+            "_rejected_network_generations",
+            "_ignored_request_ids",
+            "_active_request_ids",
+        ):
             value = getattr(browser_network_recorder, attr, None)
             if hasattr(value, "clear"):
                 with contextlib.suppress(Exception):
@@ -1486,6 +1497,8 @@ def _clear_browser_activity_memory_buffers(
         for attr in ("browser_session", "_cdp_client"):
             with contextlib.suppress(Exception):
                 setattr(browser_network_recorder, attr, None)
+        with contextlib.suppress(Exception):
+            browser_network_recorder._body_bytes = 0
 
     for value in mutable_buffers:
         if hasattr(value, "clear"):
@@ -2953,6 +2966,100 @@ async def _finalize_browser_recording_for_fe_resilient(
         return None
 
 
+async def _finalize_browser_diagnostics_for_fe(
+    *,
+    browser_network_recorder: BrowserNetworkRecorder,
+    agent_id: str,
+    task_id: Optional[str],
+    user_id: str,
+    browser_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Persist redacted console/network indexes and expose durable pointers.
+
+    The uploaded ZIP intentionally contains metadata indexes only. Raw response
+    body files remain local/trace-gated and are never included in this broadly
+    discoverable post-run debugging attachment.
+    """
+    if not task_id:
+        return None
+
+    network_index_path = await browser_network_recorder.close()
+    console_index_path = getattr(browser_network_recorder, "console_index_path", None)
+    if not network_index_path and not console_index_path:
+        return None
+
+    trace_archive_refs: Dict[str, str] = {}
+    try:
+        archive_result = await browser_network_recorder.archive_diagnostics_artifacts()
+        if isinstance(archive_result, dict):
+            trace_archive_refs = archive_result
+    except Exception as exc:
+        logger.warning(
+            "Browser diagnostics trace archive failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc)[:300],
+        )
+
+    diagnostics_file_pointer = None
+    bundle_bytes: Optional[bytes] = None
+    try:
+        bundle_bytes = browser_network_recorder.export_diagnostics_bundle_bytes()
+        if bundle_bytes:
+            diagnostics_file_pointer = await asyncio.wait_for(
+                upload_to_storage(
+                    user_id=user_id,
+                    file_content=bundle_bytes,
+                    filename=f"browser-diagnostics-{task_id}.zip",
+                    mime_type="application/zip",
+                ),
+                timeout=15,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Browser diagnostics attachment upload failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc)[:300],
+        )
+
+    metadata = {
+        "browser_diagnostics_file_pointer": diagnostics_file_pointer,
+        "console_log_path": str(console_index_path) if console_index_path else None,
+        "network_recording_path": str(network_index_path) if network_index_path else None,
+        "trace_archive_refs": trace_archive_refs,
+        "diagnostics_redacted": True,
+        "response_bodies_included": False,
+    }
+    message_saved = False
+    for attempt in range(1, 4):
+        message_saved = await save_browser_action_message(
+            agent_id=agent_id,
+            title="Browser diagnostics saved",
+            task_id=task_id,
+            message="Redacted browser console and network diagnostics are available for post-run inspection.",
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="diagnostics",
+            tool_call_id=f"browser-diagnostics:{task_id}",
+            extra_metadata=metadata,
+        )
+        if message_saved:
+            break
+        if attempt < 3:
+            await asyncio.sleep(0.2 * attempt)
+    logger.info(
+        "Browser diagnostics pointers saved",
+        agent_id=agent_id,
+        task_id=task_id,
+        bundle_bytes=len(bundle_bytes) if bundle_bytes else 0,
+        has_pointer=bool(diagnostics_file_pointer),
+        message_saved=message_saved,
+        trace_ref_count=len(trace_archive_refs),
+    )
+    return metadata
+
+
 def _schedule_browser_cleanup(
     *,
     agent_id: str,
@@ -3015,19 +3122,13 @@ def _schedule_browser_cleanup(
                     resolved_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
             if resolved_network_recorder:
                 with contextlib.suppress(Exception):
-                    network_index_path = await resolved_network_recorder.close()
-                    if network_index_path and task_id:
-                        await save_browser_action_message(
-                            agent_id=agent_id,
-                            title="Browser network recording saved",
-                            task_id=task_id,
-                            message=f"Local browser network log: {network_index_path}",
-                            status=MessageStatus.FINISHED,
-                            browser_url=browser_url or "",
-                            action_type="network_recording",
-                            tool_call_id=str(uuid_module.uuid4()),
-                            extra_metadata={"network_recording_path": str(network_index_path)},
-                        )
+                    await _finalize_browser_diagnostics_for_fe(
+                        browser_network_recorder=resolved_network_recorder,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        user_id=user_id,
+                        browser_url=browser_url,
+                    )
             if browser_recorder:
                 await _finalize_browser_recording_for_fe_resilient(
                     browser_recorder=browser_recorder,
@@ -4633,6 +4734,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
             return
+        # Any browser action can navigate (links, forms, redirects, history),
+        # and Kernel may reset the target-scoped WebAuthn environment at that
+        # boundary. Revalidate before every counter poll so the next agent
+        # interaction always sees the held credentials on a live authenticator.
+        await sync_passkeys_onto_target(context="before passkey usage readback")
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,
@@ -5421,6 +5527,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             )
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+
+            # The provider can replace the pre-navigation target/session while
+            # opening the first real page. Revalidate at that exact boundary so
+            # a cached authenticator id cannot hide a lost WebAuthn environment.
+            await sync_passkeys_onto_target(context="after start navigation")
 
             # The interaction layer (humanizer/recorder/logo) ran concurrently
             # with the navigation; both must be complete before the warm-up
@@ -7541,6 +7652,37 @@ Based on this feedback, I need to continue working on the task and address the i
         _heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _heartbeat_task
+        diagnostics_finalized = False
+        if browser_network_recorder is None and network_recorder_task is not None:
+            try:
+                browser_network_recorder = await asyncio.wait_for(
+                    asyncio.shield(network_recorder_task),
+                    timeout=10,
+                )
+            except Exception as diagnostics_resolve_error:
+                logger.warning(
+                    "Browser diagnostics recorder was unavailable before activity return",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(diagnostics_resolve_error),
+                )
+        if browser_network_recorder is not None:
+            try:
+                await _finalize_browser_diagnostics_for_fe(
+                    browser_network_recorder=browser_network_recorder,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    user_id=user_id,
+                    browser_url=browser_url,
+                )
+                diagnostics_finalized = True
+            except Exception as diagnostics_error:
+                logger.warning(
+                    "Browser diagnostics finalization failed before activity return",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(diagnostics_error),
+                )
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
@@ -7552,8 +7694,8 @@ Based on this feedback, I need to continue working on the task and address the i
             cursor_streamer=cursor_streamer,
             interaction_layer_task=interaction_layer_task,
             humanizer=humanizer,
-            browser_network_recorder=browser_network_recorder,
-            network_recorder_task=network_recorder_task,
+            browser_network_recorder=None if diagnostics_finalized else browser_network_recorder,
+            network_recorder_task=None if diagnostics_finalized else network_recorder_task,
             browser_recorder=browser_recorder,
             dom_service=dom_service,
             playwright_browser=playwright_browser,
@@ -7566,6 +7708,7 @@ Based on this feedback, I need to continue working on the task and address the i
         dom_service = None
         _clear_browser_activity_memory_buffers(
             action_history=action_history,
+            browser_network_recorder=browser_network_recorder if diagnostics_finalized else None,
             mutable_buffers=(
                 action_entries,
                 browser_state,

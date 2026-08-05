@@ -697,96 +697,32 @@ def test_mid_run_feedback_schema_evaluator_requires_exact_stability():
     assert "changed after non-goal feedback" in reason
 
 
-def test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search():
-    """Toast checkout benchmark should not rely on model-discovered DoorDash/Google routing."""
+def test_toast_nopa_benchmark_uses_semantic_outcome_validation():
+    """The task keeps only the payment boundary static and judges the outcome semantically."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     task = get_task_by_name("browser-toast-nopa-write-lock")
 
-    assert "https://order.toasttab.com/online/nopafish" in task.prompt
-    assert "Do not use Google, DoorDash, Uber Eats" in task.prompt
+    assert task.prompt == (
+        "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, "
+        "from the restaurant's Toast site"
+    )
+    # The evaluator requires the official Toast checkout, so the task must name
+    # the ordering surface. Without it, routing through a marketplace such as
+    # DoorDash or Uber Eats is a valid reading of the prompt and the agent can
+    # never satisfy a criterion the contract never stated.
+    assert "toast site" in task.prompt.lower()
+    assert task.environment["live_targets"] == ["https://order.toasttab.com/online/nopafish"]
+    assert task.environment["services"] == ["order.toasttab.com", "payment_approval"]
+    assert task.approval_handling == "ignore"
     assert task.expected_attention_kind == "payment_approval"
-    assert task.expected_payment_receipt["merchant"] == "Nopa Fish (Toast - order.toasttab.com)"
+    assert task.expected_payment_receipt is None
     assert task.success_on_payment_card_request is True
-    assert task.expected_payment_receipt["lineItems"] == [{"name": "The Rocky Sandwich", "quantity": 1}]
-    assert task.expected_payment_receipt["requiredFields"] == [
-        "merchant",
-        "currency",
-        "lineItems",
-        "fees",
-        "subtotalCents",
-        "totalCents",
-        "fingerprint",
-        "userId",
-        "agentId",
-    ]
-    assert task.expected_payment_receipt["requiredLineItemFields"] == [
-        "name",
-        "imageUrl",
-        "productUrl",
-        "rating",
-        "reviewCount",
-        "unitPriceCents",
-        "quantity",
-        "lineTotalCents",
-    ]
-    assert task.expected_payment_receipt["requiredFeeFields"] == ["label", "amountCents"]
-
-
-def test_toast_payment_approval_requires_every_declared_receipt_field():
-    """Toast cannot pass with a sparse or malformed payment approval payload."""
-    from copy import deepcopy
-
-    from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _validate_payment_receipt
-
-    task = get_task_by_name("browser-toast-nopa-write-lock")
-    payload = {
-        "merchant": "Nopa Fish via Toast",
-        "currency": "USD",
-        "lineItems": [
-            {
-                "name": "The Rocky Sandwich",
-                "imageUrl": None,
-                "productUrl": "https://toasttab.com/menu/nopafish/the-rocky-sandwich",
-                "rating": "4.8 stars",
-                "reviewCount": "125 reviews",
-                "unitPriceCents": 2100,
-                "quantity": 1,
-                "lineTotalCents": 2100,
-            }
-        ],
-        "fees": [{"label": "Taxes & Fees", "amountCents": 294}],
-        "subtotalCents": 2100,
-        "totalCents": 2394,
-        "fingerprint": "a" * 64,
-        "userId": "user-123",
-        "agentId": "agent-123",
-    }
-
-    def request(value):
-        return {"metadata": {"requestPaymentCard": value}}
-
-    _, grounding_messages = _captured_toast_payment_approval()
-    assert _validate_payment_receipt(task, request(payload), messages=grounding_messages) is None
-
-    for field in task.expected_payment_receipt["requiredFields"]:
-        sparse = deepcopy(payload)
-        sparse.pop(field)
-        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
-        assert reason is not None and field in reason
-
-    for field in task.expected_payment_receipt["requiredLineItemFields"]:
-        sparse = deepcopy(payload)
-        sparse["lineItems"][0].pop(field)
-        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
-        assert reason is not None and field in reason
-
-    for field in task.expected_payment_receipt["requiredFeeFields"]:
-        sparse = deepcopy(payload)
-        sparse["fees"][0].pop(field)
-        reason = _validate_payment_receipt(task, request(sparse), messages=grounding_messages)
-        assert reason is not None and field in reason
+    assert [evaluator["method"] for evaluator in task.evaluators] == ["single_turn_llm_judge"]
+    semantic_contract = " ".join(task.evaluators[0]["criteria"]).lower()
+    for requirement in ("nopa fish", "ferry building", "toast", "exactly one", "rocky fish sandwich"):
+        assert requirement in semantic_contract
+    assert "exact strings" in task.evaluators[0]["judge_prompt"].lower()
 
 
 def _captured_toast_payment_approval(
@@ -3025,45 +2961,37 @@ def test_approval_request_details_can_require_item_name_and_amount():
     assert "amount" in reason.lower()
 
 
-def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
-    """Amazon uses the standard completed-commerce runtime and preserves cart-path semantics."""
+def test_amazon_beanie_catalog_stops_at_unresolved_final_write_lock():
+    """Amazon stops before purchase at the final write lock without using Buy Now."""
     from benchmarks.benchmark_tasks import get_task_by_name
 
     completed_purchase_prompt = (
-        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
-        "Use my saved/default Amazon payment method and shipping address; do not request or add a new "
-        "payment card when a valid saved method is already selected. "
-        "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
+        "Buy me a black beanie on Amazon that costs less than $35. "
+        "Do not use the Buy Now button."
     )
     auth_assistance_prompt = (
         "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. "
         "Avoid using the Buy Now button as the purchase path, but make sure purchase is completed."
     )
     task = get_task_by_name("browser-agent-amazon-cookie-payment")
-    assert task.description.endswith("complete the purchase.")
+    assert task.description == "Buy one black beanie on Amazon for less than $35 without using Buy Now."
     assert task.prompt == completed_purchase_prompt
     assert get_task_by_name("browser-agent").prompt == auth_assistance_prompt
-    assert task.approval_handling == "auto_approve"
-    assert task.expected_attention_kind is None
-    assert task.expected_attention_kind_any_of == ["payment_approval", "write_lock"]
+    assert task.approval_handling == "ignore"
+    assert task.expected_attention_kind == "write_lock"
+    assert task.expected_attention_kind_any_of == []
     assert task.expected_approval_count == 1
     assert task.expected_tool_counts == {"spawn_browser_agent": 1}
     assert task.min_steps == {"browser": 5}
     assert task.tool_count_scope == "root"
     assert task.bench == "rose-bench"
     assert task.environment["live_fixtures"] == ["live"]
-    response_fields = {field["name"]: field for field in task.response_schema["fields"]}
-    assert set(response_fields) == {
-        "selected_beanie_title",
-        "selected_beanie_url",
-        "selected_beanie_price_usd",
-        "quality_evidence",
-        "order_confirmation_id",
-        "purchase_completed",
-        "cart_checkout_used",
-        "buy_now_used",
-    }
-    assert all(field["required"] is True for field in response_fields.values())
+    assert task.environment["context_notes"] == (
+        "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the "
+        "complete browser-auth graph, including the CookieBundle used to reach the final Amazon purchase "
+        "write lock. The runner leaves that request unresolved and does not place the order."
+    )
+    assert task.response_schema is None
     assert [evaluator["method"] for evaluator in task.evaluators] == [
         "static_check",
         "single_turn_llm_judge",
@@ -3072,7 +3000,6 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert static_types == {
         "no_tool_failures",
         "browser_agent_session_count",
-        "agent_status",
         "approval_request_count",
         "approval_request_details",
     }
@@ -3082,15 +3009,29 @@ def test_amazon_beanie_catalog_requires_clean_completed_cart_purchase():
     assert approval_check["required_strings"] == ["beanie"]
     assert approval_check["require_amount"] is True
     runtime_criteria = " ".join(task.evaluators[0]["criteria"]).lower()
-    assert "payment-card approval or final write approval" in runtime_criteria
+    assert "write lock" in runtime_criteria
+    assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    assert "payment-card approval or final write approval" in semantic_criteria
-    for requirement in ("black", "under $35", "well-made", "buy now", "completed"):
+    for requirement in ("black", "under $35", "buy now", "unresolved", "not placed"):
         assert requirement in semantic_criteria
+    judge_prompt = task.evaluators[1]["judge_prompt"].lower()
+    for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
+        assert failure in judge_prompt
+    user_visible_contract = "\n".join(
+        (
+            task.description,
+            task.prompt,
+            json.dumps(task.response_schema, sort_keys=True),
+            json.dumps(task.evaluators, sort_keys=True),
+            json.dumps(task.environment, sort_keys=True),
+        )
+    ).lower()
+    for removed_requirement in ("well-made", "saved/default", "saved payment", "normal cart"):
+        assert removed_requirement not in user_visible_contract
 
 
-def test_amazon_beanie_accepts_exactly_one_payment_or_write_lock():
-    """Either purchase approval is valid, but unrelated or duplicate approvals fail."""
+def test_amazon_beanie_accepts_only_one_unresolved_write_lock():
+    """A pending final write lock passes; payment and auth requests fail."""
     from dataclasses import replace
 
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3107,26 +3048,32 @@ def test_amazon_beanie_accepts_exactly_one_payment_or_write_lock():
     write_lock = {"metadata": {"requestUserApproval": {"writePermission": True}}}
     auth = {"metadata": {"attentionKind": "auth_assistance"}}
 
-    assert _attention_request_matches_task(task, payment) is True
+    assert _attention_request_matches_task(task, payment) is False
     assert _attention_request_matches_task(task, write_lock) is True
     assert _attention_request_matches_task(task, auth) is False
-    assert _attention_request_matches_task(task, write_lock, observed_count=1) is False
+    assert _attention_request_matches_task(task, write_lock, observed_count=1) is True
+
+    write_lock_only = {
+        "agent": {"status": "ACTIVE", "progress": 0.5},
+        "messages": [],
+        "_benchmark": {
+            "attention_request_kind_seen": "write_lock",
+            "expected_attention_kind_seen": "write_lock",
+        },
+    }
+    assert evaluate_task(task, write_lock_only, approvals_triggered=1) == (True, None)
 
     payment_only = {
-        "agent": {"status": "COMPLETED", "progress": 1.0},
+        "agent": {"status": "ACTIVE", "progress": 0.5},
         "messages": [],
-        "_benchmark": {"attention_request_kind_seen": "payment_approval"},
+        "_benchmark": {
+            "attention_request_kind_seen": "payment_approval",
+            "expected_attention_kind_seen": "payment_approval",
+        },
     }
-    write_lock_only = {
-        "agent": {"status": "COMPLETED", "progress": 1.0},
-        "messages": [],
-        "_benchmark": {"attention_request_kind_seen": "write_lock"},
-    }
-    assert evaluate_task(task, payment_only, approvals_triggered=1) == (True, None)
-    assert evaluate_task(task, write_lock_only, approvals_triggered=1) == (True, None)
-    passed, reason = evaluate_task(task, payment_only, approvals_triggered=2)
+    passed, reason = evaluate_task(task, payment_only, approvals_triggered=1)
     assert passed is False
-    assert reason == "Expected exactly 1 approval request(s), observed 2"
+    assert reason == "Expected write_lock attention request but it was not observed"
 
 
 def test_live_paid_bookings_stop_only_at_payment_approval():
@@ -3355,8 +3302,8 @@ async def _run_attention_poll(task, requests: list[dict], *, messages: list[dict
     return result, responses
 
 
-async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it():
-    """The live poll boundary approves one allowed kind and fails closed on every other request."""
+async def test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it():
+    """The live poll boundary stops at one write lock and never approves it."""
     payment = {
         "id": "payment-approval",
         "agentId": "agent-amazon",
@@ -3375,32 +3322,38 @@ async def test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_r
 
     (data, triggered, resolved, failure), responses = await _run_attention_poll(
         _amazon_attention_poll_task(),
-        [payment, write_lock],
+        [write_lock],
     )
-    assert failure is not None and "Expected exactly one attention request" in failure
-    assert data["_benchmark"]["attention_kinds_observed"] == [
-        "payment_approval",
-        "write_lock",
-    ]
-    assert (triggered, resolved) == (1, 1)
-    assert responses == [("payment-approval", "approved")]
+    assert failure is None
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "write_lock"
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        _amazon_attention_poll_task(),
+        [payment],
+    )
+    assert failure == "Expected attention kind write_lock, observed payment_approval"
+    assert data["_benchmark"]["unexpected_attention_kind"] == "payment_approval"
+    assert (triggered, resolved) == (0, 0)
+    assert responses == []
 
     (data, triggered, resolved, failure), responses = await _run_attention_poll(
         _amazon_attention_poll_task(),
         [auth],
     )
     assert failure is not None and "auth_assistance" in failure
-    assert data["_benchmark"]["attention_kinds_observed"] == ["auth_assistance"]
+    assert data["_benchmark"]["unexpected_attention_kind"] == "auth_assistance"
     assert (triggered, resolved) == (0, 0)
     assert responses == []
 
 
-async def test_invalid_payment_receipt_still_records_typed_attention_observation():
-    """Receipt validation failures must retain the payment attention that carried them."""
+async def test_toast_semantic_receipt_values_are_decided_by_llm_judge():
+    """A complete Toast receipt reaches the LLM judge with literal merchant evidence intact."""
     from dataclasses import replace
 
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import evaluate_task
+    import benchmarks.run_benchmark as bench
 
     request, messages = _captured_toast_payment_approval(merchant="Wrong Merchant via Toast")
     task = replace(get_task_by_name("browser-toast-nopa-write-lock"), timeout_seconds=5)
@@ -3411,16 +3364,41 @@ async def test_invalid_payment_receipt_still_records_typed_attention_observation
         messages=messages,
     )
 
-    assert failure is not None and failure.startswith("merchant mismatch:")
+    assert failure is None
     assert (triggered, resolved) == (1, 0)
     assert responses == []
     assert data["_benchmark"]["attention_request_kind_seen"] == "payment_approval"
     assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
     assert len(data["_benchmark"]["attention_requests_seen"]) == 1
-    assert "expected_payment_receipt_seen" not in data["_benchmark"]
-    passed, reason = evaluate_task(task, data, triggered)
-    assert passed is False
-    assert reason == "Expected validated payment-card request but none was observed"
+    receipt = data["_benchmark"]["attention_requests_seen"][0]["metadata"]["requestPaymentCard"]
+    assert receipt["merchant"] == "Wrong Merchant via Toast"
+
+    decisions = iter(
+        [
+            {"score": 0.0, "reasoning": "The receipt names a different merchant."},
+            {"score": 1.0, "reasoning": "Nopa Fish on Toast and one rocky sandwich are grounded."},
+        ]
+    )
+    original_call = bench._call_declared_llm_judge
+
+    async def fake_call(task_arg, evaluator_arg, data_arg):
+        assert task_arg.name == "browser-toast-nopa-write-lock"
+        assert evaluator_arg["id"] == "toast-order-semantics"
+        assert data_arg["_benchmark"]["attention_requests_seen"][0]["metadata"]["requestPaymentCard"]
+        return next(decisions)
+
+    try:
+        bench._call_declared_llm_judge = fake_call
+        passed, reason, _ = await bench._run_declared_evaluators(task, data)
+        assert passed is False
+        assert "different merchant" in reason.lower()
+
+        receipt["merchant"] = "Nopa Fish (Toast)"
+        passed, reason, _ = await bench._run_declared_evaluators(task, data)
+        assert passed is True
+        assert reason is None
+    finally:
+        bench._call_declared_llm_judge = original_call
 
 
 async def test_live_paid_booking_poll_stops_without_approving_payment():
@@ -3465,6 +3443,39 @@ async def test_live_paid_booking_poll_stops_without_approving_payment():
         assert failure == "Expected attention kind payment_approval, observed write_lock"
         assert (triggered, resolved) == (0, 0)
         assert responses == []
+
+
+async def test_toast_poll_stops_without_responding_to_payment_approval():
+    """Toast exposes the unresolved card request to semantic evaluation."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    request, messages = _captured_toast_payment_approval()
+    task = replace(
+        get_task_by_name("browser-toast-nopa-write-lock"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        timeout_seconds=5,
+    )
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [request],
+        messages=messages,
+    )
+
+    assert failure is None
+    assert data["agent"]["status"] == "ACTIVE"
+    assert (triggered, resolved) == (1, 0)
+    assert responses == []
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+    # Toast is semantic-only: it declares no expected_payment_receipt, so the
+    # static receipt flag is never raised and the LLM judge owns the verdict.
+    assert task.expected_payment_receipt is None
+    assert data["_benchmark"].get("expected_payment_receipt_seen") is not True
 
 
 def test_alchemy_sauna_catalog_stops_at_grounded_payment_approval():
@@ -8842,8 +8853,8 @@ def test_logical_tool_counts_ignore_progress_messages():
     }
 
 
-def test_logical_tool_counts_include_model_facing_routed_calls():
-    """A model-facing spawn_agent call remains observable after browser routing."""
+def test_logical_tool_counts_canonicalize_model_facing_routed_calls():
+    """A typed model-facing call and its routed runtime events are one logical tool."""
     from benchmarks.run_benchmark import _count_logical_tool_calls_from_messages
 
     messages = [
@@ -8860,6 +8871,11 @@ def test_logical_tool_counts_include_model_facing_routed_calls():
                         "tool": "spawn_agent",
                         "type": "browser",
                         "tool_call_id": "browser-2",
+                    },
+                    {
+                        "tool": "spawn_agent",
+                        "type": "explore",
+                        "tool_call_id": "explore-1",
                     },
                 ]
             },
@@ -8905,7 +8921,7 @@ def test_logical_tool_counts_include_model_facing_routed_calls():
     ]
 
     assert _count_logical_tool_calls_from_messages(messages) == {
-        "spawn_agent": 2,
+        "spawn_agent": 1,
         "spawn_browser_agent": 2,
         "request_payment_card": 2,
     }
@@ -11081,6 +11097,96 @@ def test_agent_latency_reads_isolated_benchmark_stack_logs():
     assert len(explicit_backend_events) == 1, "runner-provided backend logs must be read"
 
 
+def test_agent_latency_time_containment_scales_and_picks_narrowest_parent():
+    """Browser traces with thousands of events must not trigger quadratic parenting."""
+    from datetime import datetime, timedelta, timezone
+
+    from benchmarks.agent_latency import Span, _time_containment_parents
+
+    start = datetime(2026, 8, 4, tzinfo=timezone.utc)
+    wide = Span(
+        span_id="wide",
+        parent_span_id=None,
+        name="wide",
+        source="worker",
+        start=start,
+        end=start + timedelta(minutes=5),
+    )
+    narrow = Span(
+        span_id="narrow",
+        parent_span_id=None,
+        name="narrow",
+        source="worker",
+        start=start + timedelta(seconds=30),
+        end=start + timedelta(minutes=4),
+    )
+    points = [
+        Span(
+            span_id=f"event-{index}",
+            parent_span_id=None,
+            name="browser.event",
+            source="worker",
+            start=start + timedelta(seconds=60, microseconds=index),
+            end=None,
+        )
+        for index in range(5_000)
+    ]
+
+    parents = _time_containment_parents([wide, narrow], points)
+
+    assert len(parents) == len(points)
+    assert all(parents[id(point)] is narrow for point in points)
+
+
+def test_agent_latency_context_dir_exclusively_pins_one_isolated_run():
+    """An explicit run context must not parse unrelated newer benchmark logs."""
+    import importlib
+    import tempfile
+
+    latency = importlib.import_module("benchmarks.agent_latency")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        pinned = os.path.join(tmp, "pinned", "logs")
+        unrelated = os.path.join(tmp, "newer-unrelated", "logs")
+        os.makedirs(pinned)
+        os.makedirs(unrelated)
+        original_root = latency.ISOLATED_STACK_ROOT
+        original_context = os.environ.get("BENCHMARK_CONTEXT_DIR")
+        try:
+            latency.ISOLATED_STACK_ROOT = tmp
+            os.environ["BENCHMARK_CONTEXT_DIR"] = os.path.dirname(pinned)
+            assert latency.isolated_stack_log_dirs() == [pinned]
+        finally:
+            latency.ISOLATED_STACK_ROOT = original_root
+            if original_context is None:
+                os.environ.pop("BENCHMARK_CONTEXT_DIR", None)
+            else:
+                os.environ["BENCHMARK_CONTEXT_DIR"] = original_context
+
+
+def test_agent_latency_baseline_lookup_deduplicates_immature_span_keys():
+    """A missing/immature baseline is still one history lookup per span key."""
+    from benchmarks import agent_latency as latency
+
+    calls: list[str] = []
+
+    def summary(span_key: str, **_kwargs):
+        calls.append(span_key)
+        return None
+
+    observations = [{"span_key": "browser.event"} for _ in range(5_000)]
+    with patch.object(latency, "span_history_summary", side_effect=summary):
+        baselines = latency._span_baseline_map(
+            observations,
+            benchmark="browser-agent-amazon-cookie-payment",
+            environment="local",
+            min_samples=20,
+        )
+
+    assert baselines == {}
+    assert calls == ["browser.event"]
+
+
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
     """Raw idea kernels have a home before they become runnable evals."""
     from benchmarks.long_horizon import load_idea_bank
@@ -11905,7 +12011,7 @@ async def run_all_tests():
     r.record("logical_tool_counts_ignore_progress", test_logical_tool_counts_ignore_progress_messages)
     r.record(
         "logical_tool_counts_model_facing_routed_calls",
-        test_logical_tool_counts_include_model_facing_routed_calls,
+        test_logical_tool_counts_canonicalize_model_facing_routed_calls,
     )
     r.record("root_exact_tool_count_fail_fast", test_root_exact_tool_count_fails_fast_after_duplicate_call)
     r.record("message_side_effect_fast_cache_off", test_message_side_effect_benchmarks_force_fast_cache_off)
@@ -11943,8 +12049,8 @@ async def run_all_tests():
         test_mid_run_feedback_schema_evaluator_requires_exact_stability,
     )
     r.record(
-        "toast_nopa_routes_to_toast",
-        test_toast_nopa_benchmark_routes_browser_to_toast_not_generic_search,
+        "toast_nopa_semantic_outcome_validation",
+        test_toast_nopa_benchmark_uses_semantic_outcome_validation,
     )
     r.record(
         "payment_benchmark_bundled_frontend",
@@ -12179,12 +12285,12 @@ async def run_all_tests():
         test_approval_request_details_can_require_item_name_and_amount,
     )
     r.record(
-        "amazon_beanie_clean_completed_purchase",
-        test_amazon_beanie_catalog_requires_clean_completed_cart_purchase,
+        "amazon_beanie_unresolved_write_lock_catalog",
+        test_amazon_beanie_catalog_stops_at_unresolved_final_write_lock,
     )
     r.record(
-        "amazon_beanie_exactly_one_payment_or_write_lock",
-        test_amazon_beanie_accepts_exactly_one_payment_or_write_lock,
+        "amazon_beanie_write_lock_only",
+        test_amazon_beanie_accepts_only_one_unresolved_write_lock,
     )
     r.record(
         "live_paid_bookings_payment_only",
@@ -12195,16 +12301,20 @@ async def run_all_tests():
         test_live_paid_bookings_require_grounded_payment_site,
     )
     await r.record_async(
-        "amazon_beanie_poll_rejects_second_or_unrelated_approval",
-        test_amazon_beanie_poll_rejects_second_or_unrelated_approval_without_resolving_it,
+        "amazon_beanie_poll_stops_unresolved",
+        test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it,
     )
     await r.record_async(
-        "invalid_payment_receipt_records_attention",
-        test_invalid_payment_receipt_still_records_typed_attention_observation,
+        "toast_semantic_receipt_values_use_llm",
+        test_toast_semantic_receipt_values_are_decided_by_llm_judge,
     )
     await r.record_async(
         "live_paid_booking_poll_stops_unapproved",
         test_live_paid_booking_poll_stops_without_approving_payment,
+    )
+    await r.record_async(
+        "toast_poll_stops_unapproved",
+        test_toast_poll_stops_without_responding_to_payment_approval,
     )
     r.record(
         "alchemy_sauna_grounded_payment_approval",
@@ -12371,5 +12481,15 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_accepts_org_client_credentials_from_dotenv",
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+        "agent_latency_time_containment_scales",
+        test_agent_latency_time_containment_scales_and_picks_narrowest_parent,
+    )
+    r.record(
+        "agent_latency_context_dir_exclusive_pin",
+        test_agent_latency_context_dir_exclusively_pins_one_isolated_run,
+    )
+    r.record(
+        "agent_latency_baseline_lookup_dedupes_immature_keys",
+        test_agent_latency_baseline_lookup_deduplicates_immature_span_keys,
     )
     return r.all_passed

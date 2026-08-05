@@ -2232,6 +2232,8 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
                     tool_call_id = call.get("tool_call_id")
                     if not isinstance(tool_name, str) or not tool_name or not tool_call_id:
                         continue
+                    if tool_name == "spawn_agent" and call.get("type") == "browser":
+                        tool_name = "spawn_browser_agent"
                     requested_key = (tool_name, str(tool_call_id))
                     if requested_key in seen:
                         continue

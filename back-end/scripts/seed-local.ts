@@ -18,8 +18,9 @@ import {
   syncCookieBundleCredentials,
   syncCookieCredentials,
   syncIntegrationCredentials,
-  syncOriginCredentials,
+  syncOriginBlobCredentials,
   syncPagedCredentials,
+  ORIGIN_META_SELECT,
   syncPasskeyCredentialRows,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
@@ -47,7 +48,8 @@ if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL) {
   );
 }
 
-// Parse .env file directly to get remote DB URL
+// Parse .env directly to get the normal remote DB URL. Operators may route
+// that same trusted connection through a local tunnel without editing .env.
 // (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
 // benchmark runs may explicitly source compute tokens from the already-verified
 // shared workspace DB so a production-side cooldown cannot invalidate a local
@@ -56,7 +58,10 @@ const envPath = resolve(__dirname, '..', '.env');
 const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
 const REMOTE_URL = COMPUTE_TOKENS_ONLY
   ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
-  : selectRemoteDatabaseUrl(envVars);
+  : selectRemoteDatabaseUrl({
+      ...envVars,
+      SEED_REMOTE_DATABASE_URL: process.env.SEED_REMOTE_DATABASE_URL,
+    });
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
@@ -119,15 +124,26 @@ function pagedArgs(where: unknown, page?: { skip: number; take: number }) {
     : { where: where as never };
 }
 
+/**
+ * Origin pages carry identity + `hash` only. The payload column is fetched
+ * separately, as text, and only for rows whose hash actually changed — see
+ * `syncOriginBlobCredentials`.
+ */
+function pagedOriginArgs(where: unknown, page?: { skip: number; take: number }) {
+  return { ...pagedArgs(where, page), select: ORIGIN_META_SELECT };
+}
+
 const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
   {
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
-    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) =>
+      remote.localStorageOrigin.findMany(pagedOriginArgs(where, page)),
+    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedOriginArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) =>
+      remote.cacheStorageOrigin.findMany(pagedOriginArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
@@ -136,20 +152,15 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
 );
 
 /**
- * Page sizes are per-table because the blobs are not uniform. Peak heap is
- * driven by (page size x row size), so the right page is the one that keeps
- * that product bounded — a row count alone is not a memory bound.
+ * Origin pages now carry identity + `hash` only — never the payload — so page
+ * size no longer sets the memory bound at all. `syncOriginBlobCredentials`
+ * moves payloads in a fixed byte budget per round trip, which means peak memory
+ * is a constant regardless of both of these numbers.
  *
- * LocalStorageOrigin.entries averages ~23KB over ~3.7k prod rows, so a 100-row
- * page is a couple of MB. IndexedDBOrigin.databases averages ~2.5MB over only
- * 16 rows and its largest single row is 38MB uncompressed, so the same 100-row
- * page would read the entire table and reproduce the original OOM.
+ * They remain per-table because they still set how many rows one metadata read
+ * covers: LocalStorageOrigin has ~3.7k prod rows, IndexedDBOrigin only 16.
  */
 const ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_ORIGIN_PAGE_SIZE ?? 100);
-// Measured: with a 400MB heap the 38MB row still OOMs at page size 1, and it
-// succeeds at 900MB — so ~0.5-0.9GB is the irreducible cost of parsing that one
-// row. Peak is therefore bounded by the LARGEST SINGLE ROW, which is the best
-// achievable without streaming the blob itself, and fits any bench guest.
 const BLOB_ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_BLOB_ORIGIN_PAGE_SIZE ?? 1);
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
@@ -444,7 +455,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     async () =>
       syncPagedCredentials(
         (page) => scopedRemoteBrowserAuth.localStorageOrigin(page),
-        (origins) => syncOriginCredentials(local.localStorageOrigin, origins),
+        (origins) => syncOriginBlobCredentials(remote, local, 'LocalStorageOrigin', origins),
         ORIGIN_SYNC_PAGE_SIZE
       ),
     failures
@@ -452,13 +463,13 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
 
   // ── IndexedDB Origins ──
   // Paged: few rows, but `databases` is the single largest blob in the seed
-  // (one prod row is 38MB uncompressed).
+  // (one prod row is 41MB uncompressed).
   await syncRequiredTable(
     'IndexedDB',
     async () =>
       syncPagedCredentials(
         (page) => scopedRemoteBrowserAuth.indexedDBOrigin(page),
-        (origins) => syncOriginCredentials(local.indexedDBOrigin, origins),
+        (origins) => syncOriginBlobCredentials(remote, local, 'IndexedDBOrigin', origins),
         BLOB_ORIGIN_SYNC_PAGE_SIZE
       ),
     failures
@@ -480,7 +491,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
     async () =>
       syncPagedCredentials(
         (page) => scopedRemoteBrowserAuth.cacheStorageOrigin(page),
-        (caches) => syncOriginCredentials(local.cacheStorageOrigin, caches),
+        (caches) => syncOriginBlobCredentials(remote, local, 'CacheStorageOrigin', caches),
         ORIGIN_SYNC_PAGE_SIZE
       ),
     failures
@@ -755,7 +766,14 @@ async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> 
 // `localCookie.upsert()` invocation failed; the identical sync succeeded
 // seconds later). Every sync step is an idempotent upsert, so bounded retries
 // are safe. Mirrors syncComputeTokensWithRetries above.
-const BROWSER_AUTH_SYNC_ATTEMPTS = 3;
+// Retries now live per-table in syncRequiredCredentialTable, which re-runs ONLY
+// the table that failed. Keeping a second multiplier here would restore the
+// exact regression this replaced: a transient error on a late table re-read the
+// whole graph (21k cookies + 3.1k bundles + 3.7k origins + a 38MB blob) up to
+// three times and blew the bench live-fixture budget, so the task produced no
+// verdict at all (descend antibot, browser-biometrics-webdecoy, 2026-07-27).
+// One pass here; the bounded per-table budget absorbs transients.
+const BROWSER_AUTH_SYNC_ATTEMPTS = 1;
 
 async function syncBrowserAuthWithRetries(): Promise<void> {
   let lastError: unknown = null;
