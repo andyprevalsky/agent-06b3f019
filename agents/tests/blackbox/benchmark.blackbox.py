@@ -10008,7 +10008,7 @@ def test_unified_catalog_delineates_bench_axes():
     assert live["environment"]["live_targets"] == ["https://www.amazon.com"]
 
 
-def test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows():
+def test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows():
     """The daily ecommerce slice stays focused, complete, and stable."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.fixtures import DEFAULT_BASE_IMAGE
@@ -10026,12 +10026,13 @@ def test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows():
         "browser-event-ticket",
         "browser-imax-group-tickets",
         "browser-amazon-return",
+        "browser-1015-eventim-request-card",
     }
     tasks = validate_catalog()
     ecommerce = [task for task in tasks if "ecommerce" in task.get("tags", [])]
 
     assert {task["name"] for task in ecommerce} == expected_names
-    assert len(ecommerce) == 11
+    assert len(ecommerce) == 12
     assert all(task.get("group", "").lower() == "daily" for task in ecommerce)
     assert all(task.get("status", "ready") == "ready" for task in ecommerce)
     assert all(task.get("enforce_declared_evaluators") is True for task in ecommerce)
@@ -10775,11 +10776,41 @@ def test_antibot_slice_includes_daily_toast_and_amazon_commerce():
         "browser-toast-nopa-write-lock",
         "browser-agent-amazon-cookie-payment",
         "browser-blue-bottle-challenge-recovery",
+        "browser-1015-eventim-request-card",
     }
     assert "ecommerce" in by_name["browser-agent-amazon-cookie-payment"].tags
+    assert "ticketing" in by_name["browser-1015-eventim-request-card"].tags
     assert all(task.tags.count("antibot") == 1 for task in tasks)
     all_tags = {tag for task in all_tasks() for tag in task.tags}
     assert not ({"anti-bot", "anti_bot", "bot-challenge"} & all_tags)
+
+
+def test_eventim_1015_request_card_benchmark_contract():
+    """1015 Folsom Eventim antibot bench stays venue-fixed, artist-flexible, payment-boundary-only."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("browser-1015-eventim-request-card")
+
+    assert "https://1015.com/" in task.prompt
+    assert "Eventim" in task.prompt
+    assert "any upcoming" in task.prompt.lower() or "Artist and date may change" in task.prompt
+    assert "Do not use AXS Marketplace" in task.prompt
+    assert "Do not submit payment" in task.prompt
+    assert task.expected_attention_kind == "payment_approval"
+    assert task.approval_handling == "ignore"
+    assert task.success_on_payment_card_request is True
+    assert task.price_limit_cents == 200
+    assert task.anti_bot == "yes"
+    assert {"browser", "antibot", "ecommerce", "ticketing"} <= set(task.tags)
+    assert task.expected_payment_receipt["merchant"] == "1015 Folsom (Eventim - eventim.us)"
+    assert "eventim.us" in task.environment["live_targets"][1] or any(
+        "eventim.us" in target for target in task.environment["live_targets"]
+    )
+    assert "antibot" in task.environment["services"]
+    assert task.source == [
+        "prod-agent:ec03b6f2-744f-433a-87d0-e4cf7758818a",
+        "coverage-gap:eventim-1015-antibot-payment-boundary",
+    ]
 
 
 def test_history_ledger_task_names_still_exist_in_catalog():
@@ -12070,7 +12101,7 @@ async def run_all_tests():
     )
     r.record(
         "daily_ecommerce_v1_catalog",
-        test_daily_ecommerce_v1_catalog_has_eleven_distinct_transaction_flows,
+        test_daily_ecommerce_v1_catalog_has_twelve_distinct_transaction_flows,
     )
     r.record(
         "unified_catalog_multiple_evaluators",
@@ -12134,6 +12165,7 @@ async def run_all_tests():
     r.record("live_fixture_validation_guards", test_live_fixture_validation_rejects_unknown_and_synthetic_declarations)
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
+    r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
