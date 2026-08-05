@@ -43,7 +43,7 @@ export function resolveSubscriptionCheckoutCredentials(
   const liveKey = liveKeyFromEnv !== '' ? liveKeyFromEnv : liveKeyFromAdmin;
   const testPriceId = (env.STRIPE_SUBSCRIPTION_PRICE_ID ?? '').trim();
   const livePriceId = (env.STRIPE_SUBSCRIPTION_PRICE_ID_LIVE ?? '').trim();
-  const isProduction = env.NODE_ENV === ('produc' + 'tion'); // pragma: allowlist secret
+  const isProduction = env.NODE_ENV === 'produc' + 'tion'; // pragma: allowlist secret
 
   if (isProduction) {
     const secretKey = isLiveSecretKey(liveKey)
