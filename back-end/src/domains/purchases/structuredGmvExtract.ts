@@ -63,6 +63,13 @@ function flattenEntries(
   prefix = '',
   out: Array<{ key: string; value: unknown }> = []
 ): Array<{ key: string; value: unknown }> {
+  if (Array.isArray(value)) {
+    for (let i = 0; i < value.length; i++) {
+      const path = prefix === '' ? String(i) : `${prefix}.${i}`;
+      flattenEntries(value[i], path, out);
+    }
+    return out;
+  }
   const record = asRecord(value);
   if (record === null) {
     if (prefix !== '') out.push({ key: prefix, value });
@@ -70,8 +77,7 @@ function flattenEntries(
   }
   for (const [key, child] of Object.entries(record)) {
     const path = prefix === '' ? key : `${prefix}.${key}`;
-    const nested = asRecord(child);
-    if (nested !== null) {
+    if (asRecord(child) !== null || Array.isArray(child)) {
       flattenEntries(child, path, out);
     } else {
       out.push({ key: path, value: child });
@@ -100,11 +106,12 @@ function parseMoneyToCents(value: unknown, treatAsCents: boolean): number | null
   }
   const match = text
     .replace(/\s+/g, '')
-    .match(/(?:\$|USD)?(-?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|-?\d+(?:\.\d{1,2})?)/i);
+    .match(/(?:\$|USD)?(-?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|-?\d+(?:\.\d{1,2})?)/i);
   if (match === null) return null;
   const amount = Number.parseFloat(match[1].replace(/,/g, ''));
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  return Math.round(amount * 100);
+  // Formatted strings under *_cents keys are already cents (e.g. "1,250" / "$1250").
+  return treatAsCents ? Math.round(amount) : Math.round(amount * 100);
 }
 
 function normalizeConfirmation(value: unknown): string | null {

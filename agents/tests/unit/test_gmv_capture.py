@@ -12,6 +12,8 @@ def test_parse_money_to_cents_common_forms():
     assert parse_money_to_cents(12.34) == 1234
     assert parse_money_to_cents(500) == 50000
     assert parse_money_to_cents(500, treat_as_cents=True) == 500
+    assert parse_money_to_cents("1,250", treat_as_cents=True) == 1250
+    assert parse_money_to_cents("$1250", treat_as_cents=True) == 1250
     assert parse_money_to_cents("$0.00") is None
     assert parse_money_to_cents("free") is None
     assert parse_money_to_cents(None) is None
@@ -109,3 +111,25 @@ def test_extract_structured_gmv_rejects_prose_confirmation():
         )
         is None
     )
+
+
+def test_extract_structured_gmv_treat_as_cents_formatted_string():
+    capture = extract_structured_gmv(
+        {
+            "total_cents": "1,250",
+            "order_id": "ORD-CENTS-FMT",
+        }
+    )
+    assert capture is not None
+    assert capture["totalCents"] == 1250
+
+
+def test_extract_structured_gmv_list_nested():
+    capture = extract_structured_gmv(
+        {
+            "result": [{"order_id": "ORD-A1", "total": 42.0}],
+        }
+    )
+    assert capture is not None
+    assert capture["totalCents"] == 4200
+    assert capture["confirmationId"] == "ORD-A1"

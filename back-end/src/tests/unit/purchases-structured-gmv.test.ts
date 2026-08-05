@@ -127,6 +127,41 @@ async function main(): Promise<void> {
     });
   });
 
+  await withUser(async (userId) => {
+    const agentId = await seedAgent(userId);
+    // AgentCard spend from ~3 days ago must still cover a backfill whose
+    // occurredAt is in that same historical window (not Date.now()-24h).
+    const occurredAt = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId,
+        fingerprint: `agentcard-historical-${agentId}`,
+        merchant: 'Historical Merchant',
+        lineItemsJson: { lineItems: [], totalCents: 3400 },
+        totalCents: 3400,
+        status: PurchaseSpendStatus.CLEARED,
+        provider: 'agentcard',
+        createdAt: occurredAt,
+      },
+    });
+
+    const skipped = await recordStructuredGmv({
+      userId,
+      agentId,
+      structured: {
+        merchant: 'Historical Merchant',
+        total_cents: 3400,
+        order_id: 'HIST-CONF-01',
+      },
+      occurredAt,
+    });
+    assert.deepEqual(skipped, {
+      status: 'skipped',
+      reason: 'agentcard_purchase_exists',
+    });
+  });
+
   process.stdout.write('purchases structured gmv: passed\n');
 }
 

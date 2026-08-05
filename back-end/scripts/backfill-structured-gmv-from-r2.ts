@@ -21,10 +21,7 @@ import { readFileSync } from 'node:fs';
 
 import { extractStructuredGmv } from '../src/domains/purchases/structuredGmvExtract';
 import { recordStructuredGmv } from '../src/domains/purchases/structuredGmv';
-import {
-  decryptAndValidateArtifact,
-  readArchivedArtifact,
-} from '../src/providers/traceArchive';
+import { decryptAndValidateArtifact, readArchivedArtifact } from '../src/providers/traceArchive';
 
 function parseArgs(argv: string[]): {
   apply: boolean;
@@ -39,15 +36,33 @@ function parseArgs(argv: string[]): {
   const concurrencyIdx = argv.indexOf('--concurrency');
   const idsIdx = argv.indexOf('--ids');
   const concurrencyRaw = concurrencyIdx >= 0 ? argv[concurrencyIdx + 1] : undefined;
+  const parsed =
+    concurrencyRaw !== undefined && /^\d+$/.test(concurrencyRaw)
+      ? Number.parseInt(concurrencyRaw, 10)
+      : 20;
   return {
     apply,
-    concurrency:
-      concurrencyRaw !== undefined && /^\d+$/.test(concurrencyRaw)
-        ? Number.parseInt(concurrencyRaw, 10)
-        : 20,
+    concurrency: Math.max(1, parsed),
     idsPath:
-      idsIdx >= 0 ? (argv[idsIdx + 1] ?? '/tmp/r2-end-fixture-ids.json') : '/tmp/r2-end-fixture-ids.json',
+      idsIdx >= 0
+        ? (argv[idsIdx + 1] ?? '/tmp/r2-end-fixture-ids.json')
+        : '/tmp/r2-end-fixture-ids.json',
   };
+}
+
+function loadIds(idsPath: string): string[] {
+  const parsed: unknown = JSON.parse(readFileSync(idsPath, 'utf8'));
+  if (!Array.isArray(parsed)) {
+    throw new Error(`ids file must be a JSON string array: ${idsPath}`);
+  }
+  const ids: string[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new Error(`ids file must contain only non-empty strings: ${idsPath}`);
+    }
+    ids.push(item);
+  }
+  return ids;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -106,12 +121,21 @@ async function collectCandidates(rootAgentId: string): Promise<Candidate[]> {
   const agents = Array.isArray(rows.Agent) ? (rows.Agent as unknown[]) : [];
   const messages = Array.isArray(rows.Message) ? (rows.Message as unknown[]) : [];
 
+  // Resolve root goal first so synthetic-test filtering cannot fail open on ''.
   let rootGoal = '';
+  for (const agent of agents) {
+    const record = asRecord(agent);
+    if (record === null) continue;
+    if (record.parentAgentId == null && typeof record.goal === 'string') {
+      rootGoal = record.goal;
+      break;
+    }
+  }
+
   const out: Candidate[] = [];
   for (const agent of agents) {
     const record = asRecord(agent);
     if (record === null) continue;
-    if (record.parentAgentId == null && typeof record.goal === 'string') rootGoal = record.goal;
     if (record.structuredResponse === undefined || record.structuredResponse === null) continue;
     if (extractStructuredGmv(record.structuredResponse) === null) continue;
     if (typeof record.userId !== 'string' || typeof record.id !== 'string') continue;
@@ -165,19 +189,32 @@ async function main(): Promise<void> {
   process.env.TRACE_ARCHIVE_BACKEND = process.env.TRACE_ARCHIVE_BACKEND || 'r2';
   process.env.TRACE_ARCHIVE_ENABLED = process.env.TRACE_ARCHIVE_ENABLED || 'true';
 
-  const ids = JSON.parse(readFileSync(idsPath, 'utf8')) as string[];
+  const ids = loadIds(idsPath);
   console.error(`R2 GMV backfill mode=${apply ? 'apply' : 'dry-run'} fixtures=${ids.length}`);
 
   const all: Candidate[] = [];
   let done = 0;
+  let errors = 0;
   await mapPool(ids, concurrency, async (rootAgentId) => {
-    const candidates = await collectCandidates(rootAgentId);
-    all.push(...candidates);
-    done += 1;
-    if (done % 100 === 0 || done === ids.length) {
-      console.error(`scan ${done}/${ids.length} candidates=${all.length}`);
+    try {
+      const candidates = await collectCandidates(rootAgentId);
+      all.push(...candidates);
+      done += 1;
+      if (done % 100 === 0 || done === ids.length) {
+        console.error(`scan ${done}/${ids.length} candidates=${all.length} errors=${errors}`);
+      }
+      return candidates;
+    } catch (error) {
+      errors += 1;
+      done += 1;
+      console.error(
+        `fixture ${rootAgentId} failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      if (done % 100 === 0 || done === ids.length) {
+        console.error(`scan ${done}/${ids.length} candidates=${all.length} errors=${errors}`);
+      }
+      return [];
     }
-    return candidates;
   });
 
   const isSyntheticTestPayment = (goal: string): boolean =>
@@ -236,6 +273,7 @@ async function main(): Promise<void> {
         mode: apply ? 'apply' : 'dry-run',
         fixtures: ids.length,
         candidatesRaw: all.length,
+        fixtureErrors: errors,
         skippedSyntheticTestPayment: skippedSynthetic,
         uniqueConfirmations: unique.size,
         created,

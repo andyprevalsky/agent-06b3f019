@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 _MONEY_RE = re.compile(
-    r"(?:\$|USD\s*)?(?P<amount>-?\d{1,3}(?:,\d{3})*(?:\.\d{1,2})?|-?\d+(?:\.\d{1,2})?)",
+    r"(?:\$|USD\s*)?(?P<amount>-?\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|-?\d+(?:\.\d{1,2})?)",
     re.IGNORECASE,
 )
 _CENTS_KEY_RE = re.compile(
@@ -79,19 +79,27 @@ def parse_money_to_cents(value: Any, *, treat_as_cents: bool = False) -> Optiona
     if match is None:
         return None
     try:
-        cents = int(round(float(match.group("amount").replace(",", "")) * 100))
+        amount = float(match.group("amount").replace(",", ""))
+        # Formatted strings under *_cents keys are already cents (e.g. "1,250" / "$1250").
+        cents = int(round(amount if treat_as_cents else amount * 100))
     except ValueError:
         return None
     return cents if cents > 0 else None
 
 
 def _flatten(value: Any, prefix: str = "") -> List[Tuple[str, Any]]:
+    if isinstance(value, list):
+        out: List[Tuple[str, Any]] = []
+        for i, child in enumerate(value):
+            path = str(i) if not prefix else f"{prefix}.{i}"
+            out.extend(_flatten(child, path))
+        return out
     if not isinstance(value, dict):
         return [(prefix, value)] if prefix else []
     out: List[Tuple[str, Any]] = []
     for key, child in value.items():
         path = key if not prefix else f"{prefix}.{key}"
-        if isinstance(child, dict):
+        if isinstance(child, (dict, list)):
             out.extend(_flatten(child, path))
         else:
             out.append((path, child))

@@ -10,10 +10,7 @@ import 'dotenv/config';
 import { readFileSync, writeFileSync } from 'node:fs';
 
 import { extractStructuredGmv } from '../src/domains/purchases/structuredGmvExtract';
-import {
-  decryptAndValidateArtifact,
-  readArchivedArtifact,
-} from '../src/providers/traceArchive';
+import { decryptAndValidateArtifact, readArchivedArtifact } from '../src/providers/traceArchive';
 
 function parseArgs(argv: string[]): {
   concurrency: number;
@@ -24,15 +21,33 @@ function parseArgs(argv: string[]): {
   const queryIdx = argv.indexOf('--query');
   const idsIdx = argv.indexOf('--ids');
   const concurrencyRaw = concurrencyIdx >= 0 ? argv[concurrencyIdx + 1] : undefined;
-  const concurrency =
+  const parsed =
     concurrencyRaw !== undefined && /^\d+$/.test(concurrencyRaw)
       ? Number.parseInt(concurrencyRaw, 10)
       : 25;
   return {
-    concurrency,
+    concurrency: Math.max(1, parsed),
     query: queryIdx >= 0 ? (argv[queryIdx + 1] ?? null) : null,
-    idsPath: idsIdx >= 0 ? (argv[idsIdx + 1] ?? '/tmp/r2-end-fixture-ids.json') : '/tmp/r2-end-fixture-ids.json',
+    idsPath:
+      idsIdx >= 0
+        ? (argv[idsIdx + 1] ?? '/tmp/r2-end-fixture-ids.json')
+        : '/tmp/r2-end-fixture-ids.json',
   };
+}
+
+function loadIds(idsPath: string): string[] {
+  const parsed: unknown = JSON.parse(readFileSync(idsPath, 'utf8'));
+  if (!Array.isArray(parsed)) {
+    throw new Error(`ids file must be a JSON string array: ${idsPath}`);
+  }
+  const ids: string[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'string' || item.trim() === '') {
+      throw new Error(`ids file must contain only non-empty strings: ${idsPath}`);
+    }
+    ids.push(item);
+  }
+  return ids;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -79,7 +94,10 @@ type Hit = {
   confirmationKey: string;
 };
 
-async function scanBundle(rootAgentId: string, query: string | null): Promise<{
+async function scanBundle(
+  rootAgentId: string,
+  query: string | null
+): Promise<{
   hits: Hit[];
   queryHit: boolean;
   goal: string;
@@ -185,8 +203,10 @@ async function main(): Promise<void> {
   process.env.TRACE_ARCHIVE_BACKEND = process.env.TRACE_ARCHIVE_BACKEND || 'r2';
   process.env.TRACE_ARCHIVE_ENABLED = process.env.TRACE_ARCHIVE_ENABLED || 'true';
 
-  const ids = JSON.parse(readFileSync(idsPath, 'utf8')) as string[];
-  console.error(`scanning ${ids.length} end fixtures concurrency=${concurrency} query=${query ?? '*'}`);
+  const ids = loadIds(idsPath);
+  console.error(
+    `scanning ${ids.length} end fixtures concurrency=${concurrency} query=${query ?? '*'}`
+  );
 
   let done = 0;
   const allHits: Hit[] = [];

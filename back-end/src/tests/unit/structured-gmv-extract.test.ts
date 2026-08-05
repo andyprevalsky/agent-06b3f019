@@ -97,4 +97,28 @@ assert.equal(
   null
 );
 
+// *_cents keys with formatted strings must stay in cents (not *100).
+assert.equal(
+  extractStructuredGmv({
+    total_cents: '1,250',
+    order_id: 'ORD-CENTS-FMT',
+  })?.totalCents,
+  1250
+);
+assert.equal(
+  extractStructuredGmv({
+    total_cents: '$1250',
+    confirmation_code: 'CONF-CENTS-DOLLAR',
+  })?.totalCents,
+  1250
+);
+
+// List-nested structured outputs must yield amount + confirmation.
+const listNested = extractStructuredGmv({
+  result: [{ order_id: 'ORD-A1', total: 42.0 }],
+});
+assert.ok(listNested !== null);
+assert.equal(listNested.totalCents, 4200);
+assert.equal(listNested.confirmationId, 'ORD-A1');
+
 process.stdout.write('structured gmv extract: passed\n');

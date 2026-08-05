@@ -54,14 +54,18 @@ function buildConfirmationFingerprint(userId: string, confirmationId: string): s
 
 async function agentcardCoversPurchase(
   agentId: string | undefined,
-  totalCents: number
+  totalCents: number,
+  occurredAt?: Date
 ): Promise<string | null> {
   if (agentId === undefined) return null;
+  // Historical backfill must look back from occurredAt, not wall-clock now —
+  // otherwise AgentCard rows from the order window are invisible.
+  const anchorMs = (occurredAt ?? new Date()).getTime();
   const covered = await repo.findAgentcardCoveringPurchase({
     agentId,
     totalCents,
     statuses: AGENTCARD_COVERED_STATUSES,
-    since: new Date(Date.now() - AGENTCARD_LOOKBACK_MS),
+    since: new Date(anchorMs - AGENTCARD_LOOKBACK_MS),
   });
   return covered?.id ?? null;
 }
@@ -148,7 +152,7 @@ export async function recordStructuredGmv(input: {
   const agentId =
     trimmedAgentId !== undefined && trimmedAgentId !== '' ? trimmedAgentId : undefined;
 
-  const agentcardId = await agentcardCoversPurchase(agentId, capture.totalCents);
+  const agentcardId = await agentcardCoversPurchase(agentId, capture.totalCents, input.occurredAt);
   if (agentcardId !== null) {
     log.info('Skipping structured GMV; AgentCard purchase already covers agent+amount', {
       agentId,

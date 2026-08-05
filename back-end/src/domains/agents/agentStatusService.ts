@@ -128,14 +128,21 @@ export async function updateAgentStatus(
   // output containing BOTH a USD amount and an order/confirmation id.
   // Dynamic import keeps agents/purchases domains decoupled for layer-deps.
   if (body.status === 'COMPLETED' && body.structuredResponse !== undefined) {
-    void import('../purchases/structuredGmv').then(({ maybeRecordStructuredGmv }) =>
-      maybeRecordStructuredGmv({
-        userId: before.userId,
-        agentId,
-        structured: body.structuredResponse,
-        source: 'agent.structuredResponse',
-      })
-    );
+    void import('../purchases/structuredGmv')
+      .then(({ maybeRecordStructuredGmv }) =>
+        maybeRecordStructuredGmv({
+          userId: before.userId,
+          agentId,
+          structured: body.structuredResponse,
+          source: 'agent.structuredResponse',
+        })
+      )
+      .catch((error: unknown) => {
+        log.warn('Structured GMV dynamic import/record failed', {
+          agent_id: agentId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      });
   }
   const firstRootTerminal =
     TERMINAL_STATUSES.has(body.status) &&
