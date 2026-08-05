@@ -17,6 +17,21 @@ run_required_service_exit_code() {
 run_process_env_value() {
   local pid="$1"
   local key="$2"
+  local environ_path value
+
+  # Prefer /proc/<pid>/environ: it is the process's own env block. `ps eww`
+  # mixes in the parent's exported environment (often with shell-quoted values),
+  # so `tail -1` can return the parent's TEMPORAL_TASK_QUEUE / BACKEND_API_URL
+  # and the stale-worker killer silently skips the fixture it should reap.
+  environ_path="/proc/${pid}/environ"
+  if [ -r "$environ_path" ]; then
+    value="$(
+      tr '\0' '\n' <"$environ_path" 2>/dev/null | sed -n "s/^${key}=//p" | tail -1
+    )"
+    printf '%s\n' "$value"
+    return 0
+  fi
+
   ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | sed -n "s/^${key}=//p" | tail -1
 }
 
