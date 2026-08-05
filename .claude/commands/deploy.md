@@ -411,20 +411,25 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these thirteen independent suites without
+The concurrent runner executes exactly these eighteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+`bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
 `bash scripts/tests/workflow-deployment-migration.test.sh`,
+`bash scripts/tests/agent-surface-hash.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
 `python3 scripts/tests/deploy-review-cycle.test.py`, and
 `bash scripts/tests/run-deploy-stage.test.sh`, and
 `python3 scripts/tests/run-deploy-structural-gates.test.py`, and
-`python3 scripts/tests/deploy-live-probes.test.py`.
+`python3 scripts/tests/deploy-live-probes.test.py`,
+`bash scripts/tests/run-process-cleanup.test.sh`,
+`bash scripts/tests/run-seed-exit-code.test.sh`, and
+`bash scripts/tests/run-public-tunnel-routing.test.sh`.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \

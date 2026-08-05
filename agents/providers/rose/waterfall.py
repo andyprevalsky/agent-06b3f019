@@ -67,10 +67,30 @@ def _openrouter_tools(tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Di
     return out or None
 
 
-def _openrouter_tool_choice(tool_choice: Any) -> Any:
+def _rejects_named_tool_choice(model: str) -> bool:
+    """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
+
+    Observed as `INVALID_ARGUMENT` on `google/gemini-*` routes. Because the
+    named form is only sent for forced-tool calls, this turned every waterfall
+    step that reached a Google model into a hard failure — and when Google was
+    the last reachable model (Anthropic excluded, OpenAI out of credits) the
+    whole call died with RoseAllFailed even though the agent's work had already
+    succeeded.
+    """
+    return model.lower().startswith("google/")
+
+
+def _openrouter_tool_choice(tool_choice: Any, model: str = "") -> Any:
     if tool_choice == "any":
         return "required"
     if isinstance(tool_choice, dict) and isinstance(tool_choice.get("name"), str):
+        # Degrade to "required" only where the named form is rejected outright.
+        # This does not loosen the contract: the caller re-checks that exactly
+        # one tool came back and that it is the required one
+        # (`helpers/llm.py` raises LLMStructuredOutputError otherwise), so a
+        # model that picks a different tool still fails loudly.
+        if _rejects_named_tool_choice(model):
+            return "required"
         return {"type": "function", "function": {"name": tool_choice["name"]}}
     return tool_choice
 
@@ -102,7 +122,7 @@ def build_openrouter_body(
     if openrouter_tools:
         body["tools"] = openrouter_tools
     if tool_choice is not None and openrouter_tools:
-        body["tool_choice"] = _openrouter_tool_choice(tool_choice)
+        body["tool_choice"] = _openrouter_tool_choice(tool_choice, model)
     if response_format is not None:
         body["response_format"] = response_format
     if temperature is not None:

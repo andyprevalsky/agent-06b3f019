@@ -211,6 +211,64 @@ PY
 git -C "$pydantic_field_repo" add agents/browser_tools/schemas.py
 expect_fail "$pydantic_field_repo" "Pydantic tool Field description requires approval"
 
+zod_description_repo="$(new_repo zod-description)"
+mkdir -p "$zod_description_repo/back-end/src/providers/smsSupervisor"
+cat >"$zod_description_repo/back-end/src/providers/smsSupervisor/schema.ts" <<'TS'
+import { z } from 'zod';
+
+const budgetDollars = z
+  .number()
+  .nullable()
+  .describe(
+    'Agent-run budget for LLM and metered tool calls only. Never include purchase cost.'
+  );
+TS
+git -C "$zod_description_repo" add back-end/src/providers/smsSupervisor/schema.ts
+expect_fail "$zod_description_repo" "Zod schema description requires approval"
+expect_flag_pass "$zod_description_repo" "approval flag permits a Zod schema description"
+
+# A guard that only matches the bare `zod` specifier is bypassed by the
+# versioned entrypoint, and one that only scans .ts/.js is bypassed by .mjs.
+zod_subpath_repo="$(new_repo zod-subpath)"
+mkdir -p "$zod_subpath_repo/back-end/src/providers/tools"
+cat >"$zod_subpath_repo/back-end/src/providers/tools/schema.mjs" <<'MJS'
+import { z } from 'zod/v4';
+
+export const query = z
+  .string()
+  .describe('Search the user local data. Prefer this over the public web.');
+MJS
+git -C "$zod_subpath_repo" add back-end/src/providers/tools/schema.mjs
+expect_fail "$zod_subpath_repo" "Zod subpath import in .mjs requires approval"
+expect_flag_pass "$zod_subpath_repo" "approval flag permits a zod subpath .mjs description"
+
+zod_description_edit_repo="$(new_repo zod-description-edit)"
+mkdir -p "$zod_description_edit_repo/src"
+cat >"$zod_description_edit_repo/src/schema.ts" <<'TS'
+import { z } from 'zod';
+
+export const BudgetSchema = z.number().nullable().describe(
+  'Old model-visible budget guidance.'
+);
+TS
+git -C "$zod_description_edit_repo" add src/schema.ts
+git -C "$zod_description_edit_repo" commit -q -m "seed Zod description"
+sed -i.bak 's/Old model-visible/New model-visible/' "$zod_description_edit_repo/src/schema.ts"
+rm "$zod_description_edit_repo/src/schema.ts.bak"
+git -C "$zod_description_edit_repo" add src/schema.ts
+expect_fail "$zod_description_edit_repo" "editing existing multiline Zod description requires approval"
+expect_flag_pass "$zod_description_edit_repo" "approval flag permits a Zod description text edit"
+
+unrelated_describe_repo="$(new_repo unrelated-describe)"
+mkdir -p "$unrelated_describe_repo/src"
+cat >"$unrelated_describe_repo/src/workflow.ts" <<'TS'
+export async function inspectWorkflow(handle: WorkflowHandle) {
+  return handle.describe();
+}
+TS
+git -C "$unrelated_describe_repo" add src/workflow.ts
+expect_pass "$unrelated_describe_repo" "unrelated describe API call is not prompt text"
+
 description_passthrough_repo="$(new_repo description-passthrough)"
 mkdir -p "$description_passthrough_repo/src"
 cat >"$description_passthrough_repo/src/registry.ts" <<'TS'

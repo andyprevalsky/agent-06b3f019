@@ -36,6 +36,7 @@ import { config } from 'dotenv';
 import { z } from 'zod';
 import { Configuration, PlaidApi, PlaidEnvironments, Products } from 'plaid';
 import { prisma } from '../../providers/database';
+import { retryWithBackoff } from '../../providers/retry';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL ?? 'http://localhost:3001';
@@ -56,6 +57,7 @@ const sandboxClient = new PlaidApi(
   new Configuration({
     basePath: PlaidEnvironments.sandbox,
     baseOptions: {
+      timeout: 30_000,
       headers: {
         'PLAID-CLIENT-ID': PLAID_CLIENT_ID,
         'PLAID-SECRET': PLAID_SECRET,
@@ -206,16 +208,39 @@ async function createAnonSession(): Promise<{ accessToken: string; userId: strin
  * Plaid's docs recommend for backend testing without going through Link.
  */
 async function mintSandboxPublicToken(): Promise<string> {
-  const resp = await sandboxClient.sandboxPublicTokenCreate({
-    institution_id: 'ins_109508', // First Platypus Bank (Plaid sandbox)
-    initial_products: [Products.Transactions],
-    options: {
-      transactions: {
-        start_date: '2024-01-01',
-        end_date: '2024-12-31',
+  const resp = await retryWithBackoff(
+    () =>
+      sandboxClient.sandboxPublicTokenCreate({
+        institution_id: 'ins_109508', // First Platypus Bank (Plaid sandbox)
+        initial_products: [Products.Transactions],
+        options: {
+          transactions: {
+            start_date: '2024-01-01',
+            end_date: '2024-12-31',
+          },
+        },
+      }),
+    {
+      maxRetries: 3,
+      fixedDelays: [500, 1_500],
+      isRetryable: (error) => {
+        if (error === null || typeof error !== 'object') return false;
+        const candidate = error as {
+          code?: unknown;
+          response?: { status?: unknown };
+        };
+        const status = candidate.response?.status;
+        return (
+          status === 429 ||
+          (typeof status === 'number' && status >= 500) ||
+          candidate.code === 'ECONNABORTED' ||
+          candidate.code === 'ECONNRESET' ||
+          candidate.code === 'ETIMEDOUT'
+        );
       },
-    },
-  });
+      component: 'PlaidSandboxPublicToken',
+    }
+  );
   return resp.data.public_token;
 }
 

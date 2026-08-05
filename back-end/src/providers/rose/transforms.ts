@@ -246,6 +246,104 @@ interface ExtractedTools {
 }
 
 /**
+ * Rewrite `anyOf: [T, {type: "null"}]` — how an OpenAI-strict schema spells
+ * "optional", since strict mode requires every property — as plain `T` that is
+ * absent from `required`.
+ *
+ * Anthropic caps a request at 16 union-typed parameters; the SMS supervisor's
+ * grep tool alone declares 24, so without this every claudeAuth SMS round is
+ * rejected with `invalid_request_error` and burns the paid waterfall. Anthropic
+ * expresses optionality through `required`, so the collapsed schema carries the
+ * same contract with no unions at all.
+ */
+function relaxNullableUnionsForAnthropic(schema: unknown): unknown {
+  if (!schema || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map(relaxNullableUnionsForAnthropic);
+
+  const out: JsonSchema = { ...(schema as JsonSchema) };
+  const optionalKeys = new Set<string>();
+
+  if (out.properties && typeof out.properties === 'object') {
+    const newProps: JsonSchema = {};
+    for (const [key, value] of Object.entries(out.properties as JsonSchema)) {
+      const relaxed = relaxNullableUnionsForAnthropic(value) as JsonSchema;
+      const unwrapped = unwrapNullableUnion(relaxed);
+      if (unwrapped) {
+        newProps[key] = unwrapped;
+        optionalKeys.add(key);
+      } else {
+        newProps[key] = relaxed;
+      }
+    }
+    out.properties = newProps;
+  }
+
+  if (optionalKeys.size > 0 && Array.isArray(out.required)) {
+    out.required = (out.required as unknown[]).filter(
+      (key) => typeof key !== 'string' || !optionalKeys.has(key)
+    );
+  }
+
+  // Array items and typed-map values carry their own nullable unions, which
+  // count against the same 16-union cap. Unlike a property there is no
+  // `required` list to express optionality here, so the union collapses to its
+  // value branch outright.
+  for (const keyword of ['items', 'additionalProperties'] as const) {
+    const child = out[keyword];
+    if (!child || typeof child !== 'object' || Array.isArray(child)) continue;
+    const relaxed = relaxNullableUnionsForAnthropic(child) as JsonSchema;
+    out[keyword] = unwrapNullableUnion(relaxed) ?? relaxed;
+  }
+  if (out.$defs && typeof out.$defs === 'object') {
+    const newDefs: JsonSchema = {};
+    for (const [key, value] of Object.entries(out.$defs as JsonSchema)) {
+      newDefs[key] = relaxNullableUnionsForAnthropic(value);
+    }
+    out.$defs = newDefs;
+  }
+  for (const keyword of ['anyOf', 'oneOf', 'allOf'] as const) {
+    if (Array.isArray(out[keyword])) {
+      out[keyword] = (out[keyword] as unknown[]).map(relaxNullableUnionsForAnthropic);
+    }
+  }
+
+  return out;
+}
+
+/** Returns the value branch of a two-branch `T | null` union, else null. */
+function unwrapNullableUnion(schema: JsonSchema): JsonSchema | null {
+  const branches = (Array.isArray(schema.anyOf) ? schema.anyOf : schema.oneOf) as
+    JsonSchema[] | undefined;
+  if (!Array.isArray(branches) || branches.length !== 2) return null;
+  const valueBranch = branches.find((b) => b && typeof b === 'object' && b.type !== 'null');
+  const hasNullBranch = branches.some((b) => b && typeof b === 'object' && b.type === 'null');
+  if (!valueBranch || !hasNullBranch) return null;
+
+  const merged: JsonSchema = { ...valueBranch };
+  // The description hangs off the union wrapper, not the value branch, so
+  // collapsing without it would silently drop the model-facing field docs.
+  if (typeof schema.description === 'string') merged.description = schema.description;
+  return merged;
+}
+
+/**
+ * Read a tool-variant discriminator, which JSON-Schema generators spell two
+ * ways: `const: "name"` (a bare literal) and `enum: ["name"]` (what
+ * `z.discriminatedUnion` emits). Accepting only `const` silently rejected every
+ * discriminated-union envelope — including the SMS supervisor's — dropping it
+ * to the legacy single-schema path whose 27 nullable unions Anthropic refuses.
+ */
+function discriminatorName(toolField: JsonSchema | undefined): string | null {
+  if (!toolField || typeof toolField !== 'object') return null;
+  if (typeof toolField.const === 'string') return toolField.const;
+  const values = toolField.enum;
+  if (Array.isArray(values) && values.length === 1 && typeof values[0] === 'string') {
+    return values[0];
+  }
+  return null;
+}
+
+/**
  * Pull native Anthropic tools out of an OpenAI-style response_format whose
  * top-level shape is `{ properties: { tool_calls: { items: { anyOf: [...] } } } }`
  * — the supervisor / agent envelope where each anyOf variant is a tool with a
@@ -272,15 +370,14 @@ export function extractToolsFromResponseFormat(
   for (const variant of anyOf) {
     if (!variant || typeof variant !== 'object') return null;
     const variantProps = (variant as JsonSchema).properties as JsonSchema | undefined;
-    const toolField = variantProps?.tool as JsonSchema | undefined;
-    if (!toolField || !('const' in toolField)) return null;
+    if (discriminatorName(variantProps?.tool as JsonSchema | undefined) === null) return null;
   }
 
   const tools: Array<Record<string, unknown>> = [];
   for (const variant of anyOf) {
     const variantObj = variant as JsonSchema;
     const variantProps = { ...((variantObj.properties as JsonSchema | undefined) ?? {}) };
-    const toolName = (variantProps.tool as JsonSchema).const as string;
+    const toolName = discriminatorName(variantProps.tool as JsonSchema) as string;
     const description = (variantObj.description as string | undefined) ?? '';
 
     delete variantProps.tool;
@@ -300,12 +397,56 @@ export function extractToolsFromResponseFormat(
     tools.push({
       name: toolName,
       description,
-      input_schema: transformSchemaForAnthropic(inputSchema),
+      input_schema: relaxNullableUnionsForAnthropic(transformSchemaForAnthropic(inputSchema)),
     });
   }
 
   const responseFieldSchema = properties.response ?? { type: 'string' };
   return { tools, responseFieldSchema };
+}
+
+/**
+ * Stamp the OpenAI `type: "function"` discriminator onto every assistant
+ * tool_call before an OpenAI-dialect request goes out.
+ *
+ * Anthropic's transform reads `.function.name` directly and never needed it, so
+ * a constructor could omit it and still look correct everywhere we tested.
+ * Google validates strictly: without the discriminator it sees an assistant
+ * turn with no valid function calls followed by tool results, rejects the whole
+ * transcript with 400 "The conversation transcript is malformed", and the pool
+ * silently demotes to its weakest leg. Normalizing here means no current or
+ * future message constructor can reintroduce that failure.
+ */
+export function normalizeOpenAiToolCalls(messages: CompletionMessage[]): CompletionMessage[] {
+  return messages.map((message) => {
+    if (message.role !== 'assistant') return message;
+    if (!Array.isArray(message.tool_calls) || message.tool_calls.length === 0) return message;
+    return {
+      ...message,
+      tool_calls: message.tool_calls.map((toolCall) => {
+        // `CompletionMessage` also permits the flat `{id, name, arguments}`
+        // shape that the Anthropic and Responses transforms read. OpenAI's
+        // chat dialect has no such form, so lift it rather than passing
+        // through something even more malformed than the original defect.
+        const name = toolCall.function?.name ?? toolCall.name;
+        const args = toolCall.function?.arguments ?? toolCall.arguments;
+        if (typeof name !== 'string' || name.length === 0) return toolCall;
+        // The Responses dialect names this `call_id`; OpenAI's chat dialect
+        // requires `id`, and a tool result cannot be matched back to its call
+        // without it. Only synthesize the key when an identifier exists.
+        const id = toolCall.id ?? toolCall.call_id;
+        return {
+          ...toolCall,
+          ...(id === undefined ? {} : { id }),
+          type: 'function' as const,
+          function: {
+            name,
+            arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
+          },
+        };
+      }),
+    };
+  });
 }
 
 /**
