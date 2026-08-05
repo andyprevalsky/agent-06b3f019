@@ -4600,6 +4600,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
+    # Eventim checkaddtocart POST can keep returning 403 challenge HTML while the
+    # document GET looks clean — cookie-stage recovery then false-succeeds forever.
+    # After one cookies_sanitized result, escalate subsequent recoveries to config search.
+    cookie_recovery_successes = 0
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
@@ -6380,6 +6384,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     if recovery_storage_state is None:
                         raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
 
+                    provider_exit_rejected = bool(
+                        unified_action.get("params", {}).get("provider_exit_rejected")
+                    )
+                    escalate_after_cookie_false_stable = (
+                        not provider_exit_rejected and cookie_recovery_successes >= 1
+                    )
+                    if escalate_after_cookie_false_stable:
+                        logger.warning(
+                            "Escalating repeated challenge recovery to browser config search",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            cookie_recovery_successes=cookie_recovery_successes,
+                            reason=recovery_reason,
+                        )
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
@@ -6398,8 +6416,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
+                        provider_exit_rejected=provider_exit_rejected
+                        or escalate_after_cookie_false_stable,
                     )
+                    if recovery.recovery == "cookies_sanitized":
+                        cookie_recovery_successes += 1
 
                     config_result = recovery.config_result
                     if config_result is not None:

@@ -172,6 +172,11 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     js.stripe.com 200s) Billing Address / Payment Details remained empty shells
     — Playwright routing every request breaks Stripe Elements. Also never
     record/replay Stripe payment-CDN hosts in `browser_http` cache.
+12. Eventim `checkaddtocart` can POST 403 with ~667KB Cloudflare challenge HTML
+    while the ticket document GET looks clean (`fff2bc0f-…`). Cookie-stage
+    recovery GET-probes the document URL, false-succeeds, and loops. Fix:
+    treat API 403 challenge HTML as a provider-exit (config search), and after
+    one `cookies_sanitized` success escalate later recoveries to config search.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +

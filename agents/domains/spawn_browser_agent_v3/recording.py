@@ -1930,6 +1930,7 @@ def provider_exit_monitoring_enabled() -> bool:
 
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
 _PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
+_API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
 _PAYMENT_TUNNEL_HOST_MARKERS = (
     "js.stripe.com",
     "api.stripe.com",
@@ -1942,6 +1943,18 @@ _TUNNEL_FAILURE_MARKERS = (
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
 )
+_API_CHALLENGE_HTML_MARKERS = (
+    "access denied",
+    "attention required",
+    "just a moment",
+    "cf-chl-",
+    "/cdn-cgi/challenge-platform",
+    "challenges.cloudflare.com/turnstile",
+)
+_API_CHALLENGE_RESOURCE_TYPES = {"xhr", "fetch", "document"}
+# Cap automatic API-challenge exits so cookie-stage loops cannot be replaced by
+# an unbounded config-search thrash on a permanently blocked endpoint.
+_MAX_API_CHALLENGE_PROVIDER_EXITS = 2
 # Ticket/event inventory pages (Eventim `/event/...`) preload Stripe apple-pay
 # extensions. Tunnel failures there must not force IP rotation or recovery
 # loops before the agent reaches a real checkout/payment document.
@@ -1966,6 +1979,39 @@ def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
         return False
     lowered = (url or "").lower()
     return any(host in lowered for host in _PAYMENT_TUNNEL_HOST_MARKERS)
+
+
+def _is_api_challenge_html_response(
+    *,
+    status: Any,
+    url: str,
+    resource_type: str,
+    mime_type: str,
+    body_bytes: bytes,
+) -> bool:
+    """True when a same-tab XHR/fetch/document returns CF challenge HTML (Eventim cart).
+
+    Document GET can look clean while ``checkaddtocart`` POSTs 403 with a ~667KB
+    challenge page. Cookie-stage recovery only GET-probes the document URL and
+    false-succeeds; treat the API challenge as a provider-exit signal instead.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code != 403:
+        return False
+    resource = (resource_type or "").lower()
+    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+        return False
+    if not (url or "").startswith("http"):
+        return False
+    sample = body_bytes[:12_000].decode("utf-8", errors="ignore").lower()
+    mime = (mime_type or "").lower()
+    looks_html = "html" in mime or "<html" in sample[:800] or "<!doctype html" in sample[:800]
+    if not looks_html:
+        return False
+    return any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS)
 
 
 def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
@@ -2160,6 +2206,7 @@ class BrowserNetworkRecorder:
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
         self._payment_cdn_provider_exits = 0
+        self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
@@ -2624,12 +2671,12 @@ class BrowserNetworkRecorder:
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
 
+            generation = int(entry.get("browser_generation") or 0)
+            current_generation = int(getattr(self, "_network_generation", generation))
+            rejected_generations = getattr(self, "_rejected_network_generations", set())
             if "json" in str(entry.get("mime_type", "")).lower():
                 with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
                     payload = json.loads(body_bytes.decode("utf-8"))
-                    generation = int(entry.get("browser_generation") or 0)
-                    current_generation = int(getattr(self, "_network_generation", generation))
-                    rejected_generations = getattr(self, "_rejected_network_generations", set())
                     if (
                         generation == current_generation
                         and generation not in rejected_generations
@@ -2652,6 +2699,49 @@ class BrowserNetworkRecorder:
                             task_id=self.task_id,
                             browser_generation=generation,
                         )
+            if (
+                generation == current_generation
+                and generation not in rejected_generations
+                and _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=str(entry.get("url") or ""),
+                    resource_type=str(entry.get("resource_type") or ""),
+                    mime_type=str(entry.get("mime_type") or ""),
+                    body_bytes=body_bytes,
+                )
+            ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                    logger.warning(
+                        "API challenge HTML provider-exit ignored: cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(generation)
+                    self._rejected_network_generations = rejected_generations
+                    self._api_challenge_provider_exits = api_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _API_CHALLENGE_HTML_REASON,
+                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "browser_generation": generation,
+                            "status": entry.get("status"),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: API returned challenge HTML",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        status=entry.get("status"),
+                    )
 
             entry.update(
                 {

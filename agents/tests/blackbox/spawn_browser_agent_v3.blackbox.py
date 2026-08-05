@@ -7697,6 +7697,85 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
     }
 
 
+def test_api_challenge_html_triggers_provider_exit_rejection():
+    """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+        _is_api_challenge_html_response,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=200,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="image",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+        }
+    }
+
+    class _FakeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    import asyncio
+
+    asyncio.run(recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp()))
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": _API_CHALLENGE_HTML_REASON,
+        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        "browser_generation": 1,
+        "status": 403,
+    }
+
+
 def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     """js.stripe.com ERR_TUNNEL must rotate the provider exit (Eventim card fields)."""
     from domains.spawn_browser_agent_v3.recording import (
@@ -14098,6 +14177,10 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_accepted_fingerprint_warning",
         test_network_recorder_does_not_reject_successful_fingerprint_warning,
+    )
+    r.record(
+        "api_challenge_html_provider_exit",
+        test_api_challenge_html_triggers_provider_exit_rejection,
     )
     r.record(
         "payment_cdn_tunnel_failure_provider_exit",
