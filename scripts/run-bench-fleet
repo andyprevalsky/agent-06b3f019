@@ -3055,6 +3055,14 @@ require_in_app_hub_visibility() {
     fi
     [ -n "$hub_api_key" ] || {
         echo "❌ BACKEND_API_KEY is required to register benchmark runs in the in-app Hub" >&2
+        echo "   looked in: \$BENCHMARK_HUB_API_KEY, \$BACKEND_API_KEY, $ROOT_DIR/back-end/.env" >&2
+        if [ ! -e "$ROOT_DIR/back-end/.env" ]; then
+            # A plain `git worktree add` copies no credentials, so the fleet used
+            # to burn a full launch before dying here with no way to tell that
+            # the worktree was simply never provisioned.
+            echo "   cause: $ROOT_DIR/back-end/.env does not exist — this worktree was never provisioned." >&2
+            echo "   fix:   bash scripts/prepare-deploy-worktree.sh --worktree $ROOT_DIR --source <controller-workspace>" >&2
+        fi
         return 1
     }
     export BENCHMARK_HUB_UPLOAD_URL="$hub_url"
