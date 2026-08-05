@@ -102,6 +102,9 @@ test('describes the runtime the model is actually running in', () => {
 
   const sendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
   const attemptCompletion = TOOL_SCHEMAS.find((tool) => tool.name === 'attempt_completion');
+  // Delivery mechanics live on the tool, not the overlay: the model reads them
+  // at the moment it picks the tool.
+  assert.match(sendUserMessage?.description ?? '', /cannot be undone/i);
   assert.match(
     attemptCompletion?.description ?? '',
     /rejects it unless this run has already successfully called send_user_message/i
