@@ -267,12 +267,13 @@ describe('AdminHealth page', () => {
     expect(screen.getByText('GMV Per Task')).toBeInTheDocument();
     expect(screen.getAllByText('Task Completion Rate').length).toBeGreaterThan(0);
     expect(screen.getAllByText('82%').length).toBeGreaterThan(0);
-    expect(screen.getByText('LLM at $0')).toBeInTheDocument();
-    expect(screen.getByText('$0.0384')).toBeInTheDocument();
-    expect(screen.getByText('API rates (cache-aware)')).toBeInTheDocument();
-    expect(screen.getByText('$0.7594')).toBeInTheDocument();
-    expect(screen.getByText('Compute-token rates')).toBeInTheDocument();
-    expect(screen.getByText('$0.0745')).toBeInTheDocument();
+    // Cost labels/values appear in both the summary strip and chart legend.
+    expect(screen.getAllByText('LLM at $0').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$0.0384').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('API rates (cache-aware)').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$0.7594').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Compute-token rates').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('$0.0745').length).toBeGreaterThan(0);
     expect(screen.getByRole('img', { name: 'Cost per root task over time' })).toBeInTheDocument();
     expect(
       screen.getByText((text) => text.includes('Current sample: 332 real root runs')),
