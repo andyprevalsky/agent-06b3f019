@@ -132,9 +132,18 @@ fi
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
 # specs import the frontend's @playwright/test singleton, making every suite
 # fail during discovery with a misleading duplicate-version error.
-PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
-if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
-  echo "FAIL: Frontend Playwright is not installed at $PLAYWRIGHT_BIN" >&2
+# npm workspaces hoist .bin to the repo root, so accept either location.
+PLAYWRIGHT_BIN=""
+for candidate in \
+  "$FRONTEND_DIR/node_modules/.bin/playwright" \
+  "$REPO_DIR/node_modules/.bin/playwright"; do
+  if [[ -x "$candidate" ]]; then
+    PLAYWRIGHT_BIN="$candidate"
+    break
+  fi
+done
+if [[ -z "$PLAYWRIGHT_BIN" ]]; then
+  echo "FAIL: Frontend Playwright is not installed (checked front-end/ and repo-root node_modules/.bin/playwright)" >&2
   exit 1
 fi
 

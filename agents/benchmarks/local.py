@@ -986,6 +986,12 @@ def start_services(
         # isolated stack a provider-assigned quick tunnel instead; the shared
         # dev stack keeps its stable ngrok domain.
         env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "1"
+        # trycloudflare quick tunnels often never route from cloud VMs (edge
+        # probe stays at curl status 000 for the full timeout). Fail the CF
+        # provider after one short attempt so the existing ngrok fallback can
+        # take over without burning ~3 minutes of stack startup.
+        env.setdefault("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", "1")
+        env.setdefault("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", "10")
         # Every isolated run starts with an empty per-run database. Opt into
         # run.sh's schema/day-keyed R2 seed cache so startup restores the same
         # prod snapshot in seconds instead of row-syncing tens of thousands of
