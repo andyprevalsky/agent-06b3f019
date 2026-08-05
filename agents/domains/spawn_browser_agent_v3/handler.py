@@ -4422,6 +4422,9 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
                 llm_result.get("actual_model"),
                 input_tokens,
                 output_tokens,
+                cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(usage.get("from_fast_cache")),
             )
             action = dict(llm_result.get("action") or {})
             action_name = str(action.get("action") or "")
@@ -6260,6 +6263,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     llm_result.get("actual_model"),
                     step_input_tokens,
                     step_output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
                 )
 
             except asyncio.TimeoutError:
@@ -7124,6 +7130,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         v_usage.get("actual_model"),
                         v_input_tokens,
                         v_output_tokens,
+                        cache_read_input_tokens=int(v_usage.get("cache_read_input_tokens") or 0),
+                        cache_creation_input_tokens=int(v_usage.get("cache_creation_input_tokens") or 0),
+                        from_fast_cache=bool(v_usage.get("from_fast_cache")),
                     )
 
                     score = progress_result.get("score", 0.0)
@@ -7876,6 +7885,9 @@ Based on this feedback, I need to continue working on the task and address the i
                     fv_usage.get("actual_model"),
                     fv_input_tokens,
                     fv_output_tokens,
+                    cache_read_input_tokens=int(fv_usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(fv_usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(fv_usage.get("from_fast_cache")),
                 )
                 if final_progress.get("structured_response") is not None:
                     latest_structured_response = final_progress["structured_response"]

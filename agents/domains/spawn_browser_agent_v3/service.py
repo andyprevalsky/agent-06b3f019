@@ -673,6 +673,9 @@ def accumulate_model_usage(
     actual_model: Optional[str],
     input_tokens: int,
     output_tokens: int,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    from_fast_cache: bool = False,
 ) -> None:
     """Add one LLM call's tokens to the per-actual-model usage ledger.
 
@@ -680,10 +683,33 @@ def accumulate_model_usage(
     what decides price: the browser pool races several underlying models, and a
     `-claude`/`-gpt` suffix means the step ran on the user's own compute token
     (billed $0 by `AgentWorkflow._track_usage`).
+
+    Cached input is tracked in its own buckets because `_track_usage` prices
+    cache reads/writes separately from uncached input; dropping them here bills
+    every cache hit at the full input rate. `from_fast_cache` is sticky per
+    model: once any step for a model was replayed by Fast Mode without a
+    provider call, the emitted row must say so or the replay is billed as paid.
     """
-    bucket = usage_by_model.setdefault(str(actual_model or ""), {"input_tokens": 0, "output_tokens": 0})
+    bucket = usage_by_model.setdefault(
+        str(actual_model or ""),
+        {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "from_fast_cache": 0,
+        },
+    )
     bucket["input_tokens"] += int(input_tokens or 0)
     bucket["output_tokens"] += int(output_tokens or 0)
+    bucket["cache_read_input_tokens"] = int(bucket.get("cache_read_input_tokens") or 0) + int(
+        cache_read_input_tokens or 0
+    )
+    bucket["cache_creation_input_tokens"] = int(bucket.get("cache_creation_input_tokens") or 0) + int(
+        cache_creation_input_tokens or 0
+    )
+    if from_fast_cache:
+        bucket["from_fast_cache"] = 1
 
 
 def build_browser_llm_usage_items(
@@ -727,6 +753,12 @@ def build_browser_llm_usage_items(
                 "provider": "Rose 1 Browser Use",
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                # Forwarded so `_track_usage` can apply its cache discount and
+                # zero out Fast-Mode replays; omitting them bills every cached
+                # browser step at the full uncached input rate.
+                "cache_read_input_tokens": int((usage or {}).get("cache_read_input_tokens") or 0),
+                "cache_creation_input_tokens": int((usage or {}).get("cache_creation_input_tokens") or 0),
+                "from_fast_cache": bool((usage or {}).get("from_fast_cache")),
             }
         )
     return items
@@ -745,8 +777,8 @@ def build_usage_items(
     plus one browser-time `service` row, which is not per-model. `model_pricing`
     is the browser-pool pricing the caller resolved; the pre-computed
     `cost_cents` on llm rows is informational only — the workflow recomputes
-    from `model` + tokens and remains the single source of cost truth (it also
-    applies cache discounts, which this aggregate has no data for).
+    from `model` + tokens and remains the single source of cost truth, applying
+    the cache discount to the `cache_*` counters each row now carries.
     """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
