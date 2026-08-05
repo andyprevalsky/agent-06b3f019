@@ -7701,6 +7701,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     """js.stripe.com ERR_TUNNEL must rotate the provider exit (Eventim card fields)."""
     from domains.spawn_browser_agent_v3.recording import (
         BrowserNetworkRecorder,
+        _document_warrants_payment_cdn_exit,
         _is_payment_cdn_tunnel_failure,
     )
 
@@ -7716,11 +7717,16 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "https://js.stripe.com/v3/",
         "net::ERR_NAME_NOT_RESOLVED",
     )
+    assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
+    assert not _document_warrants_payment_cdn_exit(
+        "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
+    )
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._network_generation = 3
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = set()
     recorder.agent_id = "agent"
@@ -7729,6 +7735,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "3:r1": {
             "browser_generation": 3,
             "url": "https://js.stripe.com/v3/",
+            "document_url": "https://wl.eventim.us/checkout/order-1",
         }
     }
     recorder._on_loading_failed(
@@ -7740,6 +7747,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "reason": "payment CDN blocked by proxy tunnel",
         "url": "https://js.stripe.com/v3/",
         "browser_generation": 3,
+        "document_url": "https://wl.eventim.us/checkout/order-1",
     }
     # One signal per browser generation — no recovery loop on repeated stripe fails.
     recorder._on_loading_failed(
@@ -7748,6 +7756,30 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         generation=3,
     )
     assert recorder.pop_provider_exit_rejection() is None
+
+    # Ticket/event browse pages preload Stripe; do not rotate there.
+    browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    browse._network_generation = 1
+    browse._provider_exit_rejections = []
+    browse._rejected_network_generations = set()
+    browse._payment_cdn_provider_exits = 0
+    browse._ignored_request_ids = set()
+    browse._active_request_ids = set()
+    browse.agent_id = "agent"
+    browse.task_id = "task"
+    browse.entries = {
+        "1:r2": {
+            "browser_generation": 1,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom",
+        }
+    }
+    browse._on_loading_failed(
+        {"requestId": "r2", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-1",
+        generation=1,
+    )
+    assert browse.pop_provider_exit_rejection() is None
 
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():

@@ -1942,6 +1942,21 @@ _TUNNEL_FAILURE_MARKERS = (
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
 )
+# Ticket/event inventory pages (Eventim `/event/...`) preload Stripe apple-pay
+# extensions. Tunnel failures there must not force IP rotation or recovery
+# loops before the agent reaches a real checkout/payment document.
+_PAYMENT_DOCUMENT_URL_MARKERS = (
+    "checkout",
+    "payment",
+    "billing",
+    "/pay",
+    "purchase",
+    "/cart",
+)
+_EVENT_BROWSE_DOCUMENT_MARKERS = ("/event/", "/events/")
+# Cap automatic payment-CDN exit rotations per recorder so a bad proxy cannot
+# thrash recover_from_challenge forever when every candidate still fails Stripe.
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = 1
 
 
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
@@ -1951,6 +1966,17 @@ def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
         return False
     lowered = (url or "").lower()
     return any(host in lowered for host in _PAYMENT_TUNNEL_HOST_MARKERS)
+
+
+def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
+    """Only rotate for Stripe tunnel failures on checkout/payment documents."""
+    lowered = (document_url or "").lower()
+    if any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS):
+        return True
+    if any(marker in lowered for marker in _EVENT_BROWSE_DOCUMENT_MARKERS):
+        return False
+    # Unknown SPA paths: keep the signal so opaque checkout URLs still rotate.
+    return bool(lowered)
 
 
 def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
@@ -2133,6 +2159,7 @@ class BrowserNetworkRecorder:
         self._tasks: set[asyncio.Task] = set()
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
+        self._payment_cdn_provider_exits = 0
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
@@ -2383,6 +2410,7 @@ class BrowserNetworkRecorder:
                 "session_id": session_id,
                 "method": request.get("method"),
                 "url": url,
+                "document_url": str(event.get("documentURL") or ""),
                 "resource_type": resource_type,
                 "request_headers": _coerce_header_map(request.get("headers")),
                 # Default-deny: only allowlisted anti-bot endpoints retain a body,
@@ -2513,10 +2541,13 @@ class BrowserNetworkRecorder:
             # inside Steel/Kernel proxies, so Payment Details never render. Treat that
             # as a deterministic provider-exit rejection (same path as fingerprint
             # poison) so recovery searches a fresh IP before the agent loops.
+            # Skip ticket/event browse documents that only preload Stripe widgets —
+            # those failures were rotating forever before cart/checkout.
             entry = self.entries[request_key]
             entry_generation = int(entry.get("browser_generation") or generation or 0)
             current_generation = int(getattr(self, "_network_generation", entry_generation))
             rejected_generations = getattr(self, "_rejected_network_generations", set())
+            document_url = str(entry.get("document_url") or "")
             if (
                 entry_generation == current_generation
                 and entry_generation not in rejected_generations
@@ -2525,25 +2556,48 @@ class BrowserNetworkRecorder:
                     str(event.get("errorText") or ""),
                 )
             ):
-                rejected_generations.add(entry_generation)
-                self._rejected_network_generations = rejected_generations
-                rejections = getattr(self, "_provider_exit_rejections", [])
-                rejections.append(
-                    {
-                        "reason": _PAYMENT_TUNNEL_FAILURE_REASON,
-                        "url": _redact_url_query(str(entry.get("url") or "")),
-                        "browser_generation": entry_generation,
-                    }
-                )
-                self._provider_exit_rejections = rejections
-                logger.warning(
-                    "Browser provider exit rejected: payment CDN proxy tunnel failure",
-                    agent_id=self.agent_id,
-                    task_id=self.task_id,
-                    browser_generation=entry_generation,
-                    url=_redact_url_query(str(entry.get("url") or "")),
-                    error=event.get("errorText"),
-                )
+                if not _document_warrants_payment_cdn_exit(document_url):
+                    logger.info(
+                        "Ignoring payment CDN tunnel failure on non-checkout document",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                    )
+                elif int(getattr(self, "_payment_cdn_provider_exits", 0)) >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                    logger.warning(
+                        "Payment CDN tunnel failure ignored: provider-exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(entry_generation)
+                    self._rejected_network_generations = rejected_generations
+                    self._payment_cdn_provider_exits = int(getattr(self, "_payment_cdn_provider_exits", 0)) + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _PAYMENT_TUNNEL_FAILURE_REASON,
+                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "browser_generation": entry_generation,
+                            "document_url": _redact_url_query(document_url),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: payment CDN proxy tunnel failure",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        error=event.get("errorText"),
+                    )
 
     async def _fetch_response_body(
         self,

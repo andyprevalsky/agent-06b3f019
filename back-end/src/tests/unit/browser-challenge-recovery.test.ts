@@ -137,12 +137,13 @@ async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promi
     probe: async (config) => {
       probed.push(config.key);
       if (config.key === 'kernel_mobile') {
-        return { stablePasses: 1, attempts: 2, latencyMs: 1 };
+        return { stablePasses: 1, attempts: 2, latencyMs: 1, paymentCdnOk: false };
       }
       return {
         stablePasses: 2,
         attempts: 2,
         latencyMs: config.key === 'steel_fixed' ? 10 : 100,
+        paymentCdnOk: false,
       };
     },
     promote: async (candidate) => {
@@ -177,7 +178,7 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   await assert.rejects(
     runParallelBrowserConfigSearch(configs, {
       create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1 }),
+      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: false }),
       promote: async () => assert.fail('zero-pass candidate must never be promoted'),
       release: async (config) => {
         released.push(config.key);
@@ -198,6 +199,7 @@ async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promis
       stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
       attempts: 2,
       latencyMs: config.key === 'kernel_mobile' ? 5 : 1,
+      paymentCdnOk: false,
     }),
     promote: async (candidate) => {
       promoted.push(candidate.config.key);
@@ -210,6 +212,28 @@ async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promis
   assert.deepStrictEqual(promoted, ['kernel_mobile']);
   assert.strictEqual(released.length, configs.length - 1);
   assert.ok(!released.includes('kernel_mobile'));
+}
+
+async function testPrefersPaymentCdnReachableWinnerWhenStablePassesTie(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(configs, {
+    create: async (config) => fakeSession(config),
+    probe: async (config) => ({
+      stablePasses: 2,
+      attempts: 2,
+      // steel_managed is slower but payment-CDN reachable — must win over a
+      // faster CF-only clear (Eventim card fields need js.stripe.com).
+      latencyMs: config.key === 'steel_managed' ? 500 : 1,
+      paymentCdnOk: config.key === 'steel_managed',
+    }),
+    promote: async (candidate) => {
+      promoted.push(candidate.config.key);
+    },
+    release: async () => undefined,
+  });
+  assert.strictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
 function testChallengeDetection(): void {
@@ -297,7 +321,11 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       return { status: () => 200 };
     },
     waitForTimeout: async () => undefined,
-    evaluate: async (pageFunction: () => Promise<void>) => {
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('js.stripe.com')) {
+        return true;
+      }
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
         typeof pageFunction,
@@ -316,6 +344,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       } finally {
         delete recoveryGlobal.__naviRestoreRecoveryStorage;
       }
+      return undefined;
     },
     title: async () => {
       assert.ok(originAuthVisible, 'origin auth state must be restored before challenge probing');
@@ -381,7 +410,12 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
   assert.strictEqual(originStorageRestores, 2, 'origin auth is awaited before both clean probes');
   assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
   assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
-  assert.deepStrictEqual(result, { stablePasses: 2, attempts: 2, latencyMs: result.latencyMs });
+  assert.deepStrictEqual(result, {
+    stablePasses: 2,
+    attempts: 2,
+    latencyMs: result.latencyMs,
+    paymentCdnOk: true,
+  });
 }
 
 function testPreferredConfigCompatibility(): void {
@@ -631,6 +665,7 @@ async function main(): Promise<void> {
   await testParallelSearchPromotesStableFastestAndReleasesLosers();
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
+  await testPrefersPaymentCdnReachableWinnerWhenStablePassesTie();
   testChallengeDetection();
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPreferredConfigCompatibility();

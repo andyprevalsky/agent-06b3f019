@@ -157,9 +157,14 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
    and live verify reject a clean tab (`d0e8ddca-…`: promote `kernel_mobile`
    1/2 then "live tab is still challenged" while network captures showed the
    ticket document). Log each probe attempt's detection `reason` + `title`.
+9. Payment-CDN (`js.stripe.com` tunnel) provider-exit must not fire on
+   ticket/event browse documents that only preload Stripe widgets
+   (`4e7024e4-…` looped recoveries after a clean `kernel_isp` promote). Cap
+   auto payment-CDN exits, prefer `paymentCdnOk` candidates when ranking, and
+   treat title `Just a moment` as a challenge text marker.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
-unit `browser-challenge-recovery` Eventim-shaped classifier cases.
+unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases.
 Exact-bench outcome still required before status=`fixed`.
 
 ## Human feedback

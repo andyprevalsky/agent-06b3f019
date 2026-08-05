@@ -50,6 +50,8 @@ export interface CandidateProbeResult {
   stablePasses: number;
   attempts: number;
   latencyMs: number;
+  /** True when the candidate's browser can fetch js.stripe.com (payment fields). */
+  paymentCdnOk: boolean;
 }
 
 export interface SuccessfulRecoveryCandidate {
@@ -81,6 +83,7 @@ const CHALLENGE_TEXT = [
   'attention required! | cloudflare',
   'checking your browser',
   'enable javascript and cookies to continue',
+  'just a moment',
   'performing security verification',
   'please verify you are a human',
   'sorry, you have been blocked',
@@ -166,8 +169,14 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
   return candidates;
 }
 
-function candidateScore(candidate: SuccessfulRecoveryCandidate): [number, number] {
-  return [-candidate.probe.stablePasses, candidate.probe.latencyMs];
+function candidateScore(candidate: SuccessfulRecoveryCandidate): [number, number, number] {
+  // Prefer CF-stable, then payment-CDN-reachable (Eventim card fields need
+  // js.stripe.com through the proxy tunnel), then fastest probe.
+  return [
+    -candidate.probe.stablePasses,
+    candidate.probe.paymentCdnOk ? 0 : 1,
+    candidate.probe.latencyMs,
+  ];
 }
 
 /** Create/probe all candidates concurrently, then atomically promote one winner. */
@@ -187,6 +196,7 @@ export async function runParallelBrowserConfigSearch(
             proxyMode: config.proxyMode,
             stablePasses: probe.stablePasses,
             attempts: probe.attempts,
+            paymentCdnOk: probe.paymentCdnOk,
             latencyMs: probe.latencyMs,
           });
           return { config, session, probe };
@@ -217,9 +227,11 @@ export async function runParallelBrowserConfigSearch(
   const ranked = successful
     .filter((candidate) => candidate.probe.stablePasses > 0)
     .sort((left, right) => {
-      const [leftPasses, leftLatency] = candidateScore(left);
-      const [rightPasses, rightLatency] = candidateScore(right);
-      return leftPasses - rightPasses || leftLatency - rightLatency;
+      const [leftPasses, leftPayment, leftLatency] = candidateScore(left);
+      const [rightPasses, rightPayment, rightLatency] = candidateScore(right);
+      return (
+        leftPasses - rightPasses || leftPayment - rightPayment || leftLatency - rightLatency
+      );
     });
   // Prefer fully-stable (passes === attempts). If Cloudflare only clears one of
   // two probe loads, still promote the best partial winner — the agent live
@@ -245,6 +257,7 @@ export async function runParallelBrowserConfigSearch(
     proxyMode: winner.config.proxyMode,
     stablePasses: winner.probe.stablePasses,
     attempts: winner.probe.attempts,
+    paymentCdnOk: winner.probe.paymentCdnOk,
     partial: winner.probe.stablePasses < winner.probe.attempts,
     latencyMs: winner.probe.latencyMs,
   });
@@ -400,6 +413,28 @@ function recoveryOriginStorageScript(storageState: Record<string, unknown>): str
 })();`;
 }
 
+async function probePaymentCdnReachable(page: Page): Promise<boolean> {
+  // Run inside the candidate page so the fetch uses the same proxy tunnel the
+  // checkout card fields will need (js.stripe.com ERR_TUNNEL on Eventim).
+  return page
+    .evaluate(async () => {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8_000);
+        const response = await fetch('https://js.stripe.com/v3/', {
+          method: 'GET',
+          signal: controller.signal,
+          credentials: 'omit',
+        });
+        clearTimeout(timer);
+        return response.ok;
+      } catch {
+        return false;
+      }
+    })
+    .catch(() => false);
+}
+
 export async function probeCandidateBrowser(
   session: RecoveryCandidateSession,
   targetUrl: string,
@@ -408,6 +443,7 @@ export async function probeCandidateBrowser(
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
+  let paymentCdnOk = false;
   const attempts = 2;
   try {
     const context = session.validationBrowser.contexts()[0];
@@ -452,12 +488,20 @@ export async function probeCandidateBrowser(
       });
       stablePasses += 1;
     }
+    if (stablePasses > 0) {
+      paymentCdnOk = await probePaymentCdnReachable(page);
+      log.info('Challenge recovery candidate payment CDN probe', {
+        ...logContext,
+        paymentCdnOk,
+        host: 'js.stripe.com',
+      });
+    }
   } finally {
     // Closing this CDP client leaves the remote default context (including any
     // solver-refreshed challenge cookies) alive for atomic promotion.
     await session.validationBrowser.close().catch(() => {});
   }
-  return { stablePasses, attempts, latencyMs: Date.now() - started };
+  return { stablePasses, attempts, latencyMs: Date.now() - started, paymentCdnOk };
 }
 
 export function buildPreferredBrowserConfig(

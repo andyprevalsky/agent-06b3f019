@@ -58,6 +58,7 @@ _CHALLENGE_TEXT_MARKERS = (
     "attention required! | cloudflare",
     "checking your browser",
     "enable javascript and cookies to continue",
+    "just a moment",
     "performing security verification",
     "please verify you are a human",
     "sorry, you have been blocked",
