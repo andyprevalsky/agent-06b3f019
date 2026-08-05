@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import Callable
+
+
+def _trusted_github_host() -> str:
+    """Host gh should talk to (GH_HOST override, else github.com)."""
+    return (os.environ.get("GH_HOST") or "github.com").strip() or "github.com"
 
 
 PENDING_STATES = {
@@ -136,6 +142,11 @@ def _gh_api_json(
     hostname: str | None = None
     if repo:
         hostname, _slug = _parse_repo_ref(repo)
+    if hostname and hostname != _trusted_github_host():
+        raise ReviewWaitError(
+            f"refusing untrusted GitHub host {hostname!r}; "
+            f"expected {_trusted_github_host()!r}"
+        )
     command = ["gh", "api"]
     if hostname:
         command.extend(["--hostname", hostname])
@@ -211,6 +222,16 @@ def gh_payload(
     *,
     timeout: float | None = None,
 ) -> dict[str, object]:
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ReviewWaitError("gh_payload exceeded its time budget")
+        return left
+
     command = ["gh", "pr", "view", pr]
     if repo:
         command.extend(["--repo", repo])
@@ -221,10 +242,10 @@ def gh_payload(
             check=False,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=_remaining(),
         )
     except subprocess.TimeoutExpired as error:
-        raise ReviewWaitError(f"gh timed out after {timeout:g}s: gh pr view") from error
+        raise ReviewWaitError("gh timed out: gh pr view") from error
     if completed.returncode == 0:
         try:
             payload = json.loads(completed.stdout)
@@ -244,7 +265,7 @@ def gh_payload(
     if repo:
         head_command.extend(["--repo", repo])
     head_command.extend(["--json", "headRefOid"])
-    head_payload = _gh_json(head_command, timeout=timeout)
+    head_payload = _gh_json(head_command, timeout=_remaining())
     if not isinstance(head_payload, dict):
         raise ReviewWaitError("gh pr view headRefOid returned a non-object payload")
     head = str(head_payload.get("headRefOid") or "")
@@ -252,7 +273,7 @@ def gh_payload(
         raise ReviewWaitError("gh pr view did not return headRefOid")
     return {
         "headRefOid": head,
-        "statusCheckRollup": gh_commit_status_rollup(head, repo, timeout=timeout),
+        "statusCheckRollup": gh_commit_status_rollup(head, repo, timeout=_remaining()),
     }
 
 
@@ -271,7 +292,12 @@ def wait_for_review(
     last_message = ""
 
     def default_loader(pr_number: str, repo_name: str | None) -> dict[str, object]:
-        remaining = max(1.0, deadline - time.monotonic())
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
+                f"within {timeout_seconds:g}s (last state: MISSING)"
+            )
         return gh_payload(pr_number, repo_name, timeout=remaining)
 
     active_loader = loader or default_loader

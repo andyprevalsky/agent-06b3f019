@@ -658,6 +658,79 @@ async def test_handler_condition_raises_source_connect_gates_from_explore_error(
     assert gate_calls == [unavailable]
 
 
+async def test_handler_condition_skips_source_connect_gates_when_paused():
+    """Paused workflows must not park on source_connect gates after explore."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    unavailable = [
+        {
+            "source": "email",
+            "connector": "gmail",
+            "connected": False,
+            "connectUrl": "https://roselabs.ai/connect/gmail",
+        }
+    ]
+    gate_calls = []
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        # Explore finishes, then the parent is paused before gate raise.
+        wf.is_paused = True
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore done",
+            message="partial",
+            status=MessageStatus.FINISHED,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"unavailable_sources": unavailable, "usage": {"llm": [], "service": []}},
+        )
+
+    async def fake_raise_gates(workflow_instance, sources):
+        gate_calls.append(list(sources))
+
+    fake = _FakeWFModule()
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        with patch(
+            "domains.spawn_agent.handler._raise_source_connect_gates",
+            new=fake_raise_gates,
+        ):
+            events = await _collect(
+                WaitForManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={
+                        "description": "the deploy to be ready",
+                        "condition": "deploy ready",
+                        "check_interval_seconds": 30,
+                        "max_checks": 1,
+                    },
+                    tool_call_id="tc",
+                )
+            )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert gate_calls == []
+    assert any(
+        e.status == MessageStatus.ERROR
+        and ("paused" in (e.title or "").lower() or "pause" in (e.message or "").lower())
+        for e in events
+    )
+
+
 # ── pending_timestamp_wait_to_resume (deploy-migration resume) ────
 
 
@@ -839,6 +912,10 @@ async def run_all_tests():
     await r.record_async(
         "handler_cond_error_unavailable_sources",
         test_handler_condition_raises_source_connect_gates_from_explore_error,
+    )
+    await r.record_async(
+        "handler_cond_skip_gates_when_paused",
+        test_handler_condition_skips_source_connect_gates_when_paused,
     )
     r.record("resume_interrupted_future", test_resume_interrupted_future_wait_returns_target)
     r.record("resume_interrupted_past", test_resume_interrupted_past_wait_returns_target)

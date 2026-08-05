@@ -187,6 +187,15 @@ class ReviewWaitTest(unittest.TestCase):
         self.assertEqual(len(timeouts), 20)
         self.assertTrue(all(t is not None and 0 < float(t) <= 30.0 for t in timeouts))
 
+    def test_gh_api_json_rejects_untrusted_hostname(self) -> None:
+        with self.assertRaises(MODULE.ReviewWaitError) as ctx:
+            MODULE._gh_api_json(
+                "repos/acme/rose/commits/abc/status",
+                repo="evil.example/acme/rose",
+                timeout=5.0,
+            )
+        self.assertIn("untrusted GitHub host", str(ctx.exception))
+
     def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
         head = "c" * 40
         calls: list[list[str]] = []

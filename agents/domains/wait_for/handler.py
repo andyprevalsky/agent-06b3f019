@@ -297,10 +297,12 @@ class WaitForManager(ToolManager):
 
             # Direct _spawn_explore callers must raise source_connect gates the
             # same way execute_tool does; wait_for previously dropped them.
-            if explore_unavailable_sources:
+            # Skip when already paused so we reach the pause branch below instead
+            # of parking on raise_gate_direct's response wait.
+            if explore_unavailable_sources and not workflow_instance.is_paused:
                 await _raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
 
-            # Check if explore was cancelled (paused during explore)
+            # Check if explore was cancelled (paused during explore / gate wait)
             if workflow_instance.is_paused:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,
