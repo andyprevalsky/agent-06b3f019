@@ -205,6 +205,12 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     `request_payment_card`. Mid-loop nudge when `page_requires_new_card_entry`
     and no card requested yet: extract receipt and call `request_payment_card`
     immediately — do not debug iframe mounts.
+19. `abd4ae8a-…` called `request_payment_card` with
+    `1015 Folsom (Eventim - checkout.eventim.us)` after the empty-shell nudge,
+    but the evaluator reported `merchant host not grounded: observed none`.
+    GET `/api/attention-requests` flattens `url` onto metadata (no nested
+    `requestUserApproval`); `_payment_approval_hosts` only read the nested
+    shape. Read top-level `metadata.url` / `writeLockNotification` too.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +

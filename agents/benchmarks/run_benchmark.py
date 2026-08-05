@@ -837,16 +837,32 @@ def _grounded_payment_navigation_hosts(messages: Optional[List[dict]]) -> set[st
 
 
 def _payment_approval_hosts(req: dict) -> set[str]:
-    """Return checkout hosts carried by the pending payment approval itself."""
+    """Return checkout hosts carried by the pending payment approval itself.
+
+    Attention API payloads flatten write-lock fields onto ``metadata``
+    (``url``, ``writeLockNotification``, ``requestPaymentCard``) while chat
+    messages nest the same contract under ``requestUserApproval``. Read both
+    shapes — bench14 agent ``abd4ae8a-…`` had ``metadata.url=
+    https://checkout.eventim.us/…`` but no nested ``requestUserApproval``, so
+    host grounding reported ``observed none`` despite a valid payment card.
+    """
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     approval = metadata.get("requestUserApproval")
-    if not isinstance(approval, dict):
-        return set()
+    approval = approval if isinstance(approval, dict) else {}
 
-    values: list[object] = [approval.get("url"), approval.get("approvalUrl")]
-    notification = approval.get("writeLockNotification")
-    if isinstance(notification, dict):
+    values: list[object] = [
+        approval.get("url"),
+        approval.get("approvalUrl"),
+        metadata.get("url"),
+        metadata.get("approvalUrl"),
+    ]
+    for notification in (
+        approval.get("writeLockNotification"),
+        metadata.get("writeLockNotification"),
+    ):
+        if not isinstance(notification, dict):
+            continue
         service = notification.get("service")
         if isinstance(service, dict):
             values.extend([service.get("url"), service.get("domain")])

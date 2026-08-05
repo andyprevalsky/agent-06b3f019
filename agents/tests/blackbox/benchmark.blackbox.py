@@ -10817,8 +10817,14 @@ def _captured_eventim_payment_approval(
     *,
     merchant: str = "1015 Folsom (Eventim - eventim.us)",
     approval_url: str = "https://checkout.eventim.us/?afflky=1015Folsom",
+    flattened_attention_api: bool = False,
 ) -> tuple[dict, list[dict]]:
-    """Grounded Eventim payment boundary shaped like bench12 agent 88b8d4a4-…."""
+    """Grounded Eventim payment boundary shaped like bench12/bench14 agents.
+
+    ``flattened_attention_api=True`` mirrors GET /api/attention-requests, which
+    puts ``url`` / ``writeLockNotification`` on metadata (not nested under
+    ``requestUserApproval``) — the shape that failed host grounding on abd4ae8a-….
+    """
     receipt = {
         "merchant": merchant,
         "currency": "USD",
@@ -10841,18 +10847,37 @@ def _captured_eventim_payment_approval(
         "userId": "user-123",
         "agentId": "agent-123",
     }
-    request = {
-        "id": "eventim-payment-attention",
-        "agentId": "agent-123",
-        "metadata": {
-            "requestPaymentCard": receipt,
-            "requestUserApproval": {
+    if flattened_attention_api:
+        request = {
+            "id": "eventim-payment-attention",
+            "agentId": "agent-123",
+            "metadata": {
                 "url": approval_url,
+                "toolApproval": True,
+                "writePermission": True,
                 "requestPaymentCard": receipt,
+                "writeLockNotification": {
+                    "service": {
+                        "url": approval_url,
+                        "name": "Eventim US",
+                        "domain": "checkout.eventim.us",
+                    }
+                },
             },
-            "writePermission": True,
-        },
-    }
+        }
+    else:
+        request = {
+            "id": "eventim-payment-attention",
+            "agentId": "agent-123",
+            "metadata": {
+                "requestPaymentCard": receipt,
+                "requestUserApproval": {
+                    "url": approval_url,
+                    "requestPaymentCard": receipt,
+                },
+                "writePermission": True,
+            },
+        }
     messages: list[dict] = []
     return request, messages
 
@@ -10867,9 +10892,14 @@ def test_eventim_payment_merchant_identity_accepts_grounded_variants():
         "1015 Folsom (Eventim - eventim.us)",
         "1015 Folsom via Eventim",
         "Eventim US (Eventim - eventim.us)",
+        "1015 Folsom (Eventim - checkout.eventim.us)",
     ):
         request, messages = _captured_eventim_payment_approval(merchant=merchant)
         assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
+        flat_request, flat_messages = _captured_eventim_payment_approval(
+            merchant=merchant, flattened_attention_api=True
+        )
+        assert _validate_payment_receipt(task, flat_request, messages=flat_messages) is None, merchant
 
 
 def test_eventim_payment_merchant_identity_rejects_confused_parenthetical():
