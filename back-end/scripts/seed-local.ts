@@ -992,17 +992,30 @@ async function sync() {
 }
 
 async function main(): Promise<void> {
-  remote = await createSeedRemoteClient({
-    databaseUrl: REMOTE_URL,
-    supabaseUrl: envVars.SUPABASE_URL,
-    serviceRoleKey: envVars.SUPABASE_SERVICE_ROLE_KEY,
-    transport: REMOTE_TRANSPORT,
-  });
+  // `local` opened its pool at module load, and createSeedRemoteClient throws on
+  // a non-HTTPS SUPABASE_URL, missing credentials, or an unreachable database.
+  // Constructing the remote client inside the try keeps those startup failures
+  // from leaking the local pool.
   try {
+    remote = await createSeedRemoteClient({
+      databaseUrl: REMOTE_URL,
+      supabaseUrl: envVars.SUPABASE_URL,
+      serviceRoleKey: envVars.SUPABASE_SERVICE_ROLE_KEY,
+      transport: REMOTE_TRANSPORT,
+    });
     await sync();
   } finally {
-    await remote.$disconnect();
-    await local.$disconnect();
+    // Disconnect both independently: a rejecting remote disconnect must not skip
+    // the local one, nor replace the original sync() failure in the report.
+    const disconnects = await Promise.allSettled([
+      remote ? remote.$disconnect() : Promise.resolve(),
+      local.$disconnect(),
+    ]);
+    for (const outcome of disconnects) {
+      if (outcome.status === 'rejected') {
+        console.warn('  ⚠️  Seed client disconnect failed:', outcome.reason);
+      }
+    }
   }
 }
 

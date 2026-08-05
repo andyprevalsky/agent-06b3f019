@@ -8728,6 +8728,88 @@ async def test_dom_service_hidden_checkbox_label_coordinates_in_real_cdp():
         finally:
             await browser.close()
 
+async def test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label():
+    """A checkbox hidden with opacity:0 still reports a NON-EMPTY rect.
+
+    The original C-10 fix only consulted the label when the input had zero
+    viewport intersection, so this far more common hiding pattern kept returning
+    the input's own coordinates and clicked a point it does not own. The click
+    must land on the visible label instead.
+    """
+    from playwright.async_api import async_playwright
+
+    from browser_tools.dom_service import DOMService
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page(viewport={"width": 1280, "height": 800})
+            # Non-zero width/height + opacity:0, and an overlay covering the input
+            # so it is genuinely not the hit target while its label is.
+            await page.set_content(
+                """
+                <style>
+                  #seat { position: absolute; left: 100px; top: 100px;
+                          width: 20px; height: 20px; opacity: 0; }
+                  #cover { position: absolute; left: 90px; top: 90px;
+                           width: 60px; height: 60px; background: #fff; }
+                  label { position: absolute; left: 522px; top: 348px;
+                          width: 44px; height: 36px; }
+                </style>
+                <input id="seat" type="checkbox"><div id="cover"></div>
+                <label for="seat">E11</label>
+                """
+            )
+            cdp = await page.context.new_cdp_session(page)
+            document = await cdp.send("DOM.getDocument")
+            node = await cdp.send(
+                "DOM.querySelector",
+                {"nodeId": document["root"]["nodeId"], "selector": "#seat"},
+            )
+            described = await cdp.send("DOM.describeNode", {"nodeId": node["nodeId"]})
+            backend_node_id = described["node"]["backendNodeId"]
+
+            class _DOMAdapter:
+                async def scrollIntoViewIfNeeded(self, *, params, session_id):
+                    return await cdp.send("DOM.scrollIntoViewIfNeeded", params)
+
+                async def resolveNode(self, *, params, session_id):
+                    return await cdp.send("DOM.resolveNode", params)
+
+            class _RuntimeAdapter:
+                async def callFunctionOn(self, *, params, session_id):
+                    return await cdp.send("Runtime.callFunctionOn", params)
+
+            cdp_session = SimpleNamespace(
+                session_id="playwright",
+                cdp_client=SimpleNamespace(
+                    send=SimpleNamespace(DOM=_DOMAdapter(), Runtime=_RuntimeAdapter())
+                ),
+            )
+            element = SimpleNamespace(backend_node_id=backend_node_id)
+
+            class _FakeSession:
+                agent_focus_target_id = "page"
+
+                async def cdp_client_for_node(self, candidate):
+                    return cdp_session
+
+            dom = DOMService(cdp_url="")
+            dom._session = _FakeSession()
+            dom._selector_map = {backend_node_id: element}
+
+            coords = await dom.get_click_coordinates(backend_node_id)
+            assert coords is not None, "hidden-but-nonempty checkbox resolved no coordinates"
+            # Must be the label at (522..566, 348..384), NOT the input at ~(100,100).
+            assert abs(coords[0] - 544) <= 6 and abs(coords[1] - 366) <= 6, (
+                f"expected the visible label rect, got {coords}"
+            )
+            await page.mouse.click(*coords)
+            assert await page.locator("#seat").is_checked()
+        finally:
+            await browser.close()
+
+
 async def test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser():
     from browser_tools.dom_service import DOMService
 
@@ -14322,6 +14404,10 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_hidden_checkbox_label_coordinates_real_cdp",
         test_dom_service_hidden_checkbox_label_coordinates_in_real_cdp,
+    )
+    await r.record_async(
+        "dom_service_opacity_hidden_checkbox_nonempty_rect_uses_label",
+        test_dom_service_opacity_hidden_checkbox_with_nonempty_rect_uses_label,
     )
     await r.record_async(
         "dom_service_disconnect_stops_session",

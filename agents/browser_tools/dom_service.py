@@ -1444,14 +1444,22 @@ class DOMService:
                         };
 
                         const ownRect = visibleViewportRect(this);
-                        if (ownRect) {
-                            return ownRect;
-                        }
-
                         const inputType = String(this.type || "").toLowerCase();
                         const isCheckableInput = this.tagName === "INPUT"
                             && (inputType === "checkbox" || inputType === "radio");
-                        if (useAssociatedLabel && isCheckableInput && !this.disabled && this.labels) {
+                        // A checkbox hidden via opacity:0, clip:rect(0,0,0,0),
+                        // transform:scale(0) or pointer-events:none still reports a
+                        // NON-EMPTY rect, so a bare `if (ownRect) return ownRect`
+                        // would hand back coordinates the input does not actually
+                        // own. Require it to be the real hit target before
+                        // preferring it over its visible label.
+                        const preferLabel = useAssociatedLabel && isCheckableInput
+                            && !this.disabled && this.labels && this.labels.length > 0;
+                        if (ownRect && (!preferLabel || isReliableHitTarget(this, ownRect))) {
+                            return ownRect;
+                        }
+
+                        if (preferLabel) {
                             for (const label of this.labels) {
                                 const labelRect = visibleViewportRect(label);
                                 if (labelRect && isReliableHitTarget(label, labelRect)) {

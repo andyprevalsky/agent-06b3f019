@@ -135,7 +135,8 @@ export async function createSeedRemoteClient(
 }
 
 function quoteFilterValue(value: unknown): string {
-  const stringValue = String(value);
+  // `String(new Date())` yields a locale string PostgREST cannot parse.
+  const stringValue = value instanceof Date ? value.toISOString() : String(value);
   if (!/[\s,()"\\]/.test(stringValue)) return stringValue;
   return `"${stringValue.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`;
 }
@@ -163,9 +164,9 @@ function operatorExpression(value: unknown): string {
       return `in.(${operand.map(quoteFilterValue).join(',')})`;
     }
     case 'endsWith':
-      return `like.*${escapeLikeValue(String(operand))}`;
+      return `like.${quoteFilterValue(`*${escapeLikeValue(String(operand))}`)}`;
     case 'contains':
-      return `like.*${escapeLikeValue(String(operand))}*`;
+      return `like.${quoteFilterValue(`*${escapeLikeValue(String(operand))}*`)}`;
     case 'lt':
     case 'lte':
     case 'gt':
@@ -307,7 +308,12 @@ function normalizeRows(rows: SeedRow[], model: ModelMetadata): SeedRow[] {
 }
 
 async function responseRows(response: Response, model: ModelMetadata): Promise<SeedRow[]> {
-  const requiresLosslessNumbers = model.fields.some((field) => field.type === 'BigInt');
+  // JSON parses `numeric` into a double, and normalizeField then rebuilds a
+  // Decimal from that already-rounded value. Decimal needs the CSV path just as
+  // much as BigInt does.
+  const requiresLosslessNumbers = model.fields.some(
+    (field) => field.type === 'BigInt' || field.type === 'Decimal'
+  );
   if (requiresLosslessNumbers) return parseCsvRows(await response.text());
   const value = (await response.json()) as unknown;
   if (!Array.isArray(value)) {
@@ -443,15 +449,37 @@ function largeInFilter(where: SeedWhere | undefined): { field: string; values: u
 function comparable(value: unknown): string | number | bigint {
   if (value instanceof Date) return value.getTime();
   if (typeof value === 'number' || typeof value === 'bigint') return value;
-  return String(value ?? '');
+  return String(value);
 }
 
+/**
+ * Mirror PostgreSQL ordering so the chunked client-side path slices the same
+ * page the server-side `order` parameter would have returned:
+ *  - NULLs sort last on `asc` (PostgreSQL's default), not first.
+ *  - A numeric column with a null in one row must still compare numerically,
+ *    otherwise `10` sorts before `9`.
+ *  - Byte-wise string comparison instead of `localeCompare`, whose ICU locale
+ *    varies per machine and would order the same query differently.
+ */
 function compareValues(left: unknown, right: unknown): number {
+  const leftNull = left === null || left === undefined;
+  const rightNull = right === null || right === undefined;
+  if (leftNull || rightNull) {
+    if (leftNull && rightNull) return 0;
+    return leftNull ? 1 : -1;
+  }
   const a = comparable(left);
   const b = comparable(right);
   if (typeof a === 'number' && typeof b === 'number') return a - b;
   if (typeof a === 'bigint' && typeof b === 'bigint') return a < b ? -1 : a > b ? 1 : 0;
-  return String(a).localeCompare(String(b));
+  if (typeof a !== 'string' && typeof b !== 'string') {
+    const an = Number(a);
+    const bn = Number(b);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+  }
+  const as = String(a);
+  const bs = String(b);
+  return as < bs ? -1 : as > bs ? 1 : 0;
 }
 
 function sortRows(rows: SeedRow[], args: SeedFindArgs): SeedRow[] {

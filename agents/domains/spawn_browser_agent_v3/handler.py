@@ -6411,16 +6411,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             task_id=task_id,
                             credential_ref=session_credential_ref,
                         )
+                        # Stage the replacement identifiers; do NOT commit them until
+                        # the worker has actually attached to the new browser. If the
+                        # reconnect raises, the handler below discards the stack but
+                        # cannot restore these, and the auth-assistance path would then
+                        # hand the user a live-view session the worker never attached
+                        # to — the user signs in somewhere the agent cannot observe.
                         new_cdp_url = replacement["ws_url"]
-                        session_id = replacement.get("session_id", session_id)
-                        browser_url = replacement.get("debug_url", browser_url)
-                        cdp_url = new_cdp_url
-                        fingerprint_injection = replacement.get("fingerprint_injection") or fingerprint_injection
-                        session_credential_ref = replacement.get("credential_ref") or replacement.get(
-                            "auth_credential_ref"
+                        pending_session_id = replacement.get("session_id", session_id)
+                        pending_browser_url = replacement.get("debug_url", browser_url)
+                        pending_fingerprint_injection = (
+                            replacement.get("fingerprint_injection") or fingerprint_injection
                         )
-                        auth_realm = replacement.get("auth_realm") or auth_realm
-                        browser_session_metadata = _updated_rotation_session_metadata(
+                        pending_session_credential_ref = replacement.get(
+                            "credential_ref"
+                        ) or replacement.get("auth_credential_ref")
+                        pending_auth_realm = replacement.get("auth_realm") or auth_realm
+                        pending_browser_session_metadata = _updated_rotation_session_metadata(
                             browser_session_metadata,
                             dict(replacement),
                         )
@@ -6432,9 +6439,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             old_playwright_instance=playwright_instance,
                             old_driver_pid=playwright_driver_pid,
                             fingerprint_injection=replacement.get("fingerprint_injection")
-                            or fingerprint_injection,
+                            or pending_fingerprint_injection,
                             agent_id=agent_id,
                         )
+                        # Reconnect succeeded: the replacement session is real and
+                        # attached, so the identifiers are now safe to publish.
+                        session_id = pending_session_id
+                        browser_url = pending_browser_url
+                        cdp_url = new_cdp_url
+                        fingerprint_injection = pending_fingerprint_injection
+                        session_credential_ref = pending_session_credential_ref
+                        auth_realm = pending_auth_realm
+                        browser_session_metadata = pending_browser_session_metadata
                         dom_service = reconnected["dom_service"]
                         dom_page = reconnected["dom_page"]
                         input_page = reconnected["input_page"]
