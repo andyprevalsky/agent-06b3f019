@@ -232,12 +232,14 @@ describe('AdminHealth page', () => {
   it('renders company health metrics and charts from the admin endpoint', async () => {
     renderWithProviders(<AdminHealth />);
 
+    // Header ("Company Health") paints while the metrics fetch is still in
+    // flight — wait for post-load primary content, not the static title.
     await waitFor(() => {
-      expect(screen.getByText('Company Health')).toBeInTheDocument();
+      expect(screen.getByText('01 Primary Metric')).toBeInTheDocument();
     });
 
+    expect(screen.getByText('Company Health')).toBeInTheDocument();
     expect(screen.getAllByText('Revenue').length).toBeGreaterThan(0);
-    expect(screen.getByText('01 Primary Metric')).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Secondary metrics' })).toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'General health metrics' })).toBeInTheDocument();
     expect(screen.queryByText('How secondary metrics connect to revenue')).not.toBeInTheDocument();
