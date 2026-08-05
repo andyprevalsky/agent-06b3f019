@@ -29,6 +29,12 @@ require_text "$MEASUREMENT" \
     'budget enforcement requires exactly five cold runs' \
     "measurement enforcement must reject a smaller favorable sample"
 require_text "$MEASUREMENT" \
+    'source Cookie rows' \
+    "preflight must probe Cookie (fidelity table), not empty MessageRecord dumps"
+require_text "$MEASUREMENT" \
+    'Maximum resident set size' \
+    "Linux GNU time -v RSS parsing must stay wired alongside BSD time -l"
+require_text "$MEASUREMENT" \
     'fidelity="verified"' \
     "measurement must distinguish fidelity-verified runs"
 require_text "$MEASUREMENT" \
