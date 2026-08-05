@@ -294,7 +294,15 @@ export async function handleSmsSupervisorMessage(config: {
     try {
       const since = await fetchSessionMessagesSince(userId, threadWatermark);
       if (since.length > 0) {
-        threadWatermark = since[since.length - 1].timestamp;
+        // Advance to the MAXIMUM timestamp, not the last element. Storage order
+        // is insertion order, not sort order; taking the tail would move the
+        // watermark backwards if any entry landed out of order and replay
+        // everything after it next round — the duplicate traffic this poll
+        // exists to prevent.
+        threadWatermark = since.reduce(
+          (latest, entry) => (entry.timestamp > latest ? entry.timestamp : latest),
+          threadWatermark
+        );
         for (const entry of since) {
           messages.push({ role: entry.role, content: entry.content });
         }

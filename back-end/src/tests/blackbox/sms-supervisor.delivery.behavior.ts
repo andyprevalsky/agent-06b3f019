@@ -3,6 +3,9 @@ import type { PrismaClient } from '@prisma/client';
 import { grep as userDataGrep } from '../../domains/data/service';
 import { executeGrepTool } from '../../providers/smsSupervisor/supervisorTools.grep';
 import {
+  appendLifecycleSms,
+  appendOutboundSms,
+  fetchSessionMessagesSince,
   parseSmsSessionMessages,
   recordInboundSms,
 } from '../../providers/smsSupervisor/sessionStore';
@@ -290,8 +293,101 @@ export async function testLifecycleSms_landsOnSupervisorTranscript(prisma: Prism
   }
 }
 
+/**
+ * The catch-up poll must actually SEE a lifecycle SMS written by the database.
+ *
+ * This has to round-trip real Postgres. The defect it pins was a disagreement
+ * between the writer's format and the reader's comparison — `NOW()::text` gives
+ * `2026-08-05 03:09:02.185+00`, whose space at index 10 sorts BEFORE the `T` of
+ * a `Date.toISOString()` watermark, so every stored message compared as older
+ * than the watermark and the poll returned nothing on every round. A test that
+ * fabricates its own timestamps agrees with itself and passes while production
+ * returns zero — which is exactly how this shipped through every gate.
+ */
+export async function testCatchUp_lifecycleSmsIsVisibleToAnIsoWatermark(prisma: PrismaClient) {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const watermark = new Date().toISOString();
+
+  try {
+    await appendLifecycleSms(userId, 'Started: Order Lok Lak to-go', 'provider-catchup-1');
+
+    const since = await fetchSessionMessagesSince(userId, watermark);
+    if (since.length !== 1) {
+      const session = await prisma.smsSession.findUnique({ where: { userId } });
+      const stored = session === null ? [] : parseSmsSessionMessages(session.messages);
+      throw new Error(
+        `Expected the lifecycle SMS to be visible to an ISO watermark, got ${since.length}. ` +
+          `watermark=${watermark} stored=${JSON.stringify(stored.map((m) => m.timestamp))}`
+      );
+    }
+    if (since[0].content !== 'Started: Order Lok Lak to-go') {
+      throw new Error(`Unexpected catch-up content: ${JSON.stringify(since[0])}`);
+    }
+    // The stored format must be directly comparable to a JS ISO watermark.
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(since[0].timestamp)) {
+      throw new Error(
+        `Session timestamps must be canonical UTC ISO, got ${JSON.stringify(since[0].timestamp)}`
+      );
+    }
+  } finally {
+    await cleanupSessionScopedUser(prisma, userId);
+  }
+}
+
+/**
+ * Catch-up must never replay the user's own inbound, or the supervisor's send.
+ *
+ * `appendOutboundSms` re-stores the triggering inbound under a fresh timestamp.
+ * An unscoped poll therefore hands the run a second copy of the message it is
+ * already answering — a duplicate `user` turn that invites a second reply to an
+ * already-answered text. That is the precise production symptom this feature
+ * exists to prevent, so it gets pinned rather than assumed.
+ */
+export async function testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma: PrismaClient) {
+  const phone = uniqueSmsPhone();
+  const userId = await provisionUserWithPhone(prisma, phone);
+  const watermark = new Date().toISOString();
+
+  try {
+    // The supervisor answers the inbound: this re-stores the user turn AND the
+    // assistant reply, both after the watermark.
+    await appendOutboundSms(userId, 'On it - ordering now.', 'provider-echo-1', 'order me dinner');
+    // An agent then reports its own progress straight to the phone.
+    await appendLifecycleSms(userId, 'Started: Order Lok Lak to-go', 'provider-echo-2');
+
+    const since = await fetchSessionMessagesSince(userId, watermark);
+    const roles = since.map((message) => message.role);
+    const contents = since.map((message) => message.content);
+
+    if (roles.includes('user')) {
+      throw new Error(
+        `Catch-up replayed a user turn — the run would answer the same text twice: ${JSON.stringify(contents)}`
+      );
+    }
+    if (contents.includes('On it - ordering now.')) {
+      throw new Error(
+        `Catch-up replayed the supervisor's own send, already in its context: ${JSON.stringify(contents)}`
+      );
+    }
+    if (since.length !== 1 || contents[0] !== 'Started: Order Lok Lak to-go') {
+      throw new Error(`Expected only the agent lifecycle turn, got ${JSON.stringify(contents)}`);
+    }
+  } finally {
+    await cleanupSessionScopedUser(prisma, userId);
+  }
+}
+
 export function smsDeliveryBehaviorCases(prisma: PrismaClient) {
   return [
+    {
+      name: 'catch-up -- a lifecycle SMS is visible to an ISO watermark',
+      fn: () => testCatchUp_lifecycleSmsIsVisibleToAnIsoWatermark(prisma),
+    },
+    {
+      name: 'catch-up -- never replays the inbound echo or the supervisor own send',
+      fn: () => testCatchUp_neverReplaysTheInboundEchoOrOwnSend(prisma),
+    },
     {
       name: 'session -- concurrent first inbounds create one ordered transcript',
       fn: () => testConcurrentFirstInboundsCreateOneOrderedSession(prisma),

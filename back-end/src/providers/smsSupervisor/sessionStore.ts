@@ -18,6 +18,21 @@ export interface SmsSessionMessage {
   origin?: 'agent-lifecycle';
 }
 
+/**
+ * The ONE timestamp format stored on a session message.
+ *
+ * `fetchSessionMessagesSince` compares these as plain strings, which is only
+ * correct while every writer emits the same fixed-width UTC format that
+ * `Date.toISOString()` produces. `NOW()::text` does NOT: it renders
+ * `2026-08-05 03:09:02.185+00`, whose space at index 10 sorts BEFORE the `T` of
+ * any ISO watermark. Every stored message therefore compared as older than a
+ * watermark taken the same day, and the catch-up poll returned nothing on every
+ * round — the blind spot it exists to close stayed wide open.
+ *
+ * Keep this the only way a session timestamp is written.
+ */
+const SESSION_TIMESTAMP_SQL = Prisma.sql`to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+
 function storedMessagesArray(column: Prisma.Sql = Prisma.sql`messages`): Prisma.Sql {
   return Prisma.sql`CASE
     WHEN jsonb_typeof(${column}) = 'array' THEN ${column}
@@ -50,7 +65,7 @@ export async function recordInboundSms(userId: string, content: string): Promise
         jsonb_build_object(
           'role', 'user',
           'content', ${content},
-          'timestamp', NOW()::text,
+          'timestamp', ${SESSION_TIMESTAMP_SQL},
           'inboundSeq', 1
         )
       )::text),
@@ -66,7 +81,7 @@ export async function recordInboundSms(userId: string, content: string): Promise
           jsonb_build_object(
             'role', 'user',
             'content', ${content},
-            'timestamp', NOW()::text,
+            'timestamp', ${SESSION_TIMESTAMP_SQL},
             'inboundSeq', "SmsSession"."lastInboundSeq" + 1
           )
         )
@@ -94,7 +109,7 @@ export async function appendOutboundSms(
           jsonb_build_object(
             'role', 'user',
             'content', ${precedingUserContent},
-            'timestamp', NOW()::text
+            'timestamp', ${SESSION_TIMESTAMP_SQL}
           )
         )`;
   await prisma.$executeRaw`
@@ -106,7 +121,7 @@ export async function appendOutboundSms(
             jsonb_build_object(
               'role', 'assistant',
               'content', ${content},
-              'timestamp', NOW()::text,
+              'timestamp', ${SESSION_TIMESTAMP_SQL},
               'providerMessageId', ${providerMessageId ?? null}
             )
           )
@@ -141,7 +156,7 @@ export async function appendLifecycleSms(
             jsonb_build_object(
               'role', 'assistant',
               'content', ${content},
-              'timestamp', NOW()::text,
+              'timestamp', ${SESSION_TIMESTAMP_SQL},
               'providerMessageId', ${providerMessageId ?? null},
               'origin', 'agent-lifecycle'
             )
@@ -172,7 +187,7 @@ export function parseSmsSessionMessages(raw: unknown): SmsSessionMessage[] {
 }
 
 /**
- * Everything added to the user's SMS thread since `sinceIso`.
+ * Lifecycle SMS added to the user's thread since `sinceIso`.
  *
  * A supervisor run composes its context once, at wake-up. Anything that reaches
  * the phone *during* the run — an agent it just spawned announcing itself, a
@@ -180,9 +195,12 @@ export function parseSmsSessionMessages(raw: unknown): SmsSessionMessage[] {
  * inbound SMS. That blind spot is what produces duplicate traffic: the
  * supervisor has no evidence the user was told anything, so it says it again.
  *
- * Polled at the top of every LLM round, and returned verbatim, whatever the
- * role or origin. The goal is simply that the model's view of the conversation
- * matches the thread on the user's phone.
+ * Scoped to `origin: 'agent-lifecycle'` — turns the supervisor did NOT author.
+ * Its own sends are already in its context, and `appendOutboundSms` re-stores
+ * the triggering inbound under a fresh timestamp, so replaying everything would
+ * hand the run a duplicate `user` turn and invite a second reply to a message it
+ * had already answered. Returning only what an agent said, verbatim and in
+ * order, is exactly the evidence the supervisor lacks.
  */
 export async function fetchSessionMessagesSince(
   userId: string,
@@ -194,6 +212,6 @@ export async function fetchSessionMessagesSince(
   });
   if (session === null) return [];
   return parseSmsSessionMessages(session.messages).filter(
-    (message) => message.timestamp > sinceIso
+    (message) => message.origin === 'agent-lifecycle' && message.timestamp > sinceIso
   );
 }
