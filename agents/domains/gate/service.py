@@ -143,8 +143,9 @@ async def raise_gate_direct(workflow_instance: Any, gate: Dict[str, Any], gate_k
         lambda: request_id in workflow_instance._signal_responses
         or bool(getattr(workflow_instance, "is_paused", False))
     )
-    if request_id not in workflow_instance._signal_responses:
-        # Leave the in-stream gate PENDING for resume; unwind the waiter.
+    # Pause wins over a queued resolution: if both arrived before this waiter
+    # resumed, leave any response in the inbox and keep the gate PENDING.
+    if bool(getattr(workflow_instance, "is_paused", False)):
         logger.info("Gate wait interrupted by pause", request_id=request_id, gate_key=gate_key)
         raise GateRejectedError(gate_key, request_id)
     signal_response = workflow_instance._signal_responses.pop(request_id)

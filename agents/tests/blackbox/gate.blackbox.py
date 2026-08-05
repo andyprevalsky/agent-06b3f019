@@ -139,7 +139,8 @@ async def test_raise_gate_direct_unwinds_on_pause_without_closing_gate():
         user_id="u",
         agent_id="a",
         is_paused=True,
-        _signal_responses={},
+        # Even with a queued resolution, pause must win and leave it unread.
+        _signal_responses={request_id: "resolved"},
         _handle_tool_event=AsyncMock(side_effect=AssertionError("gate must stay PENDING")),
     )
     gate = service.build_source_connect_gate("gmail", "t", "r", "https://x")
@@ -150,6 +151,7 @@ async def test_raise_gate_direct_unwinds_on_pause_without_closing_gate():
         except GateRejectedError:
             pass
     wf_instance._handle_tool_event.assert_not_awaited()
+    assert wf_instance._signal_responses[request_id] == "resolved"
 
 
 async def run_all_tests():

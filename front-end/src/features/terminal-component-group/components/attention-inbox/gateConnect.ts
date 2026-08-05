@@ -33,7 +33,11 @@ export interface GateConnectContext {
 /** Parse the concrete source from a source_connect gate ("source_connect:gmail"). */
 export function gateSourceKey(gate: GateMetadata): string | null {
   const match = /^source_connect:(.+)$/.exec(gate.gateKey);
-  return match ? match[1] : null;
+  if (!match) return null;
+  const source = match[1];
+  // Legacy persisted gates used `sms` before the phantom source was removed;
+  // route them to the current iMessage Mac-app connect path.
+  return source === 'sms' ? 'imessage' : source;
 }
 
 /**

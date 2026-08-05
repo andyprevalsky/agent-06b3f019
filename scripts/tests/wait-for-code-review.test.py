@@ -123,6 +123,7 @@ class ReviewWaitTest(unittest.TestCase):
             if command[:2] == ["gh", "api"] and any(
                 part.startswith("repos/acme/rose/commits/abc/status") for part in command
             ):
+                # GitHub returns newest-first; rollup reverses so newest is last.
                 return {
                     "statuses": [
                         {"context": "CodeRabbit", "state": "success"},
@@ -144,17 +145,19 @@ class ReviewWaitTest(unittest.TestCase):
             [
                 {
                     "__typename": "StatusContext",
-                    "context": "CodeRabbit",
-                    "state": "SUCCESS",
+                    "context": "Vercel",
+                    "state": "PENDING",
                 },
                 {
                     "__typename": "StatusContext",
-                    "context": "Vercel",
-                    "state": "PENDING",
+                    "context": "CodeRabbit",
+                    "state": "SUCCESS",
                 },
             ],
         )
         self.assertEqual(len(calls), 1)
+        entry = MODULE.coderabbit_entry({"statusCheckRollup": rollup})
+        self.assertEqual(entry and entry.get("state"), "SUCCESS")
 
     def test_commit_status_rollup_bounds_pages_and_shares_timeout_budget(self) -> None:
         timeouts: list[float | None] = []
@@ -195,6 +198,23 @@ class ReviewWaitTest(unittest.TestCase):
                 timeout=5.0,
             )
         self.assertIn("untrusted GitHub host", str(ctx.exception))
+
+    def test_gh_payload_rejects_untrusted_hostname_before_gh(self) -> None:
+        calls: list[object] = []
+
+        def boom(*_args, **_kwargs):
+            calls.append((_args, _kwargs))
+            raise AssertionError("gh must not run for untrusted hosts")
+
+        original = MODULE.subprocess.run
+        MODULE.subprocess.run = boom
+        try:
+            with self.assertRaises(MODULE.ReviewWaitError) as ctx:
+                MODULE.gh_payload("1", repo="evil.example/acme/rose", timeout=5.0)
+        finally:
+            MODULE.subprocess.run = original
+        self.assertIn("untrusted GitHub host", str(ctx.exception))
+        self.assertEqual(calls, [])
 
     def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
         head = "c" * 40

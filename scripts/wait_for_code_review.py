@@ -213,7 +213,22 @@ def gh_commit_status_rollup(
         if len(statuses) < 100:
             break
         page += 1
+    # GitHub returns statuses newest-first; coderabbit_entry uses matches[-1]
+    # so reverse so the newest status is last.
+    rollup.reverse()
     return rollup
+
+
+def _validate_repo_ref(repo: str | None) -> None:
+    """Reject untrusted HOST/OWNER/REPO refs before any gh invocation."""
+    if not repo:
+        return
+    hostname, _slug = _parse_repo_ref(repo)
+    if hostname and hostname != _trusted_github_host():
+        raise ReviewWaitError(
+            f"refusing untrusted GitHub host {hostname!r}; "
+            f"expected {_trusted_github_host()!r}"
+        )
 
 
 def gh_payload(
@@ -231,6 +246,8 @@ def gh_payload(
         if left <= 0:
             raise ReviewWaitError("gh_payload exceeded its time budget")
         return left
+
+    _validate_repo_ref(repo)
 
     command = ["gh", "pr", "view", pr]
     if repo:

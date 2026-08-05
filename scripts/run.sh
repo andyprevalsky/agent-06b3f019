@@ -1057,51 +1057,85 @@ ensure_ngrok_domain_reserved() {
         return 0
     fi
     echo "🌐 Checking ngrok reserved domain $domain"
-    local page_body before_id last_id
+    local page_body before_id last_id page_parse
+    # Prefer the NGROK_API_KEY env (already required above) over --api-key so the
+    # credential does not appear in process argv / shell history.
+    export NGROK_API_KEY
     # ngrok API caps page size at 100 (ERR_NGROK_233 for anything larger) and
     # paginates newest→oldest via before_id / next_page_uri. Walk every page
     # before deciding to create, or an existing domain on a later page is missed.
     before_id=""
     while true; do
         if [ -n "$before_id" ]; then
-            page_body=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 --before-id "$before_id" 2>&1) || {
+            page_body=$(ngrok api reserved-domains list --limit 100 --before-id "$before_id" 2>&1) || {
                 echo "$page_body"
                 echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
                 [ "$failure_mode" = "soft" ] && return 1
                 exit 1
             }
         else
-            page_body=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 2>&1) || {
+            page_body=$(ngrok api reserved-domains list --limit 100 2>&1) || {
                 echo "$page_body"
                 echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
                 [ "$failure_mode" = "soft" ] && return 1
                 exit 1
             }
         fi
-        if printf '%s\n' "$page_body" | python3 -c '
+        page_parse=$(printf '%s\n' "$page_body" | python3 -c '
 import json
 import sys
 
 requested_domain = sys.argv[1]
-reserved_domains = json.load(sys.stdin).get("reserved_domains") or []
-sys.exit(not any(item.get("domain") == requested_domain for item in reserved_domains))
-' "$domain"; then
-            echo "🌐 Reserved domain already exists: $domain"
-            return 0
-        fi
-        last_id=$(printf '%s\n' "$page_body" | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-domains = data.get("reserved_domains") or []
-print(domains[-1]["id"] if domains and data.get("next_page_uri") else "")
-' 2>/dev/null || true)
-        [ -n "$last_id" ] || break
-        before_id="$last_id"
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    print(f"malformed:{exc}", file=sys.stderr)
+    sys.exit(2)
+if not isinstance(data, dict):
+    print("malformed:reserved-domains payload is not an object", file=sys.stderr)
+    sys.exit(2)
+reserved_domains = data.get("reserved_domains") or []
+if not isinstance(reserved_domains, list):
+    print("malformed:reserved_domains is not a list", file=sys.stderr)
+    sys.exit(2)
+if any(item.get("domain") == requested_domain for item in reserved_domains if isinstance(item, dict)):
+    print("found")
+    sys.exit(0)
+if data.get("next_page_uri"):
+    if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
+        print("malformed:missing before_id cursor", file=sys.stderr)
+        sys.exit(2)
+    print(f"next:{reserved_domains[-1]['id']}")
+else:
+    print("done")
+' "$domain") || {
+            parse_rc=$?
+            echo "$page_body"
+            echo "❌ Could not parse ngrok reserved-domains listing for $domain."
+            [ "$failure_mode" = "soft" ] && return 1
+            exit 1
+        }
+        case "$page_parse" in
+            found)
+                echo "🌐 Reserved domain already exists: $domain"
+                return 0
+                ;;
+            next:*)
+                before_id="${page_parse#next:}"
+                ;;
+            done)
+                break
+                ;;
+            *)
+                echo "❌ Unexpected reserved-domains parse result: $page_parse"
+                [ "$failure_mode" = "soft" ] && return 1
+                exit 1
+                ;;
+        esac
     done
     echo "🌐 Reserving ngrok domain $domain"
     local create_output
     create_output=$(ngrok api reserved-domains create \
-        --api-key "$NGROK_API_KEY" \
         --domain "$domain" \
         --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
         echo "$create_output"

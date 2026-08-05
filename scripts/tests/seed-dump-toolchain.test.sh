@@ -78,3 +78,16 @@ grep -q 'item.get("domain") == requested_domain' "$RUN_SH" \
   || { echo "FAIL: run.sh must literally compare reserved domain JSON values" >&2; exit 1; }
 echo "PASS: run.sh compares reserved domains as exact JSON values"
 
+# Reserved-domain API calls must use the NGROK_API_KEY env (not --api-key argv)
+# and must fail closed on malformed listing JSON instead of creating a domain.
+ensure_fn=$(sed -n '/^ensure_ngrok_domain_reserved()/,/^}$/p' "$RUN_SH")
+echo "$ensure_fn" | grep -q 'export NGROK_API_KEY' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must export NGROK_API_KEY" >&2; exit 1; }
+if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -qE -- '--api-key[[:space:]]'; then
+  echo "FAIL: ensure_ngrok_domain_reserved must not pass --api-key on argv" >&2
+  exit 1
+fi
+echo "$ensure_fn" | grep -q 'malformed' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must fail on malformed listing JSON" >&2; exit 1; }
+echo "PASS: run.sh reserved-domain listing uses env key and fails closed on bad JSON"
+
