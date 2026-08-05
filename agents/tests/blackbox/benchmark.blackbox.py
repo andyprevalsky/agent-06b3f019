@@ -12104,10 +12104,9 @@ async def run_all_tests():
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
     )
-    r.record(
-        "toast_payment_approval_complete_receipt",
-        test_toast_payment_approval_requires_every_declared_receipt_field,
-    )
+    # toast_payment_approval_complete_receipt retired with the static receipt
+    # contract — semantic LLM judge owns that outcome now
+    # (test_toast_semantic_receipt_values_are_decided_by_llm_judge).
     r.record(
         "toast_payment_merchant_grounded_connector_variant",
         test_toast_payment_merchant_identity_accepts_grounded_connector_variant,
