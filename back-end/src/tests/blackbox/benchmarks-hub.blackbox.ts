@@ -32,7 +32,7 @@ import { resolve } from 'path';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { z } from 'zod';
-import { syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
+import { assertToastPromptMigration, syntheticBenchmarkBundle } from './benchmarks-hub.testkit';
 
 config();
 
@@ -221,6 +221,10 @@ async function testCatalog_dailyMigrationUpgradesLegacyMessagePerson(): Promise<
   } finally {
     await prisma.$disconnect();
   }
+}
+
+async function testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub(): Promise<void> {
+  await assertToastPromptMigration(BASE_URL, internalHeaders);
 }
 
 async function testCatalog_statsPresentForTasksWithHistory(): Promise<void> {
@@ -632,6 +636,10 @@ async function runAll(): Promise<void> {
     [
       'catalog: Daily migration upgrades legacy message-person',
       testCatalog_dailyMigrationUpgradesLegacyMessagePerson,
+    ],
+    [
+      'catalog: Toast prompt migration updates DB truth',
+      testCatalog_toastPromptMigrationUpdatesColumnDefinitionAndHub,
     ],
     ['catalog: stats present from history ledger', testCatalog_statsPresentForTasksWithHistory],
     ['catalog: retired tasks invisible everywhere', testCatalog_retiredTasksInvisible],

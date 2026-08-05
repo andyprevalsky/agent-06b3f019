@@ -134,16 +134,78 @@ function passkeyContent(passkey: PasskeyRecord): string {
   ]);
 }
 
+/**
+ * Bounded per-table retry budget. Retrying HERE rather than around the whole
+ * browser-auth graph is what keeps a transient failure cheap: a flaky read on a
+ * late table used to restart the entire sync, re-reading 21k cookies, 3.1k
+ * bundles, 3.7k localStorage origins and a 38MB IndexedDB blob per attempt.
+ * That redundant work — not the honest cost of the sync — exhausted the bench
+ * live-fixture budget and left the task with no verdict at all.
+ */
+export const CREDENTIAL_TABLE_SYNC_ATTEMPTS = 3;
+
+export type CredentialTableSyncOptions = {
+  attempts?: number;
+  /** Injected in tests so bounded backoff does not slow the suite. */
+  sleep?: (ms: number) => Promise<void>;
+};
+
+const defaultSleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Prisma driver errors routinely carry an EMPTY `message` and put everything
+ * useful on `name`/`code`/`meta`. Reporting `err.message` alone therefore
+ * produced `LocalStorage credential sync failed after 3 attempts:` with nothing
+ * after the colon — a two-hour run that ended with no diagnosable evidence at
+ * all. Never let a failure describe itself as the empty string.
+ */
+export function describeSyncError(err: unknown): string {
+  if (!(err instanceof Error)) return String(err) || 'unknown non-Error failure';
+  const detail = err as Error & { code?: unknown; meta?: unknown };
+  const parts = [
+    err.message.trim(),
+    detail.code === undefined ? '' : `code=${String(detail.code)}`,
+    detail.meta === undefined ? '' : `meta=${JSON.stringify(detail.meta)}`,
+  ].filter(Boolean);
+  if (parts.length === 0) {
+    const frame = err.stack?.split('\n')[1]?.trim();
+    return `${err.name} with no message${frame ? ` at ${frame}` : ''}`;
+  }
+  return `${err.name}: ${parts.join(' ')}`;
+}
+
 export async function syncRequiredCredentialTable<T>(
   tableName: string,
-  sync: () => Promise<T>
+  sync: () => Promise<T>,
+  options: CredentialTableSyncOptions = {}
 ): Promise<T> {
-  try {
-    return await sync();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`${tableName} credential sync failed: ${message}`);
+  const attempts = options.attempts ?? CREDENTIAL_TABLE_SYNC_ATTEMPTS;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new Error(`credential sync attempts must be a positive integer, got ${attempts}`);
   }
+  const sleep = options.sleep ?? defaultSleep;
+  let lastMessage = '';
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await sync();
+    } catch (err) {
+      lastMessage = describeSyncError(err);
+      if (attempt < attempts) {
+        console.warn(
+          `  ⚠️  ${tableName} credential sync attempt ${attempt}/${attempts} failed: ${lastMessage}`
+        );
+        await sleep(500 * 2 ** (attempt - 1));
+      }
+    }
+  }
+
+  throw new Error(
+    attempts === 1
+      ? `${tableName} credential sync failed: ${lastMessage}`
+      : `${tableName} credential sync failed after ${attempts} attempts: ${lastMessage}`
+  );
 }
 
 export type IntegrationModel = {
@@ -290,37 +352,286 @@ export async function syncSteelSessionAuthCredentials(
   return sessions.length;
 }
 
-type BrowserOriginRecord = LocalStorageOrigin | IndexedDBOrigin | CacheStorageOrigin;
+/**
+ * The browser-storage tables whose payload column is an arbitrarily large JSON
+ * blob, mapped to that column. These three are handled together because they
+ * share one failure mode, not because they happen to look alike.
+ */
+export const ORIGIN_BLOB_COLUMNS = {
+  LocalStorageOrigin: 'entries',
+  IndexedDBOrigin: 'databases',
+  CacheStorageOrigin: 'caches',
+} as const;
 
-export type OriginModel<T extends BrowserOriginRecord> = SnapshotLookupModel<T> & {
-  upsert(args: {
-    where: { userId_origin: { userId: string; origin: string } };
-    create: T;
-    update: Omit<T, 'id'>;
-  }): Promise<unknown>;
+export type OriginBlobTable = keyof typeof ORIGIN_BLOB_COLUMNS;
+
+/**
+ * Every origin column EXCEPT the blob. Reading a page of origins through this
+ * projection is what keeps the read cheap: `hash` is the only field change
+ * detection needs, so the payload must never ride along just to be discarded.
+ */
+export const ORIGIN_META_SELECT = {
+  id: true,
+  userId: true,
+  origin: true,
+  hash: true,
+  updatedAt: true,
+} as const;
+
+export type OriginMetaRow = Pick<
+  LocalStorageOrigin | IndexedDBOrigin | CacheStorageOrigin,
+  'id' | 'userId' | 'origin' | 'hash' | 'updatedAt'
+>;
+
+/** The raw-SQL surface both seed endpoints expose (a `PrismaClient`). */
+export type RawSqlClient = {
+  $queryRawUnsafe<T = unknown>(query: string, ...values: unknown[]): Promise<T>;
+  $executeRawUnsafe(query: string, ...values: unknown[]): Promise<number>;
 };
 
-export async function syncOriginCredentials<T extends BrowserOriginRecord>(
-  localOrigin: OriginModel<T>,
-  origins: T[]
-): Promise<number> {
-  const originsToSync = await rowsNeedingContentSync(
-    origins,
-    localOrigin,
-    (origin) => rowSignature([origin.userId, origin.origin]),
-    (remote, local) => remote.hash === local.hash,
-    (rows) => ({ origin: { in: [...new Set(rows.map((row) => row.origin))] } })
+/** A `PrismaClient` local endpoint, which additionally pins one connection. */
+export type TransactionalSqlClient = RawSqlClient & {
+  $transaction<T>(
+    fn: (tx: RawSqlClient) => Promise<T>,
+    options?: { timeout?: number; maxWait?: number }
+  ): Promise<T>;
+};
+
+/**
+ * Characters of payload moved per round trip. This — not the row size — is what
+ * peak memory is proportional to, so it is the whole point of the design: a row
+ * ten times bigger than today's largest costs exactly the same peak.
+ *
+ * 4MB is large enough that every origin row in prod except the handful of giant
+ * ones is a single round trip, so the common case pays no extra latency.
+ */
+const BLOB_CHUNK_CHARS = 4 * 1024 * 1024;
+
+/** Chunked writes hold one connection open across several round trips. */
+const BLOB_TRANSACTION_TIMEOUT_MS = 5 * 60 * 1000;
+
+type BlobChunk = { chunk: string; chunkLength: number; totalLength: number };
+
+/**
+ * Read one window of a payload as text.
+ *
+ * `offset` and the returned lengths are all measured server-side in Postgres
+ * CHARACTERS. JavaScript's `String.length` counts UTF-16 code units, so driving
+ * the window from it would silently desynchronize on any astral-plane character
+ * and splice the blob back together wrong.
+ */
+async function readBlobChunk(
+  remote: RawSqlClient,
+  table: OriginBlobTable,
+  column: string,
+  id: string,
+  offset: number
+): Promise<BlobChunk | null> {
+  const rows = await remote.$queryRawUnsafe<
+    Array<{ chunk: string; chunk_length: number; total_length: number }>
+  >(
+    `SELECT substr(payload, $2::int, $3::int) AS chunk,
+            length(substr(payload, $2::int, $3::int)) AS chunk_length,
+            length(payload) AS total_length
+     FROM (SELECT "${column}"::text AS payload FROM "${table}" WHERE id = $1::text) source`,
+    id,
+    offset,
+    BLOB_CHUNK_CHARS
   );
-  for (const origin of originsToSync) {
-    const { id: remoteId, ...updateData } = origin;
-    void remoteId;
-    await localOrigin.upsert({
-      where: { userId_origin: { userId: origin.userId, origin: origin.origin } },
-      create: origin,
-      update: updateData,
-    });
+  if (rows.length === 0) return null;
+  return {
+    chunk: rows[0].chunk,
+    chunkLength: Number(rows[0].chunk_length),
+    totalLength: Number(rows[0].total_length),
+  };
+}
+
+/**
+ * `payload` is either a bind parameter (single-chunk rows) or a server-side
+ * reassembly of the staged chunks, so the trailing parameter numbers shift.
+ */
+function upsertOriginSql(
+  table: OriginBlobTable,
+  column: string,
+  payload: { expression: string; nextParam: number }
+): string {
+  return `INSERT INTO "${table}" (id, "userId", origin, "${column}", hash, "updatedAt")
+     SELECT $1::text, $2::text, $3::text, ${payload.expression},
+            $${payload.nextParam}::text, $${payload.nextParam + 1}::timestamp
+     ON CONFLICT ("userId", origin) DO UPDATE SET
+       "${column}" = EXCLUDED."${column}",
+       hash = EXCLUDED.hash,
+       "updatedAt" = EXCLUDED."updatedAt"`;
+}
+
+/**
+ * Move one page of origin rows without ever letting the payload become a parsed
+ * JavaScript value — or even a whole JavaScript string.
+ *
+ * Reading `IndexedDBOrigin` through the Prisma model returns `databases` as a
+ * decoded JSON object. For the 41MB prod blob that is hundreds of thousands of
+ * tiny V8 objects and strings on the read, and the whole graph re-encoded on the
+ * write — measured at ~4GB RSS for a single row, which SIGKILLs a 4GB bench
+ * guest with no stderr and leaves the benchmark with no verdict at all.
+ *
+ * So the payload is never decoded and never fully resident. It crosses as
+ * `::text` in {@link BLOB_CHUNK_CHARS}-character windows and is reassembled
+ * inside Postgres before `::jsonb` stores it; jsonb normalises identically on
+ * both sides, so the stored value is byte-for-byte what a decoded round trip
+ * produced. Peak memory is therefore a constant — one chunk — rather than a
+ * multiple of the largest row, and stays a constant as prod's blobs grow.
+ *
+ * A row is fetched at all only after the hash comparison says it changed, so a
+ * re-sync of unchanged origins transfers no payload whatsoever.
+ */
+export async function syncOriginBlobCredentials(
+  remote: RawSqlClient,
+  local: TransactionalSqlClient,
+  table: OriginBlobTable,
+  origins: OriginMetaRow[]
+): Promise<number> {
+  if (origins.length === 0) return 0;
+  const column = ORIGIN_BLOB_COLUMNS[table];
+  const userIds = [...new Set(origins.map((origin) => origin.userId))];
+  // Scoped to this page's origins, and to the hash column only: an unscoped or
+  // payload-bearing snapshot restores O(table) — or O(blob) — peak residency.
+  const localRows = await local.$queryRawUnsafe<
+    Array<{ userId: string; origin: string; hash: string }>
+  >(
+    `SELECT "userId", origin, hash FROM "${table}"
+     WHERE "userId" = ANY($1::text[]) AND origin = ANY($2::text[])`,
+    userIds,
+    [...new Set(origins.map((origin) => origin.origin))]
+  );
+  const localHashes = new Map(
+    localRows.map((row) => [rowSignature([row.userId, row.origin]), row.hash])
+  );
+
+  let pending = origins.filter(
+    (origin) => localHashes.get(rowSignature([origin.userId, origin.origin])) !== origin.hash
+  );
+
+  while (pending.length > 0) {
+    // One round trip carries as many payloads as fit the byte budget, so the
+    // ~3.7k small LocalStorage origins still cost roughly one read per page
+    // instead of one read per row — the redundant-round-trip cost that already
+    // blew the bench live-fixture budget once. Rows past the budget come back
+    // with a NULL payload and are picked up by the next pass; a row that cannot
+    // fit the budget alone is streamed instead.
+    const batch = await remote.$queryRawUnsafe<
+      Array<{ id: string; payload_length: number; payload: string | null }>
+    >(
+      `SELECT id, payload_length,
+              CASE WHEN running_length <= $2::bigint THEN payload END AS payload
+       FROM (SELECT id, "${column}"::text AS payload,
+                    length("${column}"::text) AS payload_length,
+                    sum(length("${column}"::text)) OVER (ORDER BY id) AS running_length
+             FROM "${table}" WHERE id = ANY($1::text[])) sized`,
+      pending.map((origin) => origin.id),
+      BLOB_CHUNK_CHARS
+    );
+    const byId = new Map(batch.map((row) => [row.id, row]));
+    const deferred: OriginMetaRow[] = [];
+
+    for (const origin of pending) {
+      const row = byId.get(origin.id);
+      if (!row) {
+        throw new Error(
+          `${table} row ${origin.id} (${origin.origin}) vanished between the page read and its ` +
+            'payload read; the source database changed mid-sync'
+        );
+      }
+      if (row.payload === null && Number(row.payload_length) <= BLOB_CHUNK_CHARS) {
+        deferred.push(origin);
+        continue;
+      }
+      if (row.payload !== null) {
+        await local.$executeRawUnsafe(
+          upsertOriginSql(table, column, { expression: '$4::jsonb', nextParam: 5 }),
+          origin.id,
+          origin.userId,
+          origin.origin,
+          row.payload,
+          origin.hash,
+          origin.updatedAt
+        );
+        continue;
+      }
+      await streamOversizedPayload(remote, local, table, column, origin);
+    }
+
+    if (deferred.length === pending.length) {
+      throw new Error(
+        `${table} payload batching made no progress on ${pending.length} row(s); the byte budget ` +
+          'cannot be smaller than a single row that is not streamed'
+      );
+    }
+    pending = deferred;
   }
   return origins.length;
+}
+
+/**
+ * A payload too big for one round trip: stream it through a per-row temp table
+ * so neither the reader nor the writer ever holds more than one chunk.
+ * `ON COMMIT DROP` plus an interactive transaction (which pins a single
+ * connection) means the staging table cannot outlive the row it assembles.
+ */
+async function streamOversizedPayload(
+  remote: RawSqlClient,
+  local: TransactionalSqlClient,
+  table: OriginBlobTable,
+  column: string,
+  origin: OriginMetaRow
+): Promise<void> {
+  const first = await readBlobChunk(remote, table, column, origin.id, 1);
+  if (first === null) {
+    throw new Error(
+      `${table} row ${origin.id} (${origin.origin}) vanished before its payload could be ` +
+        'streamed; the source database changed mid-sync'
+    );
+  }
+  await local.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(
+        'CREATE TEMP TABLE "_seed_blob_chunks" (seq int NOT NULL, chunk text NOT NULL) ON COMMIT DROP'
+      );
+      let seq = 0;
+      let offset = 1;
+      let current: BlobChunk = first;
+      for (;;) {
+        await tx.$executeRawUnsafe(
+          'INSERT INTO "_seed_blob_chunks" (seq, chunk) VALUES ($1::int, $2::text)',
+          seq,
+          current.chunk
+        );
+        offset += current.chunkLength;
+        if (offset > current.totalLength) break;
+        seq += 1;
+        const next = await readBlobChunk(remote, table, column, origin.id, offset);
+        if (next === null) {
+          throw new Error(
+            `${table} row ${origin.id} (${origin.origin}) vanished while streaming its payload; ` +
+              'the source database changed mid-sync'
+          );
+        }
+        current = next;
+      }
+      await tx.$executeRawUnsafe(
+        upsertOriginSql(table, column, {
+          expression:
+            '(SELECT string_agg(chunk, \'\' ORDER BY seq) FROM "_seed_blob_chunks")::jsonb',
+          nextParam: 4,
+        }),
+        origin.id,
+        origin.userId,
+        origin.origin,
+        origin.hash,
+        origin.updatedAt
+      );
+    },
+    { timeout: BLOB_TRANSACTION_TIMEOUT_MS, maxWait: BLOB_TRANSACTION_TIMEOUT_MS }
+  );
 }
 
 export type BrowserPermissionModel = SnapshotLookupModel<BrowserPermission> & {

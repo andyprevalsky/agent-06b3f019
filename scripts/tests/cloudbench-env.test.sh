@@ -23,6 +23,9 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
   "cloud benchmark process must receive the configured seed-dump freshness proof"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  "export BENCHMARK_REQUIRE_SEED_DUMP=1" \
+  "cloud benchmarks must fail closed instead of replacing the canonical base"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 
@@ -802,5 +805,248 @@ require_text "$HELPER_SRC" \
 require_text "$ROOT_DIR/scripts/run-bench-hub-poller" \
   'exit_code" -ne "$CLOUDBENCH_CAPACITY_BUSY_EXIT_CODE' \
   "hub requests must retry only the typed capacity-busy runner status"
+
+# ── Ledger-only unpushed HEAD must not abort a fleet launch ──────────────────
+# RCA (2026-07-27): /descend commits its append-only timing ledger before every
+# sync, so a descent starting from a clean branch has exactly one unpushed
+# commit touching only agents/benchmarks/history/*.jsonl. run-bench-fleet gated
+# patch creation on "local HEAD != fetchable base", but create-worktree-patch.sh
+# deliberately EXCLUDES those union-merge ledgers, so it emitted an empty patch
+# and the controller treated empty as fatal:
+#   "❌ could not create the fleet local workspace patch" → exit 1, zero benches.
+# The gate and the patch content must share one definition of "shippable delta",
+# and "nothing to ship" must run the base ref instead of aborting.
+patch_repo="$TMP_ROOT/ledger-only-repo"
+mkdir -p "$patch_repo/agents/benchmarks/history"
+git -C "$patch_repo" init -q
+git -C "$patch_repo" config user.email "bench@example.com"
+git -C "$patch_repo" config user.name "Bench"
+printf 'print("under test")\n' > "$patch_repo/service.py"
+printf '{"run":"a"}\n' > "$patch_repo/agents/benchmarks/history/descend_steps.jsonl"
+git -C "$patch_repo" add -A
+git -C "$patch_repo" commit -qm "base"
+ledger_base="$(git -C "$patch_repo" rev-parse HEAD)"
+
+# The one unpushed commit a /descend run always makes before syncing.
+printf '{"run":"b"}\n' >> "$patch_repo/agents/benchmarks/history/descend_steps.jsonl"
+git -C "$patch_repo" add -A
+git -C "$patch_repo" commit -qm "chore(descend): timing ledger rows"
+
+# Pre-condition: the patch generator itself succeeds but has nothing to ship.
+ledger_patch="$TMP_ROOT/ledger-only.patch"
+bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$patch_repo" "$ledger_base" > "$ledger_patch" \
+  || fail "create-worktree-patch.sh must succeed for a ledger-only delta"
+if [ -s "$ledger_patch" ]; then
+  fail "ledger-only delta must produce an empty patch (the excluded-ledger contract)"
+fi
+
+# A ledger-only delta must be reported as "no shippable delta", not as failure.
+prepared_patch="$TMP_ROOT/prepared.patch"
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "$ledger_base" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" || prepare_rc=$?
+if [ "$prepare_rc" -ne "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+  fail "ledger-only unpushed HEAD must report no-shippable-delta (rc=$CLOUDBENCH_PATCH_NO_DELTA), got rc=$prepare_rc"
+fi
+if [ -s "$prepared_patch" ]; then
+  fail "no-shippable-delta must not leave a declared patch payload behind"
+fi
+
+# A real source change on top of the same ledger commit must still ship.
+printf 'print("changed")\n' > "$patch_repo/service.py"
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "$ledger_base" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" || prepare_rc=$?
+[ "$prepare_rc" -eq 0 ] \
+  || fail "a real worktree change must still produce a shippable patch (rc=$prepare_rc)"
+[ -s "$prepared_patch" ] \
+  || fail "a real worktree change must produce a non-empty patch payload"
+grep -Fq 'service.py' "$prepared_patch" \
+  || fail "the shippable patch must carry the changed source file"
+if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
+  fail "the shippable patch must still exclude append-only history ledgers"
+fi
+
+# A genuinely broken generation (unresolvable base ref) stays a hard failure.
+prepare_rc=0
+cloudbench_prepare_workspace_patch "$patch_repo" "definitely-not-a-ref" "$prepared_patch" \
+  "$ROOT_DIR/scripts/create-worktree-patch.sh" >/dev/null 2>&1 || prepare_rc=$?
+if [ "$prepare_rc" -ne 1 ]; then
+  fail "an unresolvable base ref must stay a hard patch-generation failure (rc=$prepare_rc)"
+fi
+
+# Both cloud controllers must route through the shared helper so the launch gate
+# can never again disagree with what the patch generator actually emits.
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_prepare_workspace_patch' \
+  "fleet controller must prepare its patch through the shared helper"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_prepare_workspace_patch' \
+  "cloud controller must prepare its patch through the shared helper"
+
+
+# ── Machine readiness must fail closed (descend antibot, epoch 4) ────────────
+# A whole 7-bench fleet run aborted before provisioning ANY task machine:
+#   ▶️  Starting machine 683e47df5094d8 ...
+#   ✅ Machine started
+#   ⚠️  SSH did not become reachable on 683e47df5094d8 — proceeding (...)
+#   🔄 git-syncing /data/repo → f56705fec ...
+#      Error: app navi-whisper-lux-bench has no started VMs.
+#   ❌ exact remote checkout failed
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Both readiness gates returned SUCCESS after exhausting their budgets, so the
+# controller exec'd into a machine that was not up and the real constraint
+# surfaced as an unrelated-looking checkout error. Readiness must fail closed.
+readiness_function() {
+  awk -v function_name="$1" '
+    $0 ~ "^" function_name "\\(\\)" { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud"
+}
+
+readiness_failures=0
+
+# The shared warm source is durable provider state and can retain a stale or
+# malformed init command across workstreams. Every maintenance resize must
+# restore the known keepalive before start; otherwise Fly reports "started" and
+# the VM exits cleanly seconds later.
+(
+  function_body="$(readiness_function resize_stopped_warm_source)"
+  [ -n "$function_body" ] || fail "could not load production resize_stopped_warm_source"
+  eval "$function_body"
+  APP="cloudbench-readiness-regression"
+  resize_args="$TMP_ROOT/warm-resize.args"
+  machine_state() { echo stopped; }
+  FLY() { printf '%s\n' "$*" > "$resize_args"; }
+  resize_stopped_warm_source warm-1 shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "warm-source maintenance resize must succeed"
+  grep -Fq -- '--command sleep infinity' "$resize_args" ||
+    fail "warm-source resize must normalize the durable keepalive command"
+) || readiness_failures=$((readiness_failures + 1))
+
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  APP="cloudbench-readiness-regression"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=2
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS=1
+  probe_calls=0
+  raw_fly_calls=0
+  ssh_ready() {
+    probe_calls=$((probe_calls + 1))
+    return 1
+  }
+  FLY() {
+    raw_fly_calls=$((raw_fly_calls + 1))
+    return 1
+  }
+  machine_state() { echo started; }
+  sleep() { :; }               # keep the pre-fix reproduction fast
+  rc=0
+  wait_for_ssh mach-never-ssh >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "wait_for_ssh must fail closed when SSH never answers (rc=$rc)"
+  [ "$probe_calls" -eq 2 ] ||
+    fail "wait_for_ssh must use the bounded ssh_ready probe exactly once per attempt"
+  [ "$raw_fly_calls" -eq 0 ] ||
+    fail "wait_for_ssh must not bypass the bounded SSH timeout path"
+) || readiness_failures=$((readiness_failures + 1))
+
+(
+  function_body="$(readiness_function start_machine)"
+  [ -n "$function_body" ] || fail "could not load production start_machine"
+  eval "$function_body"
+  CLOUDBENCH_MACHINE_START_ATTEMPTS=2
+  CLOUDBENCH_MACHINE_START_SLEEP_SECONDS=0
+  machine_state() { echo stopped; }        # never reaches started
+  machine_storage_ready() { return 0; }
+  request_machine_start() { return 0; }
+  sleep() { :; }               # keep the pre-fix reproduction fast
+  rc=0
+  start_machine mach-never-starts >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "start_machine must fail closed when the machine never reaches started (rc=$rc)"
+) || readiness_failures=$((readiness_failures + 1))
+
+# A recoverable started→stopped race must re-assert the start once, then accept
+# the same bounded readiness proof used at run launch.
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=2
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  current_state=stopped
+  restart_calls=0
+  ssh_ready() { [ "$current_state" = "started" ]; }
+  machine_state() { echo "$current_state"; }
+  request_machine_start() {
+    restart_calls=$((restart_calls + 1))
+    current_state=started
+  }
+  sleep() { :; }
+  wait_for_ssh mach-recovers >/dev/null 2>&1 ||
+    fail "wait_for_ssh must recover one stopped→started transition"
+  [ "$restart_calls" -eq 1 ] ||
+    fail "wait_for_ssh must re-assert a regressed machine start exactly once"
+) || readiness_failures=$((readiness_failures + 1))
+
+# Exercise the maintenance gate itself: a failed start cannot reach the SSH
+# probe, and a failed SSH proof cannot let the caller execute remote work.
+(
+  function_body="$(readiness_function require_machine_ready)"
+  [ -n "$function_body" ] || fail "could not load production require_machine_ready"
+  eval "$function_body"
+  start_calls=0
+  wait_calls=0
+  start_machine() {
+    start_calls=$((start_calls + 1))
+    return 1
+  }
+  wait_for_ssh() {
+    wait_calls=$((wait_calls + 1))
+    return 0
+  }
+  rc=0
+  require_machine_ready mach-never-starts >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "maintenance readiness must propagate start failure"
+  [ "$start_calls" -eq 1 ] && [ "$wait_calls" -eq 0 ] ||
+    fail "maintenance readiness must not probe SSH after start failure"
+
+  start_machine() {
+    start_calls=$((start_calls + 1))
+    return 0
+  }
+  wait_for_ssh() {
+    wait_calls=$((wait_calls + 1))
+    return 1
+  }
+  remote_exec_marker="$TMP_ROOT/readiness-remote-exec"
+  if require_machine_ready mach-never-ssh >/dev/null 2>&1; then
+    : > "$remote_exec_marker"
+  fi
+  [ ! -e "$remote_exec_marker" ] ||
+    fail "maintenance work executed after readiness failure"
+) || readiness_failures=$((readiness_failures + 1))
+
+# A readiness helper that fails closed is useless if a caller bypasses it. All
+# three maintenance paths must use the combined gate, leaving the component
+# start and SSH calls reachable only inside that gate.
+readiness_call_sites="$(grep -c '^[[:space:]]*require_machine_ready "\$mid" || exit 1$' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$readiness_call_sites" = "3" ] ||
+  fail "all 3 maintenance paths must propagate the combined readiness gate (found=$readiness_call_sites)"
+start_call_sites="$(grep -c '^[[:space:]]*start_machine "' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
+  "$ROOT_DIR/scripts/run-bench-cloud" || true)"
+[ "$start_call_sites" = "1" ] && [ "$wait_call_sites" = "1" ] ||
+  fail "start/SSH component calls must remain encapsulated by the readiness gate"
+
+[ "$readiness_failures" -eq 0 ] ||
+  fail "$readiness_failures machine-readiness regression case(s) failed"
 
 echo "All cloud benchmark environment checks passed."

@@ -149,10 +149,33 @@ EMAIL_SEND_BUTTON_PATTERNS = [
     "send mail",
 ]
 
-EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS = [
-    "resend",
-    "re-send",
-]
+# A resend action re-issues something the site already sent; it never composes a
+# new outbound message, so it is not a write the user needs to approve. The test
+# is purely positional — the label must START with one of these — so ordinary
+# sends ("Send message", "Send email") are untouched.
+EMAIL_OTP_RETRY_PREFIXES = ("resend", "re-send")
+
+# A one-time code is something the site sends TO the account being signed into.
+# It is never a message composed for a third party, so no control that asks for
+# one is a write the user needs to approve — regardless of how the label is
+# phrased or where in the label the phrase appears. This is deliberately a
+# substring test, not a prefix test: "Send new email verification code",
+# "Get verification code", and "Email me a security code" are all the same
+# action, and making the agent park on any of them wedges the run on an approval
+# that nobody is there to answer.
+ONE_TIME_CODE_PATTERNS = (
+    "verification code",
+    "confirmation code",
+    "security code",
+    "one-time code",
+    "one time code",
+    "one-time password",
+    "login code",
+    "sign-in code",
+    "sign in code",
+    "access code",
+    "passcode",
+)
 
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
@@ -252,16 +275,56 @@ def is_submit_button(element_text: str) -> bool:
     return False
 
 
+ONE_TIME_CODE_TOKEN_RE = re.compile(r"\botps?\b")
+
+
+def _is_one_time_code_action(normalized: str) -> bool:
+    """Return True when the label asks the site for a one-time code.
+
+    Content test, anywhere in the label. A code is issued to the account being
+    signed into, never composed for a third party, so the phrasing and the word
+    order carry no risk signal worth gating on.
+    """
+    if ONE_TIME_CODE_TOKEN_RE.search(normalized) is not None:
+        return True
+    return any(pattern in normalized for pattern in ONE_TIME_CODE_PATTERNS)
+
+
+def _is_email_otp_retry(normalized: str) -> bool:
+    """Return True when the label's action is a resend rather than a new send.
+
+    Deliberately positional and nothing else: no email/code/destination
+    inspection. A resend re-issues something the site already decided to send, so
+    it is never a new outbound write, and the earlier destination and code-word
+    tests only made safe retry labels fail closed and hang the run on an approval
+    that never arrives.
+    """
+    return any(
+        normalized == prefix or normalized.startswith(f"{prefix} ")
+        for prefix in EMAIL_OTP_RETRY_PREFIXES
+    )
+
+
 def is_email_send_button(element_text: str) -> bool:
-    """Check if element text indicates an outbound send action."""
+    """Check whether any local action signal is an outbound send.
+
+    Two independent exemptions clear a signal: asking for a one-time code
+    (content, anywhere in the label) and resending (positional prefix). Each
+    newline-delimited signal is still classified on its own, so an exempt label
+    can never unlock a neighbouring send control or action-bearing attribute.
+    """
     if not element_text:
         return False
 
-    text_lower = re.sub(r"\s+", " ", element_text.lower()).strip()
-    if any(pattern in text_lower for pattern in EMAIL_SEND_BUTTON_EXCLUSION_PATTERNS):
-        return False
-
-    return any(pattern == text_lower or pattern in text_lower for pattern in EMAIL_SEND_BUTTON_PATTERNS)
+    for candidate in element_text.splitlines():
+        normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
+        if not normalized:
+            continue
+        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+            continue
+        if any(pattern == normalized or pattern in normalized for pattern in EMAIL_SEND_BUTTON_PATTERNS):
+            return True
+    return False
 
 
 def is_purchase_button(element_text: str) -> bool:

@@ -1594,6 +1594,12 @@ async def create_agent(
     if world_model_mode in {"simulate", "shadow"}:
         body["world_model_mode"] = world_model_mode
 
+    # A task may narrow the user context its agent sees. Used when a real user's
+    # connected data offers a route the scenario is not testing — the gate removes
+    # that shortcut without touching the prompt or the pass criteria.
+    if task.context_gates:
+        body["context_gates"] = task.context_gates
+
     if task.start_phase:
         body["start_phase"] = task.start_phase
     if task.response_schema:
@@ -2226,6 +2232,8 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
                     tool_call_id = call.get("tool_call_id")
                     if not isinstance(tool_name, str) or not tool_name or not tool_call_id:
                         continue
+                    if tool_name == "spawn_agent" and call.get("type") == "browser":
+                        tool_name = "spawn_browser_agent"
                     requested_key = (tool_name, str(tool_call_id))
                     if requested_key in seen:
                         continue
@@ -5081,7 +5089,7 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     Real local tasks refresh from the verified shared workspace. Simulated cloud
-    stacks already restore the current dated seed dump and deliberately have no
+    stacks already restore the canonical base fixture and deliberately have no
     second source DB endpoint, so they use that restored credential state.
     """
     if not _is_local_base_url(base_url):
@@ -7038,22 +7046,42 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         if not isinstance(text_value, str):
             text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence_metadata = {
+            key: metadata[key]
+            for key in (
+                "action_type",
+                "toolName",
+                "toolStatus",
+                "url",
+                "title",
+                "browser_session_metadata",
+            )
+            if key in metadata
+        }
         evidence.append(
             {
                 "role": role or "UNKNOWN",
                 "text": text_value[:12000],
-                "metadata": {
-                    key: metadata[key]
-                    for key in (
-                        "action_type",
-                        "toolName",
-                        "toolStatus",
-                        "url",
-                        "title",
-                        "browser_session_metadata",
-                    )
-                    if key in metadata
-                },
+                "metadata": evidence_metadata,
+            }
+        )
+    # The frontend renders completionSummary metadata as the root agent's final
+    # answer card, while its backing TOOL message normally has empty text. Give
+    # the semantic judge the same summary + outputs as one normalized assistant
+    # row; omit tool usage and cost metadata that are not part of that answer.
+    summaries = _final_completion_summaries(data)
+    if summaries:
+        completion = summaries[-1]
+        outputs = completion.get("outputs")
+        payload = {
+            "summary": str(completion.get("summary") or "")[:12000],
+            "outputs": outputs[:100] if isinstance(outputs, list) else [],
+        }
+        evidence.append(
+            {
+                "role": "ASSISTANT",
+                "text": json.dumps(payload, default=str),
+                "metadata": {"evidence_type": "final_completion"},
             }
         )
     evidence.append({"benchmark_state": data.get("_benchmark", {})})
@@ -8904,9 +8932,10 @@ async def _terminate_stale_workflows():
     prevents cascading resource exhaustion.
     """
     try:
-        from temporalio.client import Client, TLSConfig
+        from temporalio.client import Client
 
         from config import load_config
+        from temporal_connection import temporal_connect_options
 
         workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
         if not workspace:
@@ -8935,12 +8964,11 @@ async def _terminate_stale_workflows():
 
         client = await Client.connect(
             config.temporal.address,
-            namespace=config.temporal.namespace,
-            tls=TLSConfig(client_cert=None, client_private_key=None),
-            rpc_metadata={
-                "temporal-namespace": config.temporal.namespace,
-                "Authorization": f"Bearer {config.temporal.api_key}",
-            },
+            **temporal_connect_options(
+                config.temporal.address,
+                config.temporal.namespace,
+                config.temporal.api_key,
+            ),
         )
 
         query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'

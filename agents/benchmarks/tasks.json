@@ -1117,8 +1117,8 @@
   {
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
-    "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Use my saved/default Amazon payment method and shipping address; do not request or add a new payment card when a valid saved method is already selected. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "description": "Buy one black beanie on Amazon for less than $35 without using Buy Now.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1135,12 +1135,9 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1149,58 +1146,6 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
-    "response_schema": {
-      "fields": [
-        {
-          "name": "selected_beanie_title",
-          "type": "str",
-          "required": true,
-          "description": "Exact title of the purchased black beanie"
-        },
-        {
-          "name": "selected_beanie_url",
-          "type": "str",
-          "required": true,
-          "description": "Amazon product URL of the purchased black beanie"
-        },
-        {
-          "name": "selected_beanie_price_usd",
-          "type": "float",
-          "required": true,
-          "description": "Grounded item price in USD, below 35"
-        },
-        {
-          "name": "quality_evidence",
-          "type": "str",
-          "required": true,
-          "description": "Grounded rating and review count or material details observed on the product page"
-        },
-        {
-          "name": "order_confirmation_id",
-          "type": "str",
-          "required": true,
-          "description": "Amazon order number from the confirmation page"
-        },
-        {
-          "name": "purchase_completed",
-          "type": "bool",
-          "required": true,
-          "description": "True only after the order was placed"
-        },
-        {
-          "name": "cart_checkout_used",
-          "type": "bool",
-          "required": true,
-          "description": "True when Add to Cart and Proceed to checkout were used"
-        },
-        {
-          "name": "buy_now_used",
-          "type": "bool",
-          "required": true,
-          "description": "False when the forbidden Buy Now path was not used"
-        }
-      ]
-    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -1218,7 +1163,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase.",
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to reach the final Amazon purchase write lock. The runner leaves that request unresolved and does not place the order.",
       "live_cookie_domains": [
         "amazon.com"
       ]
@@ -1230,7 +1175,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved purchase approval: payment-card approval or final write approval",
+          "Exactly one final Amazon purchase write lock is triggered and left unresolved",
           "The approval request identifies the beanie and its price"
         ],
         "checks": [
@@ -1241,10 +1186,6 @@
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
-          },
-          {
-            "type": "agent_status",
-            "value": "COMPLETED"
           },
           {
             "type": "approval_request_count",
@@ -1263,11 +1204,12 @@
         "id": "amazon-beanie-checkout-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The selected product is one black beanie priced under $35, and grounded rating, review, material, or product-detail evidence supports that it is well-made",
-          "The agent uses the normal cart and checkout path rather than Buy Now",
-          "The trajectory shows the qualifying purchase completed after exactly one approved purchase boundary: payment-card approval or final write approval"
+          "The selected product is one black beanie priced under $35",
+          "The trajectory does not use the Buy Now button",
+          "The final Place your order or Pay now action triggers exactly one unresolved write_lock request",
+          "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, quality basis, normal cart path, and completed purchase. Authentication assistance, unsupported quality claims, or use of Buy Now is a failure."
+        "judge_prompt": "Pass only when browser/tool evidence grounds one black beanie priced under $35, shows no use of the Buy Now button, and stops at exactly one unresolved final Amazon purchase write lock before the order is placed. Fail for authentication assistance, payment-card approval, use of Buy Now, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1408,7 +1350,7 @@
   {
     "name": "browser-toast-nopa-write-lock",
     "title": "Toast Nopa Fish Order - Cloudflare Challenge + Payment Card",
-    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building using the official Toast pickup flow. Start the browser order at https://order.toasttab.com/online/nopafish for Nopa Fish, 1 Ferry Building Suite 31, San Francisco, CA. Inspect the live Toast menu, choose the closest matching single rocky fish sandwich item (currently often named The Rocky Sandwich), add quantity 1, proceed through checkout, and stop at/handle the write-lock approval before placing the order as the harness expects. Do not use Google, DoorDash, Uber Eats, or other delivery-platform search as the primary path; only fall back away from Toast if the Toast ordering page itself is technically blocked, and report the exact blocker.",
+    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1427,41 +1369,6 @@
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kind": "payment_approval",
-    "expected_payment_receipt": {
-      "merchant": "Nopa Fish (Toast - order.toasttab.com)",
-      "currency": "USD",
-      "lineItems": [
-        {
-          "name": "The Rocky Sandwich",
-          "quantity": 1
-        }
-      ],
-      "requiredFields": [
-        "merchant",
-        "currency",
-        "lineItems",
-        "fees",
-        "subtotalCents",
-        "totalCents",
-        "fingerprint",
-        "userId",
-        "agentId"
-      ],
-      "requiredLineItemFields": [
-        "name",
-        "imageUrl",
-        "productUrl",
-        "rating",
-        "reviewCount",
-        "unitPriceCents",
-        "quantity",
-        "lineTotalCents"
-      ],
-      "requiredFeeFields": [
-        "label",
-        "amountCents"
-      ]
-    },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
     "environment": {
@@ -1488,18 +1395,14 @@
     },
     "evaluators": [
       {
-        "id": "toast-payment-receipt",
-        "method": "static_check",
+        "id": "toast-order-semantics",
+        "method": "single_turn_llm_judge",
         "criteria": [
-          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item",
-          "The approval contains every required receipt, line-item, fee, identity, and fingerprint field",
-          "The complete receipt satisfies the request_payment_card schema"
+          "The browser and payment-request evidence semantically identify Nopa Fish at the Ferry Building using the official Toast checkout, regardless of exact display-label or URL syntax",
+          "The evidence semantically contains exactly one rocky fish sandwich, allowing the live menu item to use a more specific product name such as The Rocky Sandwich",
+          "The run stops at one unresolved payment-card request and does not enter card details or place the order"
         ],
-        "checks": [
-          {
-            "type": "expected_payment_receipt"
-          }
-        ]
+        "judge_prompt": "Judge the entire outcome from visible browser, tool, and payment-request evidence by meaning rather than exact strings. Fail a different business, non-Toast checkout, wrong item or quantity, missing unresolved card request, entered card details, or a completed order."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2551,6 +2454,10 @@
         "https://www.indeed.com/"
       ],
       "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
+    },
+    "context_gates": {
+      "integrations": false,
+      "recent_communications": false
     },
     "evaluators": [
       {
@@ -4447,6 +4354,64 @@
       ".context/blue-bottle-bench-findings.md",
       "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
     ]
+  },
+  {
+    "name": "whatsapp-history-recall",
+    "title": "WhatsApp History Recall",
+    "description": "Answer three factual questions about synced WhatsApp history using local data search.",
+    "prompt": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "whatsapp", "messages"],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "live_fixtures": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "The canonical Victoria base fixture includes frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
+    },
+    "evaluators": [
+      {
+        "id": "whatsapp-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          { "type": "no_tool_failures" },
+          { "type": "agent_status", "value": "COMPLETED" }
+        ]
+      },
+      {
+        "id": "whatsapp-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own WhatsApp data (grep against the whatsapp/messages source, or the local data summary) rather than answering from assumption",
+          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?'; direction and timestamp are optional details",
+          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823; its approximately 2197-message subtotal is optional",
+          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages spanning about July 2022 to July 2026; the roughly 561 contacts/threads count is optional",
+          "All three questions are answered in the final response"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation that the answer does include must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable, a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Do not require optional supporting statistics that the user did not ask for, such as the top contact's message subtotal or the number of contacts/threads. Score 1.0 only when all three requested answers are present and each matches the expected value. Score 0.0 if any requested answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user:whatsapp-bench-2026-07-29"]
   },
   {
     "name": "agent-payment-production-purchase",

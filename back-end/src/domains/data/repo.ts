@@ -82,7 +82,13 @@ export async function getNewestMessage(userId: string) {
   return prisma.messageRecord.findFirst({
     where: { person: { userId } },
     orderBy: { timestamp: 'desc' },
-    select: { timestamp: true },
+    select: {
+      timestamp: true,
+      channel: true,
+      from: true,
+      to: true,
+      message: true,
+    },
   });
 }
 

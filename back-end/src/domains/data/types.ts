@@ -304,6 +304,13 @@ export interface SummaryResult {
         from: string | null;
         to: string | null;
       };
+      latest_message: {
+        timestamp: string;
+        channel: string;
+        from: string;
+        to: string;
+        text: string;
+      } | null;
       threads: SummaryThreadInfo[];
     };
     transactions?: {

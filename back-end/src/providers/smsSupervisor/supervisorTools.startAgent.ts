@@ -3,7 +3,7 @@
  * Split from supervisorTools.ts to stay under max-lines.
  */
 
-import { prisma } from '../database';
+import { prisma, runTransactionWithRetry } from '../database';
 import { startAgentWorkflow } from '../temporal';
 import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
@@ -45,7 +45,7 @@ export async function commitStartNewAgent(
 
   let agent;
   try {
-    agent = await prisma.$transaction(async (tx) => {
+    agent = await runTransactionWithRetry(async (tx) => {
       const newAgent = await tx.agent.create({
         data: {
           // Client-supplied UUID makes commit idempotent: a retried commit

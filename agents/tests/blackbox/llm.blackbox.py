@@ -5831,6 +5831,72 @@ async def test_call_llm_structured_streaming_nested_tool_recovery():
     assert response.tool_calls[0].tool == "web_search"
 
 
+def test_normalize_provider_tool_names_is_allowlisted():
+    """Only known provider namespaces are removed from structured tool names."""
+    from helpers.llm import _normalize_provider_tool_names
+
+    payload = {
+        "tool_calls": [
+            {"tool": "default_api:grep", "pattern": "whatsapp"},
+            {"tool": "untrusted_api:grep", "pattern": "whatsapp"},
+            {"tool": "default_api:", "pattern": "whatsapp"},
+        ]
+    }
+
+    assert _normalize_provider_tool_names(payload) == 1
+    assert payload["tool_calls"][0]["tool"] == "grep"
+    assert payload["tool_calls"][1]["tool"] == "untrusted_api:grep"
+    assert payload["tool_calls"][2]["tool"] == "default_api:"
+
+
+async def test_call_llm_structured_streaming_normalizes_provider_tool_name():
+    """Provider schema namespaces do not invalidate an otherwise declared tool."""
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    content = json.dumps(
+        {
+            "response": "Searching WhatsApp history",
+            "tool_calls": [
+                {
+                    "tool": "default_api:grep",
+                    "pattern": "whatsapp",
+                    "sources": ["whatsapp"],
+                }
+            ],
+        }
+    )
+    payload = {
+        "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10},
+    }
+    body = _sse_body([payload])
+
+    def handler(req):
+        return httpx.Response(200, text=body)
+
+    set_mock_handler(handler)
+    AgentAction = create_agent_action_model(["grep"])
+
+    async def on_chunk(text, tokens):
+        pass
+
+    response, _usage, _detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "q"}],
+        model="rose",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        call_site="provider-tool-name-normalization",
+    )
+
+    assert len(response.tool_calls) == 1
+    assert response.tool_calls[0].tool == "grep"
+
+
 async def test_call_llm_structured_streaming_thinking_model_reasoning_json():
     """Thinking models that put JSON in reasoning have it extracted."""
     import httpx
@@ -7154,6 +7220,11 @@ async def run_all_tests():
         test_call_llm_structured_streaming_openrouter_cancelled_error_propagates,
     )
     await r.record_async("stream_nested_tool_recovery", test_call_llm_structured_streaming_nested_tool_recovery)
+    r.record("normalize_provider_tool_names_allowlist", test_normalize_provider_tool_names_is_allowlisted)
+    await r.record_async(
+        "stream_provider_tool_name_normalization",
+        test_call_llm_structured_streaming_normalizes_provider_tool_name,
+    )
     await r.record_async(
         "stream_thinking_model_reasoning_json", test_call_llm_structured_streaming_thinking_model_reasoning_json
     )
