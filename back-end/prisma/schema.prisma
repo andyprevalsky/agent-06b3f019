@@ -267,6 +267,7 @@ model User {
   userId                      String                      @unique
   name                        String?
   email                       String?
+  deliveryRecipientName       String?
   addressLine1                String?
   addressLine2                String?
   city                        String?

@@ -4132,46 +4132,24 @@ def _production_compute_token_database_url(local_database_url: str) -> Optional[
     --compute-tokens-only``. Keep the source selection in Python so the seed
     command never falls back to an ambient ``DATABASE_URL`` that run.sh has
     overwritten with the isolated destination.
-
-    Cursor Cloud also injects the prod pooled URL into the process environment
-    while ``back-end/.env`` may have been rewritten to local Postgres for the
-    stack. Prefer the file URL when it is a distinct remote; otherwise accept a
-    process-env URL that is not loopback so compute-token refresh can still
-    reach prod gpt_code/claude_code rows.
     """
     target_identity = _database_endpoint_identity(local_database_url)
     if target_identity is None:
         return None
-
-    def _usable_prod_source(candidate: Optional[str]) -> Optional[str]:
-        if not candidate:
-            return None
-        configured_identity = _database_endpoint_identity(candidate)
-        if not configured_identity or configured_identity == target_identity:
-            return None
-        if configured_identity[0] in {"localhost", "127.0.0.1", "::1"}:
-            return None
-        if _database_urls_equivalent(candidate, local_database_url):
-            return None
-        # This URL is consumed by Prisma, not psql. Preserve its pooler contract
-        # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
-        # makes Supabase's transaction pooler reject prepared statements (26000).
-        return candidate
-
-    file_url = (
+    configured_url = (
         load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
         or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
     )
-    from_file = _usable_prod_source(file_url)
-    if from_file:
-        return from_file
-
-    # Explicit override only — never ambient DATABASE_URL. During run.sh that
-    # variable is the isolated local destination; during Cloud idle it may be
-    # the injected prod secret. Ambiguity here previously made guest-sync
-    # fail-closed tests flip green against a live prod URL.
-    return _usable_prod_source(os.environ.get("SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL", "").strip())
+    if not configured_url:
+        return None
+    configured_identity = _database_endpoint_identity(configured_url)
+    if not configured_identity or configured_identity == target_identity:
+        return None
+    # This URL is consumed by Prisma, not psql. Preserve its pooler contract
+    # (`pgbouncer=true`, connection limits, etc.); stripping those parameters
+    # makes Supabase's transaction pooler reject prepared statements (26000).
+    return configured_url if not _database_urls_equivalent(configured_url, local_database_url) else None
 
 
 def _compute_token_source_database_url(target_database_url: str) -> tuple[Optional[str], Optional[str]]:
@@ -4684,6 +4662,11 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
     return True
 
 
+def _local_codex_auth_path() -> Path:
+    """Where this machine's Codex/ChatGPT auth envelope lives, if it has one."""
+    return Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+
+
 def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
 
@@ -4695,7 +4678,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """
     if sys.platform != "darwin":
         return False
-    auth_path = Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+    auth_path = _local_codex_auth_path()
     if not auth_path.is_file():
         print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
         return False
@@ -4907,17 +4890,19 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
         if not database_url:
-            raise RuntimeError("Benchmark run could not refresh local compute tokens")
-        # Codex auth.json / Keychain overlay exists only on macOS. Cloud/Linux
-        # agents sync gpt_code from the prod-backed .env remote instead; requiring
-        # the darwin overlay there falsely fails AgentCard after a healthy sync.
-        if sys.platform == "darwin":
-            if not _refresh_local_gpt_token_from_codex_auth(database_url):
-                raise RuntimeError(
-                    "Benchmark run could not refresh GPT credentials from local Codex auth"
-                )
-        else:
-            print("    🔑 Non-darwin host — using synced gpt_code (Codex keychain overlay skipped)")
+            raise RuntimeError("Benchmark run could not resolve the isolated benchmark database")
+        # Overlaying this machine's Codex auth is an OPTIONAL freshness upgrade,
+        # not a precondition. `_sync_compute_tokens` above already required and
+        # obtained a gpt token from the verified shared workspace, so a machine
+        # with no Codex login at all is a local-setup absence, not evidence that
+        # the synced token is stale. Hard-failing there made an unrelated gate
+        # (e.g. the AgentCard payment lifecycle, which needs no Codex at all)
+        # unrunnable on any machine without `codex login`.
+        #
+        # A codex auth file that EXISTS but cannot be overlaid is still fatal:
+        # that is the stale/rotated-token signal this overlay was built to catch.
+        if _local_codex_auth_path().is_file() and not _refresh_local_gpt_token_from_codex_auth(database_url):
+            raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.

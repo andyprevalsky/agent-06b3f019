@@ -30,7 +30,9 @@ const ErrorResponse = z.object({
 /** Shape returned by GET /api/user-settings */
 const GetUserSettingsResponse = z.object({
   name: z.string().nullable(),
+  email: z.string().nullable(),
   phone: z.string().nullable().optional(), // present when user record exists
+  deliveryRecipientName: z.string().nullable(),
   addressLine1: z.string().nullable(),
   addressLine2: z.string().nullable(),
   city: z.string().nullable(),
@@ -47,6 +49,8 @@ const GetUserSettingsResponse = z.object({
 /** Shape returned by PUT and PATCH /api/user-settings */
 const MutateUserSettingsResponse = z.object({
   name: z.string().nullable(),
+  email: z.string().nullable(),
+  deliveryRecipientName: z.string().nullable(),
   addressLine1: z.string().nullable(),
   addressLine2: z.string().nullable(),
   city: z.string().nullable(),
@@ -198,7 +202,9 @@ async function testPut_happy() {
     method: 'PUT',
     headers: authHeaders(ctx.accessToken!),
     body: JSON.stringify({
-      name: 'Contract Test User',
+      name: 'Account Owner',
+      email: 'OWNER@EXAMPLE.COM',
+      deliveryRecipientName: 'Delivery Recipient',
       city: 'San Francisco',
       state: 'CA',
       country: 'United States',
@@ -206,8 +212,16 @@ async function testPut_happy() {
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(MutateUserSettingsResponse, res.data, 'PUT /');
-  if (body.name !== 'Contract Test User') {
-    throw new Error(`Expected name 'Contract Test User', got '${body.name}'`);
+  if (body.name !== 'Account Owner') {
+    throw new Error(`Expected name 'Account Owner', got '${body.name}'`);
+  }
+  if (body.email !== 'owner@example.com') {
+    throw new Error(`Expected normalized email 'owner@example.com', got '${body.email}'`);
+  }
+  if (body.deliveryRecipientName !== 'Delivery Recipient') {
+    throw new Error(
+      `Expected delivery recipient 'Delivery Recipient', got '${body.deliveryRecipientName}'`
+    );
   }
   if (body.city !== 'San Francisco') {
     throw new Error(`Expected city 'San Francisco', got '${body.city}'`);
@@ -279,6 +293,16 @@ async function testPut_badInput_invalidFieldType() {
   });
   assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'PUT / (400 invalid type)');
+}
+
+async function testPut_badInput_invalidEmail() {
+  const res = await request(`${BASE_URL}/api/user-settings`, {
+    method: 'PUT',
+    headers: authHeaders(ctx.accessToken!),
+    body: JSON.stringify({ email: 'not-an-email' }),
+  });
+  assertStatus(res.status, 400, res.data);
+  assertSchema(ErrorResponse, res.data, 'PUT / (400 invalid email)');
 }
 
 async function testPut_nullableFields() {
@@ -433,7 +457,9 @@ async function testGetReflectsPut() {
     method: 'PUT',
     headers: authHeaders(ctx.accessToken!),
     body: JSON.stringify({
-      name: 'Roundtrip Test',
+      name: 'Roundtrip Owner',
+      email: 'roundtrip@example.com',
+      deliveryRecipientName: 'Roundtrip Recipient',
       systemName: 'MyAgent',
     }),
   });
@@ -444,8 +470,16 @@ async function testGetReflectsPut() {
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(GetUserSettingsResponse, res.data, 'GET / (after PUT)');
-  if (body.name !== 'Roundtrip Test') {
-    throw new Error(`Expected name 'Roundtrip Test', got '${body.name}'`);
+  if (body.name !== 'Roundtrip Owner') {
+    throw new Error(`Expected name 'Roundtrip Owner', got '${body.name}'`);
+  }
+  if (body.email !== 'roundtrip@example.com') {
+    throw new Error(`Expected email 'roundtrip@example.com', got '${body.email}'`);
+  }
+  if (body.deliveryRecipientName !== 'Roundtrip Recipient') {
+    throw new Error(
+      `Expected recipient 'Roundtrip Recipient', got '${body.deliveryRecipientName}'`
+    );
   }
   if (body.systemName !== 'MyAgent') {
     throw new Error(`Expected systemName 'MyAgent', got '${body.systemName}'`);
@@ -528,6 +562,7 @@ async function runAll() {
           fn: testPut_badInput_customSystemPromptTooLong,
         },
         { name: 'bad input — invalid field type → 400', fn: testPut_badInput_invalidFieldType },
+        { name: 'bad input — invalid email → 400', fn: testPut_badInput_invalidEmail },
         { name: 'nullable fields set to null', fn: testPut_nullableFields },
         { name: 'upsert creates record for new user', fn: testPut_verifyUpsertCreatesRecord },
       ],

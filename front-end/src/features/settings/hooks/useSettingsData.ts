@@ -5,6 +5,54 @@ import { type CustomizationData } from '@/features/customization';
 import type { UserData, ApiKey, UpgradeOption } from '../types';
 import { loadSettingsApi, loadSubscriptionApi, loadApiKeysApi } from '../api';
 
+const EMPTY_USER_DATA: UserData = {
+  name: '',
+  email: '',
+  phone: '',
+  deliveryRecipientName: '',
+  addressLine1: '',
+  addressLine2: '',
+  city: '',
+  state: '',
+  postalCode: '',
+  country: 'United States',
+};
+
+function toUserData(data: Record<string, unknown>): UserData {
+  return {
+    name: (data.name as string) || '',
+    email: (data.email as string) || '',
+    phone: (data.phone as string) || '',
+    deliveryRecipientName: (data.deliveryRecipientName as string) || '',
+    addressLine1: (data.addressLine1 as string) || '',
+    addressLine2: (data.addressLine2 as string) || '',
+    city: (data.city as string) || '',
+    state: (data.state as string) || '',
+    postalCode: (data.postalCode as string) || '',
+    country: (data.country as string) || 'United States',
+  };
+}
+
+function useApiKeySettings() {
+  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [loadingKeys, setLoadingKeys] = useState(true);
+
+  const loadApiKeys = useCallback(async () => {
+    try {
+      setLoadingKeys(true);
+      if (!getStoredSession()) return;
+      const data = (await loadApiKeysApi()) as { keys?: ApiKey[] };
+      setApiKeys(data.keys ?? []);
+    } catch {
+      // API keys load failure is non-critical
+    } finally {
+      setLoadingKeys(false);
+    }
+  }, []);
+
+  return { apiKeys, loadingKeys, loadApiKeys };
+}
+
 export interface SettingsDataResult {
   loading: boolean;
   error: string | null;
@@ -22,20 +70,11 @@ export interface SettingsDataResult {
 }
 
 /** Loads all settings data on mount: user settings, subscription, API keys. */
-// eslint-disable-next-line max-lines-per-function
 export function useSettingsData(): SettingsDataResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
-  const [userData, setUserData] = useState<UserData>({
-    name: '',
-    addressLine1: '',
-    addressLine2: '',
-    city: '',
-    state: '',
-    postalCode: '',
-    country: 'United States',
-  });
+  const [userData, setUserData] = useState<UserData>(EMPTY_USER_DATA);
   const [customization, setCustomization] = useState<CustomizationData>({
     systemName: 'Rose',
     profilePicture: null,
@@ -43,22 +82,7 @@ export function useSettingsData(): SettingsDataResult {
   });
   const [subscriptionTier, setSubscriptionTier] = useState<number | null>(null);
   const [upgradeOptions, setUpgradeOptions] = useState<UpgradeOption[]>([]);
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [loadingKeys, setLoadingKeys] = useState(true);
-
-  const loadApiKeys = useCallback(async () => {
-    try {
-      setLoadingKeys(true);
-      const session = getStoredSession();
-      if (!session) return;
-      const data = (await loadApiKeysApi()) as { keys?: ApiKey[] };
-      setApiKeys(data.keys ?? []);
-    } catch {
-      // API keys load failure is non-critical
-    } finally {
-      setLoadingKeys(false);
-    }
-  }, []);
+  const { apiKeys, loadingKeys, loadApiKeys } = useApiKeySettings();
 
   useEffect(() => {
     const session = getStoredSession();
@@ -76,15 +100,7 @@ export function useSettingsData(): SettingsDataResult {
           return;
         }
         const data = await loadSettingsApi();
-        setUserData({
-          name: (data.name as string) || '',
-          addressLine1: (data.addressLine1 as string) || '',
-          addressLine2: (data.addressLine2 as string) || '',
-          city: (data.city as string) || '',
-          state: (data.state as string) || '',
-          postalCode: (data.postalCode as string) || '',
-          country: (data.country as string) || 'United States',
-        });
+        setUserData(toUserData(data));
         setCustomization({
           systemName: (data.systemName as string) || 'Rose',
           profilePicture: (data.profilePicture as string) || null,

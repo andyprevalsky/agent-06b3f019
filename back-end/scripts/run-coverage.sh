@@ -229,11 +229,20 @@ if ! $DB_FOUND; then
 fi
 
 if $DB_FOUND; then
-  LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  # Every blackbox/unit child creates its own Prisma pool. Bound each pool so
+  # the prescribed parallel coverage workers cannot exceed Postgres's shared
+  # max_connections ceiling before the test assertions even run.
+  TEST_DB_CONNECTION_LIMIT="${BACKEND_TEST_DB_CONNECTION_LIMIT:-4}"
+  if ! [[ "$TEST_DB_CONNECTION_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ BACKEND_TEST_DB_CONNECTION_LIMIT must be a positive integer." >&2
+    exit 1
+  fi
+  LOCAL_PSQL_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
+  LOCAL_DB_URL="$LOCAL_PSQL_URL?connection_limit=$TEST_DB_CONNECTION_LIMIT&pool_timeout=30"
   export DATABASE_URL="$LOCAL_DB_URL"
   export DIRECT_URL="$LOCAL_DB_URL"
   if command -v psql >/dev/null 2>&1; then
-    psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
+    psql "$LOCAL_PSQL_URL" -v ON_ERROR_STOP=1 >/dev/null <<'SQL'
 DO $$
 BEGIN
   IF to_regclass('"UserAuthAssistanceRequest"') IS NOT NULL
@@ -250,7 +259,8 @@ SQL
   fi
   echo "Syncing Prisma schema to local test database..."
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
-  bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
+  DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
+    bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null
   # Credential seeding and smoke execution are separate controls. A caller may
   # pre-seed a valid production credential without disabling the real Codex
   # black-box test that consumes it.
@@ -261,7 +271,7 @@ SQL
       echo "Syncing local Codex credentials to local test database..."
       npx tsx scripts/sync-codex-token.ts >/dev/null
     else
-      SEEDED_CODEX_COUNT="$(psql "$LOCAL_DB_URL" -At -v ON_ERROR_STOP=1 -c \
+      SEEDED_CODEX_COUNT="$(psql "$LOCAL_PSQL_URL" -At -v ON_ERROR_STOP=1 -c \
         "SELECT count(*) FROM \"Integration\" WHERE name='gpt_code' AND status='CONNECTED' AND \"isActive\"=true AND coalesce(config->>'encryptedCredentials','') <> '';" 2>/dev/null || printf 0)"
       if [[ "$SEEDED_CODEX_COUNT" =~ ^[1-9][0-9]*$ ]]; then
         echo "Using the connected gpt_code credential already seeded in the isolated test database."

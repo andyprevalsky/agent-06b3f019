@@ -141,7 +141,11 @@ if [[ "$USE_EXISTING_BACKEND" == "1" && -n "$EXPLICIT_TEST_DB_URL" ]]; then
     echo "❌ BLACKBOX_TEST_DATABASE_URL must point at localhost for fixture safety."
     exit 1
   fi
-  if psql "$EXPLICIT_TEST_DB_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
+  # Prisma accepts connection-pool tuning in the URL query string, but libpq
+  # rejects those Prisma-only parameters. Probe the same local database with
+  # the plain URL while preserving the bounded URL for Prisma test children.
+  EXPLICIT_TEST_PSQL_URL="${EXPLICIT_TEST_DB_URL%%\?*}"
+  if psql "$EXPLICIT_TEST_PSQL_URL" -v ON_ERROR_STOP=1 -c 'SELECT 1' >/dev/null 2>&1; then
     DB_FOUND=true
     SELECTED_DB_URL="$EXPLICIT_TEST_DB_URL"
     echo "Using database explicitly provided by the existing backend launcher"

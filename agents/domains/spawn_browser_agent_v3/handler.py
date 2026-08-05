@@ -46,6 +46,7 @@ from helpers.file_resolution import (
 from helpers.messages import stream_browser_cursor
 from helpers.model_pricing import get_model_pricing_with_fallback
 from helpers.tracing import span, traced
+from helpers.user_profile import build_user_profile_sections
 from helpers.world_model_runtime import WorldModelToolExecutionAdapter
 from loop.activity_helper import call_temporal_activity_from_activity
 from providers.fast_cache.browser_use_cache import cached_browser_decision
@@ -151,6 +152,11 @@ from .types import ClaudeTokenState
 logger = structlog.get_logger()
 BROWSER_PROGRESS_TITLE = "Browser Agent In Progress"
 _background_browser_cleanup_tasks: set[asyncio.Task] = set()
+
+
+def build_browser_user_profile_sections(user_profile: Dict[str, Any]) -> List[str]:
+    """Build the identity and delivery context supplied to a browser agent."""
+    return build_user_profile_sections(user_profile)
 
 
 def _normalize_payment_card_last4(value: Any) -> Optional[str]:
@@ -2863,9 +2869,7 @@ async def _finalize_browser_recording_for_fe(
             None,
         )
         if callable(schedule_archive):
-            cleanup_delegated = bool(
-                schedule_archive(cleanup_after=cleanup_local_artifacts)
-            )
+            cleanup_delegated = bool(schedule_archive(cleanup_after=cleanup_local_artifacts))
         return {
             "recording_path": str(recording_path),
             "recording_file_pointer": recording_file_pointer,
@@ -4660,9 +4664,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 seeded_decrypted_passkeys_by_credential_id[credential_id] = pk
         if not seeded_decrypted_passkeys_by_credential_id:
             return 0
-        injected = await dom_service.inject_passkeys(
-            list(seeded_decrypted_passkeys_by_credential_id.values())
-        )
+        injected = await dom_service.inject_passkeys(list(seeded_decrypted_passkeys_by_credential_id.values()))
         logger.info(
             "Seeded cloud-custody passkeys onto browser virtual authenticator",
             count=injected,
@@ -5073,17 +5075,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _record_timing("parallel.data.init_messages", t)
 
             t = time.monotonic()
-            _user_context_sections: List[str] = []
-            if user_profile.get("addressLine1"):
-                addr_lines = [
-                    user_profile.get("name", ""),
-                    user_profile["addressLine1"],
-                    user_profile.get("addressLine2", ""),
-                    f"{user_profile.get('city', '')}, {user_profile.get('state', '')} {user_profile.get('postalCode', '')}",
-                    user_profile.get("country", "United States"),
-                ]
-                shipping_address = "\n".join(line for line in addr_lines if line)
-                _user_context_sections.append(f"## Delivery Address\n{shipping_address}")
+            _user_context_sections = build_browser_user_profile_sections(user_profile)
 
             _autopay_section = ""
             encrypted_payment = user_profile.get("encryptedPaymentInformation")
@@ -7949,9 +7941,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             minted_card = await workflow.execute_activity(
                                 "mint_purchase_card_activity",
                                 args=activity_args,
-                                start_to_close_timeout=timedelta(
-                                    seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS
-                                ),
+                                start_to_close_timeout=timedelta(seconds=MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS),
                                 retry_policy=RetryPolicy(maximum_attempts=1),
                             )
                             if minted_card.get("status") != "agentcard_company_funding_in_progress":
@@ -7959,9 +7949,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                             if funding_retry_deadline is None:
                                 funding_retry_deadline = workflow.now() + timedelta(minutes=10)
-                            retry_seconds = _normalize_funding_retry_seconds(
-                                minted_card.get("retryAfterSeconds", 5)
-                            )
+                            retry_seconds = _normalize_funding_retry_seconds(minted_card.get("retryAfterSeconds", 5))
                             if workflow.now() + timedelta(seconds=retry_seconds) >= funding_retry_deadline:
                                 return minted_card
                             logger.info(
