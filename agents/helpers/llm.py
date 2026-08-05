@@ -2033,6 +2033,80 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
     return result
 
 
+STRUCTURED_RETRY_FEEDBACK = (
+    "Your response did not satisfy the required output schema.\n"
+    "Validation error:\n{error}\n"
+    "Return a corrected, complete response."
+)
+
+
+async def _rewind_stream_consumers(
+    on_chunk: Callable[[str, int], Awaitable[None]],
+    last_emitted_for_chunk: str,
+    token_count: int,
+) -> None:
+    """Rewind delta-tracking consumers before a retry restarts the text stream.
+
+    `on_chunk` hands out a monotonically growing buffer, so every streaming
+    consumer keeps a `last_text` and emits only `text_so_far[len(last_text):]`
+    (domains/reasoning/service.py, call_llm_activity, loop/run_agent.py). A retry
+    — max_tokens escalation or structured-parse re-generation — restarts that
+    buffer at "", which silently breaks the invariant: the consumer still holds
+    the rejected attempt's text, so a corrected response that is not a
+    prefix-extension of it is delivered as an empty delta (dropped entirely when
+    it is shorter) or as a garbled tail.
+
+    Emitting `""` is the reset signal inside the existing contract: every
+    consumer computes an empty delta (broadcasting nothing) and assigns
+    `last_text = ""`, so the retry's text is then emitted in full. No consumer
+    needs new wiring, and callers that ignore the text are unaffected.
+
+    No-op when the attempt never streamed, so the ordinary no-retry path never
+    invokes this and its callback sequence is unchanged.
+    """
+    if not last_emitted_for_chunk:
+        return
+    await on_chunk("", token_count)
+
+
+def _build_structured_retry_messages(
+    messages: List[Dict[str, Any]],
+    *,
+    error_message: str,
+    tool_use_blocks: List[Dict[str, Any]],
+    text_buffer: str,
+    raw_json: str,
+) -> List[Dict[str, Any]]:
+    """Replay the rejected turn plus its validation error so the retry isn't a blind resample.
+
+    Same repair `_feed_browser_tool_validation_error_back` applies to browser tool
+    args: a model can only correct a mistake it can see. A native tool_use must be
+    answered by a tool_result carrying a matching id — an unpaired tool_use is a 400.
+    """
+    feedback = STRUCTURED_RETRY_FEEDBACK.format(error=error_message)
+
+    if not tool_use_blocks:
+        replay = [{"role": "assistant", "content": raw_json}] if raw_json else []
+        return [*messages, *replay, {"role": "user", "content": feedback}]
+
+    calls = [
+        {
+            "id": block.get("id") or f"structured_retry_{index}",
+            "type": "function",
+            "function": {
+                "name": block.get("name") or "",
+                "arguments": json.dumps(block.get("input") or {}),
+            },
+        }
+        for index, block in enumerate(tool_use_blocks)
+    ]
+    return [
+        *messages,
+        {"role": "assistant", "content": text_buffer, "tool_calls": calls},
+        *({"role": "tool", "tool_call_id": c["id"], "name": c["function"]["name"], "content": feedback} for c in calls),
+    ]
+
+
 async def call_llm_structured_streaming(
     messages: List[Dict[str, Any]],
     model: Optional[str],
@@ -2343,7 +2417,16 @@ async def call_llm_structured_streaming(
                     if not isinstance(parsed_args, dict):
                         parsed_args = {}
                     tool_name = chunk.data.get("name", "") or ""
-                    tool_use_blocks.append({"name": tool_name, "input": parsed_args})
+                    # Keep the provider's tool_use id: a schema-invalid turn is
+                    # replayed on the parse retry, and a tool_use block can only
+                    # be paired with its tool_result by id.
+                    tool_use_blocks.append(
+                        {
+                            "id": chunk.data.get("id", "") or "",
+                            "name": tool_name,
+                            "input": parsed_args,
+                        }
+                    )
 
                     if first_tool_calls_chunk is None:
                         first_tool_calls_chunk = chunk_count
@@ -2610,20 +2693,12 @@ async def call_llm_structured_streaming(
                 f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, retrying with 32768 (elapsed={elapsed:.1f}s)"
             )
 
-            # Known limitation: the retry restarts text_so_far from "" but callers that
-            # track delta state (e.g. last_text[0] in run_agent.py) still hold the first
-            # attempt's accumulated text. This causes the caller to emit empty deltas until
-            # the retry response exceeds the first attempt's length, then only the tail is
-            # shown. The final parsed result is correct — only the live-streaming display
-            # is affected. A proper fix requires a stream-reset signal in the on_chunk
-            # callback contract (or buffering the first attempt and not calling on_chunk
-            # until we know there's no escalation, which defeats streaming).
             first_attempt_chars = len(last_emitted_for_chunk)
             logger.info(
                 f"⚠️ [{call_site}] Escalation retry starting — first attempt streamed "
-                f"{first_attempt_chars} chars to caller; live-streaming of retry may show "
-                f"a content jump on the frontend"
+                f"{first_attempt_chars} chars to caller; rewinding the stream first"
             )
+            await _rewind_stream_consumers(on_chunk, last_emitted_for_chunk, token_count)
 
             return await call_llm_structured_streaming(
                 messages=messages,
@@ -2861,8 +2936,16 @@ async def call_llm_structured_streaming(
                     f"{_parse_retry_attempt + 1}/{MAX_STRUCTURED_PARSE_RETRIES + 1}); "
                     f"re-generating. error={error_message}",
                 )
+                retry_messages = _build_structured_retry_messages(
+                    messages,
+                    error_message=error_message,
+                    tool_use_blocks=tool_use_blocks,
+                    text_buffer=text_buffer,
+                    raw_json=accumulated_json,
+                )
+                await _rewind_stream_consumers(on_chunk, last_emitted_for_chunk, token_count)
                 return await call_llm_structured_streaming(
-                    messages=messages,
+                    messages=retry_messages,
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,

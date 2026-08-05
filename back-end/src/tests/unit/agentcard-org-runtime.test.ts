@@ -16,6 +16,11 @@ const ENV_NAMES = [
   'AGENTCARD_OAUTH_CLIENT_SECRET',
 ] as const;
 
+/** Yields one macrotask so every pending microtask chain settles before the test looks again. */
+function tick(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 async function main(): Promise<void> {
   const original = Object.fromEntries(ENV_NAMES.map((name) => [name, process.env[name]]));
   try {
@@ -103,6 +108,111 @@ async function main(): Promise<void> {
     assert.equal(retryTokenRequests, 2, 'an MCP auth rejection must refresh once');
     assert.equal(toolCalls, 2, 'an MCP auth rejection must retry the tool once');
 
+    const originalDateNow = Date.now;
+    let nowMs = 1_700_000_000_000;
+    let proactiveTokenRequests = 0;
+    const proactiveToolTokens: string[] = [];
+    try {
+      Date.now = () => nowMs;
+      const proactiveRuntime = new AgentCardOrgRuntime(
+        async (accessToken) => {
+          proactiveToolTokens.push(accessToken);
+          return { structuredContent: { transfers: [] } };
+        },
+        async () => {
+          proactiveTokenRequests += 1;
+          if (proactiveTokenRequests === 1) {
+            return new Response(
+              JSON.stringify({ access_token: 'still-valid-org-token', expires_in: 120 }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            );
+          }
+          return new Response(JSON.stringify({ error: 'Backend init failed' }), { status: 500 });
+        }
+      );
+
+      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
+      nowMs += 61_000;
+      await proactiveRuntime.callTool('list_transfers', { limit: 100 });
+      assert.equal(proactiveTokenRequests, 2, 'the refresh window should trigger a token exchange');
+      assert.deepEqual(
+        proactiveToolTokens,
+        ['still-valid-org-token', 'still-valid-org-token'],
+        'a transient proactive-refresh failure should reuse the unexpired token'
+      );
+    } finally {
+      Date.now = originalDateNow;
+    }
+
+    // Regression: a FORCED refresh (the one `callToolOnce` runs after the MCP rejects our token)
+    // read `inFlightToken` without consulting `forceClientCredentials`. `callToolOnce` clears
+    // `cachedToken` on an auth rejection but NOT `inFlightToken`, so the forced refresh could join
+    // an exchange that was already in flight when the 401 arrived — and a client-credential
+    // endpoint re-serves the same still-unexpired token, i.e. the very credential the MCP just
+    // rejected — then resend it. Reachable in the concurrent read fan-out: one member of a burst
+    // 401s while a sibling's proactive refresh is still pending.
+    let forcedNowMs = 1_700_000_000_000;
+    let forcedExchanges = 0;
+    const forcedToolTokens: string[] = [];
+    let siblingRead: Promise<unknown> | undefined;
+    let releasePendingExchange: (() => void) | undefined;
+    const pendingExchange = new Promise<void>((resolve) => {
+      releasePendingExchange = resolve;
+    });
+    try {
+      Date.now = () => forcedNowMs;
+      const forcedRuntime: AgentCardOrgRuntime = new AgentCardOrgRuntime(
+        async (accessToken, toolName) => {
+          if (toolName !== 'get_card') return { structuredContent: { cards: [] } };
+          forcedToolTokens.push(accessToken);
+          if (forcedToolTokens.length > 1) return { structuredContent: { card: { id: 'card-1' } } };
+          // Step into the token refresh window and let a SIBLING read open an exchange that is
+          // still in flight when this call's 401 lands.
+          forcedNowMs += 61_000;
+          siblingRead = forcedRuntime.callTool('list_cards', { limit: 1 });
+          await tick();
+          throw new Error('401 Unauthorized: invalid_token');
+        },
+        async () => {
+          forcedExchanges += 1;
+          // Exchange 2 is the sibling's proactive refresh: held open across the 401, and resolving
+          // to the SAME token the MCP rejected.
+          if (forcedExchanges === 2) await pendingExchange;
+          const accessToken = forcedExchanges >= 3 ? 'replacement-org-token' : 'rejected-org-token';
+          return new Response(JSON.stringify({ access_token: accessToken, expires_in: 120 }), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          });
+        }
+      );
+
+      await forcedRuntime.callTool('get_company_wallet', {});
+      assert.equal(forcedExchanges, 1);
+      const forcedRead = forcedRuntime.callTool('get_card', { card_id: 'card-forced' });
+      // Let the 401 land and the forced refresh resolve its token before the stale exchange is
+      // allowed to finish — otherwise the stale promise is already settled and cannot be joined.
+      await tick();
+      await tick();
+      await tick();
+      releasePendingExchange?.();
+      await forcedRead;
+      await siblingRead;
+
+      assert.deepEqual(
+        forcedToolTokens,
+        ['rejected-org-token', 'replacement-org-token'],
+        'a forced refresh must never resend the token the MCP just rejected'
+      );
+      assert.equal(
+        forcedExchanges,
+        3,
+        'a forced refresh must start a NEW token exchange, never join the in-flight one'
+      );
+    } finally {
+      Date.now = originalDateNow;
+      releasePendingExchange?.();
+    }
+
     // A stalled/aborted token endpoint surfaces as an AgentCardOrgRuntimeError, not a raw hang.
     const timingOutRuntime = new AgentCardOrgRuntime(
       async () => {
@@ -147,6 +257,186 @@ async function main(): Promise<void> {
         error.status === 409 &&
         error.details.missingEnv === 'AGENTCARD_ORG_OAUTH_CLIENT_ID'
     );
+
+    // Regression: AgentCard throttles the organization MCP org-wide (observed: 120 req/min, shared
+    // by card issuance, the wallet-reclaim poll loop, the minute cron and the payment-lifecycle
+    // fan-out). The throttle arrives as a raw transport error, so `callTool` used to propagate it
+    // untouched and `POST /api/test-payment/lifecycle/abandon` collapsed it into an opaque 500 —
+    // failing `agent-payment-abandonment` on every concurrent run of the AgentCard gate even though
+    // the throttle window refilled seconds later.
+    for (const name of ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
+
+    const throttleBody = (retryAfterMs: number): string =>
+      `Streamable HTTP error: Error POSTing to endpoint: {"error":"Rate limit exceeded","message":"Too many requests. Limit: 120 requests per minute.","retryAfter":${retryAfterMs}}`;
+
+    let throttledCalls = 0;
+    const throttledRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      assert.equal(toolName, 'get_card');
+      throttledCalls += 1;
+      if (throttledCalls === 1) throw new Error(throttleBody(Date.now() + 50));
+      return { structuredContent: { card: { status: 'CLOSED', balanceCents: 0 } } };
+    });
+    assert.deepEqual(
+      await throttledRuntime.callTool('get_card', { card_id: 'card_1' }),
+      { structuredContent: { card: { status: 'CLOSED', balanceCents: 0 } } },
+      'a throttled org tool call must be retried once the window refills, not surfaced as a failure'
+    );
+    assert.equal(throttledCalls, 2);
+
+    // A throttle that never clears stays bounded and surfaces as a typed 429 rather than an opaque
+    // transport error, so callers can distinguish provider backpressure from a Rose defect.
+    let exhaustedCalls = 0;
+    const exhaustedRuntime = new AgentCardOrgRuntime(async () => {
+      exhaustedCalls += 1;
+      throw new Error(throttleBody(Date.now() + 50));
+    });
+    await assert.rejects(
+      () => exhaustedRuntime.callTool('list_transfers', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        error.status === 429 &&
+        error.code === 'agentcard_org_mcp_rate_limited' &&
+        error.details.tool === 'list_transfers' &&
+        // The wallet-funding release observer detects provider throttling by message text, so an
+        // exhausted throttle must stay recognisable to it.
+        /too many requests|rate.?limit|\b429\b/i.test(error.message)
+    );
+    assert.equal(exhaustedCalls, 3, 'rate-limit retries must stay bounded');
+
+    // A window reset further out than the delay budget must fail fast rather than parking the
+    // request: nested callers (the 20-attempt release observer) would otherwise multiply the wait.
+    let unbudgetedCalls = 0;
+    const unbudgetedRuntime = new AgentCardOrgRuntime(async () => {
+      unbudgetedCalls += 1;
+      throw new Error(throttleBody(Date.now() + 60_000));
+    });
+    const unbudgetedStartedAt = Date.now();
+    await assert.rejects(
+      () => unbudgetedRuntime.callTool('list_cards', { limit: 100 }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError && error.code === 'agentcard_org_mcp_rate_limited'
+    );
+    assert.equal(unbudgetedCalls, 1, 'a reset beyond the delay budget must not be waited out');
+    assert.ok(
+      Date.now() - unbudgetedStartedAt < 5_000,
+      'exceeding the delay budget must fail fast, not sleep'
+    );
+
+    // Non-throttle failures must never be retried — retrying a real error would multiply load.
+    let hardFailureCalls = 0;
+    const hardFailureRuntime = new AgentCardOrgRuntime(async () => {
+      hardFailureCalls += 1;
+      throw new Error('card_closed: This card is closed and its credentials are unavailable');
+    });
+    await assert.rejects(
+      () => hardFailureRuntime.callTool('get_card_details', { card_id: 'card_1' }),
+      /card_closed/
+    );
+    assert.equal(hardFailureCalls, 1);
+
+    // A bare `429` inside an unrelated error is not a throttle. Provider errors routinely carry
+    // arbitrary numbers (amounts in cents, record counts, id fragments); matching one relabels the
+    // real failure as a rate limit, retries a request that can never succeed, and hides the cause.
+    let bareNumberCalls = 0;
+    const bareNumberRuntime = new AgentCardOrgRuntime(async () => {
+      bareNumberCalls += 1;
+      throw new Error('MCP error -32603: transfer amount 429 cents could not be settled');
+    });
+    await assert.rejects(
+      () => bareNumberRuntime.callTool('get_card', { card_id: 'card_bare' }),
+      /could not be settled/
+    );
+    assert.equal(bareNumberCalls, 1, 'a bare 429 in unrelated text must not be read as a throttle');
+
+    // The measured production throttle advertised a reset 13.8s out. The budget must cover it: at
+    // 10s this fell through instantly and failed the payment lifecycle on every contended run.
+    let measuredWindowCalls = 0;
+    const measuredWindowRuntime = new AgentCardOrgRuntime(async () => {
+      measuredWindowCalls += 1;
+      if (measuredWindowCalls === 1) throw new Error(throttleBody(Date.now() + 13_800));
+      return { structuredContent: { transfers: [] } };
+    });
+    const measuredStartedAt = Date.now();
+    assert.deepEqual(await measuredWindowRuntime.callTool('list_transfers', { limit: 100 }), {
+      structuredContent: { transfers: [] },
+    });
+    assert.equal(measuredWindowCalls, 2, 'the advertised reset must be waited out, not abandoned');
+    assert.ok(
+      Date.now() - measuredStartedAt >= 13_800,
+      'the wait must clear the provider-advertised window boundary'
+    );
+
+    // An exhausted throttle must name the upstream body. Error logging prints the message and drops
+    // structured details, so omitting it made every throttle unattributable.
+    const opaqueRuntime = new AgentCardOrgRuntime(async () => {
+      throw new Error(throttleBody(Date.now() + 50));
+    });
+    await assert.rejects(
+      () => opaqueRuntime.callTool('get_card', { card_id: 'card_opaque' }),
+      (error: unknown) =>
+        error instanceof AgentCardOrgRuntimeError &&
+        /Limit: 120 requests per minute/.test(error.message)
+    );
+
+    // The organization MCP throttle (120 requests/minute) is shared by EVERY org caller, so
+    // identical idempotent reads that overlap must cost ONE request, not one per caller. Rose fans
+    // these out constantly: concurrent payment-lifecycle reads issue the same `list_transfers`
+    // status sweep, and the minute cron polls the same page as an in-flight wallet reclaim.
+    let coalescedCalls = 0;
+    let releaseCoalescedCall: (() => void) | undefined;
+    const coalescedGate = new Promise<void>((resolve) => {
+      releaseCoalescedCall = resolve;
+    });
+    const coalescingRuntime = new AgentCardOrgRuntime(async (_token, toolName) => {
+      coalescedCalls += 1;
+      await coalescedGate;
+      return { structuredContent: { tool: toolName, transfers: [{ id: 'owt_1' }] } };
+    });
+    const coalesced = Promise.all([
+      coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 }),
+      coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 }),
+      // Argument order must not defeat the coalescing key.
+      coalescingRuntime.callTool('list_transfers', { limit: 100, status: 'reclaimed' }),
+      coalescingRuntime.callTool('list_transfers', { status: 'failed', limit: 100 }),
+    ]);
+    releaseCoalescedCall?.();
+    const coalescedResults = await coalesced;
+    assert.equal(
+      coalescedCalls,
+      2,
+      'three identical in-flight reads must share one request; a different status is its own request'
+    );
+    assert.deepEqual(coalescedResults[0], coalescedResults[1]);
+    assert.notEqual(
+      coalescedResults[0],
+      coalescedResults[1],
+      'joiners must get a detached copy so one caller cannot mutate another caller view'
+    );
+
+    // A completed read must not be served from the coalescing map: the next caller needs fresh
+    // provider state (an abandon flow reads a card immediately after closing it).
+    await coalescingRuntime.callTool('list_transfers', { status: 'reclaimed', limit: 100 });
+    assert.equal(coalescedCalls, 3, 'coalescing must never outlive the in-flight request');
+
+    // Mutations must NEVER be coalesced — each caller's side effect has to reach AgentCard.
+    let mutationCalls = 0;
+    let releaseMutation: (() => void) | undefined;
+    const mutationGate = new Promise<void>((resolve) => {
+      releaseMutation = resolve;
+    });
+    const mutationRuntime = new AgentCardOrgRuntime(async () => {
+      mutationCalls += 1;
+      await mutationGate;
+      return { structuredContent: { status: 'CLOSED' } };
+    });
+    const mutations = Promise.all([
+      mutationRuntime.callTool('close_card', { card_id: 'card_1' }),
+      mutationRuntime.callTool('close_card', { card_id: 'card_1' }),
+    ]);
+    releaseMutation?.();
+    await mutations;
+    assert.equal(mutationCalls, 2, 'identical mutations must not be coalesced');
 
     process.stdout.write('AgentCard org runtime tests passed\n');
   } finally {

@@ -67,11 +67,20 @@ TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-# Payment lifecycle tasks must exercise the regular Stripe-backed purchase path. The default Rose
-# benchmark identity is a production admin and intentionally receives a company-funded card with no
-# personal Stripe hold, so use an isolated non-admin fixture for these settlement benchmarks.
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+# The payment-lifecycle fixture belongs to a dedicated NON-ADMIN synthetic user: admins mint
+# company-funded cards with no personal Stripe hold, which every AGENT_PAYMENT_TASK_NAMES task
+# asserts. Must equal run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID and
+# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Same identity, reached through the harness-wide env override so `run_benchmark` and this launcher
+# cannot drift: `configure_task_environment` publishes it and `seed_payment_fixture` reads it back.
+# Must equal run_benchmark.AGENT_PAYMENT_BENCHMARK_USER_ID.
+AGENT_PAYMENT_BENCHMARK_USER_ID = AGENT_PAYMENT_LIFECYCLE_USER_ID
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+# Counterpart to the above: the ADMIN funding path keeps its own benchmark, run as a synthetic
+# admin. Must equal run_benchmark.ADMIN_SUBSCRIPTION_BYPASS_USER_ID.
+ADMIN_BYPASS_TASK_NAME = "gate-subscription-card-mint-admin-bypass"
+ADMIN_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
 _PORT_RANGE_RESERVATIONS: dict[int, tuple[TextIO, ...]] = {}
 _RESERVED_PORTS: set[int] = set()
 
@@ -788,6 +797,21 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
             )
+    if ADMIN_BYPASS_TASK_NAME in selected:
+        # The admin-bypass gate benchmark runs as a SYNTHETIC admin so it can prove
+        # issueAdminCompanyCard without touching a real admin's account. isAdminUser() only honors
+        # extra ids from ADMIN_USER_IDS_EXTRA, which nothing else sets — so without this the task
+        # ran as an ordinary user and silently exercised the charged path instead of the bypass.
+        # Additive by construction: it grants admin ONLY to the synthetic id, never to a real one,
+        # and only on this local isolated stack.
+        configured = [
+            entry.strip()
+            for entry in os.environ.get("ADMIN_USER_IDS_EXTRA", "").split(",")
+            if entry.strip()
+        ]
+        if ADMIN_BYPASS_USER_ID not in configured:
+            configured.append(ADMIN_BYPASS_USER_ID)
+        os.environ["ADMIN_USER_IDS_EXTRA"] = ",".join(configured)
     if any(task.name in selected and task.requires_claude_code for task in all_tasks()):
         os.environ["ROSE_CODE_AGENT_PROVIDER"] = "claude"
 
@@ -799,17 +823,22 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
-    print("Seeding Stripe test billing fixture for agent-payment-test-shop")
+    # `configure_task_environment` publishes the payment identity on
+    # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, so read it back here rather than re-deriving it: the
+    # seeded fixture and the identity the tasks actually run as can then never disagree.
+    payment_user_id = (
+        os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
+        or os.environ.get("BENCHMARK_USER_ID", "").strip()
+        or AGENT_PAYMENT_LIFECYCLE_USER_ID
+    )
+    print(f"Seeding Stripe test billing fixture for the payment-lifecycle user {payment_user_id}")
     subprocess.run(
         [
             "npx",
             "tsx",
             "scripts/setup-benchmark-payment.ts",
             "--user-id",
-            os.environ.get(
-                AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
-                AGENT_PAYMENT_BENCHMARK_USER_ID,
-            ),
+            payment_user_id,
         ],
         cwd=REPO_ROOT / "back-end",
         env=env,
@@ -1347,11 +1376,36 @@ def diagnostic_commands(agent_id: str, *, task_name: str, port: int) -> list[lis
     ]
 
 
+def diagnostic_log_env(stack: ServiceStack | None) -> dict[str, str]:
+    """
+    Point the file-reading diagnostics at THIS run's logs.
+
+    An isolated stack writes `<context_dir>/logs/backend.log` and one `worker.N.log` per worker
+    process, never the default `agents/navi-worker-log.txt` / `back-end/backend-logs.log`. Without
+    this, `agent_latency.py` and `agent_cache.py` reported "No log lines found" for every failed
+    benchmark and the collected diagnostics were empty — the failure looked undiagnosable.
+    """
+    env = dict(os.environ)
+    if stack is None or not stack.isolated:
+        return env
+    log_dir = stack.context_dir / "logs"
+    if not log_dir.is_dir():
+        return env
+    worker_logs = sorted(str(path) for path in log_dir.glob("worker*.log"))
+    backend_log = log_dir / "backend.log"
+    if worker_logs:
+        env["NAVI_WORKER_LOGS"] = ",".join(worker_logs)
+    if backend_log.exists():
+        env["NAVI_BACKEND_LOGS"] = str(backend_log)
+    return env
+
+
 def run_diagnostics(
     failures: Sequence[FailedTask],
     *,
     port: int,
     result_path: Path,
+    stack: ServiceStack | None = None,
     timeout_seconds: float = 180,
 ) -> Path | None:
     runnable = [failure for failure in failures if failure.agent_id]
@@ -1360,6 +1414,7 @@ def run_diagnostics(
     out_root = result_path.with_suffix("")
     diag_root = out_root.parent / f"{out_root.name}_diagnostics"
     diag_root.mkdir(parents=True, exist_ok=True)
+    diag_env = diagnostic_log_env(stack)
     for failure in runnable:
         task_dir = diag_root / f"{failure.name}_{failure.agent_id[:12]}"
         task_dir.mkdir(exist_ok=True)
@@ -1369,7 +1424,7 @@ def run_diagnostics(
             outfile = open(task_dir / f"{label}.txt", "w")
             outfile.write(f"$ {' '.join(command)}\n\n")
             outfile.flush()
-            processes.append((subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT), outfile))
+            processes.append((subprocess.Popen(command, cwd=AGENTS_DIR, stdout=outfile, stderr=subprocess.STDOUT, env=diag_env), outfile))
         for process, outfile in processes:
             try:
                 process.wait(timeout=timeout_seconds)
@@ -1960,7 +2015,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             result_paths.append(result_path)
             failures = failed_tasks_from_run(result_path)
             if failures:
-                diag_dir = run_diagnostics(failures, port=port, result_path=result_path)
+                diag_dir = run_diagnostics(
+                    failures, port=port, result_path=result_path, stack=stack
+                )
                 if diag_dir:
                     print(f"Diagnostics saved: {diag_dir}")
         all_failures = [failure for path in result_paths for failure in failed_tasks_from_run(path)]

@@ -2,6 +2,27 @@
  * Canonical Stripe SDK provider.
  * Domain code must import from here instead of 'stripe' directly.
  * ESLint no-restricted-imports enforces this in src/domains/.
+ *
+ * ── TWO STRIPE ROLES, TWO KEYS ───────────────────────────────────────────────────────────────
+ * Rose sits on BOTH sides of a Stripe transaction and they must not share a key:
+ *
+ *   BILLING  (`STRIPE_SECRET_KEY`, the `stripe` singleton below)
+ *     Subscriptions, customers, and the personal purchase hold/capture/refund lifecycle. This key
+ *     deliberately STAYS test-mode: every production `Subscription.stripeCustomerId` was created in
+ *     test mode, so flipping the global key to live orphans every real user's billing (a live-key
+ *     lookup of an existing prod customer returns "No such customer"). Never change it to unblock
+ *     an acquirer-side problem.
+ *
+ *   MERCHANT / ACQUIRER (`TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY`,
+ *                        `getTestPaymentMerchantStripeClient()`)
+ *     The `/test_payment` shop taking a card at checkout. This side must be LIVE for a live
+ *     Rose-minted AgentCard to be authorized on real card rails: AgentCard refuses `test_charge` on
+ *     live cards ("Live cards are charged by real merchants") and Stripe test mode never touches
+ *     the card networks, so a live PAN can only be proven by a real acquirer authorization.
+ *
+ * Transposing them is a silent, expensive failure in both directions — a merchant charge on the
+ * billing key proves nothing about live rails, and billing on the merchant key writes real-money
+ * customers Rose cannot reconcile. Keep the two accessors separate and single-purpose.
  */
 import Stripe from 'stripe';
 import { createLogger } from './logger';
@@ -62,6 +83,97 @@ export async function getVerifiedStripeMetricsClient(): Promise<Stripe> {
       throw error;
     });
   await stripeMetricsAccountVerification;
+  return client;
+}
+
+// ── /test_payment MERCHANT (acquirer) client ──────────────────────────────────────────────────
+
+/** Env var holding the `/test_payment` shop's own Stripe secret key. Never the billing key. */
+export const TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV = 'TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY';
+
+export interface ResolvedMerchantSecretKey {
+  secretKey: string;
+  /** True when no merchant key was configured and the BILLING key is standing in for it. */
+  usedBillingFallback: boolean;
+}
+
+/**
+ * Pick the key the `/test_payment` shop charges with. A configured merchant key ALWAYS wins; the
+ * billing key is only a last-resort stand-in, and the caller must announce that (see
+ * `getTestPaymentMerchantStripeClient`) rather than quietly acquiring on the billing account.
+ */
+export function resolveTestPaymentMerchantSecretKey(
+  merchantKey: string | undefined,
+  billingKey: string
+): ResolvedMerchantSecretKey {
+  const trimmed = merchantKey?.trim() ?? '';
+  if (trimmed !== '') {
+    return { secretKey: trimmed, usedBillingFallback: false };
+  }
+  return { secretKey: billingKey, usedBillingFallback: true };
+}
+
+/** One client per distinct merchant key, so repeated checkouts reuse a single connection pool. */
+const merchantStripeClients = new Map<string, Stripe>();
+
+/**
+ * Stripe client for the `/test_payment` shop — the ACQUIRER side.
+ *
+ * When `TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY` is absent:
+ *   - production FAILS CLOSED. The only prod consumer is the live-lifecycle payment benchmark,
+ *     whose entire purpose is proving a LIVE Rose card authorizes on real rails. Test-mode rails
+ *     cannot do that, so a fallback there would turn a real capability check into a confusing
+ *     Stripe decline (or worse, a green run that proved nothing). The throw names the fix.
+ *   - non-production falls back to the billing key and says so LOUDLY on every call. Local dev and
+ *     the sandbox benchmarks mint test-mode cards, which the test-mode billing key can authorize,
+ *     so the shop stays usable — but the log makes it impossible to mistake that for live rails.
+ *
+ * This client is for merchant charges ONLY. Subscriptions, customers, and purchase holds keep using
+ * the `stripe` billing singleton.
+ */
+export function getTestPaymentMerchantStripeClient(): Stripe {
+  const resolved = resolveTestPaymentMerchantSecretKey(
+    process.env[TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV],
+    STRIPE_SECRET_KEY
+  );
+  if (resolved.usedBillingFallback) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        `${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV} is not configured. The /test_payment shop is the ` +
+          'ACQUIRER for Rose-minted AgentCards and needs its OWN live-mode Stripe secret key; the ' +
+          'global STRIPE_SECRET_KEY is the BILLING key and stays test-mode on purpose (every ' +
+          'production Subscription.stripeCustomerId was created in test mode). Set ' +
+          `${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV} on the backend service — do NOT change ` +
+          'STRIPE_SECRET_KEY.'
+      );
+    }
+    log.warn(
+      `${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV} is not set; /test_payment is acquiring on the ` +
+        'BILLING key. Test-mode rails never reach the card networks, so a LIVE Rose-minted ' +
+        'AgentCard cannot be authorized on this path until the merchant key is configured.',
+      { merchant_key_env: TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV, using_billing_fallback: true }
+    );
+    // Return the billing singleton itself rather than a second client on the same key, so the
+    // fallback is observably identical to billing instead of masquerading as a merchant account.
+    return stripe;
+  }
+  const requiredKeyPattern =
+    process.env.NODE_ENV === 'production' ? /^(sk|rk)_live_/ : /^(sk|rk)_(test|live)_/;
+  if (!requiredKeyPattern.test(resolved.secretKey)) {
+    const expected =
+      process.env.NODE_ENV === 'production'
+        ? 'an sk_live_ or rk_live_ value in production'
+        : 'an sk_live_/sk_test_/rk_live_/rk_test_ value';
+    throw new Error(
+      `${TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV} is not a Stripe secret/restricted key ` +
+        `(expected ${expected})`
+    );
+  }
+  let client = merchantStripeClients.get(resolved.secretKey);
+  if (client === undefined) {
+    client = new Stripe(resolved.secretKey, { apiVersion: STRIPE_API_VERSION });
+    merchantStripeClients.set(resolved.secretKey, client);
+  }
   return client;
 }
 

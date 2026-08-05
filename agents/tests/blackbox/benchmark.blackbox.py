@@ -1,6 +1,8 @@
 """Blackbox tests for benchmark helpers."""
 
 import asyncio
+import base64
+import contextlib
 import hashlib
 import json
 import importlib.util
@@ -15,6 +17,31 @@ from unittest.mock import patch
 import time
 
 from _test_utils import BlackboxResult
+
+
+@contextlib.contextmanager
+def anthropic_family(*, excluded: bool):
+    """Pin ROSE_EXCLUDE_ANTHROPIC_FAMILY for the duration of a test.
+
+    Several compute-credential helpers branch on this flag, and operators export it
+    in their shell whenever Anthropic credits/OAuth are unavailable. Left unpinned,
+    the ambient value silently decides which branch a test samples, so the suite goes
+    red on an unrelated machine-state change instead of on a real regression. Any test
+    asserting an exact call list against those helpers must declare its mode.
+    """
+    key = "ROSE_EXCLUDE_ANTHROPIC_FAMILY"
+    previous = os.environ.get(key)
+    if excluded:
+        os.environ[key] = "1"
+    else:
+        os.environ.pop(key, None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous
 
 
 def test_every_benchmark_run_registers_in_app_hub_before_execution():
@@ -179,9 +206,7 @@ def test_agent_payment_output_blob_is_key_agnostic():
     # The regression: agent emitted `order_id`, not `order_confirmation_id`.
     assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
     # Legacy/alternate key names surface too.
-    assert "tp_c5053b1b" in blob_for(
-        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
-    )
+    assert "tp_c5053b1b" in blob_for({"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96})
     # No populated browser output → empty blob (the semantic gate fails closed on empty).
     assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
@@ -237,13 +262,9 @@ def test_cloud_fleet_controller_detaches_by_default():
     """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
     repo_root = Path(__file__).resolve().parents[3]
     fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
-    detach_default = next(
-        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
-    )
+    detach_default = next(line.strip() for line in fleet.splitlines() if line.startswith("DETACH="))
 
-    assert detach_default == 'DETACH="1"', (
-        f"fleet launch mode was {detach_default}; paid runs must detach by default"
-    )
+    assert detach_default == 'DETACH="1"', f"fleet launch mode was {detach_default}; paid runs must detach by default"
     assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
     assert '--foreground)     DETACH="0"' in fleet
     assert "--recover-stale-owner)" in fleet
@@ -251,9 +272,7 @@ def test_cloud_fleet_controller_detaches_by_default():
     assert "volume_id=%s" in fleet
     assert "Never sweep app-global unattached" in fleet
     assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
-    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
-        "cloudbench_controller_lock_acquire"
-    )
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire")
 
 
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
@@ -535,7 +554,9 @@ async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles()
     with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
-    assert max_active_browser_tasks == 2, f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
+    assert max_active_browser_tasks == 2, (
+        f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
+    )
 
 
 async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles():
@@ -565,8 +586,7 @@ async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles()
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
     assert max_active_browser_tasks == 1, (
-        "shared browser profiles lost one-writer protection; "
-        f"observed concurrency={max_active_browser_tasks}"
+        f"shared browser profiles lost one-writer protection; observed concurrency={max_active_browser_tasks}"
     )
 
 
@@ -873,11 +893,14 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
     wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
         merchant="Nopa Fish (Toast - order.doordash.com)"
     )
-    assert _validate_payment_receipt(
-        task,
-        wrong_structured_request,
-        messages=wrong_structured_messages,
-    ) is not None
+    assert (
+        _validate_payment_receipt(
+            task,
+            wrong_structured_request,
+            messages=wrong_structured_messages,
+        )
+        is not None
+    )
 
     current_request, toast_messages = _captured_toast_payment_approval()
     _, doordash_messages = _captured_toast_payment_approval()
@@ -885,11 +908,14 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
         message["metadata"]["subAgentId"] = "doordash-browser-task"
         message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
     doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(
-        task,
-        current_request,
-        messages=[*toast_messages, *doordash_messages],
-    ) is not None
+    assert (
+        _validate_payment_receipt(
+            task,
+            current_request,
+            messages=[*toast_messages, *doordash_messages],
+        )
+        is not None
+    )
 
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
@@ -1076,10 +1102,7 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
     from benchmarks import local
 
     env_path = tmp_path / ".env"
-    env_path.write_text(
-        'AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\n'
-        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n'
-    )
+    env_path.write_text('AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\nAGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n')
     local.validate_agentcard_org_credentials(
         ["agent-payment-test-shop"],
         env={},
@@ -1172,6 +1195,144 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "tx.credit.create" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
+
+
+def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
+    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+
+    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
+    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
+    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
+    benchmark user makes that assertion unreachable by construction. Three places must agree on
+    the identity — the harness run-user override, the local stack's fixture seeding, and the
+    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    """
+    import re
+
+    from benchmarks import local
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        AGENT_PAYMENT_LIFECYCLE_TASK_NAMES,
+        AGENT_PAYMENT_LIFECYCLE_USER_ID,
+        USER_ID,
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
+    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
+        "benchmark payment identity drifted between the harness and the back-end: "
+        f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
+    )
+    assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
+    assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
+    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+
+    for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
+        task = get_task_by_name(name)
+        assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
+        assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
+            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+        )
+        assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
+        assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+
+
+def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
+    """The PRODUCTION payment tasks must run on an identity that can satisfy their own contract.
+
+    Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal Stripe hold;
+    the admin branch calls `issueAdminCompanyCard`, which never creates a payment intent. The
+    default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving a hold-asserting task on
+    it makes the production gate unpassable by construction -- which is exactly how it broke.
+
+    The charge expectation itself is owned by the payment tasks, not by this guard: a task may
+    legitimately declare a personal hold (`stripeHold.status == succeeded`) or the admin no-charge
+    contract (`stripeHold: null`). Pinning one of those here made the guard disagree with a
+    definition that shipped separately. So assert the INVARIANT that actually matters -- a task that
+    expects a hold must not run as an admin -- and let the task own which contract it declares.
+    """
+    import re
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID,
+        AGENT_PAYMENT_LIFECYCLE_USER_ID,
+        AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES,
+        USER_ID,
+        benchmark_run_user_id_for_task,
+    )
+
+    repo_root = Path(__file__).resolve().parents[3]
+    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts)
+    assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
+        "production payment identity drifted between the harness and the back-end: "
+        f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
+    )
+
+    # Never the default (admin) user, never a hardcoded admin, and never shared with the sandbox
+    # identity: one user holds exactly one Subscription (stripeCustomerId) and one agentcard
+    # Integration (cardholderId), and production needs LIVE values where sandbox needs TEST ones.
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID != AGENT_PAYMENT_LIFECYCLE_USER_ID
+    admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
+    assert AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID not in admin_ts
+
+    for name in sorted(AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES):
+        task = get_task_by_name(name)
+        assert task.production_only, f"{name} must stay production_only"
+        assert benchmark_run_user_id_for_task(name) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
+            f"{name} must run as the non-admin production payment identity, otherwise a "
+            "stripeHold expectation cannot be satisfied"
+        )
+        # The task owns WHICH contract it declares; this guard owns that the declaration is
+        # satisfiable by the identity it runs on. A declared hold requires the non-admin path,
+        # which the identity assertion above already pins.
+        hold = task.expected_payment_lifecycle["stripeHold"]
+        assert hold is None or hold["status"] == "succeeded", (
+            f"{name} declares an unexpected stripeHold contract: {hold!r}. Expected either the "
+            "admin no-charge contract (null) or a succeeded personal hold."
+        )
+
+
+def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
+    """The admin funding path keeps a benchmark, and it only works if the stack grants admin.
+
+    `isAdminUser` honors extra ids ONLY from `ADMIN_USER_IDS_EXTRA`. Nothing else in the harness
+    sets it, so without this wiring `gate-subscription-card-mint-admin-bypass` ran as an ordinary
+    user and silently exercised the charged path — the exact opposite of what it asserts.
+    """
+    import os
+    from unittest.mock import patch
+
+    from benchmarks import local
+    from benchmarks.run_benchmark import (
+        ADMIN_SUBSCRIPTION_BYPASS_USER_ID,
+        AGENT_PAYMENT_LIFECYCLE_TASK_NAMES,
+        GATE_FIXTURE_TASK_USER_IDS,
+        PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME,
+    )
+
+    assert local.ADMIN_BYPASS_TASK_NAME == PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME
+    assert local.ADMIN_BYPASS_USER_ID == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    assert GATE_FIXTURE_TASK_USER_IDS[local.ADMIN_BYPASS_TASK_NAME] == local.ADMIN_BYPASS_USER_ID
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
+        local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
+        assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
+
+    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
+        local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
+        assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
@@ -2705,9 +2866,7 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
                 "skipped": True,
                 "reason": "benchmark_agent",
                 "messagePreview": (
-                    f"Done: {summary}\n"
-                    "Pickup Time: 7:41 AM\n"
-                    "View agent: https://roselabs.ai/?agent-id=root-blue-bottle"
+                    f"Done: {summary}\nPickup Time: 7:41 AM\nView agent: https://roselabs.ai/?agent-id=root-blue-bottle"
                 ),
             },
         }
@@ -3623,8 +3782,7 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
         assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prisma_source
 
         same_database_source = (
-            "postgres://source-user:one@DB.EXAMPLE.COM/victoria"
-            "?sslmode=require&application_name=seed&schema=public"
+            "postgres://source-user:one@DB.EXAMPLE.COM/victoria?sslmode=require&application_name=seed&schema=public"
         )
         env_path.write_text(f"DATABASE_URL={same_database_source}\n")
         seed_called = False
@@ -3640,8 +3798,7 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
                 bench,
                 "_local_victoria_database_url",
                 return_value=(
-                    "postgresql://target-user:two@db.example.com:5432/victoria"
-                    "?connection_limit=50&pool_timeout=30"
+                    "postgresql://target-user:two@db.example.com:5432/victoria?connection_limit=50&pool_timeout=30"
                 ),
             ),
             patch.object(bench, "_shared_workspace_database_url", return_value=None),
@@ -4462,6 +4619,67 @@ def test_webdecoy_biometrics_uses_fresh_isolated_browser_state():
     assert restored == [(manifest, "fresh browser state")]
 
 
+async def test_live_fixture_setup_and_restore_yield_to_parallel_tasks():
+    """Slow credential subprocesses must not freeze every concurrent benchmark lane."""
+    from benchmarks import run_benchmark as bench
+
+    class Task:
+        name = "browser-smoke"
+        environment = {"live_fixtures": ["live"]}
+
+    setup_timeline = []
+
+    def blocking_applier(_ctx):
+        setup_timeline.append("setup-start")
+        time.sleep(0.1)
+        setup_timeline.append("setup-end")
+        return {"fixture": "live"}
+
+    async def setup_probe():
+        async def heartbeat():
+            await asyncio.sleep(0.02)
+            setup_timeline.append("parallel-tick")
+
+        with (
+            patch.dict(bench.LIVE_FIXTURE_APPLIERS, {"live": blocking_applier}),
+            patch.object(bench, "_is_local_base_url", return_value=True),
+            patch.object(bench, "_has_usable_anthropic_api_key_fallback", return_value=False),
+        ):
+            await asyncio.gather(
+                bench._apply_live_fixtures(Task(), "http://localhost:3001"),
+                heartbeat(),
+            )
+
+    await setup_probe()
+    assert setup_timeline.index("parallel-tick") < setup_timeline.index("setup-end")
+
+    restore_timeline = []
+    manifest = {
+        "scenario": "fresh_browser_state",
+        "fixture": "live",
+    }
+
+    def blocking_restore(_manifest, *, label):
+        assert label == "fresh browser state"
+        restore_timeline.append("restore-start")
+        time.sleep(0.1)
+        restore_timeline.append("restore-end")
+
+    async def restore_probe():
+        async def restore():
+            await bench._restore_live_fixture_scenarios_async([manifest])
+
+        async def heartbeat():
+            await asyncio.sleep(0.02)
+            restore_timeline.append("parallel-tick")
+
+        with patch.object(bench, "_restore_isolated_browser_state_scenario", blocking_restore):
+            await asyncio.gather(restore(), heartbeat())
+
+    await restore_probe()
+    assert restore_timeline.index("parallel-tick") < restore_timeline.index("restore-end")
+
+
 def test_benchmark_agent_source_override_validates_known_sources():
     """Benchmark source override accepts only real AgentSource values."""
     import os
@@ -5259,7 +5477,11 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
 
-        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+        # Mode is pinned, not inherited: the helper narrows the token query when the
+        # Anthropic family is excluded, so an ambient operator flag would otherwise
+        # decide which branch this exact-call assertion is sampling.
+        with anthropic_family(excluded=False):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -5269,6 +5491,62 @@ async def test_code_agent_preflight_accepts_gpt_compute_token():
             "http://localhost:55120/api/integrations/compute-code/credentials/token",
             {"X-API-Key": "test-key"},
             None,
+            10.0,
+        )
+    ]
+
+
+async def test_code_agent_preflight_narrows_to_gpt_when_anthropic_family_excluded():
+    """With the Anthropic family excluded the preflight must ask ONLY for a gpt token.
+
+    Pairs with the non-excluded test above so both branches of the flag are pinned
+    instead of whichever one the ambient environment happens to select.
+    """
+    import benchmarks.run_benchmark as bench
+
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {"type": "gpt", "accessToken": "gpt-token"}
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url, *, headers, params=None, timeout):
+            calls.append((url, headers, params, timeout))
+            return FakeResponse()
+
+    original_headers = bench._api_headers
+    original_client = bench.httpx.AsyncClient
+    try:
+
+        async def fake_headers():
+            return {"X-API-Key": "test-key"}
+
+        bench._api_headers = fake_headers
+        bench.httpx.AsyncClient = FakeClient
+
+        with anthropic_family(excluded=True):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+    finally:
+        bench._api_headers = original_headers
+        bench.httpx.AsyncClient = original_client
+
+    assert calls == [
+        (
+            "http://localhost:55120/api/integrations/compute-code/credentials/token",
+            {"X-API-Key": "test-key"},
+            {"tokenType": "gpt"},
             10.0,
         )
     ]
@@ -5356,7 +5634,10 @@ async def test_code_agent_preflight_accepts_anthropic_api_key_fallback():
         bench._api_headers = fake_headers
         bench.httpx.AsyncClient = FakeClient
 
-        assert await bench._check_compute_code_credentials("http://localhost:55120") is True
+        # The Anthropic API-key fallback only exists when the Anthropic family is in
+        # play, so this test must declare that mode rather than inherit it.
+        with anthropic_family(excluded=False):
+            assert await bench._check_compute_code_credentials("http://localhost:55120") is True
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -5511,9 +5792,12 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
         bench.httpx.AsyncClient = FakeClient
         bench._sync_compute_tokens = fake_sync
 
-        refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
-        if asyncio.iscoroutine(refresh):
-            await refresh
+        # Excluding the Anthropic family takes a different refresh branch entirely
+        # (gpt-only, no cooldown probe), so pin the mode this test describes.
+        with anthropic_family(excluded=False):
+            refresh = bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+            if asyncio.iscoroutine(refresh):
+                await refresh
     finally:
         bench._api_headers = original_headers
         bench.httpx.AsyncClient = original_client
@@ -5750,6 +6034,88 @@ def test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_
         assert _evaluate_webdecoy_biometrics_result(data) == (True, None)
 
 
+def test_webdecoy_biometrics_failure_reports_third_party_engine_version():
+    """An over-ratchet failure must name the FCaptcha engine version that produced it.
+
+    The gated number comes from a detector we do not control, so a vendor release can
+    move it with zero change on our side. On 2026-07-28 exactly that happened: FCaptcha
+    v1.14.0/v1.15.0 returned a bit-identical 0.15595 across 14 runs and 13 distinct
+    egress IPs, then v1.18.0 returned 0.18296 for the same unchanged client while every
+    reported categoryScore sat at 0. Without the version in the failure line that reads
+    as an anti-detection regression and costs a full RCA cycle. The version is diagnostic
+    ONLY — it must never relax the ratchet comparison itself.
+    """
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import _evaluate_webdecoy_biometrics_result
+
+    def _build(tmp: str, score: float, engine_version: str) -> dict:
+        network_dir = Path(tmp) / "recording" / "network"
+        network_dir.mkdir(parents=True)
+        score_file = network_dir / "0001_score.json"
+        score_file.write_text(
+            json.dumps({"action": "form_submit", "recommendation": "allow", "score": score, "success": True})
+        )
+        page_file = network_dir / "0002_page.txt"
+        page_file.write_text(
+            "<html><body><a href=https://github.com/WebDecoy/FCaptcha/releases/tag/"
+            f"v{engine_version}>Running v{engine_version}</a></body></html>"
+        )
+        (network_dir / "index.json").write_text(
+            json.dumps(
+                {
+                    "entries": [
+                        {
+                            "method": "GET",
+                            "url": "https://webdecoy.com/product/fcaptcha-demo/",
+                            "response_ts_ms": 1,
+                            "body_file": page_file.name,
+                        },
+                        {
+                            "method": "POST",
+                            "url": "https://fcaptcha.webdecoy.com/api/score",
+                            "response_ts_ms": 123,
+                            "body_file": score_file.name,
+                        },
+                    ]
+                }
+            )
+        )
+        return {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": (
+                        "Visited https://webdecoy.com/product/fcaptcha-demo/. "
+                        "Clicked the checkbox mode verification control. "
+                        "Entered benchmark-human@example.com in invisible mode and clicked Submit. "
+                        "Final visible FCaptcha Risk Score: 0.18."
+                    ),
+                    "metadata": {"network_recording_path": str(network_dir / "index.json")},
+                }
+            ]
+        }
+
+    # Over-ratchet: the failure line must carry the engine version for triage.
+    with tempfile.TemporaryDirectory() as tmp:
+        passed, reason = _evaluate_webdecoy_biometrics_result(_build(tmp, 0.18296, "1.18.0"))
+        assert passed is False
+        assert "0.183" in reason
+        assert "v1.18.0" in reason
+        assert "ratchet" in reason.lower()
+
+    # The version note must NOT buy a pass — a recalibrated engine still fails the ratchet.
+    with tempfile.TemporaryDirectory() as tmp:
+        passed, _ = _evaluate_webdecoy_biometrics_result(_build(tmp, 0.42, "99.0.0"))
+        assert passed is False
+
+    # Under the ratchet still passes cleanly, with no diagnostic noise appended.
+    with tempfile.TemporaryDirectory() as tmp:
+        assert _evaluate_webdecoy_biometrics_result(_build(tmp, 0.1559512195121951, "1.15.0")) == (True, None)
+
+
 def test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled():
     """Minted auth-bundle probes should include the strict WebDecoy score gate by default."""
     import os
@@ -5941,14 +6307,22 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     }
     enabled = subprocess.run(
         ["bash", str(script)],
-        env={**base_env, "BENCH_TASKS": "gate-source-connect-gmail"},
+        env={
+            **base_env,
+            "BENCH_TASKS": "ignored-raw-task",
+            "BENCH_TASKS_B64": base64.b64encode(b"gate-source-connect-gmail").decode(),
+        },
         capture_output=True,
         text=True,
         check=False,
     )
     disabled = subprocess.run(
         ["bash", str(script)],
-        env={**base_env, "BENCH_TASKS": "chat-mode"},
+        env={
+            **base_env,
+            "BENCH_TASKS": "ignored-raw-task",
+            "BENCH_TASKS_B64": base64.b64encode(b"chat-mode").decode(),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -5958,7 +6332,7 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert enabled.stdout.splitlines() == [
         "stack:NON_PURCHASE_GATES_ENABLED=1",
         "benchmark:export NON_PURCHASE_GATES_ENABLED=1",
-    ]
+    ], f"stdout={enabled.stdout!r} stderr={enabled.stderr!r}"
     assert disabled.returncode == 0, disabled.stderr
     assert disabled.stdout == ""
 
@@ -5980,6 +6354,42 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
 
     assert resolver_failure.returncode == 42
     assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
+
+
+def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
+    """A broken task catalog must not silently disable source-connect gates.
+
+    Companion to the resolver-failure case above: that one proves a resolver that dies silently
+    still fails closed, this one proves the resolver's own diagnostics reach the operator instead
+    of being swallowed. The gate interpreter is selected with CLOUDBENCH_TASK_GATE_PYTHON, and a
+    non-{0,10} exit is propagated verbatim so the real cause is never flattened away.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    script = repo_root / "scripts" / "cloudbench-run.sh"
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        fake_python = Path(temp_dir) / "python3"
+        fake_python.write_text("#!/bin/sh\necho catalog-unavailable >&2\nexit 23\n", encoding="utf-8")
+        fake_python.chmod(0o755)
+        result = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **os.environ,
+                "CLOUDBENCH_TASK_GATE_PYTHON": str(fake_python),
+                "CLOUDBENCH_REPO_DIR": str(repo_root),
+                "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
+                "CLOUDBENCH_PRINT_TASK_ENV": "1",
+                "BENCH_TASKS": "gate-source-connect-gmail",
+                "BENCH_TASKS_B64": "",
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert result.returncode == 23
+    assert "catalog-unavailable" in result.stderr
+    assert "task gate resolution failed (exit 23)" in result.stderr
 
 
 def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():
@@ -6902,8 +7312,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
-        local_bench._prime_local_seed_dump_from_shared_stack = (
-            lambda path: captured.setdefault("primed_seed_dump", path) is path
+        local_bench._prime_local_seed_dump_from_shared_stack = lambda path: (
+            captured.setdefault("primed_seed_dump", path) is path
         )
         with tempfile.TemporaryDirectory() as tmp:
             context_dir = Path(tmp) / "isolated-run"
@@ -7447,6 +7857,7 @@ def test_local_port_range_allocation_is_reserved_across_processes():
         child_base_text = child.stdout.readline().strip()
         assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
         child_base = int(child_base_text)
+
         def occupied(base):
             return {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
 
@@ -8805,9 +9216,7 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
-        result = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
-        )
+        result = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
     assert result is None
 
     # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
@@ -8821,15 +9230,11 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
             }
         ),
     ):
-        failure = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
-        )
+        failure = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
     assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
 
     # No populated output → judged as missing without an LLM call.
-    empty = asyncio.run(
-        _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
-    )
+    empty = asyncio.run(_judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep"))
     assert empty is not None and "no populated output schema" in empty
 
     # REUSABLE / not overfitted: the same judge works for a totally different task's schema
@@ -8876,20 +9281,11 @@ def test_admin_bypass_card_mint_variant_wiring():
     from benchmarks.benchmark_tasks import get_task_by_name
 
     # Both variants share the depleted purchase-subscription fixture...
-    assert (
-        GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
-        == "purchase-subscription"
-    )
+    assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == "purchase-subscription"
     assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == "purchase-subscription"
     # ...but run as different users: a synthetic admin vs a plain non-admin.
-    assert (
-        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
-        == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
-    )
-    assert (
-        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME]
-        == PURCHASE_SUBSCRIPTION_GATE_USER_ID
-    )
+    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == PURCHASE_SUBSCRIPTION_GATE_USER_ID
     assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID != PURCHASE_SUBSCRIPTION_GATE_USER_ID
 
     non_admin = get_task_by_name(PURCHASE_SUBSCRIPTION_GATE_TASK_NAME)
@@ -10427,6 +10823,7 @@ def test_agent_latency_reads_isolated_benchmark_stack_logs():
     """
     import importlib
     import tempfile
+    from unittest.mock import patch
 
     latency = importlib.import_module("benchmarks.agent_latency")
 
@@ -10462,6 +10859,20 @@ def test_agent_latency_reads_isolated_benchmark_stack_logs():
             assert latency.isolated_stack_log_dirs() == [log_dir]
             worker_events = latency._read_worker_raw()
             backend_events = latency._read_backend_raw()
+
+            # The isolated runner exports the exact log set before diagnostics.
+            # That must take precedence over recent-run discovery so concurrent
+            # workspaces cannot contaminate the failed agent's evidence.
+            latency.ISOLATED_STACK_ROOT = os.path.join(tmp, "missing")
+            with patch.dict(
+                os.environ,
+                {
+                    "NAVI_WORKER_LOGS": os.path.join(log_dir, "worker.4.log"),
+                    "NAVI_BACKEND_LOGS": os.path.join(log_dir, "backend.log"),
+                },
+            ):
+                explicit_worker_events = latency._read_worker_raw()
+                explicit_backend_events = latency._read_backend_raw()
         finally:
             latency.ISOLATED_STACK_ROOT = original_root
             latency.WORKER_LOG = original_worker
@@ -10471,6 +10882,8 @@ def test_agent_latency_reads_isolated_benchmark_stack_logs():
     assert worker_events[0].data["agent_id"] == "053a9066-28d1-4f34-a558-cc7cd402520d"
     assert len(backend_events) == 1, "isolated-stack backend.log must be read"
     assert backend_events[0].source == "backend"
+    assert len(explicit_worker_events) == 1, "runner-provided worker logs must be read"
+    assert len(explicit_backend_events) == 1, "runner-provided backend logs must be read"
 
 
 def test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes():
@@ -10910,6 +11323,10 @@ async def run_all_tests():
         "webdecoy_fresh_browser_state",
         test_webdecoy_biometrics_uses_fresh_isolated_browser_state,
     )
+    await r.record_async(
+        "live_fixture_setup_restore_yields",
+        test_live_fixture_setup_and_restore_yield_to_parallel_tasks,
+    )
     r.record(
         "anon_benchmark_mode_disables_saved_auth",
         test_anon_benchmark_mode_disables_saved_auth_material,
@@ -10962,6 +11379,10 @@ async def run_all_tests():
         "code_agent_preflight_accepts_gpt_compute", test_code_agent_preflight_accepts_gpt_compute_token
     )
     await r.record_async(
+        "code_agent_preflight_narrows_to_gpt_when_anthropic_excluded",
+        test_code_agent_preflight_narrows_to_gpt_when_anthropic_family_excluded,
+    )
+    await r.record_async(
         "code_agent_preflight_rejects_missing_compute", test_code_agent_preflight_rejects_missing_compute_token
     )
     await r.record_async(
@@ -11000,6 +11421,10 @@ async def run_all_tests():
         test_webdecoy_biometrics_evaluator_uses_exact_network_score_when_visible_is_rounded,
     )
     r.record(
+        "webdecoy_biometrics_engine_version_in_failure",
+        test_webdecoy_biometrics_failure_reports_third_party_engine_version,
+    )
+    r.record(
         "auth_bundle_biometrics_gate_env",
         test_auth_bundle_biometrics_gate_defaults_on_and_can_be_disabled,
     )
@@ -11020,6 +11445,10 @@ async def run_all_tests():
     r.record(
         "cloudbench_source_connect_gate_benchmark_non_purchase_env",
         test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates,
+    )
+    r.record(
+        "cloudbench_task_gate_resolution_fails_closed",
+        test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error,
     )
     r.record(
         "cloudbench_test_payment_bundled_frontend_env",
@@ -11288,6 +11717,18 @@ async def run_all_tests():
     r.record(
         "agentcard_lifecycle_bootstrap_float",
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
+    )
+    r.record(
+        "agent_payment_lifecycle_user_is_non_admin",
+        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+    )
+    r.record(
+        "production_payment_lifecycle_user_is_non_admin",
+        test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity,
+    )
+    r.record(
+        "admin_bypass_gate_grants_synthetic_admin",
+        test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
     )
     r.record(
         "toast_payment_approval_complete_receipt",

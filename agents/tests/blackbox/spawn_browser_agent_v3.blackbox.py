@@ -236,6 +236,21 @@ def test_transient_session_init_failure_classification():
     assert not is_transient_session_init_failure(401, "Unauthorized")
     assert not is_transient_session_init_failure(404, "Not Found")
 
+    # RCA (agent c8dc9824): a proxy can also fail BELOW the provider API —
+    # allocation succeeds, then the browser's CDP navigation to start_url dies
+    # inside the tunnel. Chrome reports net::ERR_TUNNEL_CONNECTION_FAILED, which
+    # matched no marker and so classified FATAL: the bounded fresh-proxy retry in
+    # handler.py was skipped entirely and the activity escaped to Temporal, which
+    # replayed the identical doomed spawn 124 times and burned the full 900s
+    # budget without ever reaching the payment step it was benchmarking.
+    assert is_transient_session_init_failure(
+        400, "Navigation failed: net::ERR_TUNNEL_CONNECTION_FAILED"
+    )
+    assert is_transient_session_init_failure(400, "net::ERR_PROXY_CONNECTION_FAILED")
+    # Still fatal: a navigation error that is NOT a proxy/tunnel fault must not be
+    # retried onto a fresh proxy — a new IP cannot fix a bad name or a refused host.
+    assert not is_transient_session_init_failure(400, "net::ERR_NAME_NOT_RESOLVED")
+
 
 # ============================================================================
 # RCA repro — browser agent returns BEST-EFFORT results at max steps

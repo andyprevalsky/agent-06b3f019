@@ -1,4 +1,9 @@
-import { callOrgTool, type AgentCardOrgToolCaller } from '../agentcard/org-runtime';
+import { orgPollWaitsMs } from '../agentcard/org-poll-schedule';
+import {
+  callOrgTool,
+  orgRetryDeadlineAtMs,
+  type AgentCardOrgToolCaller,
+} from '../agentcard/org-runtime';
 import { createLogger } from '../logger';
 import { AgentCardProviderError } from './errors';
 import type {
@@ -477,9 +482,12 @@ export class AgentCardOrgMcpProvider implements CardProvider {
     request: CardProviderMintRequest
   ): Promise<unknown> {
     const maxAttempts = request.idempotencyKey === undefined ? 1 : CREATE_CARD_TIMEOUT_MAX_ATTEMPTS;
+    // One shared rate-limit retry budget across the timeout retries, so two attempts cannot each
+    // arm their own and double the delay this mint can absorb.
+    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await this.toolCaller('create_card', args);
+        return await this.toolCaller('create_card', args, retryDeadlineAtMs);
       } catch (error) {
         const canRetry = isTimeoutError(error) && attempt < maxAttempts;
         if (!canRetry) {
@@ -514,10 +522,19 @@ export class AgentCardOrgMcpProvider implements CardProvider {
   }
 
   private async findCompanyTransferId(cardId: string): Promise<string | undefined> {
-    for (let attempt = 1; attempt <= this.transferLookup.attempts; attempt += 1) {
+    // Each attempt costs TWO organization-MCP reads, so the old fixed 500ms cadence spent 40
+    // requests of the org-wide 120-per-minute window on a single mint. Exponential backoff waits
+    // for exactly as long overall while issuing 12.
+    const waits = orgPollWaitsMs(this.transferLookup.attempts, this.transferLookup.delayMs);
+    const observations = waits.length + 1;
+    // ONE rate-limit retry budget for the WHOLE visibility poll. The org runtime's budget bounds a
+    // single `callTool`, so re-arming it per read would let these 12 reads accumulate 12 budgets
+    // (12 x 30s = 360s) and turn a ~10s poll into a multi-minute mint.
+    const retryDeadlineAtMs = orgRetryDeadlineAtMs();
+    for (let attempt = 1; attempt <= observations; attempt += 1) {
       let observedTransferCount = 0;
       for (const args of [{ status: 'consumed', limit: 100 }, { limit: 100 }]) {
-        const result = await this.toolCaller('list_transfers', args);
+        const result = await this.toolCaller('list_transfers', args, retryDeadlineAtMs);
         const record = resultRecord(result);
         throwForGate(record, result);
         const transfers = recordArray(record, ['transfers']);
@@ -538,14 +555,14 @@ export class AgentCardOrgMcpProvider implements CardProvider {
           return transferId;
         }
       }
-      if (attempt < this.transferLookup.attempts) {
+      if (attempt < observations) {
         if (attempt === 1) {
           log.info('Waiting for AgentCard organization transfer visibility', {
             card_id: maskId(cardId),
             observed_transfer_count: observedTransferCount,
           });
         }
-        await delay(this.transferLookup.delayMs);
+        await delay(waits[attempt - 1]);
       }
     }
     return undefined;
