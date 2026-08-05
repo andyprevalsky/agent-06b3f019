@@ -4553,10 +4553,19 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            reconcile_worker_ready_outcomes "$out" \
-                || fail_autoscaler "could not reconcile worker readiness outcomes"
-            reconcile_worker_failure_outcomes "$bench" "$out" \
-                || fail_autoscaler "could not reconcile worker failure outcomes"
+            if ! reconcile_worker_ready_outcomes "$out"; then
+                if [ "$SECONDS" -ge "$terminal_deadline" ]; then
+                    fail_autoscaler "could not reconcile worker readiness outcomes"
+                    return 1
+                fi
+                sleep 0.2
+                continue
+            fi
+            if ! reconcile_worker_failure_outcomes "$bench" "$out"; then
+                [ -s "$out/autoscaler.failed" ] && return 1
+                fail_autoscaler "could not reconcile worker failure outcomes"
+                return 1
+            fi
             [ ! -s "$out/autoscaler.failed" ] || return 1
             desired_workers="$(cat "$out/desired-worker-count" 2>/dev/null || true)"
             if ! printf '%s' "$desired_workers" | grep -Eq '^[0-9]+$'; then

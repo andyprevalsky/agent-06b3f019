@@ -96,6 +96,87 @@ def test_convert_context_to_messages():
     assert "Search result" in result[1]["content"]
 
 
+def test_convert_context_to_messages_mixed_timestamp_awareness():
+    """Duplicate terminal rows compare cleanly when one has no timestamp.
+
+    parse_timestamp returns an aware datetime for a "Z" value, so a naive epoch
+    fallback made the terminal-row dedup raise "can't compare offset-naive and
+    offset-aware datetimes" and fail the entire summary conversion whenever one
+    duplicate row lacked a timestamp.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "calling",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "call-1"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "older result",
+            "timestamp": "",
+            "metadata": {
+                "toolCallId": "call-1",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "newer result",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "metadata": {
+                "toolCallId": "call-1",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    result = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_messages = [m for m in result if m.get("role") == "tool"]
+    assert len(tool_messages) == 1, tool_messages
+    assert "newer result" in tool_messages[0]["content"], tool_messages
+
+
+def test_tool_call_declaration_dedup_ignores_argument_key_order():
+    """A dual-write duplicate dedupes even when its argument keys are ordered differently.
+
+    The duplicate check compares serialized arguments, and json.dumps preserves
+    insertion order — so without sort_keys, two semantically identical
+    declarations serialized in different key orders would be treated as
+    conflicting and raise, failing the whole conversion.
+    """
+    import json
+
+    import pytest
+
+    from helpers.llm import register_tool_call_declaration
+
+    declared: dict = {}
+    forward = json.dumps({"query": "rose", "limit": 5}, sort_keys=True)
+    reordered = json.dumps({"limit": 5, "query": "rose"}, sort_keys=True)
+
+    call_id, emit_first = register_tool_call_declaration(declared, "call-1", "web_search", forward, "ASSISTANT")
+    assert call_id == "call-1"
+    assert emit_first is True
+
+    _, emit_second = register_tool_call_declaration(declared, "call-1", "web_search", reordered, "ASSISTANT")
+    assert emit_second is False, "same declaration in a different key order must dedupe"
+
+    with pytest.raises(ValueError):
+        register_tool_call_declaration(
+            declared,
+            "call-1",
+            "web_search",
+            json.dumps({"query": "other", "limit": 5}, sort_keys=True),
+            "ASSISTANT",
+        )
+
+
 def test_tool_result_uses_declared_not_executed_tool_name():
     """A tool result must be labelled with the DECLARED tool name.
 
@@ -260,6 +341,343 @@ def test_convert_context_to_messages_verifier_message():
     assistant_msgs = [m for m in msgs if m["role"] == "assistant"]
     assert len(assistant_msgs) == 1
     assert "Verifier" in assistant_msgs[0]["content"]
+
+
+def _anthropic_tool_block_ids(messages):
+    """(tool_use ids, [(tool_result id, 'messages.i.content.j')]) on the Anthropic wire."""
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    _static, _dynamic, anthropic = transform_messages_for_anthropic(messages)
+    tool_use_ids = []
+    tool_result_ids = []
+    for i, msg in enumerate(anthropic):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for j, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_use_ids.append(block["id"])
+            elif block.get("type") == "tool_result":
+                tool_result_ids.append((block["tool_use_id"], f"messages.{i}.content.{j}"))
+    return tool_use_ids, tool_result_ids
+
+
+def test_convert_context_to_messages_one_tool_result_per_tool_use():
+    """Two terminal TOOL rows sharing a toolCallId must yield ONE tool_result.
+
+    Regression for the 2026-08-04 smoke failure on browser-biometrics-webdecoy
+    (agent 1d7e1fb9-2604-45c6-906e-b6da1f12d4b7). spawn_browser_agent persists
+    two terminal rows for one tool call -- "Task Failed" from inside the
+    activity (spawn_browser_agent_v3/handler.py) and "Browser automation
+    failed" from the manager boundary. generate_completion_summary is the only
+    prod caller of convert_context_to_messages, and it emitted one `role: tool`
+    message per row, so Anthropic rejected the whole request with 400
+    "messages.2.content.1: each tool_use must have a single result. Found
+    multiple `tool_result` blocks with id: toolu_011ZJAa4M5KxJUzKuJsemswi",
+    Gemini answered 400 INVALID_ARGUMENT, and the rose-1-ultra pool died with
+    RoseAllFailed -- the agent lost its completion summary entirely.
+
+    The later row wins, matching what build_llm_messages has always shown the
+    main loop, so both converters give the model the same view of a tool call.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    call_id = "toolu_011ZJAa4M5KxJUzKuJsemswi"
+    context = [
+        {"role": "USER", "text": "browse the demo", "timestamp": "2026-08-04T23:51:59.000Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-08-04T23:51:59.937Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2026-08-04T23:52:00.325Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "IN_PROGRESS",
+                "title": "Starting up a browser",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "**Status**: FAILED\n\n**Outcome**: Navigation failed: net::ERR_CONNECTION_CLOSED",
+            "timestamp": "2026-08-04T23:52:15.400Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "ERROR",
+                "title": "Task Failed",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "RuntimeError: Navigation failed: net::ERR_CONNECTION_CLOSED",
+            "timestamp": "2026-08-04T23:52:15.797Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "spawn_browser_agent",
+                "toolStatus": "ERROR",
+                "title": "Browser automation failed",
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, f"expected 1 tool message, got {[m['tool_call_id'] for m in tool_msgs]}"
+    assert tool_msgs[0]["tool_call_id"] == call_id
+    # Latest terminal row wins -- same row build_llm_messages keeps.
+    assert "Browser automation failed" in tool_msgs[0]["content"]
+
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id]
+    assert [tid for tid, _ in tool_result_ids] == [call_id], (
+        f"Anthropic payload must carry exactly one tool_result per tool_use, got {tool_result_ids}"
+    )
+
+
+def test_convert_context_to_messages_pairs_orphan_tool_use():
+    """A tool_use whose terminal TOOL row never landed gets a synthetic result.
+
+    Same captured request as above also declared attempt_completion
+    (dd27bdbb-1e39-4414-bea1-4d1fce95b691) with no terminal row, which
+    Anthropic rejects with "tool_use ids were found without tool_result
+    blocks". build_llm_messages already ran _ensure_tool_result_pairing;
+    convert_context_to_messages did not.
+    """
+    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+
+    call_id = "dd27bdbb-1e39-4414-bea1-4d1fce95b691"
+    context = [
+        {"role": "USER", "text": "do the thing", "timestamp": "2026-08-04T23:54:00.000Z"},
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-08-04T23:54:39.241Z",
+            "metadata": {"tool_calls": [{"tool": "attempt_completion", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "A completed child task returned a grounded structured response.",
+            "timestamp": "2026-08-04T23:54:40.171Z",
+            "metadata": {"verifierMessage": True, "title": "Progress: 100%"},
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id]
+    assert [tid for tid, _ in tool_result_ids] == [call_id], (
+        f"every tool_use needs a tool_result, got {tool_result_ids}"
+    )
+    synthetic = [m for m in messages if m.get("tool_call_id") == call_id]
+    assert synthetic and synthetic[0]["content"] == SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+
+
+def test_convert_context_to_messages_subagent_row_cannot_win_the_dedup():
+    """A row that is never sent to the model must not win the terminal dedup.
+
+    Sub-agent-internal rows carry the parent's toolCallId with a later
+    timestamp. If dedup ran before they were filtered, the internal row would
+    win and the real result would be dropped, orphaning the tool_use.
+    """
+    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+
+    call_id = "toolu_dedup_ordering"
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "the real result the model must see",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "metadata": {"toolCallId": call_id, "toolName": "spawn_agent", "toolStatus": "FINISHED"},
+        },
+        {
+            "role": "TOOL",
+            "text": "internal sub-agent chatter",
+            "timestamp": "2026-01-01T00:00:09Z",
+            "metadata": {
+                "toolCallId": call_id,
+                "toolName": "spawn_agent",
+                "toolStatus": "FINISHED",
+                "subAgentId": "sub-1",
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1, tool_msgs
+    assert "the real result the model must see" in tool_msgs[0]["content"]
+    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert "internal sub-agent chatter" not in tool_msgs[0]["content"]
+
+
+def test_convert_context_to_messages_verifier_row_between_call_and_error_result():
+    """A verifier row between a tool_call and its ERROR result must not split the pair.
+
+    convert_context_to_messages renders verifier TOOL rows as `role: assistant`,
+    and _ensure_tool_result_pairing treats every assistant as a run boundary. If
+    the ERROR result sorts after that verifier row, the declaring assistant looks
+    uncovered: the pairing pass synthesizes a placeholder AND keeps the real
+    result, producing exactly the two-tool_result-blocks 400 this suite exists to
+    prevent. Terminal rows are re-anchored to their IN_PROGRESS timestamp --
+    ERROR as well as FINISHED -- so the pair stays contiguous.
+    """
+    from helpers.llm import SYNTHETIC_TOOL_RESULT_PLACEHOLDER, convert_context_to_messages
+
+    call_id = "tc-verifier-interleave"
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "metadata": {"tool_calls": [{"tool": "spawn_agent", "tool_call_id": call_id}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "metadata": {"toolCallId": call_id, "toolStatus": "IN_PROGRESS", "title": "Starting up a browser"},
+        },
+        {
+            "role": "TOOL",
+            "text": "still working on it",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "metadata": {"verifierMessage": True, "title": "Progress: 50%"},
+        },
+        {
+            "role": "TOOL",
+            "text": "boom",
+            "timestamp": "2026-01-01T00:00:09Z",
+            "metadata": {"toolCallId": call_id, "toolStatus": "ERROR", "title": "Browser automation failed"},
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_use_ids, tool_result_ids = _anthropic_tool_block_ids(messages)
+    assert tool_use_ids == [call_id]
+    assert [tid for tid, _ in tool_result_ids] == [call_id], (
+        f"verifier row must not split the tool_use/tool_result pair, got {tool_result_ids}"
+    )
+    tool_msgs = [m for m in messages if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["content"] != SYNTHETIC_TOOL_RESULT_PLACEHOLDER
+    assert "boom" in tool_msgs[0]["content"]
+
+
+def test_collapse_duplicate_tool_results_timestamp_edge_cases():
+    """Ties keep the earlier row; naive/missing timestamps must not raise."""
+    from helpers.llm import collapse_duplicate_tool_results
+
+    def tool(call_id, text, ts=None):
+        msg = {"role": "TOOL", "text": text, "metadata": {"toolCallId": call_id, "toolStatus": "FINISHED"}}
+        if ts is not None:
+            msg["timestamp"] = ts
+        return msg
+
+    # Identical timestamps -> earlier row wins (matches the inline dedup this replaced).
+    tied = collapse_duplicate_tool_results(
+        [tool("a", "first", "2026-01-01T00:00:02Z"), tool("a", "second", "2026-01-01T00:00:02Z")]
+    )
+    assert [m["text"] for m in tied] == ["first"]
+
+    # Offset-naive vs missing timestamp: comparing aware and naive datetimes
+    # raises TypeError unless every parse path is normalized to UTC.
+    mixed = collapse_duplicate_tool_results([tool("a", "naive", "2026-01-01T00:00:02"), tool("a", "no timestamp")])
+    assert [m["text"] for m in mixed] == ["naive"]
+
+    # created_at is a valid timestamp source and must order correctly.
+    fallback = collapse_duplicate_tool_results(
+        [
+            {**tool("a", "older"), "created_at": "2026-01-01T00:00:01Z"},
+            {**tool("a", "newer"), "created_at": "2026-01-01T00:00:09Z"},
+        ]
+    )
+    assert [m["text"] for m in fallback] == ["newer"]
+
+
+async def test_build_llm_messages_dedupes_duplicate_terminal_tool_rows():
+    """The main agent loop's converter keeps one terminal row per toolCallId too.
+
+    build_llm_messages had this inline; the refactor hoisted it into
+    collapse_duplicate_tool_results, so pin the behaviour at this converter
+    rather than trusting the shared helper's own test.
+    """
+    from helpers.llm import build_llm_messages
+
+    call_id = "toolu_build_llm_dedup"
+    context = [
+        {"role": "USER", "text": "go", "timestamp": "2026-01-01T00:00:00Z"},
+        {
+            "role": "TOOL",
+            "text": "in progress",
+            "timestamp": "2026-01-01T00:00:01Z",
+            "metadata": {"toolCallId": call_id, "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            "role": "TOOL",
+            "text": "in-activity terminal row",
+            "timestamp": "2026-01-01T00:00:02Z",
+            "metadata": {"toolCallId": call_id, "toolStatus": "FINISHED", "title": "Task Completed"},
+        },
+        {
+            "role": "TOOL",
+            "text": "manager-boundary terminal row",
+            "timestamp": "2026-01-01T00:00:03Z",
+            "metadata": {"toolCallId": call_id, "toolStatus": "FINISHED", "title": "Browser automation complete"},
+        },
+    ]
+
+    messages = await build_llm_messages(context, "sys")
+    blob = json.dumps(messages)
+    assert blob.count("manager-boundary terminal row") == 1, messages
+    assert "in-activity terminal row" not in blob, messages
+    assert "in progress" not in blob, messages
+
+
+def test_collapse_duplicate_tool_results_keeps_latest_terminal_row():
+    """The shared invariant helper keeps the latest terminal row, per toolCallId."""
+    from helpers.llm import collapse_duplicate_tool_results
+
+    def tool(ts, call_id, text, status="FINISHED"):
+        return {
+            "role": "TOOL",
+            "text": text,
+            "timestamp": ts,
+            "metadata": {"toolCallId": call_id, "toolStatus": status},
+        }
+
+    context = [
+        {"role": "USER", "text": "go", "timestamp": "2026-01-01T00:00:00Z"},
+        tool("2026-01-01T00:00:01Z", "a", "in progress", status="IN_PROGRESS"),
+        tool("2026-01-01T00:00:02Z", "a", "first terminal"),
+        tool("2026-01-01T00:00:03Z", "a", "second terminal", status="ERROR"),
+        tool("2026-01-01T00:00:04Z", "b", "only terminal"),
+        {"role": "TOOL", "text": "no call id", "timestamp": "2026-01-01T00:00:05Z", "metadata": {}},
+    ]
+
+    kept = collapse_duplicate_tool_results(context)
+    texts = [m["text"] for m in kept]
+    assert texts == ["go", "in progress", "second terminal", "only terminal", "no call id"], texts
+
+    # Idempotent.
+    assert collapse_duplicate_tool_results(kept) == kept
 
 
 def test_convert_context_to_messages_skip_subagent_and_inprogress():
@@ -879,9 +1297,7 @@ async def test_fetch_compute_token_activity_pins_benchmark_provider():
         }
     )
 
-    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch(
-        "temporalio.activity.heartbeat"
-    ):
+    with patch.dict(os.environ, {"BENCHMARK_COMPUTE_TOKEN_TYPE": "claude"}), patch("temporalio.activity.heartbeat"):
         from helpers.llm import fetch_compute_token_activity
 
         result = await fetch_compute_token_activity("user-1")
@@ -2179,7 +2595,7 @@ async def test_call_llm_structured_streaming_happy_path():
 
 
 async def test_call_llm_structured_streaming_retries_malformed_output():
-    """A malformed/schema-invalid structured output is re-generated (bounded)."""
+    """A malformed output is re-generated with validation feedback (bounded)."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2200,9 +2616,11 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
     valid_body = _sse_body([_payload('{"response": "recovered", "tool_calls": []}')])
 
     call_count = {"n": 0}
+    request_payloads = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         call_count["n"] += 1
+        request_payloads.append(json.loads(req.content))
         body = malformed_body if call_count["n"] == 1 else valid_body
         return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
@@ -2221,11 +2639,213 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
         response_model=AgentAction,
         on_chunk=on_chunk,
         call_site="test",
+        _exclude_anthropic_family=True,
     )
 
     # Exactly one retry: the malformed first generation re-generated once and parsed.
     assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    retry_messages = request_payloads[1]["messages"]
+    # The rejected turn is replayed so the model can see what it actually emitted,
+    # rather than being told "your response was wrong" with no response in context.
+    assert len(retry_messages) == 3, f"expected original + assistant replay + correction, got {retry_messages}"
+    assert retry_messages[-2]["role"] == "assistant", retry_messages
+    assert "not-a-list" in retry_messages[-2]["content"], retry_messages[-2]
+    correction = retry_messages[-1]
+    assert correction["role"] == "user", correction
+    assert "did not satisfy the required output schema" in correction["content"], correction
+    assert "input should be a valid list" in correction["content"].lower(), correction
     assert response.response == "recovered"
+
+
+async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers():
+    """A parse retry must not strand delta consumers on the rejected attempt's text.
+
+    `on_chunk` hands out a monotonically growing buffer, so every streaming
+    consumer (domains/reasoning/service.py, call_llm_activity, run_agent) emits
+    `text_so_far[len(last_text):]` and keeps `last_text`. A parse retry restarts
+    that buffer at "", so without a rewind the rejected text stays in the
+    consumer's accumulator and a corrected response that is NOT a
+    prefix-extension of it is delivered as an empty (or garbled tail) delta —
+    the consumer completes holding stale output.
+    """
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    # Divergent AND shorter than the rejected text, so pure suffix math yields ""
+    # — this is the case that silently drops the correction entirely.
+    rejected_text = "The first attempt claims the meeting is Monday at noon."
+    corrected_text = "Actually the meeting is Friday."
+    assert not corrected_text.startswith(rejected_text)
+    assert len(corrected_text) < len(rejected_text)
+
+    def _payload(content: str) -> dict:
+        return {
+            "actual_model": "claude-sonnet-4-6",
+            "pool_name": "test-pool",
+            "pool_size": 1,
+            "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    # tool_calls must be a list — the first generation fails validation only
+    # AFTER its `response` text has already streamed out through on_chunk.
+    malformed_body = _sse_body([_payload(json.dumps({"response": rejected_text, "tool_calls": "not-a-list"}))])
+    valid_body = _sse_body([_payload(json.dumps({"response": corrected_text, "tool_calls": []}))])
+
+    call_count = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        body = malformed_body if call_count["n"] == 1 else valid_body
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    AgentAction = create_agent_action_model([])
+
+    # Mirrors the real consumers' delta-suffix bookkeeping exactly.
+    last_text = [""]
+    broadcast: list[str] = []
+
+    async def on_chunk(text_so_far: str, tokens: int):
+        delta = text_so_far[len(last_text[0]) :]
+        if delta:
+            broadcast.append(delta)
+        last_text[0] = text_so_far
+
+    response, _usage, _detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "when is the meeting?"}],
+        model="rose-labs/rose-1-lite",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        call_site="test",
+        _exclude_anthropic_family=True,
+    )
+
+    assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    assert response.response == corrected_text, response.response
+
+    # The whole point: what the consumer reconstructed must be the corrected
+    # response, not the rejected one and not a tail of it.
+    reconstructed = "".join(broadcast)
+    assert corrected_text in reconstructed, f"correction never reached the consumer: {reconstructed!r}"
+    assert reconstructed.endswith(corrected_text), f"consumer ends on stale text: {reconstructed!r}"
+    assert last_text[0] == corrected_text, f"consumer state stranded on rejected attempt: {last_text[0]!r}"
+
+
+async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
+    """A schema-invalid native tool_use is replayed with a paired tool_result error."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    captured_messages: list = []
+    calls = {"n": 0}
+
+    async def fake_cached_complete(*args, **kwargs):
+        calls["n"] += 1
+        captured_messages.append(json.loads(json.dumps(kwargs.get("messages") or [])))
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "claude-sonnet-4-6-claude", "pool_name": "rose-1-lite", "request_id": "r1"},
+        )
+        if calls["n"] == 1:
+            # `query` is required by the web_search schema — this fails validation.
+            yield StreamChunk(
+                kind="tool_call",
+                data={"id": "toolu_bad", "name": "web_search", "arguments": json.dumps({})},
+            )
+        else:
+            yield StreamChunk(
+                kind="tool_call",
+                data={"id": "toolu_ok", "name": "web_search", "arguments": json.dumps({"query": "recovered"})},
+            )
+        yield StreamChunk(
+            kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "tool_calls"}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    import providers.fast_cache.rose_cache as rose_cache_module
+
+    original = rose_cache_module.cached_complete
+    rose_cache_module.cached_complete = fake_cached_complete
+    try:
+        AgentAction = create_agent_action_model(["web_search"])
+
+        async def on_chunk(text: str, tokens: int):
+            pass
+
+        response, _usage, _detected = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "search something"}],
+            model="rose",
+            temperature=1.0,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            call_site="test",
+        )
+    finally:
+        rose_cache_module.cached_complete = original
+
+    assert calls["n"] == 2, f"expected one re-generation (2 calls), got {calls['n']}"
+    retry_messages = captured_messages[1]
+    assert len(retry_messages) == 3, f"expected original + tool_use replay + tool_result, got {retry_messages}"
+
+    # The rejected tool_use is replayed as an assistant turn keyed by the
+    # provider's own id, so the paired tool_result below can reference it.
+    assistant_turn = retry_messages[-2]
+    assert assistant_turn["role"] == "assistant", retry_messages
+    assert assistant_turn["tool_calls"][0]["id"] == "toolu_bad", assistant_turn
+    assert assistant_turn["tool_calls"][0]["function"]["name"] == "web_search", assistant_turn
+
+    # The validation error comes back as a tool result, not a bare user turn —
+    # every tool_use must be answered by a tool_result with a matching id.
+    tool_result = retry_messages[-1]
+    assert tool_result["role"] == "tool", retry_messages
+    assert tool_result["tool_call_id"] == "toolu_bad", tool_result
+    assert "did not satisfy the required output schema" in tool_result["content"], tool_result
+
+    assert response.tool_calls[0].query == "recovered"
+
+
+def test_structured_retry_replay_is_wire_valid_for_anthropic():
+    """The replayed turn must survive the Anthropic transform with paired tool ids.
+
+    Anthropic rejects a tool_use block that has no tool_result with a matching
+    tool_use_id, so an unpaired replay would turn a recoverable parse retry into
+    a hard 400 on the claudeAuth path.
+    """
+    from helpers.llm import _build_structured_retry_messages
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    retry_messages = _build_structured_retry_messages(
+        [{"role": "user", "content": "search something"}],
+        error_message="tool_calls.0.query: Field required",
+        tool_use_blocks=[{"id": "toolu_bad", "name": "web_search", "input": {}}],
+        text_buffer="let me search",
+        raw_json="",
+    )
+    _system, _cache, messages = transform_messages_for_anthropic(retry_messages)
+
+    tool_use_ids, tool_result_ids = [], []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_use_ids.append(block["id"])
+            elif block.get("type") == "tool_result":
+                tool_result_ids.append(block["tool_use_id"])
+
+    assert tool_use_ids == ["toolu_bad"], messages
+    assert tool_result_ids == tool_use_ids, f"unpaired tool_use would 400: {messages}"
 
 
 async def test_call_llm_structured_streaming_model_detected_callback():
@@ -6066,6 +6686,34 @@ async def run_all_tests():
     )
     r.record("convert_context_to_messages_empty", test_convert_context_to_messages_empty)
     r.record(
+        "convert_context_to_messages_one_tool_result_per_tool_use",
+        test_convert_context_to_messages_one_tool_result_per_tool_use,
+    )
+    r.record(
+        "convert_context_to_messages_pairs_orphan_tool_use",
+        test_convert_context_to_messages_pairs_orphan_tool_use,
+    )
+    r.record(
+        "convert_context_to_messages_subagent_row_cannot_win_the_dedup",
+        test_convert_context_to_messages_subagent_row_cannot_win_the_dedup,
+    )
+    r.record(
+        "convert_context_to_messages_verifier_row_between_call_and_error_result",
+        test_convert_context_to_messages_verifier_row_between_call_and_error_result,
+    )
+    r.record(
+        "collapse_duplicate_tool_results_timestamp_edge_cases",
+        test_collapse_duplicate_tool_results_timestamp_edge_cases,
+    )
+    await r.record_async(
+        "build_llm_messages_dedupes_duplicate_terminal_tool_rows",
+        test_build_llm_messages_dedupes_duplicate_terminal_tool_rows,
+    )
+    r.record(
+        "collapse_duplicate_tool_results_keeps_latest_terminal_row",
+        test_collapse_duplicate_tool_results_keeps_latest_terminal_row,
+    )
+    r.record(
         "convert_context_to_messages_with_declared_tool_call", test_convert_context_to_messages_with_declared_tool_call
     )
     r.record(
@@ -6248,6 +6896,18 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_structured_streaming_retries_malformed_output",
         test_call_llm_structured_streaming_retries_malformed_output,
+    )
+    await r.record_async(
+        "structured_parse_retry_rewinds_streamed_text_for_delta_consumers",
+        test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers,
+    )
+    await r.record_async(
+        "call_llm_structured_streaming_replays_invalid_native_tool_use",
+        _call_llm_structured_streaming_replays_invalid_native_tool_use_case,
+    )
+    r.record(
+        "structured_retry_replay_is_wire_valid_for_anthropic",
+        test_structured_retry_replay_is_wire_valid_for_anthropic,
     )
     await r.record_async(
         "call_llm_structured_streaming_model_detected_callback",
@@ -6498,8 +7158,26 @@ async def run_all_tests():
         test_ensure_tool_result_pairing_preserves_well_formed_messages,
     )
     teardown_mock()
+    r.record(
+        "convert_context_to_messages_mixed_timestamp_awareness",
+        test_convert_context_to_messages_mixed_timestamp_awareness,
+    )
+    r.record(
+        "tool_call_declaration_dedup_ignores_argument_key_order",
+        test_tool_call_declaration_dedup_ignores_argument_key_order,
+    )
+    await r.record_async(
+        "heartbeat_compute_token_lineage_activity_posts_lineage_key",
+        test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
+    )
     return r.summary()
 
 
 if __name__ == "__main__":
-    raise SystemExit(0 if asyncio.run(run_all_tests()) else 1)
+    # run_all_tests() returns r.summary(), a dict — which is truthy even when
+    # tests failed. `0 if <dict> else 1` therefore exited 0 on a red suite, so
+    # running this file directly reported a false green. scripts/run_blackbox_tests.py
+    # (the /deploy gate) reads summary["failed"] and was never fooled; this
+    # only ever misled direct invocation. Branch on the count, not the dict.
+    _summary = asyncio.run(run_all_tests())
+    raise SystemExit(0 if _summary["failed"] == 0 else 1)

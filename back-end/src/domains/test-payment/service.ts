@@ -14,7 +14,6 @@ import { stripe } from '../../providers/stripe';
 import {
   assertCardPresent,
   calculateTotals,
-  isAgentCardSandboxPan,
   normalizeExpiry,
   normalizeLineItems,
   paymentMethodIdForBenchmarkCard,
@@ -135,9 +134,16 @@ export async function confirmTestPayment(
   const normalizedCardNumber = input.card.number.replace(/\s+/g, '');
   const postalCode = input.card.postalCode?.trim();
 
-  if (isAgentCardSandboxPan(normalizedCardNumber)) {
-    const settle = dependencies.settleAgentCardSandboxPayment ?? settleAgentCardSandboxPayment;
-    const settlement = await settle({
+  // Route by OWNERSHIP, not by BIN. `isAgentCardSandboxPan` only matched the
+  // 424242424242xxxx sandbox BIN, so a LIVE Rose-minted card (real Visa BIN) fell through to the
+  // raw-PAN Stripe path — which Stripe blocks in live mode (PCI). Settlement already proves
+  // ownership itself: it matches the typed PAN against the minted card on a HELD purchase and
+  // throws 404 when nothing matches. So attempt it for any PAN and fall through only on that 404,
+  // which keeps genuine third-party cards on the Stripe path while letting a live Rose card settle.
+  const settle = dependencies.settleAgentCardSandboxPayment ?? settleAgentCardSandboxPayment;
+  let roseCardSettlement: Awaited<ReturnType<typeof settleAgentCardSandboxPayment>> | null = null;
+  try {
+    roseCardSettlement = await settle({
       cardNumber: normalizedCardNumber,
       amountCents: totals.totalCents,
       merchant: 'Rose Labs Test Payment',
@@ -145,11 +151,23 @@ export async function confirmTestPayment(
     return {
       orderId: `tp_${randomUUID().slice(0, 8)}`,
       status: 'succeeded',
-      paymentIntentId: settlement.stripePaymentIntentId,
-      purchaseId: settlement.purchaseId,
-      cardId: settlement.cardId,
+      paymentIntentId: roseCardSettlement.stripePaymentIntentId,
+      purchaseId: roseCardSettlement.purchaseId,
+      cardId: roseCardSettlement.cardId,
       receipt: { lineItems, totals },
     };
+  } catch (error) {
+    // 404 = this PAN is not a Rose-minted card on a HELD purchase, so it is an ordinary shopper
+    // card and belongs on the Stripe path below. Every other failure is a REAL settlement fault
+    // (wrong amount, missing hold, charge declined) and must surface instead of silently
+    // re-charging the customer through a second provider.
+    // The local wrapper above rewraps AgentCardSandboxSettlementError as TestPaymentError, keeping
+    // the status code, so match on that — an injected test double may still raise the raw provider
+    // error, so accept either.
+    const notARoseCard =
+      (error instanceof TestPaymentError || error instanceof AgentCardSandboxSettlementError) &&
+      error.statusCode === 404;
+    if (!notARoseCard) throw error;
   }
 
   const paymentMethodId = (

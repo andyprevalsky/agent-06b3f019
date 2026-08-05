@@ -1898,6 +1898,23 @@ async def run_all_tests():
     )
 
     teardown_mock()
+    r.record(
+        "build_browser_use_system_prompt_auth_priority_is_numbered",
+        test_build_browser_use_system_prompt_auth_priority_is_numbered,
+    )
+    r.record(
+        "build_browser_use_system_prompt_reuses_main_grading_prompt",
+        test_build_browser_use_system_prompt_reuses_main_grading_prompt,
+    )
+    r.record(
+        "browser_attempt_completion_uses_canonical_prompt_and_empty_schema",
+        test_browser_attempt_completion_uses_canonical_prompt_and_empty_schema,
+    )
+    r.record("normalize_request_payment_card_preserves_receipt", test_normalize_request_payment_card_preserves_receipt)
+    r.record(
+        "normalize_request_payment_card_parses_tool_string_arguments",
+        test_normalize_request_payment_card_parses_tool_string_arguments,
+    )
     return r.summary()
 
 

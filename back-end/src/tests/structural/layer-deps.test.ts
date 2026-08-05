@@ -2,7 +2,7 @@
 /**
  * Structural dependency test for layered domain architecture.
  *
- * Automatically scans all domains in src/domains/ and verifies 9 invariants:
+ * Automatically scans all domains in src/domains/ and verifies 10 invariants:
  *
  *   1. Import direction (per domain layer)
  *   2. Cross-domain isolation
@@ -13,6 +13,7 @@
  *   7. No Express outside routes layer
  *   8. No circular imports within domains
  *   9. server.ts wires from domains/, not routes/
+ *  10. Raw interactive transactions cannot bypass the canonical timeout policy
  *
  * Cross-cutting concern enforcement (canonical utilities) is handled by
  * ESLint custom rules in eslint.config.mjs, not by structural tests.
@@ -24,6 +25,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import {
+  checkInteractiveTransactionPolicy,
+  findRawInteractiveTransactions,
+} from './interactive-transaction-policy';
 
 const SRC_DIR = path.resolve(__dirname, '../..');
 const DOMAINS_DIR = path.join(SRC_DIR, 'domains');
@@ -518,6 +523,25 @@ runCheck('utils/ has zero src/ dependencies', checkUtilsBoundary());
 
 // Invariant 9: server.ts wiring
 runCheck('server.ts wires from domains/, not routes/', checkServerWiring(domains));
+
+// Invariant 10: canonical interactive-transaction timeout/retry policy
+if (
+  findRawInteractiveTransactions(
+    'import { prisma as db } from "./database"; db.$transaction<User>(async (tx) => tx.user.findMany())'
+  ).length !== 1 ||
+  findRawInteractiveTransactions(
+    'const { $transaction } = db; $transaction(async (tx) => tx.user.findMany())'
+  ).length !== 1 ||
+  findRawInteractiveTransactions('prisma.$transaction([first, second])').length !== 0 ||
+  findRawInteractiveTransactions('runTransactionWithRetry(async (tx) => tx.user.findMany())')
+    .length !== 0
+) {
+  throw new Error('Interactive transaction policy detector failed its callback/array self-check');
+}
+runCheck(
+  'interactive transactions use the canonical wrapper or an exact documented exception',
+  checkInteractiveTransactionPolicy(SRC_DIR)
+);
 
 // ── Summary ──
 

@@ -26,6 +26,10 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
     "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
+    # rose-1-mini's first waterfall layer. Absent until the waterfall table was
+    # derived from POOL_REGISTRY, at which point pricing rose-1-mini raised
+    # KeyError instead of returning a number.
+    "anthropic/claude-haiku-4.5":     {"prompt": 1.00 / 1_000_000, "completion": 5.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
     "openai/gpt-5.4":                 {"prompt": 1.75 / 1_000_000, "completion": 14.00 / 1_000_000},
     "openai/gpt-5.5":                 {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},

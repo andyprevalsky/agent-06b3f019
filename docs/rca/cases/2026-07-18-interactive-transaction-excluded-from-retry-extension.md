@@ -56,6 +56,17 @@ semantic `createAgent` helper now retries the same transient 500 that the blackb
 helpers already retried. Covered by 8/8 new `database-transaction-retry` unit
 tests; no hand-rolled retry loop and no lint disables.
 
+On 2026-08-03 a related transaction-policy boundary failed in
+`providers/gateResolution.ts`. `resolveAndSignal` still called raw
+`prisma.$transaction`, so attention respond/reject inherited Prisma's five-second
+body timeout instead of the wrapper's bounded ten-second policy. Under the full
+coverage gate, transactions expired after 5.381s and 5.854s and both endpoints
+returned 500. Unlike this case's side-effect-free transaction-start failure,
+the later failure was a mid-body expiry caused by bypassing the canonical body
+timeout, so it is cross-linked as a relative rather than a recurrence. Gate
+resolution now uses `runTransactionWithRetry`; see
+`2026-08-03-attention-resolution-bypasses-transaction-timeout-policy`.
+
 ## Human feedback
 
 None recorded.

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Minimal, atomic `shlock` fallback for environments where the classic
+# INN/C-News `shlock` binary is unavailable (e.g. a bare Cursor Cloud VM).
+#
+# Implements exactly the contract the repo uses:
+#     shlock -p <PID> -f <LOCKFILE>
+#   - exit 0: lock acquired (LOCKFILE now records <PID>)
+#   - exit 1: lock held by a LIVE process (LOCKFILE records a pid that is alive)
+#   A lock whose recorded PID is dead is atomically broken and re-acquired.
+#
+# Atomicity comes from hard-linking a temp file onto the target: link() fails if
+# the target already exists, which is the classic O_EXCL-equivalent lock. Real
+# shlock supports more flags; this covers only `-p`/`-f`, which is all the
+# cloudbench/fetch-ref lock helpers invoke.
+set -u
+
+pid=""
+file=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p) pid="${2:-}"; shift 2 ;;
+        -f) file="${2:-}"; shift 2 ;;
+        *)  shift ;;
+    esac
+done
+[ -n "$pid" ] && [ -n "$file" ] || { echo "usage: shlock -p PID -f LOCKFILE" >&2; exit 2; }
+
+tmp="${file}.tmp.$$.${RANDOM:-0}"
+if ! printf '%s\n' "$pid" > "$tmp" 2>/dev/null; then
+    exit 1
+fi
+
+# Atomic acquire: hard-link temp onto the lockfile (fails if it exists).
+if ln "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    exit 0
+fi
+
+# Lock exists — is the recorded holder still alive?
+holder="$(tr -d '[:space:]' < "$file" 2>/dev/null || true)"
+if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+    rm -f "$tmp"
+    exit 1  # live holder — genuinely locked
+fi
+
+# Stale (dead holder or empty) — break it and re-acquire atomically.
+rm -f "$file" 2>/dev/null || true
+if ln "$tmp" "$file" 2>/dev/null; then
+    rm -f "$tmp"
+    exit 0
+fi
+rm -f "$tmp"
+exit 1

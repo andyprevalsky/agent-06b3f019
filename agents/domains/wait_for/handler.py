@@ -28,6 +28,7 @@ from domains.wait_for.config import (
 )
 from domains.wait_for.service import cap_evidence, evaluate_condition_activity, format_duration
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
+from utils.source_connect_gates import raise_source_connect_gates
 
 # =============================================================================
 # WAIT_FOR MANAGER
@@ -53,9 +54,7 @@ class WaitForManager(ToolManager):
         resume = tool_call.get("resume") is True
 
         if until_timestamp:
-            async for event in self._timestamp_mode(
-                workflow_instance, until_timestamp, tool_call_id, resume=resume
-            ):
+            async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id, resume=resume):
                 yield event
         elif condition:
             if not isinstance(description, str) or not 3 <= len(description) <= 80:
@@ -185,7 +184,6 @@ class WaitForManager(ToolManager):
         routing explore events as spawn_agent messages so the FE groups them
         correctly. wait_for events reference the explore via exploreTaskId.
         """
-        from domains.spawn_agent.handler import _raise_source_connect_gates
         from tools.spawn_agent import SpawnAgentManager
 
         # Validate
@@ -300,7 +298,7 @@ class WaitForManager(ToolManager):
             # Skip when already paused so we reach the pause branch below instead
             # of parking on raise_gate_direct's response wait.
             if explore_unavailable_sources and not workflow_instance.is_paused:
-                await _raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
+                await raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
 
             # Check if explore was cancelled (paused during explore / gate wait)
             if workflow_instance.is_paused:

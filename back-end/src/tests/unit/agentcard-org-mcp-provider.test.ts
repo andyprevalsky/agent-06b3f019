@@ -1,7 +1,11 @@
 #!/usr/bin/env tsx
-/* eslint-disable no-console */
 
 import assert from 'node:assert';
+import {
+  AgentCardOrgRuntime,
+  AgentCardOrgRuntimeError,
+  orgRetryDeadlineAtMs,
+} from '../../providers/agentcard/org-runtime';
 import {
   AgentCardOrgMcpProvider,
   AgentCardRoutingProvider,
@@ -9,6 +13,135 @@ import {
 } from '../../providers/card-provider';
 
 type ToolCall = { name: string; args: Record<string, unknown> };
+
+const ORG_RUNTIME_ENV_NAMES = [
+  'AGENTCARD_ORG_MCP_ACCESS_TOKEN',
+  'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+  'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+] as const;
+
+type TimeoutFn = typeof globalThis.setTimeout;
+
+/**
+ * Runs `run` on a virtual clock: `Date.now()` advances by exactly the milliseconds code asks
+ * `setTimeout` to sleep, and every timer fires immediately.
+ *
+ * That makes a retry schedule that would take minutes of wall clock measurable in milliseconds,
+ * and makes the measurement exact rather than machine-load dependent.
+ */
+async function onVirtualClock<T>(run: (elapsedMs: () => number) => Promise<T>): Promise<T> {
+  const realDateNow = Date.now;
+  const realSetTimeout = globalThis.setTimeout;
+  const startedAtMs = 1_700_000_000_000;
+  let nowMs = startedAtMs;
+  Date.now = () => nowMs;
+  const virtualSetTimeout = (
+    handler: (...args: unknown[]) => void,
+    timeoutMs?: number,
+    ...args: unknown[]
+  ): ReturnType<TimeoutFn> => {
+    if (typeof timeoutMs === 'number' && timeoutMs > 0) nowMs += timeoutMs;
+    return realSetTimeout(handler, 0, ...args);
+  };
+  globalThis.setTimeout = virtualSetTimeout as unknown as TimeoutFn;
+  try {
+    return await run(() => nowMs - startedAtMs);
+  } finally {
+    Date.now = realDateNow;
+    globalThis.setTimeout = realSetTimeout;
+  }
+}
+
+/** The AgentCard throttle body, verbatim, carrying an ABSOLUTE epoch-ms window reset. */
+function throttleBody(windowResetAtMs: number): string {
+  return (
+    'Streamable HTTP error: Error POSTing to endpoint: {"error":"Rate limit exceeded",' +
+    `"message":"Too many requests. Limit: 120 requests per minute.","retryAfter":${windowResetAtMs}}`
+  );
+}
+
+/**
+ * Regression: the org runtime's rate-limit delay budget bounds ONE `callTool`. The transfer
+ * visibility poll LOOPS over `callTool` at TWO reads per observation, so a per-call budget
+ * multiplied — its 12 production reads could each add their own 30s budget (360s), turning a ~10s
+ * poll into a multi-minute mint that overruns the upstream request/activity timeout. The poll now
+ * takes ONE deadline before the loop and threads it through every read, and surrenders with the
+ * runtime's typed 429 once that single budget is spent.
+ *
+ * `delayMs: 0` zeroes the poll's own schedule so the measured elapsed time IS the throttle delay
+ * the runtime added; the observation count is unchanged.
+ */
+async function assertTransferVisibilityPollSharesOneRetryBudget(): Promise<void> {
+  const originalEnv = Object.fromEntries(
+    ORG_RUNTIME_ENV_NAMES.map((name) => [name, process.env[name]])
+  );
+  try {
+    for (const name of ORG_RUNTIME_ENV_NAMES) delete process.env[name];
+    process.env.AGENTCARD_ORG_MCP_ACCESS_TOKEN = 'direct-org-token';
+
+    await onVirtualClock(async (elapsedMs) => {
+      const budgetMs = orgRetryDeadlineAtMs() - Date.now();
+      // A window that re-throttles as soon as it refills: every `list_transfers` read is refused
+      // with the reset measured in production (13.8s out) and succeeds on the retry after it. That
+      // is the shape that multiplies — each call individually stays inside a 30s budget.
+      let windowResetAtMs = 0;
+      const runtime = new AgentCardOrgRuntime(async (_token, toolName) => {
+        if (toolName === 'create_card') {
+          return toolResult({ status: 'created', card_id: 'card-throttled' });
+        }
+        if (toolName === 'get_card_details') {
+          return toolResult({
+            pan: '4242424242424242',
+            cvv: '123',
+            expiry: '07/28',
+            balance_cents: 4396,
+            status: 'OPEN',
+          });
+        }
+        if (Date.now() < windowResetAtMs) throw new Error(throttleBody(windowResetAtMs));
+        windowResetAtMs = Date.now() + 13_800;
+        return toolResult({ transfers: [] });
+      });
+      const provider = new AgentCardOrgMcpProvider(
+        'cardholder-123',
+        (name, args, deadlineAtMs) => runtime.callTool(name, args, deadlineAtMs),
+        { attempts: 20, delayMs: 0 }
+      );
+
+      let mintError: unknown;
+      try {
+        await provider.mintCard({
+          amountCents: 4396,
+          fundsSource: 'company_flow',
+          idempotencyKey: 'purchase:throttled-visibility',
+        });
+      } catch (error) {
+        mintError = error;
+      }
+
+      assert.ok(
+        elapsedMs() > 0,
+        'the throttle must actually have been waited on, or this measures nothing'
+      );
+      assert.ok(
+        elapsedMs() <= budgetMs,
+        `a looping caller must never accumulate more than one retry budget: the transfer ` +
+          `visibility poll added ${elapsedMs()}ms of throttle delay against a ${budgetMs}ms budget`
+      );
+      assert.ok(
+        mintError instanceof AgentCardOrgRuntimeError &&
+          mintError.code === 'agentcard_org_mcp_rate_limited',
+        'a spent budget must surrender the poll with the runtime typed 429, not grind on'
+      );
+    });
+  } finally {
+    for (const name of ORG_RUNTIME_ENV_NAMES) {
+      const value = originalEnv[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
 
 function toolResult(payload: Record<string, unknown>): unknown {
   return {
@@ -393,33 +526,8 @@ async function main(): Promise<void> {
       error instanceof Error && error.message === 'AgentCard Organization MCP failed'
   );
 
-  // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
-  // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
-  const missingCardholderProvider = new AgentCardOrgMcpProvider(
-    'cardholder-missing',
-    async (name) => {
-      if (name === 'create_card') {
-        return toolResult({
-          status: 'error',
-          message: 'create_card failed: Cardholder not found',
-        });
-      }
-      throw new Error(`unexpected tool ${name}`);
-    }
-  );
-  await assert.rejects(
-    () =>
-      missingCardholderProvider.mintCard({
-        amountCents: 4396,
-        fundsSource: 'company_flow',
-        idempotencyKey: 'purchase:missing-cardholder',
-      }),
-    (error: unknown) =>
-      error instanceof Error &&
-      'code' in error &&
-      error.code === 'agentcard_cardholder_not_found' &&
-      error.message.includes('Cardholder not found')
-  );
+  // "Cardholder not found" structured errors are covered with thrown MCP errors below
+  // (agentcard_cardholder_not_found) so the funding-resume classifier stays fail-closed.
 
   const proseKycCalls: string[] = [];
   const proseKycProvider = new AgentCardOrgMcpProvider('cardholder-123', async (name) => {
@@ -447,7 +555,121 @@ async function main(): Promise<void> {
   );
   assert.deepStrictEqual(proseKycCalls, ['create_card']);
 
-  console.log('AgentCard organization MCP provider tests passed');
+  // Regression: the transfer-visibility poll ran on a FIXED interval and issues TWO reads per
+  // attempt, so a single mint spent 40 requests of AgentCard's org-wide 120-requests-per-minute
+  // window in ten seconds — throttling the reclaim/lifecycle callers that share it. Exponential
+  // backoff waits for the same total time on far fewer requests.
+  // Scaled to 1/100 of production (delayMs 5 stands in for 500) so the assertion runs fast; the
+  // request count is a pure function of the schedule shape, so it is identical at either scale.
+  const invisibleTransferAttempts = 20;
+  const invisibleTransferScaledDelayMs = 5;
+  const invisibleTransferTotalWaitMs =
+    (invisibleTransferAttempts - 1) * invisibleTransferScaledDelayMs;
+  let invisibleTransferLookups = 0;
+  const invisibleTransferProvider = new AgentCardOrgMcpProvider(
+    'cardholder-123',
+    async (name) => {
+      if (name === 'create_card') return toolResult({ status: 'created', card_id: 'card-invis' });
+      if (name === 'get_card_details') {
+        return toolResult({
+          pan: '4242424242424242',
+          cvv: '123',
+          expiry: '07/28',
+          balance_cents: 4396,
+          status: 'OPEN',
+        });
+      }
+      if (name === 'list_transfers') {
+        invisibleTransferLookups += 1;
+        return toolResult({ transfers: [] });
+      }
+      throw new Error(`unexpected invisible-transfer tool ${name}`);
+    },
+    { attempts: invisibleTransferAttempts, delayMs: invisibleTransferScaledDelayMs }
+  );
+  const invisibleTransferStartedAt = Date.now();
+  await assert.rejects(
+    () =>
+      invisibleTransferProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:invisible-transfer',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_company_funding_in_progress'
+  );
+  assert.strictEqual(
+    invisibleTransferLookups,
+    12,
+    `a full transfer-visibility wait must cost 12 organization-MCP requests, not ${invisibleTransferLookups}`
+  );
+  // The visibility deadline was NOT shortened to buy the request saving.
+  assert.ok(
+    Date.now() - invisibleTransferStartedAt >= invisibleTransferTotalWaitMs,
+    'the transfer-visibility window must not shrink'
+  );
+
+  await assertTransferVisibilityPollSharesOneRetryBudget();
+
+  // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
+  // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
+  // Covers both thrown MCP errors and isError structured results.
+  const missingCardholderProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        throw new Error('create_card failed: Cardholder not found');
+      }
+      throw new Error(`unexpected missing-cardholder tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  const missingCardholderResultProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        return {
+          isError: true,
+          structuredContent: { status: 'error', message: 'Cardholder not found' },
+        };
+      }
+      throw new Error(`unexpected missing-cardholder-result tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderResultProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder-result',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_cardholder_not_found' &&
+      error.message.includes('Cardholder not found') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  process.stdout.write('AgentCard organization MCP provider tests passed\n');
 }
 
 void main();

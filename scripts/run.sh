@@ -404,7 +404,7 @@ kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
     local killed_any=false
-    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel'
+    local pattern='scripts/run\.sh --benchmark|worker\.py|tsx.*src/server\.ts|node_modules/.bin/vite|ngrok http|cloudflared tunnel|localtunnel --port'
     for pid in $(pgrep -f "$pattern" 2>/dev/null); do
         [ "$pid" = "$$" ] && continue
         is_current_process_family "$pid" && continue
@@ -790,8 +790,26 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # below cold-syncs exactly as before (then repopulates the cache); the schemahash
 # guard + pg_restore fallback catch any mismatch/corruption, so it can never break
 # a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
-# + UTC day (bounds staleness to 24h). Local dev leaves BENCHMARK_SEED_DUMP unset.
-_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+# + pg_dump major (compatibility) + UTC day (bounds staleness to 24h). Local dev
+# leaves BENCHMARK_SEED_DUMP unset.
+#
+# The pg major belongs in the token because a custom-format archive is NOT
+# backward compatible: a PG18 client emits header format 1.16, which the pinned
+# postgres:16-alpine pg_restore rejects outright ("unsupported version (1.16) in
+# file header"). Without it every publisher shares one token, so a single
+# neighbour on a newer client poisons the shared cache for every consumer — each
+# of which then fails its restore and, under BENCHMARK_REQUIRE_SEED_DUMP=1,
+# refuses to boot at all. Keying by major lets mismatched clients coexist rather
+# than clobber each other.
+_SEED_DUMP_CLIENT_MAJOR="$(
+    if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
+        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+    else
+        echo 16 # the pinned postgres:16-alpine container below writes the archive
+    fi
+)"
+[ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
+_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-pg${_SEED_DUMP_CLIENT_MAJOR}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
@@ -1161,16 +1179,102 @@ CLOUDFLARE_TUNNEL_MAX_ATTEMPTS="${CLOUDFLARE_TUNNEL_MAX_ATTEMPTS:-3}"
 # Linear backoff base; attempt N waits N × this before re-requesting.
 CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS:-20}"
 
+# True when the tunnel hostname has at least one A/AAAA record. trycloudflare
+# quick tunnels sometimes print a hostname that never gets DNS (NXDOMAIN from
+# 1.1.1.1 / 8.8.8.8 / local resolver) even after "Registered tunnel connection".
+# Curl then reports 000 forever; fail that case early instead of burning the
+# full edge timeout × retry budget.
+# One Cloudflare-edge status probe, supervised from the parent shell.
+#
+# Prints the HTTP status ('' or 000 when unreachable). Extra args are passed to
+# curl so the caller can select an address family. curl's --max-time normally
+# bounds this, but under extreme host contention the process has been observed
+# to outlive the entire isolated harness watchdog; a wedged probe must never
+# block quick-tunnel recycling or the ngrok fallback, so the parent enforces its
+# own deadline and escalates TERM -> KILL.
+supervised_edge_probe() {
+    local url="$1"
+    shift
+    local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
+    [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
+    local status_file probe_pid probe_deadline status
+    status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
+    curl "$@" -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+        --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
+        >"$status_file" 2>/dev/null &
+    probe_pid=$!
+    probe_deadline=$((SECONDS + curl_timeout + 2))
+    while kill -0 "$probe_pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$probe_deadline" ]; then
+            kill "$probe_pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$probe_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+    wait "$probe_pid" 2>/dev/null || true
+    status="$(cat "$status_file" 2>/dev/null || true)"
+    rm -f "$status_file"
+    printf '%s' "$status"
+}
+
+public_tunnel_hostname_resolves() {
+    local url="$1" host
+    host="${url#https://}"
+    host="${host%%/*}"
+    [ -n "$host" ] || return 1
+    if command -v getent >/dev/null 2>&1 && getent ahosts "$host" >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v dig >/dev/null 2>&1; then
+        dig +short A "$host" 2>/dev/null | grep -Eq '^[0-9.]+$' && return 0
+        dig +short AAAA "$host" 2>/dev/null | grep -Eq ':' && return 0
+    fi
+    return 1
+}
+
 cloudflare_tunnel_edge_is_routing() {
     local url="$1" deadline=$((SECONDS + CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS)) status
     local retry_seconds="${CLOUDFLARE_TUNNEL_EDGE_RETRY_SECONDS:-2}"
+    local started=$SECONDS
+    local dns_grace_seconds="${CLOUDFLARE_TUNNEL_DNS_GRACE_SECONDS:-15}"
     while [ "$SECONDS" -lt "$deadline" ]; do
+        # NXDOMAIN fast-fail is trycloudflare-specific: account-less quick tunnels
+        # can print a hostname that never gets public DNS. Other providers
+        # (ngrok/loca.lt) resolve normally; skip this gate for them so unit tests
+        # with stub hostnames and non-CF providers keep exercising the HTTP path.
+        if [ "${CLOUDFLARE_TUNNEL_SKIP_DNS_CHECK:-0}" != "1" ] &&
+            [[ "$url" == *".trycloudflare.com" || "$url" == *".trycloudflare.com/"* ]] &&
+            ! public_tunnel_hostname_resolves "$url"; then
+            # Hostname never entered DNS — no amount of curling will help.
+            if [ $((SECONDS - started)) -ge "$dns_grace_seconds" ]; then
+                return 1
+            fi
+            sleep "$retry_seconds"
+            continue
+        fi
         # --noproxy '*': this probe must measure the Cloudflare edge itself, not
         # an inherited HTTP(S)_PROXY/ALL_PROXY. A proxy corrupts the result in
         # BOTH directions — it can answer 407/5xx and fake a healthy tunnel, or
         # (as on a macOS host with a content blocker configured system-wide)
         # refuse trycloudflare.com outright and report a healthy tunnel as dead.
-        status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        #
+        # Prefer IPv4 (-4): some Cloud/Linux VMs resolve trycloudflare.com to
+        # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
+        # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
+        # probe falsely declares a healthy tunnel dead and recycles forever.
+        #
+        # Each attempt is supervised from the parent shell: curl's own --max-time
+        # is normally sufficient, but under extreme host contention we have seen
+        # the process stay stuck past the entire isolated harness watchdog, and a
+        # wedged edge probe must not block quick-tunnel recycling / ngrok
+        # fallback. Merge keeps both protections — IPv4-first for correctness,
+        # supervision for liveness.
+        status="$(supervised_edge_probe "$url" -4)"
+        if [ -z "$status" ] || [ "$status" = "000" ]; then
+            status="$(supervised_edge_probe "$url")"
+        fi
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0
         fi
@@ -1221,6 +1325,19 @@ start_cloudflare_quick_tunnel() {
                 return 0
             fi
             echo "⚠️  $PUBLIC_BASE_URL never routed within ${CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS}s; recycling the quick tunnel."
+            # NXDOMAIN across public resolvers means more quick-tunnel attempts
+            # from this IP will almost certainly fail the same way — fall through
+            # to ngrok/localtunnel instead of burning ~minutes of backoff.
+            if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
+                echo "⚠️  $PUBLIC_BASE_URL has no DNS (NXDOMAIN); skipping remaining quick-tunnel attempts."
+                kill "$NGROK_PID" 2>/dev/null || true
+                wait "$NGROK_PID" 2>/dev/null || true
+                unset 'PIDS[${#PIDS[@]}-1]' 'NAMES[${#NAMES[@]}-1]'
+                NGROK_PID=""
+                echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT (DNS never provisioned)."
+                echo "   trycloudflare.com is account-less and best-effort."
+                return 1
+            fi
         fi
 
         # Retire this hostname before asking Cloudflare for a new one, so the dead
@@ -1243,6 +1360,66 @@ start_cloudflare_quick_tunnel() {
     echo "⚠️  cloudflared could not obtain a routable quick tunnel for :$FRONTEND_PORT after $CLOUDFLARE_TUNNEL_MAX_ATTEMPTS attempts."
     echo "   trycloudflare.com is account-less and best-effort."
     return 1
+}
+
+# Last-resort public tunnel when trycloudflare DNS is dead AND ngrok has no
+# authtoken (common on Cursor Cloud VMs: NGROK_API_KEY present but invalid,
+# NGROK_AUTHTOKEN unset). loca.lt is already allowlisted in authRealm + browser
+# agent crypto; no account required.
+start_localtunnel_public_tunnel() {
+    if ! command -v npx >/dev/null 2>&1; then
+        echo "   localtunnel fallback unavailable: npx is not installed."
+        return 1
+    fi
+
+    mkdir -p "$RUN_CONTEXT_DIR"
+    local lt_log="$RUN_CONTEXT_DIR/localtunnel.log"
+    echo "🌐 Falling back to localtunnel (loca.lt) → localhost:$FRONTEND_PORT"
+    # --yes: non-interactive install of the CLI if missing from the cache.
+    npx --yes localtunnel --port "$FRONTEND_PORT" > "$lt_log" 2>&1 &
+    NGROK_PID=$!
+    PUBLIC_TUNNEL_SERVICE_NAME="localtunnel"
+    PIDS+=($NGROK_PID); NAMES+=("$PUBLIC_TUNNEL_SERVICE_NAME")
+
+    local lt_url=""
+    for attempt in $(seq 1 45); do
+        if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+            echo "❌ localtunnel exited before publishing a tunnel."
+            tail -20 "$lt_log" || true
+            return 1
+        fi
+        lt_url="$(grep -oE 'https://[a-zA-Z0-9.-]+\.loca\.lt' "$lt_log" 2>/dev/null | head -1 || true)"
+        [ -n "$lt_url" ] && break
+        sleep 1
+    done
+    [ -n "$lt_url" ] || {
+        echo "❌ localtunnel did not publish an HTTPS endpoint."
+        tail -20 "$lt_log" || true
+        return 1
+    }
+
+    public_tunnel_publish_environment "$lt_url" "$ALLOWED_ORIGINS" || {
+        echo "❌ localtunnel published an unusable origin: $lt_url"
+        return 1
+    }
+
+    # loca.lt does NOT return 502 when the origin is down — the request hangs
+    # until the client times out (curl http_code 000). The Cloudflare-style
+    # edge probe therefore falsely fails here because the frontend is started
+    # AFTER the public tunnel. Verify DNS + process liveness now; HTTP proof
+    # is deferred to scripts/test-public-tunnel.sh once vite is up.
+    echo "🔎 Verifying localtunnel DNS + process: $PUBLIC_BASE_URL"
+    if ! public_tunnel_hostname_resolves "$PUBLIC_BASE_URL"; then
+        echo "❌ $PUBLIC_BASE_URL has no DNS."
+        return 1
+    fi
+    if ! kill -0 "$NGROK_PID" 2>/dev/null; then
+        echo "❌ localtunnel process exited after publishing $PUBLIC_BASE_URL."
+        tail -20 "$lt_log" || true
+        return 1
+    fi
+    echo "🌐 Public tunnel ready (localtunnel; HTTP verify deferred until frontend up): $PUBLIC_BASE_URL"
+    return 0
 }
 
 # Fallback provider when trycloudflare is unavailable.
@@ -1373,13 +1550,14 @@ reap_failed_ngrok_tunnel() {
 
 start_ngrok_public_tunnel() {
     if ! command -v ngrok >/dev/null 2>&1; then
-        echo "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken."
-        exit 1
+        # Must use ngrok_public_tunnel_fail: in cloudflare/ephemeral mode this
+        # function is a non-fatal fallback and a bare `exit 1` would skip
+        # localtunnel and tear down the whole stack.
+        ngrok_public_tunnel_fail "❌ ngrok is required for scripts/run.sh. Install it and configure an authtoken." || return 1
     fi
     if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
         ngrok config check >/dev/null 2>&1 || {
-            echo "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>"
-            exit 1
+            ngrok_public_tunnel_fail "❌ ngrok config is invalid or missing an authtoken. Run: ngrok config add-authtoken <token>" || return 1
         }
     fi
 
@@ -1462,6 +1640,18 @@ start_public_tunnel() {
             # run when trycloudflare will not route.
             start_cloudflare_quick_tunnel && return 0
             start_ngrok_ephemeral_tunnel && return 0
+            # No ngrok credentials at all → skip the reserved-domain path (it
+            # cannot succeed) and go straight to account-less localtunnel.
+            # Previously start_ngrok_public_tunnel used bare `exit 1` here, which
+            # tore down the stack before localtunnel could run (Cloud AgentCard).
+            if [ -z "${NGROK_AUTHTOKEN:-}" ] && ! ngrok config check >/dev/null 2>&1; then
+                echo "⚠️  cloudflare unavailable and ngrok has no authtoken; trying localtunnel." >&2
+                start_localtunnel_public_tunnel && return 0
+                echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, then localtunnel; ngrok unconfigured)." >&2
+                echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+                echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
+                exit 1
+            fi
             # Last resort: this worktree's already-reserved stable domain.
             #
             # Both providers above are ACCOUNT-GLOBAL and can be exhausted by
@@ -1509,8 +1699,13 @@ start_public_tunnel() {
             fi
             NGROK_PUBLIC_TUNNEL_NONFATAL=0
             [ -n "$saved_ngrok_api_key" ] && export NGROK_API_KEY="$saved_ngrok_api_key"
-            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, then the worktree domain)." >&2
+            # Cursor Cloud / Linux VMs often have trycloudflare NXDOMAIN + no
+            # ngrok authtoken. localtunnel (loca.lt) needs neither.
+            reap_failed_ngrok_tunnel
+            start_localtunnel_public_tunnel && return 0
+            echo "❌ No public tunnel provider could serve :$FRONTEND_PORT (tried cloudflare, ephemeral ngrok, worktree domain, localtunnel)." >&2
             echo "   Set BENCHMARK_SKIP_PUBLIC_TUNNEL=1 for runs that do not need a public origin." >&2
+            echo "   Or set NGROK_AUTHTOKEN for the ngrok fallback." >&2
             exit 1
             ;;
         ngrok) start_ngrok_public_tunnel ;;

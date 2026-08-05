@@ -36,6 +36,7 @@ async function runAll(): Promise<void> {
   await import('./agents-configuration.cases');
   await import('./agents-edge-routes.cases');
   await import('./agents-batch.cases');
+  await import('./agents-liveness-reconcile.cases');
   const {
     testBoundary_createAgentModelPricing,
     testBoundary_createAgentGeoip,
@@ -57,13 +58,12 @@ async function runAll(): Promise<void> {
     tests,
     EFFECTIVE_CASE_CONCURRENCY,
     async (tc) => {
-      return runTest(tc.name, tc.fn);
+      console.log(`  RUN   ${tc.name}`);
+      const result = await runTest(tc.name, tc.fn);
+      console.log(`  ${result.passed ? 'PASS' : 'FAIL'}  ${result.name} (${result.duration}ms)`);
+      return result;
     }
   );
-
-  for (const r of parallelResults) {
-    console.log(`  ${r.passed ? 'PASS' : 'FAIL'}  ${r.name} (${r.duration}ms)`);
-  }
 
   // Phase 2: Sequential boundary capture tests (shared capture buffer)
   const captureAvailable = await checkCaptureAvailable();

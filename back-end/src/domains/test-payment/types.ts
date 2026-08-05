@@ -51,7 +51,11 @@ export interface TestPaymentTotals {
 export interface TestPaymentConfirmation {
   orderId: string;
   status: string;
-  paymentIntentId: string;
+  /**
+   * Null when a company-funded ADMIN purchase settled: that flow mints the card off the AgentCard
+   * org transfer and never authorizes a personal Stripe hold, so no payment intent exists.
+   */
+  paymentIntentId: string | null;
   purchaseId?: string;
   cardId?: string;
   receipt: {

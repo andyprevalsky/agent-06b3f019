@@ -35,7 +35,12 @@ import {
   TAX_LABEL,
   TEST_PAYMENT_MERCHANT_NAME,
 } from '../config';
-import { confirmTestPayment, fetchTestPaymentItems } from '../hooks';
+import {
+  confirmTestPayment,
+  fetchTestPaymentItems,
+  settleTestPaymentCheckout,
+  startTestPaymentCheckout,
+} from '../hooks';
 import type { TestPaymentCardForm, TestPaymentConfirmation, TestPaymentItem } from '../types';
 
 function formatCents(value: number): string {
@@ -413,6 +418,20 @@ export default function TestPaymentPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Return leg of the hosted Stripe Checkout. Stripe has already captured by the time it sends the
+  // shopper back, so this only reconciles that authorization onto the Rose purchase record.
+  useEffect(() => {
+    const checkoutSessionId = new URLSearchParams(window.location.search).get(
+      'checkout_session_id',
+    );
+    if (checkoutSessionId === null || checkoutSessionId === '') return;
+    setSubmitting(true);
+    settleTestPaymentCheckout(checkoutSessionId)
+      .then(setConfirmation)
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSubmitting(false));
+  }, []);
+
   useEffect(() => {
     if (!isDev || isLiveLifecycleFixture || isAbandonmentFixture) return;
     fetchTestPaymentItems()
@@ -471,8 +490,19 @@ export default function TestPaymentPage() {
             setSubmitting(true);
             setError(null);
             try {
-              if (isLiveLifecycleFixture || isAbandonmentFixture) {
+              // The abandonment fixture must NEVER submit — the whole point of that benchmark is
+              // that the minted card is left unspent so the reclaim/refund path can be asserted.
+              if (isAbandonmentFixture) {
                 throw new Error('This checkout is unavailable');
+              }
+              // Live fixture: hand off to a REAL hosted Stripe Checkout. A live Rose-minted card
+              // cannot be charged any other way — AgentCard's test_charge is sandbox-only and
+              // Stripe blocks live-mode raw-PAN tokenization — so this is what makes the page an
+              // actual merchant rather than a fixture.
+              if (isLiveLifecycleFixture) {
+                const { url } = await startTestPaymentCheckout(selectedIds);
+                window.location.assign(url);
+                return;
               }
               setConfirmation(await confirmTestPayment(selectedIds, card));
             } catch (err) {

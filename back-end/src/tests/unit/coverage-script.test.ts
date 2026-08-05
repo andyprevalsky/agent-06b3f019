@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const coverageScript = readFileSync(join(process.cwd(), 'scripts', 'run-coverage.sh'), 'utf8');
@@ -15,12 +17,18 @@ const blackboxRunner = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'run.ts'),
   'utf8'
 );
+const gateResolutionProvider = readFileSync(
+  join(process.cwd(), 'src', 'providers', 'gateResolution.ts'),
+  'utf8'
+);
 const unitRunner = readFileSync(join(process.cwd(), 'scripts', 'run-unit-tests.ts'), 'utf8');
 const adminHealthBlackbox = readFileSync(
   join(process.cwd(), 'src', 'tests', 'blackbox', 'admin-health.blackbox.ts'),
   'utf8'
 );
 const autoRcaEnvPath = join(process.cwd(), 'scripts', 'blackbox-auto-rca-env.sh');
+const processGroupHelperPath = join(process.cwd(), 'scripts', 'coverage-process-group.py');
+const processLockHelperPath = join(process.cwd(), 'scripts', 'coverage-process-lock.py');
 
 assert.ok(
   existsSync(autoRcaEnvPath),
@@ -64,9 +72,371 @@ assert.match(
 
 assert.match(
   coverageScript,
-  /lsof -tiTCP:"\$COV_PORT" -sTCP:LISTEN/,
+  /lsof -tiTCP:"\$candidate" -sTCP:LISTEN/,
   'coverage port preflight must ignore outbound connections using the same local port'
 );
+assert.match(
+  coverageScript,
+  /reserve_coverage_port/,
+  'coverage must reserve an available port instead of assuming its preferred port is free'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /COV_PORT=\$\(\(BASE_PORT \+ 200\)\)/,
+  'coverage must not hard-code a port outside the workspace reserved range'
+);
+assert.match(
+  coverageScript,
+  /COV_PORT_START=.*BASE_PORT \+ 7[\s\S]*COV_PORT_END=.*BASE_PORT \+ 8/,
+  'coverage port selection must stay inside the workspace-owned ten-port range'
+);
+assert.match(
+  coverageScript,
+  /coverage-process-lock\.py[\s\S]*Another backend coverage run is already active/,
+  'coverage must lock the whole run before mutating shared artifacts or the test database'
+);
+assert.doesNotMatch(
+  coverageScript,
+  /mkdir "\$COVERAGE_RUN_LOCK/,
+  'coverage must not use a staleable mkdir mutex for the run-wide lock'
+);
+
+function waitForPath(path: string, shouldExist: boolean): void {
+  for (let attempt = 0; attempt < 100 && existsSync(path) !== shouldExist; attempt++) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.equal(existsSync(path), shouldExist, `Timed out waiting for ${path}`);
+}
+
+const processHelperFixtureRoot = mkdtempSync(join(tmpdir(), 'coverage-process-helpers-'));
+try {
+  const missingRegistryPath = join(processHelperFixtureRoot, 'missing-command-groups');
+  const missingCommand = spawnSync(
+    'python3',
+    [
+      processGroupHelperPath,
+      missingRegistryPath,
+      join(processHelperFixtureRoot, 'missing-command'),
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.equal(missingCommand.status, 127, 'a missing coverage child executable must return 127');
+
+  const deniedExecutablePath = join(processHelperFixtureRoot, 'not-executable');
+  writeFileSync(deniedExecutablePath, '#!/usr/bin/env bash\nexit 0\n');
+  chmodSync(deniedExecutablePath, 0o644);
+  const deniedCommand = spawnSync(
+    'python3',
+    [
+      processGroupHelperPath,
+      join(processHelperFixtureRoot, 'denied-command-groups'),
+      deniedExecutablePath,
+    ],
+    { encoding: 'utf8' }
+  );
+  assert.equal(deniedCommand.status, 126, 'a non-executable coverage child must return 126');
+
+  const delayedRegistryPath = join(processHelperFixtureRoot, 'delayed-launch-groups');
+  const delayedMarkerPath = join(processHelperFixtureRoot, 'delayed-command-ran');
+  execFileSync(
+    'python3',
+    [
+      '-c',
+      [
+        'import fcntl, os, subprocess, sys, time',
+        'helper, registry_path, marker_path = sys.argv[1:]',
+        "with open(registry_path, 'a+', encoding='utf-8') as registry:",
+        '    fcntl.flock(registry.fileno(), fcntl.LOCK_EX)',
+        '    child = subprocess.Popen([',
+        "        sys.executable, helper, registry_path, sys.executable, '-c',",
+        '        "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(\'ran\')",',
+        '        marker_path,',
+        '    ])',
+        '    time.sleep(0.1)',
+        "    registry.write('shutdown\\n')",
+        '    registry.flush()',
+        '    os.fsync(registry.fileno())',
+        '    fcntl.flock(registry.fileno(), fcntl.LOCK_UN)',
+        'status = child.wait(timeout=5)',
+        "assert status == 125, f'delayed launcher exited {status}, expected 125'",
+        "assert not os.path.exists(marker_path), 'delayed command ran after shutdown was published'",
+      ].join('\n'),
+      processGroupHelperPath,
+      delayedRegistryPath,
+      delayedMarkerPath,
+    ],
+    { stdio: 'pipe' }
+  );
+  assert.equal(
+    existsSync(delayedMarkerPath),
+    false,
+    'a launcher delayed behind the registry lock must stop before exec after guardian shutdown'
+  );
+
+  execFileSync(
+    'python3',
+    [
+      '-c',
+      [
+        'import json, os, signal, subprocess, sys, tempfile, time',
+        'lock_helper = sys.argv[1]',
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)",
+        'try:',
+        "    with tempfile.TemporaryDirectory(prefix='coverage-identity-mismatch-') as root:",
+        "        registry = os.path.join(root, 'groups')",
+        "        status = os.path.join(root, 'status')",
+        "        lock = os.path.join(root, 'lock')",
+        "        with open(registry, 'w', encoding='utf-8') as handle:",
+        "            handle.write(json.dumps({'pgid': child.pid, 'identity_pid': child.pid, 'start_identity': 'wrong-identity'}) + '\\n')",
+        '        guardian = subprocess.Popen([sys.executable, lock_helper, lock, status, str(os.getpid()), registry])',
+        '        for _ in range(100):',
+        "            if os.path.exists(status) and open(status, encoding='utf-8').read() == 'acquired':",
+        '                break',
+        '            time.sleep(0.02)',
+        '        else:',
+        "            raise AssertionError('guardian did not acquire identity mismatch fixture lock')",
+        '        guardian.send_signal(signal.SIGTERM)',
+        '        guardian.wait(timeout=5)',
+        '        os.killpg(child.pid, 0)',
+        'finally:',
+        '    try:',
+        '        os.killpg(child.pid, signal.SIGKILL)',
+        '    except ProcessLookupError:',
+        '        pass',
+        '    child.wait(timeout=5)',
+      ].join('\n'),
+      processLockHelperPath,
+    ],
+    { stdio: 'pipe' }
+  );
+
+  const nestedStatusPath = join(processHelperFixtureRoot, 'nested', 'status', 'lock-status');
+  const nestedStatusGuardian = spawn(
+    'python3',
+    [
+      processLockHelperPath,
+      join(processHelperFixtureRoot, 'nested-status-lock'),
+      nestedStatusPath,
+      String(process.pid),
+    ],
+    { stdio: 'ignore' }
+  );
+  try {
+    waitForPath(nestedStatusPath, true);
+    assert.equal(
+      readFileSync(nestedStatusPath, 'utf8'),
+      'acquired',
+      'the coverage lock guardian must create a nested status directory before reporting'
+    );
+  } finally {
+    nestedStatusGuardian.kill('SIGTERM');
+  }
+} finally {
+  rmSync(processHelperFixtureRoot, { recursive: true, force: true });
+}
+
+const runLockFixtureRoot = mkdtempSync(join(tmpdir(), 'coverage-run-lock-'));
+const runLockPath = join(runLockFixtureRoot, 'active');
+const processGroupsPath = join(runLockFixtureRoot, 'process-groups');
+const lockHolder = spawn('bash', ['scripts/run-coverage.sh', '--hold-coverage-lock-with-child'], {
+  cwd: process.cwd(),
+  env: {
+    ...process.env,
+    BACKEND_COVERAGE_RUN_LOCK_DIR: runLockPath,
+    BACKEND_COVERAGE_PROCESS_GROUPS_FILE: processGroupsPath,
+    BACKEND_COVERAGE_HOLD_SECONDS: '30',
+  },
+  detached: true,
+  stdio: 'ignore',
+});
+try {
+  for (
+    let attempt = 0;
+    attempt < 100 && readFileSync(runLockPath, { encoding: 'utf8', flag: 'a+' }).trim() === '';
+    attempt++
+  ) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  assert.equal(
+    readFileSync(runLockPath, 'utf8').trim(),
+    String(lockHolder.pid),
+    'coverage process lock must identify its live shell owner'
+  );
+  for (
+    let attempt = 0;
+    attempt < 100 &&
+    (!existsSync(processGroupsPath) || readFileSync(processGroupsPath, 'utf8').trim() === '');
+    attempt++
+  ) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  }
+  const registeredProcessGroup = JSON.parse(readFileSync(processGroupsPath, 'utf8').trim()) as {
+    identity_pid: number;
+    pgid: number;
+    start_identity: string;
+  };
+  const childProcessGroup = registeredProcessGroup.pgid;
+  assert.ok(Number.isInteger(childProcessGroup) && childProcessGroup > 0);
+  assert.ok(
+    Number.isInteger(registeredProcessGroup.identity_pid) &&
+      registeredProcessGroup.identity_pid > 0 &&
+      registeredProcessGroup.identity_pid !== childProcessGroup,
+    'coverage process registration must use a distinct persistent identity sentinel'
+  );
+  assert.match(
+    registeredProcessGroup.start_identity,
+    /^(proc-start-ticks|ps-lstart):/,
+    'coverage process registration must include an immutable session-leader start identity'
+  );
+  process.kill(-childProcessGroup, 0);
+  let blockedStderr = '';
+  try {
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      env: { ...process.env, BACKEND_COVERAGE_RUN_LOCK_DIR: runLockPath },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch (error) {
+    blockedStderr = String((error as { stderr?: Buffer }).stderr ?? '');
+  }
+  assert.match(
+    blockedStderr,
+    /Another backend coverage run is already active/,
+    'a second same-worktree coverage run must fail before mutating shared state'
+  );
+
+  // A directory mutex survives SIGKILL forever. Kill the owning shell's whole
+  // process group and prove the separately-sessioned guardian reaps registered
+  // descendants before releasing the same lock without manual cleanup.
+  if (lockHolder.pid !== undefined) process.kill(-lockHolder.pid, 'SIGKILL');
+  let recoveredPort = '';
+  for (let attempt = 0; attempt < 100 && recoveredPort === ''; attempt++) {
+    try {
+      recoveredPort =
+        execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+          cwd: process.cwd(),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            BACKEND_COVERAGE_RUN_LOCK_DIR: runLockPath,
+            BACKEND_COVERAGE_START_PORT: '59000',
+            BACKEND_COVERAGE_END_PORT: '59020',
+            BACKEND_COVERAGE_PORT_LOCK_ROOT: join(runLockFixtureRoot, 'recovery-port-locks'),
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+          .trim()
+          .split('\n')
+          .at(-1) ?? '';
+    } catch {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    }
+  }
+  assert.match(recoveredPort, /^59\d{3}$/, 'coverage run lock must recover after owner SIGKILL');
+  assert.throws(
+    () => process.kill(-childProcessGroup, 0),
+    /ESRCH/,
+    'coverage must terminate registered descendant groups before releasing the run lock'
+  );
+} finally {
+  if (lockHolder.pid !== undefined) {
+    try {
+      process.kill(-lockHolder.pid, 'SIGTERM');
+    } catch {
+      // The SIGKILL recovery assertion normally reaches this cleanup after exit.
+    }
+  }
+  if (existsSync(processGroupsPath)) {
+    for (const value of readFileSync(processGroupsPath, 'utf8').split(/\n+/)) {
+      let pgid = 0;
+      try {
+        pgid = Number((JSON.parse(value) as { pgid?: number }).pgid);
+      } catch {
+        continue;
+      }
+      if (!Number.isInteger(pgid) || pgid <= 0) continue;
+      try {
+        process.kill(-pgid, 'SIGKILL');
+      } catch {
+        // The orphan cleanup assertion normally reaps every registered group.
+      }
+    }
+  }
+  rmSync(runLockFixtureRoot, { recursive: true, force: true });
+}
+
+const portFixtureRoot = mkdtempSync(join(tmpdir(), 'coverage-port-reservation-'));
+const occupiedPortFile = join(portFixtureRoot, 'occupied-port');
+const listener = spawn(
+  'python3',
+  [
+    '-c',
+    [
+      'import socket, sys, time',
+      'sock = socket.socket()',
+      'sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)',
+      'for port in range(58000, 59000):',
+      '    try:',
+      "        sock.bind(('127.0.0.1', port))",
+      '        break',
+      '    except OSError:',
+      '        continue',
+      'sock.listen()',
+      "with open(sys.argv[1], 'w', encoding='utf-8') as handle:",
+      '    handle.write(str(sock.getsockname()[1]))',
+      'time.sleep(30)',
+    ].join('\n'),
+    occupiedPortFile,
+  ],
+  { stdio: 'ignore' }
+);
+try {
+  waitForPath(occupiedPortFile, true);
+  const occupiedPort = Number(readFileSync(occupiedPortFile, 'utf8'));
+  const lockRoot = join(portFixtureRoot, 'locks');
+  const endPort = occupiedPort + 20;
+  const selectedPort = Number(
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_START_PORT: String(occupiedPort),
+        BACKEND_COVERAGE_END_PORT: String(endPort),
+        BACKEND_COVERAGE_PORT_LOCK_ROOT: lockRoot,
+        BACKEND_COVERAGE_RUN_LOCK_DIR: join(portFixtureRoot, 'selection-run-lock'),
+      },
+    })
+      .trim()
+      .split('\n')
+      .at(-1)
+  );
+  assert.ok(
+    selectedPort > occupiedPort,
+    `coverage selected occupied port ${occupiedPort} instead of advancing (${selectedPort})`
+  );
+  assert.ok(selectedPort <= endPort, 'coverage selected a port outside its owned range');
+  const selectedAgain = Number(
+    execFileSync('bash', ['scripts/run-coverage.sh', '--print-coverage-port'], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        BACKEND_COVERAGE_START_PORT: String(occupiedPort),
+        BACKEND_COVERAGE_END_PORT: String(endPort),
+        BACKEND_COVERAGE_PORT_LOCK_ROOT: lockRoot,
+        BACKEND_COVERAGE_RUN_LOCK_DIR: join(portFixtureRoot, 'selection-run-lock'),
+      },
+    })
+      .trim()
+      .split('\n')
+      .at(-1)
+  );
+  assert.equal(selectedAgain, selectedPort, 'print-only coverage must release its process lock');
+} finally {
+  listener.kill('SIGTERM');
+  rmSync(portFixtureRoot, { recursive: true, force: true });
+}
 assert.match(
   coverageScript,
   /export AMPLITUDE_API_KEY=""[\s\S]*export AMPLITUDE_SECRET_KEY=""/,
@@ -104,8 +474,8 @@ assert.doesNotMatch(
 );
 assert.match(
   coverageScript,
-  /bash scripts\/run-blackbox-tests\.sh &[\s\S]*node --import tsx scripts\/run-unit-tests\.ts &/,
-  'backend blackbox and isolated unit pools must overlap under coverage'
+  /launch_coverage_process_group env[\s\S]*bash scripts\/run-blackbox-tests\.sh[\s\S]*launch_coverage_process_group env[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
+  'backend blackbox and isolated unit pools must overlap in dedicated process groups'
 );
 assert.match(
   coverageScript,
@@ -144,7 +514,7 @@ assert.match(
 );
 assert.match(
   coverageScript,
-  /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts &/,
+  /BACKEND_UNIT_COVERAGE_DIR="\$COV_TMP"[\s\S]*node --import tsx scripts\/run-unit-tests\.ts/,
   'coverage must be passed to unit children without instrumenting the scheduler itself'
 );
 assert.match(
@@ -159,13 +529,25 @@ assert.ok(
 );
 assert.match(
   blackboxRunner,
-  /lateExclusiveDomainNames = new Set\(\['admin-health', 'benchmarks-test-prompts'\]\)/,
+  /lateExclusiveDomainNames = new Set\(\[[\s\S]*'admin-health',[\s\S]*'benchmarks',[\s\S]*'benchmarks-hub',[\s\S]*'benchmarks-test-prompts',[\s\S]*\]\)/,
   'whole-database and mutable-catalog readers must be isolated from fixture writers'
 );
 assert.match(
   blackboxRunner,
   /domainWeights[\s\S]*\.sort\(/,
   'parallel blackbox domains must schedule measured long poles first'
+);
+// resolveAndSignal deliberately runs a raw interactive transaction rather than
+// runTransactionWithRetry: it must take lockAgentWorkflowGeneration BEFORE the
+// row mutation so a gate response and deploy cleanup acquire the same locks in
+// the same order, and a retry wrapper would re-run that acquisition — the exact
+// interleaving the ordering exists to prevent. (The raw transaction carries a
+// documented entry in the interactive-transaction policy allowlist.) What must
+// not regress is the ordering itself.
+assert.match(
+  gateResolutionProvider,
+  /resolveAndSignal\([\s\S]*lockAgentWorkflowGeneration\(tx, request\.agentId\)[\s\S]*UPDATE "AgentAttentionRequest"/,
+  'gate resolution must take the generation lock before mutating the attention row'
 );
 assert.match(
   blackboxRunner,

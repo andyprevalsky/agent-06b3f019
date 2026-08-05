@@ -32,7 +32,9 @@ Output format:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -57,9 +59,34 @@ def _parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _env_log_files() -> List[Path]:
+    """
+    Logs for THIS run, when an isolated benchmark stack exported them.
+
+    That stack writes `<run-dir>/logs/backend.log` plus one `worker.N.log` per worker process, so the
+    default single-file candidates below never match and every collected cache report came back
+    empty. Accepts a comma/os.pathsep-separated list of paths or globs.
+    """
+    found: List[Path] = []
+    for var in ("NAVI_WORKER_LOGS", "NAVI_BACKEND_LOGS"):
+        raw = os.environ.get(var, "").strip()
+        if raw == "":
+            continue
+        for pattern in raw.replace(os.pathsep, ",").split(","):
+            pattern = pattern.strip()
+            if not pattern:
+                continue
+            matches = sorted(Path(p) for p in glob.glob(pattern)) if glob.has_magic(pattern) else [Path(pattern)]
+            found.extend(path for path in matches if path.exists() and path not in found)
+    return found
+
+
 def _find_log_files(explicit: Optional[str]) -> List[Path]:
     if explicit:
         return [Path(explicit)]
+    from_env = _env_log_files()
+    if from_env:
+        return from_env
     repo_root = Path(__file__).parent.parent.parent
     worker_candidates = [
         Path("agents/navi-worker-log.txt"),

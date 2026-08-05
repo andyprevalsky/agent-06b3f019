@@ -120,6 +120,16 @@ if ! $IS_MAC; then
             $SUDO sed -i 's/^\(host\s\+all\s\+all\s\+127\.0\.0\.1\/32\s\+\)scram-sha-256/\1md5/' "$PG_HBA"
             $SUDO pg_ctlcluster "$PG_VER" main reload 2>/dev/null || true
         fi
+        # Parallel deploy coverage (backend unit + blackbox + agents) opens many
+        # Prisma pools. Default max_connections=100 OOMs the gate with
+        # "sorry, too many clients already" — raise before restart.
+        PG_CONF=$(find /etc/postgresql -name postgresql.conf 2>/dev/null | head -1)
+        if [ -n "$PG_CONF" ]; then
+            $SUDO sed -i 's/^#*max_connections.*/max_connections = 300/' "$PG_CONF"
+            $SUDO pg_ctlcluster "$PG_VER" main restart 2>/dev/null \
+              || $SUDO service postgresql restart 2>/dev/null \
+              || true
+        fi
         if pg_isready -U postgres -q 2>/dev/null; then
             echo "✅ System Postgres running (fallback — no Docker)"
         else
