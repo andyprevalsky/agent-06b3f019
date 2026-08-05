@@ -198,6 +198,35 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
+# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
+# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
+# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
+# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
+# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
+# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
+# back-end/scripts/setup-benchmark-payment.ts. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+}
+# Production counterpart of the four sandbox tasks above, and the same hard requirement.
+# `agent-payment-production-abandonment` is /deploy Step 13c and asserts stripeHold succeeded plus
+# stripePaymentIntentCount 1; running it as the default (admin) benchmark user routes the mint to
+# `issueAdminCompanyCard`, which never creates a payment intent, so the gate cannot pass.
+# The identity is deliberately SEPARATE from AGENT_PAYMENT_LIFECYCLE_USER_ID: a user holds exactly
+# one Subscription row (one stripeCustomerId) and one agentcard Integration row (one cardholderId),
+# and production needs LIVE-mode values where the sandbox fixture needs TEST-mode ones. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID in back-end/src/domains/purchases/config.ts; provisioned
+# once by `back-end/scripts/setup-benchmark-payment.ts --live`.
+AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = "00000000-0000-4000-8000-000000000107"
+AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_PRODUCTION_TASK_NAME,
+    "agent-payment-production-purchase",
+}
 # Repeatable-cache baselines from local smoke run
 # 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
 # agent identity + call site and excludes one-shot calls. Per the one-way
@@ -1313,10 +1342,7 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
             return None
         # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
         # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
-        return (
-            os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
-            or AGENT_PAYMENT_BENCHMARK_USER_ID
-        )
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
 
@@ -1325,6 +1351,25 @@ def _free_credit_subscription_gate_user_id() -> str:
         os.environ.get("BENCHMARK_FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID", "").strip()
         or FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID
     )
+
+
+def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
+    """The dedicated identity a task must run as, or None to use the default benchmark user.
+
+    Single source of truth for the run-user override so the mapping can be asserted directly
+    instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
+    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
+    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    """
+    if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        return _free_credit_subscription_gate_user_id()
+    if task_name in GATE_FIXTURE_TASK_USER_IDS:
+        return GATE_FIXTURE_TASK_USER_IDS[task_name]
+    if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+    if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    return None
 
 
 async def _api_headers() -> dict:
@@ -1411,6 +1456,53 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
             "iMessage bench requires an updated, authenticated Mac app polling this exact backend; "
             f"last seen: {last_seen_at}"
         )
+
+
+PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
+    "Provision it once with: cd back-end && STRIPE_SECRET_KEY=<production sk_live_ key> "
+    "BENCHMARK_AGENTCARD_CARDHOLDER_ID=<production cardholder id> "
+    "npx tsx scripts/setup-benchmark-payment.ts --live"
+)
+
+
+def _production_payment_identity_gap(usage: dict) -> Optional[str]:
+    """Why the production payment identity cannot complete a purchase, or None when it can.
+
+    `resolveAndIssuePurchaseCard` 402s a non-admin with no `Subscription.stripeCustomerId`, and an
+    agent with no credit headroom stops at OUT_OF_CREDITS before it ever reaches checkout. Both are
+    provisioning gaps, not product failures, so name them before the run spends live money.
+    """
+    tier = usage.get("tier")
+    if tier is None or tier == "":
+        return "it has no Subscription row, so no Stripe billing customer — every mint would 402"
+    remaining = usage.get("remaining")
+    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
+        return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    return None
+
+
+async def _preflight_production_payment_identity(base_url: str) -> None:
+    """Fail fast when the production payment identity was never provisioned.
+
+    Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
+    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    """
+    user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
+    if response.status_code != 200:
+        print(
+            f"    ⚠ Could not verify production payment identity {user_id} "
+            f"({response.status_code}): {response.text[:200]}"
+        )
+        return
+    gap = _production_payment_identity_gap(response.json())
+    if gap is None:
+        return
+    raise RuntimeError(
+        f"Production payment identity {user_id} is not provisioned: {gap}. {PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+    )
 
 
 def _benchmark_agent_source_override() -> str:
@@ -1846,6 +1938,27 @@ def _payment_abandonment_has_started(lifecycle: dict) -> bool:
     }
 
 
+# The AgentCard Organization MCP cap is org-wide (shared across every workspace
+# using these credentials) and its retryAfter points at the top of the next
+# window, so a refusal must wait that window out rather than burn its remaining
+# attempts inside the same closed minute.
+ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
+
+
+def _rate_limit_retry_delay(message: str) -> Optional[float]:
+    """Seconds to wait for an upstream rate-limit refusal, or None if not rate-limited."""
+    if "rate limit" not in message.lower() and "429" not in message:
+        return None
+    match = re.search(r'"retryAfterSeconds"\s*:\s*(\d+)', message)
+    if match:
+        return min(float(match.group(1)), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    match = re.search(r'"retryAfter"\s*:\s*(\d+)', message)
+    if match:
+        remaining = float(match.group(1)) / 1000.0 - time.time()
+        return min(max(remaining, 1.0), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
+
+
 async def _start_payment_abandonment_with_recovery(
     base_url: str,
     agent_id: str,
@@ -1869,7 +1982,16 @@ async def _start_payment_abandonment_with_recovery(
         try:
             return await abandon_payment(base_url, agent_id)
         except Exception as error:
-            if not isinstance(error, httpx.TransportError) and "Failed to abandon test payment: 5" not in str(error):
+            # A 429 from the org-wide MCP cap is retryable too: it means the
+            # request never ran, not that the lifecycle is broken. Without this
+            # the gate reported "cleanup did not complete" for a lifecycle that
+            # was already terminal-clean.
+            rate_limit_delay = _rate_limit_retry_delay(str(error))
+            if (
+                not isinstance(error, httpx.TransportError)
+                and "Failed to abandon test payment: 5" not in str(error)
+                and rate_limit_delay is None
+            ):
                 raise
             last_error = error
             try:
@@ -1881,11 +2003,13 @@ async def _start_payment_abandonment_with_recovery(
                 last_error = read_error
             if attempt >= max_attempts:
                 break
+            wait_seconds = rate_limit_delay if rate_limit_delay is not None else retry_delay_seconds
+            reason = "was rate limited" if rate_limit_delay is not None else "was indeterminate"
             print(
-                "    ⚠ Payment abandonment response was indeterminate; "
-                f"retrying ({attempt}/{max_attempts}): {error}"
+                f"    ⚠ Payment abandonment response {reason}; "
+                f"retrying ({attempt}/{max_attempts}) in {wait_seconds:.0f}s: {error}"
             )
-            await asyncio.sleep(retry_delay_seconds)
+            await asyncio.sleep(wait_seconds)
     raise RuntimeError(
         f"Payment abandonment remained unavailable after {max_attempts} attempts: {last_error}"
     ) from last_error
@@ -1897,6 +2021,9 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
             headers=headers,
+            # The AgentCard integration must be reset/completed for the user the task actually runs
+            # as. Hardcoding the default benchmark user left the run user's integration untouched,
+            # so the setup fixture silently configured the wrong account.
             json={"userId": _current_benchmark_user_id(), "action": action},
         )
         if resp.status_code != 200:
@@ -2608,9 +2735,7 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict
             if isinstance(pointer, dict):
                 return pointer
             raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
-        raise RuntimeError(
-            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
-        )
+        raise RuntimeError(f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}")
 
 
 # ============================================================
@@ -4796,10 +4921,7 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Claude keychain refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Claude keychain refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Claude keychain refresh error: {exc}")
@@ -4850,10 +4972,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Codex refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Codex refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Codex refresh error: {exc}")
@@ -4993,10 +5112,11 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
     gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
     Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
-    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
-    infra failure — it dropped every live task while the pre-flight for the same
-    run already tolerated the exact same absence. A genuinely Codex-dependent task
-    still fails at runtime when its Codex call fails, not falsely here.
+    payment) do not spawn Codex, so gating them on gpt_code is a FALSE infra
+    failure. When Anthropic is excluded, their ordinary root/browser turns still
+    use the GPT-family provider waterfall (including OpenRouter); that is distinct
+    from requiring a gpt_code integration for a Codex sandbox. A genuinely
+    Codex-dependent task still fails at its own strict credential gate.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
@@ -5009,7 +5129,10 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
     if _anthropic_family_excluded():
-        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        )
     else:
         synced_compute_tokens = _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
@@ -5035,7 +5158,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     if _anthropic_family_excluded():
-        if not _sync_compute_tokens(required_token_types=("gpt",)):
+        if not _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        ):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
         if not database_url:
@@ -5302,6 +5428,11 @@ def _restore_live_fixture_scenarios(manifests: list[dict]) -> None:
             _restore_amazon_passkey_scenario(manifest)
 
 
+async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
+    """Restore blocking browser fixtures without freezing concurrent task polling."""
+    await asyncio.to_thread(_restore_live_fixture_scenarios, manifests)
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
 }
@@ -5338,9 +5469,12 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         applier = LIVE_FIXTURE_APPLIERS.get(name)
         if applier is None:
             raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
-        manifests.append(applier(ctx))
+        # Credential overlays shell out to seed processes and can take minutes.
+        # Keep that blocking work off the event loop so an unrelated benchmark
+        # lane can still poll its agent and observe completion before its cap.
+        manifests.append(await asyncio.to_thread(applier, ctx))
     if task.name == AMAZON_PASSKEY_TASK_NAME and not _is_simulate_mode():
-        manifests.append(_apply_amazon_passkey_scenario(ctx))
+        manifests.append(await asyncio.to_thread(_apply_amazon_passkey_scenario, ctx))
     return manifests
 
 
@@ -6240,6 +6374,50 @@ def _webdecoy_exact_score_from_network_log(index_path: Path) -> Optional[float]:
     return scored_entries[-1][1]
 
 
+def _webdecoy_engine_version_from_network_log(index_path: Path) -> Optional[str]:
+    """Read the FCaptcha engine version the demo page advertised ("Running vX.Y.Z").
+
+    The gated score is produced by a third-party detector we do not control, so a
+    vendor release can move it with no change on our side. Capturing the version
+    next to the score is what makes those two cases distinguishable after the fact.
+    """
+    if not index_path.exists():
+        return None
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    entries = index.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if "webdecoy.com/product/fcaptcha-demo" not in str(entry.get("url") or ""):
+            continue
+        body_file = entry.get("body_file")
+        if not isinstance(body_file, str) or not body_file:
+            continue
+        try:
+            body = (index_path.parent / body_file).read_text(errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"Running v([0-9]+(?:\.[0-9]+)*)", body)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _webdecoy_engine_version_from_recordings(data: dict) -> Optional[str]:
+    for index_path in _webdecoy_network_recording_paths(data):
+        version = _webdecoy_engine_version_from_network_log(index_path)
+        if version is not None:
+            return version
+    return None
+
+
 def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     scores: List[float] = []
     for index_path in _webdecoy_network_recording_paths(data):
@@ -6294,10 +6472,24 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # code change — the current external anti-bot floor (Steel proxy IP reputation)
     # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
     WEBDECOY_RISK_RATCHET = 0.163
+    # Engine version is diagnostic only — it NEVER relaxes the comparison above.
+    # It exists so a vendor recalibration is visible in the failure line instead of
+    # being misread as an anti-detection regression on our side. Reference points:
+    # FCaptcha v1.14.0/v1.15.0 scored a bit-identical 0.15595 across 14 runs and 13
+    # distinct egress IPs (2026-07-18..07-26); the v1.18.0 release moved the same
+    # unchanged client to 0.18296 while every reported categoryScore sat at 0.
     if final_score > WEBDECOY_RISK_RATCHET:
+        engine_version = _webdecoy_engine_version_from_recordings(data)
+        version_note = (
+            f" [FCaptcha engine v{engine_version}; a version change here means the third-party"
+            f" detector was recalibrated — compare against the version on the last passing run"
+            f" before treating this as an anti-detection regression]"
+            if engine_version
+            else ""
+        )
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
-            f"(lower = more human; this gate only ratchets down, never up)"
+            f"(lower = more human; this gate only ratchets down, never up){version_note}"
         )
     return True, None
 
@@ -7518,9 +7710,19 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
-    task_user_id = _benchmark_user_id_for_task(task.name, base_url)
-    if task_user_id is not None:
-        os.environ["BENCHMARK_RUN_USER_ID"] = task_user_id
+    # Includes the non-admin payment identities: the admin funding path mints a company-funded card
+    # with no personal Stripe hold, which the lifecycle tasks explicitly assert.
+    # `_benchmark_user_id_for_task` is base-URL aware (it declines to redirect a sandbox payment
+    # task pointed at a remote stack, where the synthetic fixture user does not exist) and honors
+    # the harness env override; `benchmark_run_user_id_for_task` supplies the production lifecycle
+    # identity, which only exists there.
+    run_user_id_override = _benchmark_user_id_for_task(task.name, base_url)
+    if run_user_id_override is None and task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+        run_user_id_override = benchmark_run_user_id_for_task(task.name)
+    if run_user_id_override:
+        os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
+    if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
+        await _preflight_production_payment_identity(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
@@ -7969,9 +8171,7 @@ async def run_single_task(
 
         if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME and passed:
             try:
-                payment_confirmation_error = await validate_agent_payment_confirmation_contract(
-                    data, agent_id
-                )
+                payment_confirmation_error = await validate_agent_payment_confirmation_contract(data, agent_id)
                 if payment_confirmation_error:
                     passed = False
                     failure_reason = payment_confirmation_error
@@ -8294,7 +8494,7 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
-        _restore_live_fixture_scenarios(live_fixture_manifests)
+        await _restore_live_fixture_scenarios_async(live_fixture_manifests)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -9125,9 +9325,7 @@ def _parallel_task_phases(
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
     if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
         auth_reading_siblings = [
-            task
-            for task in tasks
-            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+            task for task in tasks if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
         ]
         if not auth_reading_siblings:
             exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)

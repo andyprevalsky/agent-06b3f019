@@ -14,7 +14,10 @@ const SANDBOX_CREATE_BASE_BACKOFF_MS = 500;
  */
 export class SandboxOrphanLookupError extends Error {
   readonly isSandboxOrphanLookupError = true;
-  constructor(createRequestId: string, readonly cause: unknown) {
+  constructor(
+    createRequestId: string,
+    readonly cause: unknown
+  ) {
     super(
       `Could not determine whether create ${createRequestId} already produced a sandbox; ` +
         'refusing to create a possible duplicate'

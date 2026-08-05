@@ -10,6 +10,18 @@ import type {
 const TAX_BPS = 825;
 const SHIPPING_CENTS = 499;
 const STRIPE_VISA_TEST_PAYMENT_METHOD = 'pm_card_visa';
+const LIVE_LIFECYCLE_ITEM_ID = 'agentcard-lifecycle-probe';
+
+const LIVE_LIFECYCLE_ITEM: TestPaymentItem = {
+  id: LIVE_LIFECYCLE_ITEM_ID,
+  name: 'Agent Card Lifecycle Probe',
+  description: 'Single-use checkout verification item.',
+  imageUrl: 'https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe',
+  priceCents: 100,
+  productUrl: '/p/agentcard-lifecycle-probe',
+  rating: '5.0 stars',
+  reviewCount: '128 reviews',
+};
 
 export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
   {
@@ -64,7 +76,9 @@ export const TEST_PAYMENT_ITEMS: TestPaymentItem[] = [
   },
 ];
 
-const ITEMS_BY_ID = new Map(TEST_PAYMENT_ITEMS.map((item) => [item.id, item]));
+const CHECKOUT_ITEMS_BY_ID = new Map(
+  [...TEST_PAYMENT_ITEMS, LIVE_LIFECYCLE_ITEM].map((item) => [item.id, item])
+);
 
 export function assertCardPresent(
   card: TestPaymentCardInput | null | undefined
@@ -104,7 +118,12 @@ export function paymentMethodIdForBenchmarkCard(cardNumber: string): string | nu
 
 export function normalizeLineItems(items: TestPaymentLineItem[]): TestPaymentReceiptLine[] {
   if (!Array.isArray(items)) throw new TestPaymentError('items are required');
-  if (items.length !== 3) throw new TestPaymentError('exactly 3 distinct test items are required');
+  const isLiveLifecycleCart = items.length === 1 && items[0]?.id === LIVE_LIFECYCLE_ITEM_ID;
+  if (!isLiveLifecycleCart && items.length !== 3) {
+    throw new TestPaymentError(
+      'exactly 3 distinct test items or the single lifecycle probe are required'
+    );
+  }
 
   const seen = new Set<string>();
   return items.map((line) => {
@@ -112,7 +131,7 @@ export function normalizeLineItems(items: TestPaymentLineItem[]): TestPaymentRec
     if (seen.has(line.id)) throw new TestPaymentError('duplicate items are not allowed');
     seen.add(line.id);
 
-    const item = ITEMS_BY_ID.get(line.id);
+    const item = CHECKOUT_ITEMS_BY_ID.get(line.id);
     if (!item) throw new TestPaymentError(`unknown item: ${line.id}`);
     const quantity = Number(line.quantity);
     if (!Number.isInteger(quantity) || quantity !== 1) {
@@ -131,8 +150,9 @@ export function normalizeLineItems(items: TestPaymentLineItem[]): TestPaymentRec
 
 export function calculateTotals(lineItems: TestPaymentReceiptLine[]): TestPaymentTotals {
   const subtotalCents = lineItems.reduce((sum, item) => sum + item.lineTotalCents, 0);
-  const taxCents = Math.round((subtotalCents * TAX_BPS) / 10_000);
-  const shippingCents = SHIPPING_CENTS;
+  const isLiveLifecycleCart = lineItems.length === 1 && lineItems[0]?.id === LIVE_LIFECYCLE_ITEM_ID;
+  const taxCents = isLiveLifecycleCart ? 0 : Math.round((subtotalCents * TAX_BPS) / 10_000);
+  const shippingCents = isLiveLifecycleCart ? 0 : SHIPPING_CENTS;
   return {
     subtotalCents,
     taxCents,

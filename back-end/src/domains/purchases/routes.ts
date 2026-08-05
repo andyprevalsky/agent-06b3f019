@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { hybridAuth, type HybridAuthRequest } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { recordStructuredGmv } from './structuredGmv';
 import * as service from './service';
 import type { AgentCardWebhookEvent, MintPurchaseInput } from './types';
 
@@ -82,6 +83,32 @@ router.post(
       });
       res.status(500).json({ error: 'Failed to mint purchase card' });
     }
+  })
+);
+
+/**
+ * Record paid-order GMV from a structured agent/browser completion.
+ * Requires amount + confirmation id inside `structured`. Registered before
+ * `/:cardId/close` so the path is not parsed as a card id.
+ */
+router.post(
+  '/record-structured-gmv',
+  asyncHandler(hybridAuth),
+  asyncHandler<HybridAuthRequest>(async (req: HybridAuthRequest, res: Response) => {
+    const userId = getAuthenticatedUserId(req);
+    if (userId === undefined) {
+      res.status(401).json({ error: 'Authenticated user required' });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const result = await recordStructuredGmv({
+      userId,
+      agentId: asString(body.agentId),
+      structured: body.structured ?? body,
+      source: asString(body.source) ?? 'api.record-structured-gmv',
+    });
+    res.json(result);
   })
 );
 

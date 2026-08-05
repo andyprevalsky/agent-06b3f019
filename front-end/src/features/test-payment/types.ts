@@ -31,7 +31,8 @@ export interface TestPaymentTotals {
 export interface TestPaymentConfirmation {
   orderId: string;
   status: string;
-  paymentIntentId: string;
+  /** Null for a company-funded admin purchase, which never authorizes a personal Stripe hold. */
+  paymentIntentId: string | null;
   receipt: {
     lineItems: TestPaymentReceiptLine[];
     totals: TestPaymentTotals;

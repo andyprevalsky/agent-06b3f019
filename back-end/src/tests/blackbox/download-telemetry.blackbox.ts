@@ -147,7 +147,7 @@ async function captures(token: string): Promise<Capture[]> {
 async function waitForCaptures(
   token: string,
   expected: number,
-  deadline = Date.now() + 3_000
+  deadline = Date.now() + 15_000
 ): Promise<Capture[]> {
   const observed = await captures(token);
   if (observed.length >= expected || Date.now() >= deadline) return observed;

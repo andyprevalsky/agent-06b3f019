@@ -581,6 +581,7 @@ def _existing_codex_auth() -> Path:
 
 
 def test_anthropic_excluded_preflight_requires_gpt_only_sync():
+    captured: dict[str, object] = {}
     calls: list[str] = []
 
     def fake_sync(
@@ -589,9 +590,9 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
         tolerate_claude_code_unavailable: bool = False,
         required_token_types: tuple[str, ...] | None = None,
     ) -> bool:
-        assert required_token_types == ("gpt",)
-        assert tolerate_gpt_code_unavailable is False
-        assert tolerate_claude_code_unavailable is False
+        captured["required"] = required_token_types
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
         calls.append("source-sync")
         return True
 
@@ -614,7 +615,40 @@ def test_anthropic_excluded_preflight_requires_gpt_only_sync():
     ):
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
+    # gpt-only sync, and a quota-blocked gpt_code (Codex) integration must not fail the run: the
+    # excluded-Anthropic path still overlays this machine's Codex auth as a separate, required step.
+    assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
     assert calls == ["source-sync", "codex-overlay"]
+
+
+def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():
+    captured: dict[str, object] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["required"] = required_token_types
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
+        return True
+
+    ctx = rb.LiveFixtureContext(
+        base_url="http://localhost:3001",
+        user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
+        auth_realm="local",
+    )
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_simulate_mode", return_value=False),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_browser_credentials", return_value=True),
+    ):
+        rb._apply_live_fixture(ctx)
+
+    assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
 
 
 def test_anthropic_excluded_preflight_tolerates_absent_codex_auth():

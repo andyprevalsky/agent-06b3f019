@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -80,8 +81,6 @@ async def test_scrape_url_returns_markdown_and_links():
 
 async def test_firecrawl_boundary_request_shape():
     """The Firecrawl request uses Bearer auth and asks only for markdown+links."""
-    import json as _json
-
     _setup_firecrawl()
     with patch("temporalio.activity.heartbeat"):
         from tools.web_fetch import web_fetch_activity
@@ -339,6 +338,259 @@ async def test_web_fetch_activity_marks_deterministic_provider_failures_non_retr
     assert error is not None
     assert error.non_retryable is True
     assert error.type == "WebFetchProvidersFailed"
+
+
+# =========================================================================
+# URL validation at the tool boundary
+#
+# Regression: prod agent e14d5abb-1ff9-40f2-a910-2d3a1e9bb1cc (2026-08-03).
+# The explore agent read grep result *paths* out of its own tool output and
+# passed them to web_fetch as a "URL". `network/+19729777432.contact` is
+# byte-for-byte what back-end/src/domains/data/format.ts:90 emits, and
+# `https://internal/...` is a fabricated host. Nothing validated them, so each
+# one burned a Firecrawl call plus a Parallel Extract fallback.
+# =========================================================================
+
+# Non-fetchable strings that must never reach a paid provider.
+NON_FETCHABLE_URLS = [
+    "network/+19729777432.contact",  # grep match path (format.ts:90)
+    "messages/+19729777432.thread",  # grep match path (format.ts:60)
+    "https://internal/messages/+19729777432.thread",  # fabricated host, no dot
+    "",  # missing url arg
+    "   ",  # whitespace only
+    "ftp://x.com/a",  # non-http scheme
+    "file:///etc/passwd",
+    "javascript:alert(1)",
+    "example.com/a",  # scheme-less
+    "https:///no-host",  # empty host
+]
+
+
+async def test_scrape_url_rejects_non_fetchable_urls_before_any_provider_call():
+    """Non-http / hostless URLs raise non-retryably with zero provider calls."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.web_fetch import service as web_fetch_service
+
+    firecrawl = AsyncMock(return_value={"markdown": "should not happen", "links": [], "metadata": {}})
+    parallel = AsyncMock(return_value={"markdown": "should not happen", "links": [], "metadata": {}})
+
+    with (
+        patch.object(web_fetch_service, "fetch_firecrawl_scrape", firecrawl),
+        patch.object(web_fetch_service, "fetch_parallel_extract", parallel),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        for candidate in NON_FETCHABLE_URLS:
+            try:
+                await web_fetch_service.scrape_url(candidate)
+            except ApplicationError as e:
+                assert e.non_retryable is True, f"{candidate!r} must be non-retryable"
+                assert e.type == "WebFetchProvidersFailed", f"{candidate!r} -> {e.type}"
+            else:
+                raise AssertionError(f"{candidate!r} was not rejected")
+
+    assert firecrawl.call_count == 0, f"Firecrawl called {firecrawl.call_count}x for non-fetchable URLs"
+    assert parallel.call_count == 0, f"Parallel Extract called {parallel.call_count}x for non-fetchable URLs"
+
+
+async def test_scrape_url_still_reaches_provider_for_valid_https_url():
+    """Validation must not over-reject: a real https URL still hits Firecrawl exactly once."""
+    from domains.web_fetch import service as web_fetch_service
+
+    firecrawl = AsyncMock(return_value={"markdown": "real page", "links": [], "metadata": {}})
+    parallel = AsyncMock(return_value={"markdown": "fallback", "links": [], "metadata": {}})
+
+    with (
+        patch.object(web_fetch_service, "fetch_firecrawl_scrape", firecrawl),
+        patch.object(web_fetch_service, "fetch_parallel_extract", parallel),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        out = await web_fetch_service.scrape_url("https://example.com/a")
+
+    assert out["markdown"] == "real page"
+    assert firecrawl.call_count == 1
+    assert parallel.call_count == 0
+    assert firecrawl.call_args.args[0] == "https://example.com/a"
+
+
+async def test_scrape_url_accepts_localhost_and_http():
+    """localhost (no dot) and plain http are legitimately fetchable."""
+    from domains.web_fetch import service as web_fetch_service
+
+    firecrawl = AsyncMock(return_value={"markdown": "local page", "links": [], "metadata": {}})
+
+    with (
+        patch.object(web_fetch_service, "fetch_firecrawl_scrape", firecrawl),
+        patch("temporalio.activity.heartbeat"),
+    ):
+        await web_fetch_service.scrape_url("http://localhost:3001/health")
+        await web_fetch_service.scrape_url("http://example.co.uk/a?b=1")
+
+    assert firecrawl.call_count == 2
+
+
+async def test_handler_rejects_non_fetchable_url_before_scheduling_any_activity():
+    """The tool boundary fails loudly without scheduling the scrape/Haiku/download activities."""
+    from temporalio.exceptions import ApplicationError
+
+    from domains.web_fetch.handler import WebFetchManager
+
+    scheduled: list[str] = []
+
+    async def fake_execute_activity(fn, args=None, **kwargs):
+        scheduled.append(getattr(fn, "__name__", "?"))
+        return None
+
+    manager = WebFetchManager()
+    try:
+        await manager.execute_tool(
+            execute_activity=fake_execute_activity,
+            tool_call={"url": "network/+19729777432.contact", "objective": "read the contact"},
+            tool_call_id="tc-bad-url",
+            agent_id="a-bad-url",
+            user_id="u-1",
+        )
+    except ApplicationError as e:
+        assert e.non_retryable is True
+        assert e.type == "WebFetchProvidersFailed"
+    else:
+        raise AssertionError("handler accepted a non-fetchable URL")
+
+    assert "web_fetch_activity" not in scheduled, scheduled
+    assert "summarize_and_filter_links" not in scheduled, scheduled
+    assert "web_fetch_download_activity" not in scheduled, scheduled
+
+
+# =========================================================================
+# In-activity retry shim honours non_retryable
+#
+# Regression: same prod agent. web_fetch_activity correctly raised
+# ApplicationError(non_retryable=True), but every sub-agent tool call routes
+# through loop.activity_helper.call_temporal_activity_from_activity, whose
+# blanket `except Exception` retried it anyway — doubling the cost of every
+# deterministic sub-agent tool failure.
+# =========================================================================
+
+
+async def test_non_retryable_application_error_runs_exactly_once():
+    """ApplicationError(non_retryable=True) is re-raised immediately, not retried."""
+    from temporalio.common import RetryPolicy
+    from temporalio.exceptions import ApplicationError
+
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    attempts = 0
+
+    async def deterministically_failing_activity():
+        nonlocal attempts
+        attempts += 1
+        raise ApplicationError(
+            "web_fetch failed with Firecrawl and Parallel Extract.",
+            type="WebFetchProvidersFailed",
+            non_retryable=True,
+        )
+
+    try:
+        await call_temporal_activity_from_activity(
+            deterministically_failing_activity,
+            args=[],
+            start_to_close_timeout=timedelta(seconds=5),
+            retry_policy=RetryPolicy(maximum_attempts=2, initial_interval=timedelta(seconds=0)),
+        )
+    except ApplicationError as e:
+        assert e.type == "WebFetchProvidersFailed"
+    else:
+        raise AssertionError("expected the non-retryable error to propagate")
+
+    assert attempts == 1, f"non_retryable=True was retried: ran {attempts}x"
+
+
+async def test_retry_policy_non_retryable_error_types_run_exactly_once():
+    """A type listed in retry_policy.non_retryable_error_types is not retried."""
+    from temporalio.common import RetryPolicy
+    from temporalio.exceptions import ApplicationError
+
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    attempts = 0
+
+    async def failing_activity():
+        nonlocal attempts
+        attempts += 1
+        raise ApplicationError("deterministic", type="WebFetchProvidersFailed")
+
+    try:
+        await call_temporal_activity_from_activity(
+            failing_activity,
+            args=[],
+            start_to_close_timeout=timedelta(seconds=5),
+            retry_policy=RetryPolicy(
+                maximum_attempts=3,
+                initial_interval=timedelta(seconds=0),
+                non_retryable_error_types=["WebFetchProvidersFailed"],
+            ),
+        )
+    except ApplicationError:
+        pass
+    else:
+        raise AssertionError("expected the non-retryable error to propagate")
+
+    assert attempts == 1, f"non_retryable_error_types was ignored: ran {attempts}x"
+
+
+async def test_retryable_error_still_retries_to_maximum_attempts():
+    """Genuinely retryable failures keep the existing numeric retry behavior."""
+    from temporalio.common import RetryPolicy
+
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    attempts = 0
+
+    async def flaky_activity():
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("transient upstream 503")
+
+    try:
+        await call_temporal_activity_from_activity(
+            flaky_activity,
+            args=[],
+            start_to_close_timeout=timedelta(seconds=5),
+            retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=0)),
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected the retryable error to propagate after exhaustion")
+
+    assert attempts == 3, f"retryable error should run maximum_attempts times, ran {attempts}x"
+
+
+async def test_retryable_application_error_still_retries():
+    """An ApplicationError with non_retryable=False keeps retrying."""
+    from temporalio.common import RetryPolicy
+    from temporalio.exceptions import ApplicationError
+
+    from loop.activity_helper import call_temporal_activity_from_activity
+
+    attempts = 0
+
+    async def flaky_activity():
+        nonlocal attempts
+        attempts += 1
+        if attempts < 2:
+            raise ApplicationError("rate limited", type="ProviderRateLimited")
+        return "recovered"
+
+    result = await call_temporal_activity_from_activity(
+        flaky_activity,
+        args=[],
+        start_to_close_timeout=timedelta(seconds=5),
+        retry_policy=RetryPolicy(maximum_attempts=3, initial_interval=timedelta(seconds=0)),
+    )
+
+    assert result == "recovered"
+    assert attempts == 2
 
 
 # =========================================================================
@@ -640,9 +892,7 @@ async def test_handler_execute_tool_happy_path():
     assert "Downloaded 1 file" in out["result"]["content"]
     # Service cost line attributed to Firecrawl
     assert out["usage"]["service"][0]["provider"] == "Firecrawl scrape"
-    assert out["usage"]["llm"][0]["cache_sequence_id"] == (
-        "agent:a-1:tool:tc-wf:call:summarize_web_fetch"
-    )
+    assert out["usage"]["llm"][0]["cache_sequence_id"] == ("agent:a-1:tool:tc-wf:call:summarize_web_fetch")
 
     tool_titles = [
         call["args"][3]["title"]
@@ -920,6 +1170,33 @@ async def run_all_tests() -> bool:
         "activity_deterministic_provider_failures_non_retryable",
         test_web_fetch_activity_marks_deterministic_provider_failures_non_retryable,
     )
+
+    # URL validation at the tool boundary (prod agent e14d5abb regression)
+    await r.record_async(
+        "scrape_url_rejects_non_fetchable_before_providers",
+        test_scrape_url_rejects_non_fetchable_urls_before_any_provider_call,
+    )
+    await r.record_async(
+        "scrape_url_valid_https_still_reaches_provider",
+        test_scrape_url_still_reaches_provider_for_valid_https_url,
+    )
+    await r.record_async("scrape_url_accepts_localhost_and_http", test_scrape_url_accepts_localhost_and_http)
+    await r.record_async(
+        "handler_rejects_non_fetchable_url_before_activities",
+        test_handler_rejects_non_fetchable_url_before_scheduling_any_activity,
+    )
+
+    # In-activity retry shim honours non_retryable (prod agent e14d5abb regression)
+    await r.record_async(
+        "non_retryable_application_error_runs_once", test_non_retryable_application_error_runs_exactly_once
+    )
+    await r.record_async(
+        "non_retryable_error_types_run_once", test_retry_policy_non_retryable_error_types_run_exactly_once
+    )
+    await r.record_async(
+        "retryable_error_retries_to_max_attempts", test_retryable_error_still_retries_to_maximum_attempts
+    )
+    await r.record_async("retryable_application_error_still_retries", test_retryable_application_error_still_retries)
 
     # Pure helpers
     r.record("get_filename_simple", test_get_filename_from_url_simple)

@@ -201,4 +201,15 @@ self_conflict="$(
 )"
 expect_eq "$self_conflict" "" "the workspace's own container is never treated as a conflict"
 
+# cloud-build.sh must write `# rose-cloud-env` into .cloud-env itself (not only
+# into shell rc files). Without that marker, normalize_conductor_workspace_env
+# rewrites the synthetic cloud name to the checkout basename and breaks ngrok
+# domain reuse on Cursor Cloud agents.
+cloud_build_script="$ROOT_DIR/scripts/cloud-build.sh"
+if ! grep -q '^# rose-cloud-env$' <(sed -n '/cat > \.cloud-env <<EOF/,/^EOF$/p' "$cloud_build_script"); then
+  echo "FAIL: cloud-build.sh .cloud-env template must include # rose-cloud-env marker" >&2
+  exit 1
+fi
+echo "PASS: cloud-build.sh writes # rose-cloud-env into .cloud-env"
+
 echo "All workspace env tests passed."

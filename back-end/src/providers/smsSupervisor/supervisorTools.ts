@@ -19,8 +19,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { prisma } from '../database';
-import { startAgentWorkflow, getTemporalClient } from '../temporal';
-import { getAgentUrl } from '../smsTemplates';
+import { getTemporalClient } from '../temporal';
 import { createMessage } from '../messages';
 import { createLogger } from '../logger';
 import {
@@ -30,7 +29,12 @@ import {
   unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
-import { executeWebSearchTool } from './supervisorTools.webSearch';
+import {
+  commitStartNewAgent,
+  executeWebSearchTool,
+  type StartNewAgentArgs,
+  type WebSearchArgs,
+} from './supervisorTools.startAgent';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -80,11 +84,6 @@ interface KillAgentArgs {
 interface IncreaseBudgetArgs {
   agent_id_or_prefix: string;
   amount_dollars: number;
-}
-
-interface StartNewAgentArgs {
-  goal: string;
-  budget_dollars?: number;
 }
 
 // ============================================
@@ -163,7 +162,7 @@ export async function dispatchToolCall(
         result = validateStartNewAgent(args as unknown as StartNewAgentArgs, pendingWrites);
         break;
       case 'web_search':
-        result = await executeWebSearchTool(args as unknown as { query: string });
+        result = await executeWebSearchTool(args as unknown as WebSearchArgs);
         break;
       case 'grep':
         result = await executeGrepTool(args as unknown as GrepArgs, userId);
@@ -631,130 +630,6 @@ async function commitIncreaseBudget(
   };
 }
 
-async function commitStartNewAgent(
-  op: Extract<PendingOp, { kind: 'start_new_agent' }>,
-  userId: string
-): Promise<ToolResult> {
-  const { args, provisionalId } = op;
-  const { goal, budget_dollars } = args;
-  const priceLimitCents = budget_dollars ? Math.round(budget_dollars * 100) : 100;
-
-  log.info('Starting new agent', {
-    phase: 'start',
-    userId,
-    provisionalId,
-    goal: goal.substring(0, 100),
-    priceLimitCents,
-  });
-
-  let agent;
-  try {
-    agent = await prisma.$transaction(async (tx) => {
-      const newAgent = await tx.agent.create({
-        data: {
-          // Client-supplied UUID makes commit idempotent: a retried commit
-          // would collide on the PK and we catch P2002 below as already-done.
-          id: provisionalId,
-          userId,
-          goal,
-          source: 'SMS',
-          model: 'rose-labs/rose-1-lite',
-          reasoningMaxTokens: 2048,
-          status: 'STARTING_UP',
-          priceLimitCents,
-        },
-      });
-
-      await tx.verifier.create({
-        data: {
-          agentId: newAgent.id,
-          type: 'FLOAT_LLM_JUDGE',
-        },
-      });
-
-      await tx.message.create({
-        data: {
-          agentId: newAgent.id,
-          text: goal,
-          role: 'USER',
-          timestamp: new Date(),
-        },
-      });
-
-      return newAgent;
-    });
-  } catch (error) {
-    // P2002 = unique constraint violation. Means this provisional ID was
-    // already created — a previous commit fired (the seq gate normally
-    // prevents this, but a backend restart mid-flush could rerun us). Treat
-    // as already-committed and report the existing agent.
-    if (
-      error &&
-      typeof error === 'object' &&
-      'code' in error &&
-      (error as { code: string }).code === 'P2002'
-    ) {
-      log.info('start_new_agent commit already done (PK collision)', { provisionalId });
-      return {
-        tool: 'start_new_agent',
-        success: true,
-        result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
-      };
-    }
-    throw error;
-  }
-
-  // Start Temporal workflow
-  try {
-    const workflowId = await startAgentWorkflow({
-      agentId: agent.id,
-      userId,
-      goal,
-      model: 'rose-labs/rose-1-lite',
-      reasoningMaxTokens: 2048,
-      verifier: {
-        type: 'FLOAT_LLM_JUDGE',
-      },
-      priceLimitCents,
-    });
-
-    await prisma.agent.update({
-      where: { id: agent.id },
-      data: { temporalWorkflowId: workflowId },
-    });
-
-    log.info('Agent created and workflow started', {
-      phase: 'start',
-      agentId: agent.id,
-      prefix: agent.id.substring(0, 6),
-      workflowId,
-    });
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    log.error('Failed to start workflow', {
-      phase: 'start',
-      agentId: agent.id,
-      error: errorMsg,
-    });
-
-    await prisma.agent.update({
-      where: { id: agent.id },
-      data: { status: 'FAILED', statusMessage: `Failed to start workflow: ${errorMsg}` },
-    });
-
-    return {
-      tool: 'start_new_agent',
-      success: false,
-      result: '',
-      error: `Failed to start agent workflow: ${errorMsg}`,
-    };
-  }
-
-  return {
-    tool: 'start_new_agent',
-    success: true,
-    result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
-  };
-}
+// commitStartNewAgent + executeWebSearchTool live in supervisorTools.startAgent.ts
 
 // deleteAgentRecursive moved to supervisorTools.helpers.ts

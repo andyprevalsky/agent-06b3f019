@@ -5,6 +5,7 @@
  */
 
 import { Prisma } from '@prisma/client';
+import { parseAccountLabel } from './path';
 import { prisma } from '../../providers/database';
 
 export interface MessageGrepRow {
@@ -178,12 +179,16 @@ export async function resolvePersonId(userId: string, identifier: string): Promi
 function messageFilters(
   personId: string | undefined,
   since: Date | undefined,
-  channel: string | undefined
+  channel: string | undefined,
+  messageId?: string
 ): Prisma.Sql {
   const parts: Prisma.Sql[] = [];
   if (personId !== undefined) parts.push(Prisma.sql`AND m."personId" = ${personId}`);
   if (since !== undefined) parts.push(Prisma.sql`AND m.timestamp >= ${since}`);
   if (channel !== undefined) parts.push(Prisma.sql`AND m.channel::text = ${channel}`);
+  // Set when `filters.path` addresses one message (`messages/<thread>/<id>`)
+  // rather than the whole thread.
+  if (messageId !== undefined) parts.push(Prisma.sql`AND m.id = ${messageId}`);
   return parts.length > 0 ? Prisma.join(parts, ' ') : Prisma.empty;
 }
 
@@ -196,6 +201,9 @@ function transactionFilters(params: {
   status?: 'pending' | 'posted' | 'all';
   includePendingInTotals?: boolean;
   forTotals?: boolean;
+  pathInstitution?: string;
+  pathAccount?: string;
+  pathTransactionId?: string;
 }): Prisma.Sql {
   const parts: Prisma.Sql[] = [Prisma.sql`t."removedAt" IS NULL`];
   if (params.since !== undefined) parts.push(Prisma.sql`t.date >= ${params.since}`);
@@ -209,14 +217,40 @@ function transactionFilters(params: {
   if (params.forTotals === true && params.includePendingInTotals !== true)
     parts.push(Prisma.sql`t.pending = false`);
   if (params.account !== undefined) {
-    const account = `%${params.account}%`;
-    parts.push(Prisma.sql`(
-      a.name ILIKE ${account}
-      OR COALESCE(a.mask, '') ILIKE ${account}
-      OR COALESCE(i."institutionName", '') ILIKE ${account}
-      OR t."plaidAccountExternalId" ILIKE ${account}
-    )`);
+    // Results print the account as `<name> ****<mask>`. Feeding that printed
+    // label back matched neither `a.name` nor `a.mask` (each holds only one half)
+    // and silently returned nothing, so decompose it and match both halves.
+    // Any other value keeps the original free-text behavior.
+    const { accountName, accountMask } = parseAccountLabel(params.account);
+    if (accountMask !== undefined) {
+      parts.push(
+        Prisma.sql`(a.name ILIKE ${`%${accountName}%`} AND COALESCE(a.mask, '') = ${accountMask})`
+      );
+    } else {
+      const account = `%${params.account}%`;
+      parts.push(Prisma.sql`(
+        a.name ILIKE ${account}
+        OR COALESCE(a.mask, '') ILIKE ${account}
+        OR COALESCE(i."institutionName", '') ILIKE ${account}
+        OR t."plaidAccountExternalId" ILIKE ${account}
+      )`);
+    }
   }
+  // `filters.path` components address an institution/account/transaction subtree.
+  if (params.pathInstitution !== undefined)
+    parts.push(
+      Prisma.sql`COALESCE(i."institutionName", 'unknown-institution') = ${params.pathInstitution}`
+    );
+  if (params.pathAccount !== undefined) {
+    const { accountName, accountMask } = parseAccountLabel(params.pathAccount);
+    parts.push(
+      accountMask === undefined
+        ? Prisma.sql`a.name = ${accountName}`
+        : Prisma.sql`(a.name = ${accountName} AND COALESCE(a.mask, '') = ${accountMask})`
+    );
+  }
+  if (params.pathTransactionId !== undefined)
+    parts.push(Prisma.sql`t."plaidTransactionId" = ${params.pathTransactionId}`);
   return Prisma.sql`AND ${Prisma.join(parts, ' AND ')}`;
 }
 
@@ -225,11 +259,28 @@ function documentFilters(params: {
   since?: Date;
   until?: Date;
   path?: string;
+  pathDocumentSource?: string;
+  pathRest?: string;
   tag?: string;
 }): Prisma.Sql {
   const parts: Prisma.Sql[] = [Prisma.sql`d."deletedAt" IS NULL`];
   if (params.documentSource !== undefined) {
     parts.push(Prisma.sql`d.source = ${params.documentSource}`);
+  }
+  // `filters.path` given as a path this tool printed: `documents/<source>/<rest>`.
+  // The rest is the vault+relative path (obsidian) or title+externalId, so match
+  // it against the same fields those segments were built from.
+  if (params.pathDocumentSource !== undefined) {
+    parts.push(Prisma.sql`d.source = ${params.pathDocumentSource}`);
+  }
+  if (params.pathRest !== undefined) {
+    const tail = params.pathRest.split('/');
+    const last = tail[tail.length - 1];
+    parts.push(Prisma.sql`(
+      d."externalId" = ${last}
+      OR d.title = ${last}
+      OR COALESCE(d.metadata::text, '') ILIKE ${`%${last}%`}
+    )`);
   }
   if (params.since !== undefined) {
     parts.push(Prisma.sql`COALESCE(d."sourceUpdatedAt", d."updatedAt") >= ${params.since}`);
@@ -258,11 +309,12 @@ export async function countMessageGrepRows(params: {
   pattern: string;
   caseInsensitive: boolean;
   personId?: string;
+  messageId?: string;
   since?: Date;
   channel?: string;
 }): Promise<number> {
   const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since, params.channel);
+  const filters = messageFilters(params.personId, params.since, params.channel, params.messageId);
   const rows = await prisma.$queryRaw<Array<{ count: bigint }>>`
     SELECT COUNT(*)::bigint AS count
     FROM "MessageRecord" m
@@ -281,11 +333,12 @@ export async function searchMessageGrepRows(params: {
   limit: number;
   offset: number;
   personId?: string;
+  messageId?: string;
   since?: Date;
   channel?: string;
 }): Promise<MessageGrepRow[]> {
   const predicate = regexPredicate(Prisma.sql`m.message`, params.pattern, params.caseInsensitive);
-  const filters = messageFilters(params.personId, params.since, params.channel);
+  const filters = messageFilters(params.personId, params.since, params.channel, params.messageId);
   return prisma.$queryRaw<MessageGrepRow[]>`
     SELECT
       m.id,
@@ -313,6 +366,7 @@ export async function countNetworkGrepRows(params: {
   userId: string;
   pattern: string;
   caseInsensitive: boolean;
+  personId?: string;
 }): Promise<number> {
   const expression = Prisma.sql`(
     COALESCE(p."firstName", '') || E'\n' ||
@@ -330,6 +384,7 @@ export async function countNetworkGrepRows(params: {
     FROM "Person" p
     WHERE p."userId" = ${params.userId}
       AND ${predicate}
+      ${params.personId !== undefined ? Prisma.sql`AND p.id = ${params.personId}` : Prisma.empty}
   `;
   return Number(rows[0]?.count ?? 0);
 }
@@ -340,6 +395,7 @@ export async function searchNetworkGrepRows(params: {
   caseInsensitive: boolean;
   limit: number;
   offset: number;
+  personId?: string;
 }): Promise<NetworkGrepRow[]> {
   const expression = Prisma.sql`(
     COALESCE(p."firstName", '') || E'\n' ||
@@ -368,15 +424,34 @@ export async function searchNetworkGrepRows(params: {
     FROM "Person" p
     WHERE p."userId" = ${params.userId}
       AND ${predicate}
+      ${params.personId !== undefined ? Prisma.sql`AND p.id = ${params.personId}` : Prisma.empty}
     ORDER BY p."messagesExchanged" DESC, p."lastName" ASC, p.id ASC
     LIMIT ${pageSize(params.limit, params.offset)}
   `;
+}
+
+/** `filters.path` narrowing for agent_network: depth-N/<agentId>/<role>/<messageId>. */
+function agentNetworkPathFilters(params: {
+  pathAgentId?: string;
+  pathRole?: string;
+  pathMessageId?: string;
+}): Prisma.Sql {
+  const parts: Prisma.Sql[] = [];
+  if (params.pathAgentId !== undefined)
+    parts.push(Prisma.sql`AND m."agentId" = ${params.pathAgentId}`);
+  if (params.pathRole !== undefined) parts.push(Prisma.sql`AND m.role::text = ${params.pathRole}`);
+  if (params.pathMessageId !== undefined)
+    parts.push(Prisma.sql`AND m.id = ${params.pathMessageId}`);
+  return parts.length > 0 ? Prisma.join(parts, ' ') : Prisma.empty;
 }
 
 export async function countAgentNetworkGrepRows(params: {
   agentIds: string[];
   pattern: string;
   caseInsensitive: boolean;
+  pathAgentId?: string;
+  pathRole?: string;
+  pathMessageId?: string;
 }): Promise<number> {
   if (params.agentIds.length === 0) return 0;
   const expression = Prisma.sql`(
@@ -388,6 +463,7 @@ export async function countAgentNetworkGrepRows(params: {
     FROM "Message" m
     WHERE m."agentId" IN (${Prisma.join(params.agentIds)})
       AND ${predicate}
+      ${agentNetworkPathFilters(params)}
   `;
   return Number(rows[0]?.count ?? 0);
 }
@@ -398,6 +474,9 @@ export async function searchAgentNetworkGrepRows(params: {
   caseInsensitive: boolean;
   limit: number;
   offset: number;
+  pathAgentId?: string;
+  pathRole?: string;
+  pathMessageId?: string;
 }): Promise<AgentMessageGrepRow[]> {
   if (params.agentIds.length === 0) return [];
   const expression = Prisma.sql`(
@@ -419,6 +498,7 @@ export async function searchAgentNetworkGrepRows(params: {
     INNER JOIN "Agent" a ON a.id = m."agentId"
     WHERE m."agentId" IN (${Prisma.join(params.agentIds)})
       AND ${predicate}
+      ${agentNetworkPathFilters(params)}
     ORDER BY m."createdAt" DESC, m.id DESC
     LIMIT ${pageSize(params.limit, params.offset)}
   `;
@@ -434,6 +514,9 @@ export async function countTransactionGrepRows(params: {
   minAmount?: number;
   maxAmount?: number;
   status?: 'pending' | 'posted' | 'all';
+  pathInstitution?: string;
+  pathAccount?: string;
+  pathTransactionId?: string;
 }): Promise<number> {
   const expression = Prisma.sql`concat_ws(E'\n',
     t.name,
@@ -470,6 +553,8 @@ export async function countDocumentGrepRows(params: {
   since?: Date;
   until?: Date;
   path?: string;
+  pathDocumentSource?: string;
+  pathRest?: string;
   tag?: string;
 }): Promise<number> {
   const expression = Prisma.sql`concat_ws(E'\n',
@@ -500,6 +585,8 @@ export async function searchDocumentGrepRows(params: {
   since?: Date;
   until?: Date;
   path?: string;
+  pathDocumentSource?: string;
+  pathRest?: string;
   tag?: string;
 }): Promise<DocumentGrepRow[]> {
   const expression = Prisma.sql`concat_ws(E'\n',
@@ -544,6 +631,9 @@ export async function searchTransactionGrepRows(params: {
   minAmount?: number;
   maxAmount?: number;
   status?: 'pending' | 'posted' | 'all';
+  pathInstitution?: string;
+  pathAccount?: string;
+  pathTransactionId?: string;
 }): Promise<TransactionGrepRow[]> {
   const expression = Prisma.sql`concat_ws(E'\n',
     t.name,
@@ -606,6 +696,9 @@ export async function aggregateTransactionGrepRows(params: {
   minAmount?: number;
   maxAmount?: number;
   status?: 'pending' | 'posted' | 'all';
+  pathInstitution?: string;
+  pathAccount?: string;
+  pathTransactionId?: string;
   includePendingInTotals?: boolean;
 }): Promise<TransactionAggregateRow[]> {
   const expression = Prisma.sql`concat_ws(E'\n',

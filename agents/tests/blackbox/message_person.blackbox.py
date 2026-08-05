@@ -393,6 +393,7 @@ async def test_agent_sms_generation_uses_text_prompt_without_subject_or_httpx():
         mock_llm.return_value = {
             "content": "Hey! Great to connect.",
             "usage": {"input_tokens": 100, "output_tokens": 20},
+            "finish_reason": "stop",
         }
         from tools.message_person import generate_message_activity
 
@@ -429,6 +430,7 @@ async def test_generate_message_activity_forwards_compute_tokens_to_llm():
         mock_llm.return_value = {
             "content": "Subject: Hello\nHi Alice!",
             "usage": {"input_tokens": 100, "output_tokens": 20},
+            "finish_reason": "stop",
         }
         from tools.message_person import generate_message_activity
 
@@ -458,6 +460,81 @@ async def test_generate_message_activity_forwards_compute_tokens_to_llm():
     assert kwargs["gpt_token_source"] == "pool"
     assert kwargs["gpt_token_pool_id"] == "pool-token-1"
     assert kwargs["gpt_token_user_id"] == "user-1"
+    assert kwargs["max_tokens"] >= 4096
+
+
+def test_build_message_approval_question_is_plain_text_and_keeps_full_draft():
+    """Approval SMS must not emit Markdown asterisks and must keep the full draft.
+
+    Reproduces agent eab955b6: iMessage showed `**Email**` / `**To:**` literally,
+    and the Message section was truncated mid-sentence.
+    """
+    from domains.message_person.service import build_message_approval_question
+
+    full_draft = (
+        "Hi Speedrun Team,\n\n"
+        "I am looking into credit allocations provided through the Speedrun marketplace "
+        "for our infrastructure planning.\n\n"
+        "Please share the exact credit amounts by provider for OpenAI, Anthropic, AWS, "
+        "Google Cloud, Azure, and Runpod.\n\n"
+        "Thanks,\nAndy"
+    )
+    question = build_message_approval_question(
+        system_name="Rose",
+        channel="email",
+        channel_label="Email",
+        person_display="sr-team@a16z.com",
+        recipient="sr-team@a16z.com",
+        from_email="andy@roselabs.ai",
+        generated_subject="LLM and Cloud Credit Amounts for Speedrun Marketplace",
+        intent=(
+            "Ask a16z Speedrun team (sr-team@a16z.com) for the exact breakdown and "
+            "dollar amounts of LLM and cloud credits provided per provider"
+        ),
+        generated_message=full_draft,
+    )
+
+    assert "**" not in question, f"Approval question leaked markdown asterisks:\n{question}"
+    assert "Rose wants to send an Email" in question
+    assert "To: sr-team@a16z.com (sr-team@a16z.com)" in question
+    assert "From: andy@roselabs.ai" in question
+    assert "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace" in question
+    assert full_draft in question
+    assert question.endswith('Reply to approve, or say "no" to cancel.')
+
+
+async def test_generate_message_activity_rejects_truncated_finish_reason():
+    """Truncated drafts must not reach approval/SMS (finish_reason=length)."""
+    _setup()
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("helpers.llm.call_llm") as mock_llm,
+    ):
+        mock_llm.return_value = {
+            "content": (
+                "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\n"
+                "Hi Speedrun Team,\n\nPlease share the"
+            ),
+            "finish_reason": "length",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 1024, "finish_reason": "length"},
+        }
+        from tools.message_person import generate_message_activity
+
+        try:
+            await generate_message_activity(
+                model="rose-labs/rose-1-lite",
+                system_name="Rose",
+                conversation_context="User asked about speedrun credits",
+                person_name="sr-team@a16z.com",
+                messages_context="No previous messages.",
+                exa_context="",
+                intent="Ask for exact LLM credit amounts",
+                channel="email",
+                person_email="sr-team@a16z.com",
+            )
+            raise AssertionError("expected truncated generation to raise")
+        except ValueError as exc:
+            assert "truncated" in str(exc).lower()
 
 
 # ── classify_person_id ──────────────────────────────────────────────
@@ -1553,6 +1630,14 @@ async def run_all_tests():
     await r.record_async(
         "generate_message_forwards_compute_token",
         test_generate_message_activity_forwards_compute_tokens_to_llm,
+    )
+    r.record(
+        "approval_question_plain_text_full_draft",
+        test_build_message_approval_question_is_plain_text_and_keeps_full_draft,
+    )
+    await r.record_async(
+        "generate_message_rejects_truncated_finish_reason",
+        test_generate_message_activity_rejects_truncated_finish_reason,
     )
     # classify_person_id
     r.record("classify_phone_full", test_classify_person_id_phone_full)

@@ -14,6 +14,7 @@ import {
   toolLifecycleIdentity,
 } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
+import { scheduleMessageGmvCapture } from './messageGmvCapture';
 
 const log = createLogger('Messages');
 
@@ -191,6 +192,9 @@ export async function createMessage(params: CreateMessageParams): Promise<Messag
     return result.message;
   }
   if (params.skipBroadcast !== true) broadcastCreatedMessage(params, result.message);
+  // Browser (and other tool) completions carry structured_response on the FINISHED
+  // TOOL row — harvest paid-order GMV when amount + confirmation id are both present.
+  scheduleMessageGmvCapture(params);
   return result.message;
 }
 
@@ -318,6 +322,9 @@ export async function createWorkflowMessageGroup(
   broadcastWorkflowMessageGroup(stampedParams, result);
   if (!result.accepted || result.main === null) {
     return { accepted: false, message: result.main?.message ?? null };
+  }
+  if (result.main.created) {
+    scheduleMessageGmvCapture(stampedParams);
   }
   return { accepted: true, message: result.main.message };
 }

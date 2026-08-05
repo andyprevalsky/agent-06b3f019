@@ -980,6 +980,7 @@ async def run_all_tests():
     r.record("create_action_custom_registry", test_create_agent_action_model_custom_registry)
     r.record("agent_action_openai_schema_spawn_items", test_agent_action_openai_schema_has_typed_spawn_agent_items)
     teardown_mock()
+    r.record("all_phase_tools_superset", test_all_phase_tools_superset)
     return r.all_passed
 
 

@@ -3,7 +3,11 @@ import { config } from 'dotenv';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
+import {
+  CODE_AGENT_CREDENTIALS_UNAVAILABLE,
+  CodeAgentCredentialError,
+  resolveCodexCodeAuthEnvs,
+} from '../../providers/e2b';
 import { prisma } from '../../providers/database';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
@@ -281,24 +285,46 @@ function testResolveCodexAuthEnvs_apiKeyFallback() {
   assert(envs.CODEX_AUTH_JSON === undefined, 'no OAuth auth.json in fallback');
 }
 
-function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {
-  let threw = false;
+/**
+ * `POST /api/codex-code-session/create` returns `error.message` verbatim in its 500 body, so the
+ * credential-inventory breakdown must stay on `detail` (server logs only).
+ */
+function assertRedactedCredentialThrow(run: () => unknown, label: string): void {
+  let error: unknown;
   try {
-    resolveCodexCodeAuthEnvs(null, undefined);
-  } catch {
-    threw = true;
+    run();
+  } catch (err) {
+    error = err;
   }
-  assert(threw, 'throws when no OAuth credential and no OPENAI_API_KEY fallback configured');
+  assert(error instanceof CodeAgentCredentialError, `${label}: throws a credential error`);
+  const credentialError = error as CodeAgentCredentialError;
+  assert(
+    credentialError.message === CODE_AGENT_CREDENTIALS_UNAVAILABLE,
+    `${label}: client-facing message must be redacted, got: ${credentialError.message}`
+  );
+  assert(
+    !credentialError.message.includes('OPENAI_API_KEY') &&
+      !credentialError.message.includes('pool tokens'),
+    `${label}: client-facing message must not disclose credential state`
+  );
+  assert(
+    credentialError.detail.includes('OPENAI_API_KEY (GPT_API_KEY)'),
+    `${label}: operator detail must still name the missing fallback, got: ${credentialError.detail}`
+  );
+}
+
+function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {
+  assertRedactedCredentialThrow(
+    () => resolveCodexCodeAuthEnvs(null, undefined),
+    'no OAuth credential and no OPENAI_API_KEY fallback configured'
+  );
 }
 
 function testResolveCodexAuthEnvs_emptyKeyThrows() {
-  let threw = false;
-  try {
-    resolveCodexCodeAuthEnvs(null, '');
-  } catch {
-    threw = true;
-  }
-  assert(threw, 'throws when the api-key fallback is an empty string');
+  assertRedactedCredentialThrow(
+    () => resolveCodexCodeAuthEnvs(null, ''),
+    'api-key fallback is an empty string'
+  );
 }
 
 function testResolveCodexAuthEnvs_cooldownExcludesFundedKey() {
