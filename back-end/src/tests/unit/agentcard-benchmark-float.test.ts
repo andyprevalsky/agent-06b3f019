@@ -27,9 +27,7 @@ function walletResult(cents: {
   };
 }
 
-function cardholdersResult(
-  cardholders: Array<{ id: string; email?: string }>
-): unknown {
+function cardholdersResult(cardholders: Array<{ id: string; email?: string }>): unknown {
   return {
     structuredContent: {
       message: `${cardholders.length} cardholder(s); showing ${cardholders.length}.`,

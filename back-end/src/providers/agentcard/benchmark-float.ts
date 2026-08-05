@@ -66,10 +66,7 @@ function extractCardholders(result: unknown): AgentCardSandboxCardholder[] {
 function preferredBenchmarkCardholderIds(
   env: Record<string, string | undefined> = process.env
 ): string[] {
-  const preferred = [
-    env.BENCHMARK_AGENTCARD_CARDHOLDER_ID,
-    env.AGENTCARD_CARDHOLDER_ID,
-  ]
+  const preferred = [env.BENCHMARK_AGENTCARD_CARDHOLDER_ID, env.AGENTCARD_CARDHOLDER_ID]
     .map((value) => value?.trim())
     .filter((value): value is string => value !== undefined && value !== '');
   return [...new Set(preferred)];

@@ -348,13 +348,10 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
     // classifyFundingResumeFailure treats providerCallStarted + untyped errors as
     // ambiguous funding and loops forever on "Cardholder not found".
     if (/\bcardholder not found\b/i.test(message)) {
-      throw new AgentCardProviderError(
-        message,
-        409,
-        undefined,
-        'agentcard_cardholder_not_found',
-        { agentcardStatus: 'cardholder_not_found', agentcardResult: record }
-      );
+      throw new AgentCardProviderError(message, 409, undefined, 'agentcard_cardholder_not_found', {
+        agentcardStatus: 'cardholder_not_found',
+        agentcardResult: record,
+      });
     }
     throw new AgentCardProviderError(message);
   }

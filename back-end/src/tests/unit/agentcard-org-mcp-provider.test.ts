@@ -395,15 +395,18 @@ async function main(): Promise<void> {
 
   // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
   // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
-  const missingCardholderProvider = new AgentCardOrgMcpProvider('cardholder-missing', async (name) => {
-    if (name === 'create_card') {
-      return toolResult({
-        status: 'error',
-        message: 'create_card failed: Cardholder not found',
-      });
+  const missingCardholderProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        return toolResult({
+          status: 'error',
+          message: 'create_card failed: Cardholder not found',
+        });
+      }
+      throw new Error(`unexpected tool ${name}`);
     }
-    throw new Error(`unexpected tool ${name}`);
-  });
+  );
   await assert.rejects(
     () =>
       missingCardholderProvider.mintCard({
