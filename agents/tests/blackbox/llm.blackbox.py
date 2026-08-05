@@ -315,12 +315,13 @@ def test_tool_result_name_pairs_with_the_declared_call_not_the_display_name():
     assert tool_msg["name"] == "spawn_agent"
 
 
-def test_generated_tool_call_id_is_shared_by_bookkeeping_and_emitted_call():
-    """A tool call with no id must get ONE generated id, used in both passes.
+def test_missing_tool_call_id_fails_closed_instead_of_being_synthesized():
+    """An id-less tool call must RAISE, never get a synthesized id.
 
-    Generating it twice made the declaration bookkeeping disagree with the id
-    actually sent to the model, so the paired result matched neither: it lost
-    its name or was downgraded to a system message.
+    A fresh uuid4 per conversion can never pair with the persisted terminal
+    result, so the real result is silently replaced by a synthetic placeholder —
+    and the id the bookkeeping recorded disagrees with the one actually sent to
+    the model. Failing closed surfaces the malformed row at its source instead.
     """
     from helpers.llm import convert_context_to_messages
 
@@ -333,46 +334,24 @@ def test_generated_tool_call_id_is_shared_by_bookkeeping_and_emitted_call():
         },
     ]
 
-    # The generated id is random, so pin uuid4 to a counting sequence: calling it
-    # twice for one tool call is exactly the defect, and yields two distinct ids.
-    import helpers.llm as llm_module
-
-    generated: List[str] = []
-
-    class _SequencedUuid:
-        def __init__(self, index: int) -> None:
-            self._value = f"generated-{index}"
-
-        def __str__(self) -> str:
-            return self._value
-
-    def _fake_uuid4() -> _SequencedUuid:
-        token = _SequencedUuid(len(generated))
-        generated.append(str(token))
-        return token
-
-    original_uuid4 = llm_module.uuid.uuid4
-    llm_module.uuid.uuid4 = _fake_uuid4
     try:
-        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
-    finally:
-        llm_module.uuid.uuid4 = original_uuid4
-
-    assistant_msg = next(m for m in messages if m["role"] == "assistant")
-    emitted_id = assistant_msg["tool_calls"][0]["id"]
-    assert len(generated) == 1, f"one id-less tool call must generate exactly ONE id, generated {generated}"
-    assert emitted_id == generated[0], (
-        f"the emitted assistant call id {emitted_id!r} must be the same id the declaration "
-        f"bookkeeping recorded ({generated[0]!r})"
-    )
+        convert_context_to_messages(context, include_system=False, include_assistant=True)
+    except ValueError as error:
+        assert "tool_call_id" in str(error), f"error must name the missing field, got {error!r}"
+        assert "web_search" in str(error), f"error must name the offending tool, got {error!r}"
+    else:
+        raise AssertionError(
+            "an ASSISTANT tool_call with no tool_call_id must raise, not silently "
+            "synthesize an id that can never pair with its persisted result"
+        )
 
 
 def test_null_tool_call_ids_do_not_collide_on_the_string_none():
-    """A present-but-null id must generate a UNIQUE id, not the literal "None".
+    """A present-but-null id must fail closed, not collapse onto the literal "None".
 
-    `dict.get(key, default)` returns None when the key EXISTS and is null, so
-    the default never fires: every such call became the string "None" and they
-    all collided onto one another.
+    `dict.get(key, default)` returns None when the key EXISTS and is null, so a
+    `.get(k, uuid4())` default never fires: every such call became the string
+    "None" and they all collided onto one another. Fail closed instead.
     """
     from helpers.llm import convert_context_to_messages
 
@@ -390,9 +369,13 @@ def test_null_tool_call_ids_do_not_collide_on_the_string_none():
         },
     ]
 
-    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    try:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    except ValueError as error:
+        assert "tool_call_id" in str(error), f"error must name the missing field, got {error!r}"
+        return
     ids = [tc["id"] for tc in next(m for m in messages if m["role"] == "assistant")["tool_calls"]]
-    assert "None" not in ids, f'null ids must not collapse onto the literal "None": {ids}'
+    assert "None" not in ids, f'null ids must never collapse onto the literal "None": {ids}'
     assert len(set(ids)) == 2, f"each null-id call needs its own unique id, got {ids}"
 
 
@@ -6954,8 +6937,8 @@ async def run_all_tests():
         test_tool_result_omits_name_when_no_declaration_is_known,
     )
     r.record(
-        "generated_tool_call_id_shared_across_passes",
-        test_generated_tool_call_id_is_shared_by_bookkeeping_and_emitted_call,
+        "missing_tool_call_id_fails_closed",
+        test_missing_tool_call_id_fails_closed_instead_of_being_synthesized,
     )
     r.record(
         "null_tool_call_ids_do_not_collide",

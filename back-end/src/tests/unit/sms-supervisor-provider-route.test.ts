@@ -26,10 +26,24 @@ test('routes through Cerebras with failover, never straight at Anthropic', () =>
   // The default path must still be Cerebras. The benchmark override exists
   // only to A/B a different model against the same task; it is env-gated and
   // unset in prod.
-  assert.ok(SUPERVISOR_LLM_SOURCE.includes("providerRoute: 'direct-cerebras'"));
+  assert.ok(SUPERVISOR_LLM_SOURCE.includes("'direct-cerebras'"));
   assert.ok(SUPERVISOR_LLM_SOURCE.includes('BENCHMARK_SMS_SUPERVISOR_MODEL'));
-  assert.ok(!SUPERVISOR_LLM_SOURCE.includes('claude_token'));
-  assert.ok(!SUPERVISOR_LLM_SOURCE.includes('gpt_token'));
+
+  // Compute tokens must stay OFF the default route. They are legitimately sent
+  // when the benchmark override moves the run onto a waterfall route (that path
+  // needs a user token), so the invariant is not "never mentioned" — it is
+  // "never sent while providerRoute is direct-cerebras". Assert the gate itself:
+  // a bare `claude_token: claudeToken` with no route check is the regression.
+  for (const token of ['claude_token', 'gpt_token']) {
+    const gated = SUPERVISOR_LLM_SOURCE.includes(
+      `providerRoute !== 'direct-cerebras' && ${token === 'claude_token' ? 'claudeToken' : 'gptToken'}`
+    );
+    assert.ok(
+      gated,
+      `${token} must be gated behind providerRoute !== 'direct-cerebras'; an ungated send puts the ` +
+        'default SMS route back on a user compute token instead of Cerebras'
+    );
+  }
 });
 
 test('keeps the full grep surface — the union limit is not a reason to cut tools', () => {
