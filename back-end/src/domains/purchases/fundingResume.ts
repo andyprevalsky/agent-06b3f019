@@ -105,7 +105,6 @@ export async function classifyFundingResumeFailure(
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
-      state.fundingRetryClaimed ||
       ambiguousExternalOutcome ||
       funding?.status === PurchaseWalletFundingStatus.FAILED ||
       walletWasFunded);

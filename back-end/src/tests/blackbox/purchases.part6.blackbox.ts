@@ -165,6 +165,72 @@ async function main(): Promise<void> {
     assert(calls.cancels.length === 0, 'ambiguous provider outcome must preserve the Stripe hold');
   });
 
+  const safeGateUserId = await createSubscribedUser();
+  const safeGateFingerprint = `safe-gate-after-funding-${randomUUID()}`;
+  let safeGateMintCalls = 0;
+  const safeGateAfterFundingProvider: CardProvider = {
+    async mintCard(): Promise<never> {
+      safeGateMintCalls += 1;
+      if (safeGateMintCalls === 1) {
+        throw new AgentCardProviderError(
+          'AgentCard company funding is in progress',
+          409,
+          undefined,
+          'agentcard_company_funding_in_progress',
+          { agentcardStatus: 'funding_in_progress', retryAfterSeconds: 60 }
+        );
+      }
+      throw new AgentCardProviderError(
+        'AgentCard organization setup required: org_wallet_funding_required',
+        409,
+        undefined,
+        'agentcard_org_wallet_funding_required',
+        { agentcardStatus: 'org_wallet_funding_required' }
+      );
+    },
+    async getDetails(): Promise<never> {
+      throw new Error('details must not run when AgentCard returns a setup gate');
+    },
+    async closeCard(): Promise<void> {
+      throw new Error('an unknown card must not be closed without its id');
+    },
+  };
+  await withFakeStripe(async (calls) => {
+    const firstError = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(safeGateUserId, safeGateFingerprint),
+        safeGateAfterFundingProvider,
+        new FakeWalletFundingProvider()
+      )
+    );
+    assert(
+      firstError.code === 'agentcard_company_funding_in_progress',
+      `first response should preserve funding retry, got ${firstError.code}`
+    );
+
+    const secondError = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(safeGateUserId, safeGateFingerprint),
+        safeGateAfterFundingProvider,
+        new FakeWalletFundingProvider()
+      )
+    );
+    assert(
+      secondError.code === 'agentcard_org_wallet_funding_required',
+      `safe provider gate must not be rewrapped as funding pending, got ${secondError.code}`
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: safeGateUserId, fingerprint: safeGateFingerprint },
+      include: { walletFunding: true },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FAILED,
+      `safe gate should end the resumable purchase, got ${purchase.status}`
+    );
+    assert(purchase.walletFunding === null, 'pending wallet marker should be discarded');
+    assert(calls.cancels.length === 1, 'the preserved Stripe hold should be canceled');
+  });
+
   const closedReplayUserId = await createSubscribedUser();
   const closedReplayFingerprint = `closed-replay-${randomUUID()}`;
   const closedReplayCardId = `card-closed-${randomUUID()}`;
