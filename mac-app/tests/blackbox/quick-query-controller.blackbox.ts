@@ -179,4 +179,185 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     (willNavigate?.[1] as (e: { preventDefault: () => void }) => void)(event);
     expect(event.preventDefault).toHaveBeenCalled();
   });
+
+  it('focus cancels a pending blur-hide; file-drag inactive is a no-op', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => null,
+      getOnboardingComplete: () => true,
+    });
+    const win = controller.createWindow() as unknown as WinStub;
+    controller.registerIpc();
+    controller.registerGlobalShortcuts();
+
+    const toggle = await altSpaceToggle();
+    toggle();
+    win.isVisible.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1100);
+
+    windowEventHandler(win, 'blur')?.();
+    windowEventHandler(win, 'focus')?.();
+    await vi.advanceTimersByTimeAsync(QUICK_QUERY_BLUR_HIDE_DELAY_MS + 50);
+    expect(win.hide).not.toHaveBeenCalled();
+
+    const fileDrag = await ipcHandler('quick-query:file-drag');
+    fileDrag?.(null, { active: false });
+    fileDrag?.(null, { active: true });
+    expect(win.showInactive).not.toHaveBeenCalled();
+  });
+
+  it('submit with query content focuses the main window; hide IPC focuses main', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as WinStub & {
+      show: ReturnType<typeof vi.fn>;
+      focus: ReturnType<typeof vi.fn>;
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      getOnboardingComplete: () => true,
+    });
+    const win = controller.createWindow() as unknown as WinStub;
+    controller.registerIpc();
+    controller.registerGlobalShortcuts();
+
+    const toggle = await altSpaceToggle();
+    toggle();
+    win.isVisible.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1100);
+
+    const submit = await ipcHandler('quick-query:submit');
+    submit?.(null, { query: 'ship it', submittedAt: Date.now() });
+    expect(main.show).toHaveBeenCalled();
+    expect(main.focus).toHaveBeenCalled();
+    expect(main.webContents.send).toHaveBeenCalledWith(
+      'quick-query:submit',
+      expect.objectContaining({ query: 'ship it' })
+    );
+
+    // Re-open after the 2s re-show guard so hide IPC can run.
+    await vi.advanceTimersByTimeAsync(2100);
+    win.isVisible.mockReturnValue(false);
+    toggle();
+    win.isVisible.mockReturnValue(true);
+    await vi.advanceTimersByTimeAsync(1100);
+
+    const hide = await ipcHandler('quick-query:hide');
+    hide?.(null);
+    expect(main.show).toHaveBeenCalled();
+  });
+
+  it('resize IPC clamps height; empty submit does not forward to main', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    const main = makeBrowserWindowStub() as unknown as WinStub & {
+      webContents: { send: ReturnType<typeof vi.fn> };
+    };
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => main as unknown as Electron.BrowserWindow,
+      getOnboardingComplete: () => true,
+    });
+    const win = controller.createWindow() as unknown as WinStub & {
+      setContentSize: ReturnType<typeof vi.fn>;
+    };
+    controller.registerIpc();
+
+    const resize = await ipcHandler('quick-query:resize');
+    expect(resize?.(null, { height: 156 })).toEqual({ success: true });
+    expect(win.setContentSize).toHaveBeenCalledWith(500, 156);
+    expect(resize?.(null, null)).toEqual({ success: true });
+
+    const submit = await ipcHandler('quick-query:submit');
+    submit?.(null, { query: '   ', submittedAt: 1 });
+    expect(main.webContents.send).not.toHaveBeenCalled();
+  });
+
+  it('blocks show/toggle when onboarding is incomplete', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => null,
+      getOnboardingComplete: () => false,
+    });
+    const win = controller.createWindow() as unknown as WinStub;
+    controller.registerGlobalShortcuts();
+    const toggle = await altSpaceToggle();
+    toggle();
+    expect(win.show).not.toHaveBeenCalled();
+  });
+
+  it('logs when Alt+Space is already taken and unregisters shortcuts', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+    vi.mocked(electron.globalShortcut.register).mockReturnValue(false);
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => null,
+      getOnboardingComplete: () => true,
+    });
+    controller.createWindow();
+    controller.registerGlobalShortcuts();
+    controller.registerGlobalShortcuts(); // idempotent
+    controller.unregisterGlobalShortcuts();
+    expect(electron.globalShortcut.unregisterAll).toHaveBeenCalled();
+    controller.unregisterGlobalShortcuts(); // no-op when disabled
+    vi.mocked(electron.globalShortcut.register).mockReturnValue(true);
+  });
+
+  it('ignores hide during the first second after show; defers toggle while loading', async () => {
+    const electron = await import('electron');
+    vi.mocked(electron.BrowserWindow).mockImplementation(
+      () => makeBrowserWindowStub() as unknown as Electron.BrowserWindow
+    );
+
+    const controller = new QuickQueryController({
+      getMainWindow: () => null,
+      getOnboardingComplete: () => true,
+    });
+    const win = controller.createWindow() as unknown as WinStub & {
+      webContents: {
+        isLoading: ReturnType<typeof vi.fn>;
+        once: ReturnType<typeof vi.fn>;
+        send: ReturnType<typeof vi.fn>;
+      };
+    };
+    win.webContents.isLoading.mockReturnValue(true);
+    controller.registerIpc();
+    controller.registerGlobalShortcuts();
+
+    const toggle = await altSpaceToggle();
+    toggle();
+    win.isVisible.mockReturnValue(true);
+    // Still inside the 1s show grace — hide IPC must no-op.
+    await vi.advanceTimersByTimeAsync(200);
+    const hide = await ipcHandler('quick-query:hide');
+    hide?.(null);
+    expect(win.hide).not.toHaveBeenCalled();
+
+    // configureWindow + emitToggle both register did-finish-load; the toggle
+    // sender is the last one and must flush the open event when load completes.
+    const onceCalls = win.webContents.once.mock.calls.filter(
+      (call) => call[0] === 'did-finish-load'
+    );
+    expect(onceCalls.length).toBeGreaterThanOrEqual(2);
+    const toggleSender = onceCalls[onceCalls.length - 1]?.[1] as () => void;
+    toggleSender();
+    expect(win.webContents.send).toHaveBeenCalledWith('quick-query:toggle', { open: true });
+  });
 });

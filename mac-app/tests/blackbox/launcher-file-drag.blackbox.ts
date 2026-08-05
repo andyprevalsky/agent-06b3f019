@@ -44,5 +44,37 @@ describe('looksLikeFileDrag', () => {
   it('rejects non-file drags', () => {
     expect(looksLikeFileDrag(dt({ types: ['text/plain'] }))).toBe(false);
     expect(looksLikeFileDrag(null)).toBe(false);
+    expect(looksLikeFileDrag(undefined)).toBe(false);
+  });
+
+  it('accepts types that merely contain "file" and populated files[]', () => {
+    expect(looksLikeFileDrag(dt({ types: ['application/x-something-file'] }))).toBe(true);
+    const file = new File(['x'], 'a.png', { type: 'image/png' });
+    expect(
+      looksLikeFileDrag(
+        dt({
+          types: [],
+          files: [file],
+        })
+      )
+    ).toBe(true);
+  });
+
+  it('falls through empty items/files and nullish types without claiming a drag', () => {
+    expect(
+      looksLikeFileDrag(
+        dt({
+          types: [],
+          items: [{ kind: 'string', type: 'text/plain' }],
+        })
+      )
+    ).toBe(false);
+    expect(
+      looksLikeFileDrag({
+        types: undefined,
+        files: undefined,
+        items: undefined,
+      } as unknown as DataTransfer)
+    ).toBe(false);
   });
 });
