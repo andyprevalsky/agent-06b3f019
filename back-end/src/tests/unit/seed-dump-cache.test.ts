@@ -91,6 +91,19 @@ test('bulk transfers get a budget large enough for the ~150MB canonical base', (
   assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '1' }), 1_000);
   assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '99999999' }), 1_800_000);
   assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: 'nonsense' }), 300_000);
+
+  // An explicitly pinned probe deadline must still bound the bulk path, or a
+  // hung endpoint stalls a boot for the full bulk budget instead of failing
+  // fast (exactly what the hanging-endpoint test below asserts).
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000' }), 2_000);
+  // An explicit bulk budget still wins over the probe pin when both are set.
+  assert.equal(
+    bulkTransferTimeoutMs({
+      SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000',
+      SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '120000',
+    }),
+    120_000
+  );
 });
 
 test('multipart plan covers the whole object with S3-legal part sizes', () => {

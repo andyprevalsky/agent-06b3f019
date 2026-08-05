@@ -81,8 +81,16 @@ export function bulkTransferTimeoutMs(
   env: Record<string, string | undefined> = process.env
 ): number {
   const configured = Number(env.SEED_DUMP_CACHE_BULK_TIMEOUT_MS);
-  if (!Number.isFinite(configured) || configured <= 0) return 300_000;
-  return Math.min(Math.max(Math.floor(configured), 1_000), 1_800_000);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(Math.max(Math.floor(configured), 1_000), 1_800_000);
+  }
+  // An explicitly pinned request deadline is a deliberate bound (run.sh's cache
+  // probe, and the hanging-endpoint regression test). Never let the bulk budget
+  // silently override it — a dead endpoint must still fail fast, not stall a
+  // boot for five minutes.
+  const pinnedProbe = Number(env.SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS);
+  if (Number.isFinite(pinnedProbe) && pinnedProbe > 0) return cacheRequestTimeoutMs(env);
+  return 300_000;
 }
 
 // S3/R2 requires >=5MiB parts (except the last). 16MiB keeps the part count for
@@ -110,7 +118,9 @@ function client(bulk = false): S3Client {
   return new S3Client({
     region: 'auto',
     endpoint: process.env.R2_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`,
-    maxAttempts: bulk ? 3 : 1,
+    // One attempt on both paths: uploadMultipart() owns its own per-part retry,
+    // and a client-level retry of a hung request just multiplies the deadline.
+    maxAttempts: 1,
     requestHandler: {
       connectionTimeout: Math.min(requestTimeout, 5_000),
       requestTimeout,
