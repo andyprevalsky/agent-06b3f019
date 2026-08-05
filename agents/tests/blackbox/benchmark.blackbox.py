@@ -1172,6 +1172,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "tx.credit.create" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
+    assert "const callerDatabaseUrl = process.env.DATABASE_URL" in fixture
+    assert "process.env.DATABASE_URL = callerDatabaseUrl" in fixture
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():

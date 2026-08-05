@@ -13,7 +13,17 @@ import { isAdminUser } from '../src/utils/adminAccess';
 // Cursor Cloud injects per-key secrets into the process env. A truncated
 // BENCHMARK_AGENTCARD_ORG_ID (seen as 7 chars) would otherwise beat the full
 // value in back-end/.env because dotenv defaults to non-override mode.
+// Isolated benchmark stacks pass DATABASE_URL/DIRECT_URL explicitly; preserve
+// those caller overrides so payment fixtures seed the stack database.
+const callerDatabaseUrl = process.env.DATABASE_URL;
+const callerDirectUrl = process.env.DIRECT_URL;
 dotenv.config({ override: true });
+if (callerDatabaseUrl) {
+  process.env.DATABASE_URL = callerDatabaseUrl;
+}
+if (callerDirectUrl) {
+  process.env.DIRECT_URL = callerDirectUrl;
+}
 applyResolvedBenchmarkAgentCardIds();
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
