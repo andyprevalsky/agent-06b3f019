@@ -933,6 +933,32 @@ class DOMService:
             return 0
         if self._webauthn_cdp is None:
             raise RuntimeError("No WebAuthn CDP session is available for passkey injection")
+
+        if self._passkey_authenticator_id is not None:
+            try:
+                result = await self._send_cdp_command(
+                    self._webauthn_cdp,
+                    "WebAuthn.getCredentials",
+                    {"authenticatorId": self._passkey_authenticator_id},
+                )
+                observed_ids = {
+                    credential.get("credentialId")
+                    for credential in result.get("credentials", []) or []
+                    if credential.get("credentialId")
+                }
+                if not set(self._passkey_seed_counts).issubset(observed_ids):
+                    logger.warning(
+                        "⚠️ [passkey] virtual authenticator lost seeded credentials; rebuilding it"
+                    )
+                    self._passkey_authenticator_id = None
+                    self._passkey_seed_counts.clear()
+            except Exception as e:
+                if "virtual authenticator environment has not been enabled" not in str(e).lower():
+                    raise RuntimeError("Failed to verify the browser passkey authenticator") from e
+                logger.warning("⚠️ [passkey] WebAuthn environment was reset; rebuilding it")
+                self._passkey_authenticator_id = None
+                self._passkey_seed_counts.clear()
+
         if self._passkey_authenticator_id is None:
             try:
                 # Provider/browser startup can replace or reset the target after

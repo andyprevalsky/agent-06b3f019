@@ -1,69 +1,77 @@
 /**
  * Pill-shaped Quick-Query launcher component.
  *
- * Thin view: reads state + handlers from `useLauncher`, renders the shader
- * backdrop + form. All IO (IPC, focus, submit) is orchestrated in hooks.ts.
+ * Thin view: reads state + handlers from `useLauncher`, renders the shell
+ * + form + drag/drop attach surface. All IO is orchestrated in hooks.
+ *
+ * STATE MACHINE:
+ *   [idle] ↔ [has_text] ↔ [has_files]
+ *   any --dragover--> [drag_over] --drop--> [has_files]
+ *   [has_text|has_files] --submit--> [submitting]
+ *
+ * Border = pre-DnD production shell:
+ *   outer + ShaderTile, 2px inset #f5f5f5
+ *   Corner radius locked to the idle pill (height/2), so expanding for
+ *   files/paragraph does NOT grow into a giant stadium — same ends as before.
  */
 
-import ShaderTile from './ShaderTile';
+import { useCallback, useEffect, useState } from 'react';
 import QueryForm from './QueryForm';
+import LauncherShell from './LauncherShell';
 import { useLauncher } from '../hooks';
-import { LAUNCHER_PILL_HEIGHT, LAUNCHER_PILL_WIDTH } from '../config';
+import { resizeQuickQuery } from '../api';
+import {
+  LAUNCHER_PILL_HEIGHT,
+  launcherPillHeightFromContent,
+  launcherWindowHeightFromPill,
+} from '../config';
 
 const Launcher = (): React.JSX.Element => {
-  const { query, setQuery, submitting, inputRef, handleSubmit, handleKeyDown } = useLauncher();
+  const {
+    query,
+    setQuery,
+    submitting,
+    inputRef,
+    handleSubmit,
+    handleKeyDown,
+    attachments,
+    isDragOver,
+    attachError,
+    dragHandlers,
+    removeAttachment,
+    addFiles,
+  } = useLauncher();
+
+  const [contentHeight, setContentHeight] = useState(LAUNCHER_PILL_HEIGHT - 4);
+  const hasAttachments = attachments.length > 0;
+  const pillHeight = launcherPillHeightFromContent(contentHeight, hasAttachments);
+
+  const onContentHeightChange = useCallback((height: number) => {
+    setContentHeight(height);
+  }, []);
+
+  useEffect(() => {
+    void resizeQuickQuery({ height: launcherWindowHeightFromPill(pillHeight) });
+  }, [pillHeight]);
 
   return (
     <div className="drag-region" style={{ position: 'relative', width: '100%', height: '100%' }}>
-      <div
-        className="drag-region"
-        style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: LAUNCHER_PILL_WIDTH,
-          height: LAUNCHER_PILL_HEIGHT,
-          borderRadius: 9999,
-          boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15), 0 2px 4px rgba(0, 0, 0, 0.1)',
-        }}
-      >
-        {/* Shader background */}
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            borderRadius: 9999,
-            overflow: 'hidden',
-          }}
-        >
-          <ShaderTile size={LAUNCHER_PILL_HEIGHT} />
-        </div>
-
-        {/* Inner content */}
-        <div
-          style={{
-            position: 'absolute',
-            top: 2,
-            left: 2,
-            right: 2,
-            bottom: 2,
-            borderRadius: 9999,
-            backgroundColor: '#f5f5f5',
-            display: 'flex',
-            alignItems: 'center',
-          }}
-        >
-          <QueryForm
-            query={query}
-            setQuery={setQuery}
-            submitting={submitting}
-            inputRef={inputRef}
-            handleSubmit={handleSubmit}
-            handleKeyDown={handleKeyDown}
-          />
-        </div>
-      </div>
+      <LauncherShell pillHeight={pillHeight} isDragOver={isDragOver} dragHandlers={dragHandlers}>
+        <QueryForm
+          query={query}
+          setQuery={setQuery}
+          submitting={submitting}
+          inputRef={inputRef}
+          handleSubmit={handleSubmit}
+          handleKeyDown={handleKeyDown}
+          canSubmitWithoutQuery={hasAttachments}
+          attachments={attachments}
+          onRemoveAttachment={removeAttachment}
+          onPickFiles={addFiles}
+          attachError={attachError}
+          onContentHeightChange={onContentHeightChange}
+        />
+      </LauncherShell>
     </div>
   );
 };

@@ -155,6 +155,8 @@ this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
+**Run every Phase 1 block that expands a file list — `$CHANGED_TS`, `$LINT_TS` — under `bash`, e.g. `bash -c '<block>'`.** These lists are newline-separated and rely on shell word splitting to become separate argv entries. The agent harness shell is zsh, which does NOT word-split unquoted parameter expansions, so running them directly passes the whole list as one filename and the stage fails with `No files matching the pattern were found`. Persist the computed lists to files (`/tmp/deploy-changed-ts.txt`, `/tmp/deploy-lint-ts.txt`) so each `bash -c` block can re-read them instead of relying on exported shell state, which does not persist between tool calls.
+
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
 SYNC_MERGES=$(
@@ -435,6 +437,7 @@ their assertions or test counts:
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
@@ -447,6 +450,7 @@ their assertions or test counts:
 `python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
+`bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`,
 `bash scripts/tests/run-public-tunnel-routing.test.sh`, and
 `bash scripts/tests/setup-db-concurrency.test.sh`.
@@ -595,6 +599,22 @@ python3 scripts/run_deploy_live_probes.py
 
 Both stage records must pass before closing the `runtime-blackbox` boundary.
 
+## Step 4r: Cold-seed memory ratchet (no skip)
+
+Measure five full cold seeds against the newest cached production dump. Every
+run gets a fresh target database and must pass the source/target fidelity
+fingerprints for Cookies, LocalStorage, IndexedDB, and Cache Storage. The gate
+uses the OS-level maximum resident set size; failed or fidelity-mismatched runs
+never count as a favorable low-memory sample.
+
+```bash
+cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
+  bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget
+```
+
+The checked-in budget is the maximum of the last five stable runs plus exactly
+20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
+all five measurements. Never raise the budget or a machine size to make it pass.
 ## Step 5: Spin up local services
 
 **Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.
@@ -2093,6 +2113,24 @@ python benchmarks/run_benchmark.py \
   --bootstrap
 python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
+
+**Prod payment identity (prerequisite).** These tasks run as the NON-admin
+`BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID` (`...000107`), because the admin path
+(`issueAdminCompanyCard`) never authorizes a personal Stripe hold and the task asserts
+`stripeHold: succeeded`. Every credential needed is already in `back-end/.env` — do NOT ask
+the user for them. If the run fails closed on a missing identity, provision it:
+
+```bash
+cd back-end && set -a && . ./.env && set +a && \
+  DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \
+  BENCHMARK_ALLOW_LIVE_STRIPE=1 BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=1 \
+  npx tsx scripts/setup-benchmark-payment.ts --live
+```
+
+Use `DIRECT_URL`; the 6543 pooler fails with `Can't reach database server`. The only step an
+agent cannot perform is saving a card on the live Stripe customer (entering a card number is
+prohibited) — the script prints a one-time hosted Checkout link for a human, and it persists
+permanently once done.
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 

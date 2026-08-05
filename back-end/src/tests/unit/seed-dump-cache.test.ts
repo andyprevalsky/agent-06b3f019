@@ -7,7 +7,14 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
 
-import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
+import {
+  bulkTransferTimeoutMs,
+  cacheRequestTimeoutMs,
+  MULTIPART_CHUNK_BYTES,
+  MULTIPART_THRESHOLD_BYTES,
+  objectKey,
+  planUploadParts,
+} from '../../../scripts/seed-dump-cache';
 
 /**
  * Resolve the tsx CLI used to spawn the script under test.
@@ -74,6 +81,75 @@ test('request deadline defaults below the benchmark service readiness window', (
   assert.ok(cacheRequestTimeoutMs({}) < 180_000);
 });
 
+test('bulk transfers get a budget large enough for the ~150MB canonical base', () => {
+  // The probe timeout is sized for a miss; a 150MB body needs far more. Sharing
+  // one 30s budget is what made a republication die mid-stream.
+  assert.ok(bulkTransferTimeoutMs({}) > cacheRequestTimeoutMs({}));
+  assert.equal(bulkTransferTimeoutMs({}), 300_000);
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '90000' }), 90_000);
+  // Clamped both ways so a typo cannot hang a boot forever or disable the budget.
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '1' }), 1_000);
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '99999999' }), 1_800_000);
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_BULK_TIMEOUT_MS: 'nonsense' }), 300_000);
+
+  // An explicitly pinned probe deadline must still bound the bulk path, or a
+  // hung endpoint stalls a boot for the full bulk budget instead of failing
+  // fast (exactly what the hanging-endpoint test below asserts).
+  assert.equal(bulkTransferTimeoutMs({ SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000' }), 2_000);
+  // An explicit bulk budget still wins over the probe pin when both are set.
+  assert.equal(
+    bulkTransferTimeoutMs({
+      SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000',
+      SEED_DUMP_CACHE_BULK_TIMEOUT_MS: '120000',
+    }),
+    120_000
+  );
+});
+
+test('multipart plan covers the whole object with S3-legal part sizes', () => {
+  // R2/S3 reject any part below 5MiB except the last one.
+  assert.ok(MULTIPART_CHUNK_BYTES >= 5 * 1024 * 1024);
+  assert.ok(MULTIPART_THRESHOLD_BYTES >= MULTIPART_CHUNK_BYTES);
+
+  const size = 152_119_674; // the real canonical base artifact
+  const parts = planUploadParts(size);
+
+  assert.equal(parts[0].start, 0);
+  assert.equal(parts[parts.length - 1].end, size, 'plan must reach exactly EOF');
+  assert.deepEqual(
+    parts.map((p) => p.partNumber),
+    parts.map((_, i) => i + 1),
+    'part numbers must be 1-based and contiguous'
+  );
+  // No gaps and no overlaps: byte N belongs to exactly one part.
+  for (let i = 1; i < parts.length; i += 1) {
+    assert.equal(parts[i].start, parts[i - 1].end, `gap/overlap before part ${i + 1}`);
+  }
+  // Every part but the last is exactly one chunk; the last is the remainder.
+  for (const part of parts.slice(0, -1)) {
+    assert.equal(part.end - part.start, MULTIPART_CHUNK_BYTES);
+  }
+  const last = parts[parts.length - 1];
+  assert.ok(last.end - last.start > 0 && last.end - last.start <= MULTIPART_CHUNK_BYTES);
+  assert.equal(
+    parts.reduce((sum, p) => sum + (p.end - p.start), 0),
+    size,
+    'parts must sum to the file size'
+  );
+});
+
+test('multipart plan handles exact-multiple and tiny sizes without empty parts', () => {
+  const exact = planUploadParts(MULTIPART_CHUNK_BYTES * 3);
+  assert.equal(exact.length, 3);
+  assert.equal(exact[2].end, MULTIPART_CHUNK_BYTES * 3);
+
+  const tiny = planUploadParts(10);
+  assert.equal(tiny.length, 1);
+  assert.deepEqual(tiny[0], { partNumber: 1, start: 0, end: 10 });
+
+  assert.deepEqual(planUploadParts(0), [], 'an empty object needs no parts');
+});
+
 test('CLI fails closed (exit 1) when R2 is unconfigured — caller cold-syncs', () => {
   const script = path.resolve(__dirname, '../../../scripts/seed-dump-cache.ts');
   let code = 0;
@@ -121,7 +197,7 @@ async function testHangingEndpointIsBounded(): Promise<void> {
     requestWatchdog = setTimeout(() => {
       killedByRequestWatchdog = true;
       child.kill('SIGKILL');
-    }, 2_000);
+    }, 10_000);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -140,11 +216,17 @@ async function testHangingEndpointIsBounded(): Promise<void> {
         R2_ACCESS_KEY_ID: 'test-access',
         R2_SECRET_ACCESS_KEY: 'test-secret',
         R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
-        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+        // The deploy verifier deliberately saturates the host with backend and
+        // agents coverage workers. Leave enough time for the local TCP
+        // handshake while keeping the hung response deadline sharply bounded.
+        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000',
       },
       stdio: 'pipe',
     }
   );
+  const childOutput: Buffer[] = [];
+  child.stdout?.on('data', (chunk: Buffer) => childOutput.push(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => childOutput.push(chunk));
   let killedByStartupWatchdog = false;
   const startupWatchdog = setTimeout(() => {
     killedByStartupWatchdog = true;
@@ -156,8 +238,17 @@ async function testHangingEndpointIsBounded(): Promise<void> {
   server.closeAllConnections();
   server.close();
 
-  assert.equal(killedByStartupWatchdog, false, 'R2 deadline test CLI did not start');
-  assert.equal(requestObserved, true, 'R2 deadline test never reached the hanging endpoint');
+  const output = Buffer.concat(childOutput).toString('utf8').trim();
+  assert.equal(
+    killedByStartupWatchdog,
+    false,
+    `R2 deadline test CLI did not start${output === '' ? '' : `:\n${output}`}`
+  );
+  assert.equal(
+    requestObserved,
+    true,
+    `R2 deadline test never reached the hanging endpoint${output === '' ? '' : `:\n${output}`}`
+  );
   assert.equal(killedByRequestWatchdog, false, 'R2 request exceeded its client-owned deadline');
   assert.equal(code, 1, 'timed-out cache lookup must fail closed');
 }

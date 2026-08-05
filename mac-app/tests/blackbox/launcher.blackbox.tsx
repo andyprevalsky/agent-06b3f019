@@ -93,12 +93,14 @@ interface LauncherIpc {
   focusCallbacks: FocusCallback[];
   submitQuickQuery: ReturnType<typeof vi.fn>;
   hideQuickQuery: ReturnType<typeof vi.fn>;
+  resizeQuickQuery: ReturnType<typeof vi.fn>;
 }
 
 function installLauncherIpc(
   overrides: {
     submitQuickQuery?: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
     hideQuickQuery?: () => Promise<{ success: boolean }>;
+    resizeQuickQuery?: (payload: { height: number }) => Promise<{ success: boolean }>;
   } = {}
 ): LauncherIpc {
   const toggleCallbacks: ToggleCallback[] = [];
@@ -106,6 +108,7 @@ function installLauncherIpc(
 
   const submitQuickQuery = vi.fn(overrides.submitQuickQuery ?? (async () => ({ success: true })));
   const hideQuickQuery = vi.fn(overrides.hideQuickQuery ?? (async () => ({ success: true })));
+  const resizeQuickQuery = vi.fn(overrides.resizeQuickQuery ?? (async () => ({ success: true })));
 
   const partial: Partial<IPC> = {
     onQuickQueryToggle: (cb) => {
@@ -116,11 +119,27 @@ function installLauncherIpc(
     },
     submitQuickQuery,
     hideQuickQuery,
+    resizeQuickQuery,
   };
 
   installIpcMock(partial);
 
-  return { toggleCallbacks, focusCallbacks, submitQuickQuery, hideQuickQuery };
+  return { toggleCallbacks, focusCallbacks, submitQuickQuery, hideQuickQuery, resizeQuickQuery };
+}
+
+function makeDropFile(name: string, contents: string, type = 'text/plain'): File {
+  return new File([contents], name, { type });
+}
+
+function dropFilesOnLauncher(files: File[]): void {
+  const target = screen.getByTestId('launcher-drop-target');
+  const dataTransfer = {
+    files,
+    types: ['Files'],
+    items: files.map((file) => ({ kind: 'file', type: file.type, getAsFile: () => file })),
+  };
+  fireEvent.dragOver(target, { dataTransfer });
+  fireEvent.drop(target, { dataTransfer });
 }
 
 async function loadLauncherTree(): Promise<React.ReactNode> {
@@ -152,7 +171,7 @@ describe('launcher blackbox', () => {
     document.body.innerHTML = '';
   });
 
-  it('renders the query input and submit button on mount (happy-path empty state)', async () => {
+  it('renders the query input, attach button, and submit button on mount (happy-path empty state)', async () => {
     installLauncherIpc();
     const tree = await loadLauncherTree();
 
@@ -160,8 +179,11 @@ describe('launcher blackbox', () => {
 
     const input = screen.getByPlaceholderText('Enter any desire');
     expect(input).toBeInTheDocument();
+    expect(input.tagName).toBe('TEXTAREA');
     expect(input).toHaveValue('');
     expect(input).not.toBeDisabled();
+    expect(screen.getByTestId('attach-button')).toBeInTheDocument();
+    expect(screen.getByTestId('launcher-file-input')).toBeInTheDocument();
     expect(screen.getByTestId('submit-button')).toBeInTheDocument();
   });
 
@@ -351,5 +373,136 @@ describe('launcher blackbox', () => {
     // mount so the main process can open + focus it.
     expect(ipc.toggleCallbacks.length).toBeGreaterThanOrEqual(1);
     expect(ipc.focusCallbacks.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows a drop overlay while dragging files over the launcher', async () => {
+    installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const target = screen.getByTestId('launcher-drop-target');
+    expect(screen.queryByTestId('launcher-drag-overlay')).not.toBeInTheDocument();
+
+    fireEvent.dragOver(target, {
+      dataTransfer: { types: ['Files'], files: [] },
+    });
+    expect(screen.getByTestId('launcher-drag-overlay')).toHaveTextContent('Drop files here');
+
+    fireEvent.dragLeave(target, {
+      dataTransfer: { types: ['Files'], files: [] },
+    });
+    expect(screen.queryByTestId('launcher-drag-overlay')).not.toBeInTheDocument();
+  });
+
+  it('holds dropped files as chips and resizes the window', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('notes.txt', 'hello')]);
+
+    expect(await screen.findByTestId('launcher-attachments')).toBeInTheDocument();
+    expect(screen.getByTestId('launcher-attachment-chip')).toHaveTextContent('notes.txt');
+    await waitFor(() => {
+      expect(ipc.resizeQuickQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ height: expect.any(Number) })
+      );
+    });
+    const heights = ipc.resizeQuickQuery.mock.calls.map(
+      (call) => (call[0] as { height: number }).height
+    );
+    expect(heights.some((h) => h > 100)).toBe(true);
+  });
+
+  it('attaches files via the paperclip button file picker', async () => {
+    installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const fileInput = screen.getByTestId('launcher-file-input') as HTMLInputElement;
+    const file = makeDropFile('picked.txt', 'from-picker');
+    await act(async () => {
+      fireEvent.change(fileInput, { target: { files: [file] } });
+    });
+
+    expect(await screen.findByTestId('launcher-attachment-chip')).toHaveTextContent('picked.txt');
+  });
+
+  it('submits dropped file bytes with the query via submitQuickQuery', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('brief.md', '# plan', 'text/markdown')]);
+    await screen.findByTestId('launcher-attachment-chip');
+
+    await user.type(screen.getByPlaceholderText('Enter any desire'), 'summarize this');
+    await user.keyboard('{Enter}');
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('summarize this');
+    expect(payload.attachments).toHaveLength(1);
+    expect(payload.attachments?.[0]?.name).toBe('brief.md');
+    expect(payload.attachments?.[0]?.mimeType).toBe('text/markdown');
+    expect(payload.attachments?.[0]?.data.byteLength).toBeGreaterThan(0);
+  });
+
+  it('allows submit with attachments only (no typed query)', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    const user = userEvent.setup();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('solo.txt', 'only-file')]);
+    await screen.findByTestId('launcher-attachment-chip');
+
+    await user.click(screen.getByTestId('submit-button'));
+
+    await waitFor(() => {
+      expect(ipc.submitQuickQuery).toHaveBeenCalledTimes(1);
+    });
+    const payload = ipc.submitQuickQuery.mock.calls[0]?.[0] as QuickQueryPayload;
+    expect(payload.query).toBe('');
+    expect(payload.attachments).toHaveLength(1);
+    expect(payload.attachments?.[0]?.name).toBe('solo.txt');
+  });
+
+  it('rejects oversized dropped files and keeps the fetch invariant', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    // Avoid allocating a real 20MB buffer in jsdom — only the size check matters.
+    const huge = makeDropFile('huge.bin', 'x', 'application/octet-stream');
+    Object.defineProperty(huge, 'size', { value: 20 * 1024 * 1024 + 1 });
+    dropFilesOnLauncher([huge]);
+
+    expect(await screen.findByTestId('launcher-attach-error')).toHaveTextContent('20MB');
+    expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
+    expect(ipc.submitQuickQuery).not.toHaveBeenCalled();
+    expect(capturedRequests).toHaveLength(0);
+  });
+
+  it('clears held attachments when the launcher re-opens', async () => {
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    dropFilesOnLauncher([makeDropFile('temp.txt', 'x')]);
+    await screen.findByTestId('launcher-attachment-chip');
+
+    const toggle = ipc.toggleCallbacks[0];
+    expect(toggle).toBeDefined();
+    await act(async () => {
+      toggle({ open: true });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('launcher-attachment-chip')).not.toBeInTheDocument();
+    });
   });
 });

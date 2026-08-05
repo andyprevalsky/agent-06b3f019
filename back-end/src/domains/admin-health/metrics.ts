@@ -11,6 +11,7 @@ import type {
   AdminHealthRetentionCohort,
 } from './types';
 
+export { gmvPerTaskCents, sumGmvCents } from './gmvMetrics';
 export { buildSeries } from './series';
 
 const log = createLogger('AdminHealth');

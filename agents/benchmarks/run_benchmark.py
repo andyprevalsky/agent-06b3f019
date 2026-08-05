@@ -53,6 +53,7 @@ import httpx
 # Add parent dir to path so we can import from agents/
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from benchmarks.benchmark_tasks import (
+    RUNNABLE_TASK_RUNNERS,
     BenchmarkTask,
     all_tasks,
     apply_sub_agent_count,
@@ -198,6 +199,35 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
+# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
+# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
+# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
+# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
+# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
+# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
+# back-end/scripts/setup-benchmark-payment.ts. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
+    "agent-payment-setup-resume",
+    "agent-payment-idempotent-abandonment",
+    "agent-payment-abandonment",
+}
+# Production counterpart of the four sandbox tasks above, and the same hard requirement.
+# `agent-payment-production-abandonment` is /deploy Step 13c and asserts stripeHold succeeded plus
+# stripePaymentIntentCount 1; running it as the default (admin) benchmark user routes the mint to
+# `issueAdminCompanyCard`, which never creates a payment intent, so the gate cannot pass.
+# The identity is deliberately SEPARATE from AGENT_PAYMENT_LIFECYCLE_USER_ID: a user holds exactly
+# one Subscription row (one stripeCustomerId) and one agentcard Integration row (one cardholderId),
+# and production needs LIVE-mode values where the sandbox fixture needs TEST-mode ones. Must equal
+# BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID in back-end/src/domains/purchases/config.ts; provisioned
+# once by `back-end/scripts/setup-benchmark-payment.ts --live`.
+AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID = "00000000-0000-4000-8000-000000000107"
+AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES = {
+    AGENT_PAYMENT_PRODUCTION_TASK_NAME,
+    "agent-payment-production-purchase",
+}
 # Repeatable-cache baselines from local smoke run
 # 4657d9e8-6c05-48c2-bc20-1acd0513728a. The metric groups by authoritative
 # agent identity + call site and excludes one-shot calls. Per the one-way
@@ -1503,10 +1533,7 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
             return None
         # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
         # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
-        return (
-            os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
-            or AGENT_PAYMENT_BENCHMARK_USER_ID
-        )
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
 
@@ -1515,6 +1542,25 @@ def _free_credit_subscription_gate_user_id() -> str:
         os.environ.get("BENCHMARK_FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID", "").strip()
         or FREE_CREDIT_SUBSCRIPTION_GATE_USER_ID
     )
+
+
+def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
+    """The dedicated identity a task must run as, or None to use the default benchmark user.
+
+    Single source of truth for the run-user override so the mapping can be asserted directly
+    instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
+    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
+    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    """
+    if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
+        return _free_credit_subscription_gate_user_id()
+    if task_name in GATE_FIXTURE_TASK_USER_IDS:
+        return GATE_FIXTURE_TASK_USER_IDS[task_name]
+    if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+    if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+        return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    return None
 
 
 async def _api_headers() -> dict:
@@ -1601,6 +1647,53 @@ async def _preflight_message_person_bridge(base_url: str) -> None:
             "iMessage bench requires an updated, authenticated Mac app polling this exact backend; "
             f"last seen: {last_seen_at}"
         )
+
+
+PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT = (
+    "Provision it once with: cd back-end && STRIPE_SECRET_KEY=<production sk_live_ key> "
+    "BENCHMARK_AGENTCARD_CARDHOLDER_ID=<production cardholder id> "
+    "npx tsx scripts/setup-benchmark-payment.ts --live"
+)
+
+
+def _production_payment_identity_gap(usage: dict) -> Optional[str]:
+    """Why the production payment identity cannot complete a purchase, or None when it can.
+
+    `resolveAndIssuePurchaseCard` 402s a non-admin with no `Subscription.stripeCustomerId`, and an
+    agent with no credit headroom stops at OUT_OF_CREDITS before it ever reaches checkout. Both are
+    provisioning gaps, not product failures, so name them before the run spends live money.
+    """
+    tier = usage.get("tier")
+    if tier is None or tier == "":
+        return "it has no Subscription row, so no Stripe billing customer — every mint would 402"
+    remaining = usage.get("remaining")
+    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool) or remaining <= 0:
+        return f"it has no credit headroom (remaining={remaining!r}) — the agent stops at OUT_OF_CREDITS"
+    return None
+
+
+async def _preflight_production_payment_identity(base_url: str) -> None:
+    """Fail fast when the production payment identity was never provisioned.
+
+    Without this the deploy gate mints a LIVE AgentCard, then dies minutes later on an opaque 402.
+    A non-200 is only a warning: a transient backend blip must not abort the gate on its own.
+    """
+    user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=15) as client:
+        response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
+    if response.status_code != 200:
+        print(
+            f"    ⚠ Could not verify production payment identity {user_id} "
+            f"({response.status_code}): {response.text[:200]}"
+        )
+        return
+    gap = _production_payment_identity_gap(response.json())
+    if gap is None:
+        return
+    raise RuntimeError(
+        f"Production payment identity {user_id} is not provisioned: {gap}. {PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+    )
 
 
 def _benchmark_agent_source_override() -> str:
@@ -1692,6 +1785,12 @@ async def create_agent(
     world_model_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE", "real").strip().lower()
     if world_model_mode in {"simulate", "shadow"}:
         body["world_model_mode"] = world_model_mode
+
+    # A task may narrow the user context its agent sees. Used when a real user's
+    # connected data offers a route the scenario is not testing — the gate removes
+    # that shortcut without touching the prompt or the pass criteria.
+    if task.context_gates:
+        body["context_gates"] = task.context_gates
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -2086,6 +2185,27 @@ def _payment_abandonment_has_started(lifecycle: dict) -> bool:
     }
 
 
+# The AgentCard Organization MCP cap is org-wide (shared across every workspace
+# using these credentials) and its retryAfter points at the top of the next
+# window, so a refusal must wait that window out rather than burn its remaining
+# attempts inside the same closed minute.
+ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
+
+
+def _rate_limit_retry_delay(message: str) -> Optional[float]:
+    """Seconds to wait for an upstream rate-limit refusal, or None if not rate-limited."""
+    if "rate limit" not in message.lower() and "429" not in message:
+        return None
+    match = re.search(r'"retryAfterSeconds"\s*:\s*(\d+)', message)
+    if match:
+        return min(float(match.group(1)), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    match = re.search(r'"retryAfter"\s*:\s*(\d+)', message)
+    if match:
+        remaining = float(match.group(1)) / 1000.0 - time.time()
+        return min(max(remaining, 1.0), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
+
+
 async def _start_payment_abandonment_with_recovery(
     base_url: str,
     agent_id: str,
@@ -2109,7 +2229,16 @@ async def _start_payment_abandonment_with_recovery(
         try:
             return await abandon_payment(base_url, agent_id)
         except Exception as error:
-            if not isinstance(error, httpx.TransportError) and "Failed to abandon test payment: 5" not in str(error):
+            # A 429 from the org-wide MCP cap is retryable too: it means the
+            # request never ran, not that the lifecycle is broken. Without this
+            # the gate reported "cleanup did not complete" for a lifecycle that
+            # was already terminal-clean.
+            rate_limit_delay = _rate_limit_retry_delay(str(error))
+            if (
+                not isinstance(error, httpx.TransportError)
+                and "Failed to abandon test payment: 5" not in str(error)
+                and rate_limit_delay is None
+            ):
                 raise
             last_error = error
             try:
@@ -2121,11 +2250,13 @@ async def _start_payment_abandonment_with_recovery(
                 last_error = read_error
             if attempt >= max_attempts:
                 break
+            wait_seconds = rate_limit_delay if rate_limit_delay is not None else retry_delay_seconds
+            reason = "was rate limited" if rate_limit_delay is not None else "was indeterminate"
             print(
-                "    ⚠ Payment abandonment response was indeterminate; "
-                f"retrying ({attempt}/{max_attempts}): {error}"
+                f"    ⚠ Payment abandonment response {reason}; "
+                f"retrying ({attempt}/{max_attempts}) in {wait_seconds:.0f}s: {error}"
             )
-            await asyncio.sleep(retry_delay_seconds)
+            await asyncio.sleep(wait_seconds)
     raise RuntimeError(
         f"Payment abandonment remained unavailable after {max_attempts} attempts: {last_error}"
     ) from last_error
@@ -2137,6 +2268,9 @@ async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dic
         resp = await client.post(
             f"{base_url}/api/test-payment/lifecycle/agentcard-setup",
             headers=headers,
+            # The AgentCard integration must be reset/completed for the user the task actually runs
+            # as. Hardcoding the default benchmark user left the run user's integration untouched,
+            # so the setup fixture silently configured the wrong account.
             json={"userId": _current_benchmark_user_id(), "action": action},
         )
         if resp.status_code != 200:
@@ -2340,6 +2474,8 @@ def _count_logical_tool_calls_from_messages(messages: List[dict]) -> Dict[str, i
                     tool_call_id = call.get("tool_call_id")
                     if not isinstance(tool_name, str) or not tool_name or not tool_call_id:
                         continue
+                    if tool_name == "spawn_agent" and call.get("type") == "browser":
+                        tool_name = "spawn_browser_agent"
                     requested_key = (tool_name, str(tool_call_id))
                     if requested_key in seen:
                         continue
@@ -2848,9 +2984,7 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict
             if isinstance(pointer, dict):
                 return pointer
             raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
-        raise RuntimeError(
-            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
-        )
+        raise RuntimeError(f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}")
 
 
 # ============================================================
@@ -4394,20 +4528,49 @@ def _shared_workspace_database_url() -> Optional[str]:
         return None
 
     services_path = shared_context / "services.json"
-    try:
-        services = json.loads(services_path.read_text())
-    except (OSError, ValueError):
-        return None
-    if services.get("status") in {"failed", "stopped"}:
-        return None
+    if services_path.exists():
+        try:
+            services = json.loads(services_path.read_text())
+        except (OSError, ValueError):
+            return None
+        if services.get("status") in {"failed", "stopped"}:
+            return None
 
-    database = services.get("database") or {}
-    ports = services.get("ports") or {}
-    if database.get("use_system_postgres") is True:
-        database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+        database = services.get("database") or {}
+        ports = services.get("ports") or {}
+        if database.get("use_system_postgres") is True:
+            database_url = "postgresql://postgres:postgres@localhost:5432/victoria"
+        else:
+            port = database.get("port") or ports.get("local_db")
+            if not port:
+                return None
+            database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
     else:
-        port = database.get("port") or ports.get("local_db")
-        if not port:
+        # A shared run may leave its workspace-scoped Postgres alive after its
+        # services manifest is removed. Isolated stacks replace the inherited
+        # Conductor identity with their per-run identity, so derive the shared
+        # container from the physical repository directory exactly as
+        # scripts/lib/workspace-env.sh does. Never scan or guess another DB.
+        container = f"victoria-db-{REPO_ROOT.name}"
+        inspect = [
+            "docker",
+            "inspect",
+            container,
+            "--format",
+            '{{.State.Running}} {{(index (index .NetworkSettings.Ports "5432/tcp") 0).HostPort}}',
+        ]
+        try:
+            result = subprocess.run(inspect, capture_output=True, text=True, timeout=5)
+        except Exception:
+            return None
+        parts = result.stdout.strip().split()
+        if result.returncode != 0 or len(parts) != 2 or parts[0].lower() != "true":
+            return None
+        try:
+            port = int(parts[1])
+        except ValueError:
+            return None
+        if not 1 <= port <= 65535:
             return None
         database_url = f"postgresql://postgres:postgres@localhost:{port}/victoria"
 
@@ -4549,7 +4712,45 @@ def _database_urls_equivalent(left: str, right: str) -> bool:
     return identity(left) == identity(right)
 
 
+# Docker Desktop's daemon socket briefly refuses connections while it reaps a
+# previous run's containers, so a back-to-back benchmark can hit it mid-startup.
+# That is infrastructure noise, not a benchmark result — retrying it is what
+# stops a transient blip from being recorded as a task failure in the ledger.
+_TRANSIENT_LOCAL_SQL_MARKERS = (
+    "cannot connect to the docker daemon",
+    "docker daemon is not running",
+    "error during connect",
+    "connection refused",
+    "the database system is starting up",
+    "server closed the connection unexpectedly",
+)
+_LOCAL_SQL_ATTEMPTS = 4
+_LOCAL_SQL_RETRY_DELAY_SECONDS = 2.0
+
+
+def _is_transient_local_sql_error(stderr: str) -> bool:
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _TRANSIENT_LOCAL_SQL_MARKERS)
+
+
 def _run_local_victoria_sql(sql: str) -> str:
+    last_error = ""
+    for attempt in range(_LOCAL_SQL_ATTEMPTS):
+        try:
+            return _run_local_victoria_sql_once(sql)
+        except RuntimeError as error:
+            last_error = str(error)
+            if not _is_transient_local_sql_error(last_error) or attempt == _LOCAL_SQL_ATTEMPTS - 1:
+                raise
+            print(
+                f"    ⏳ Local DB unavailable (attempt {attempt + 1}/{_LOCAL_SQL_ATTEMPTS}), "
+                f"retrying: {last_error[:120]}"
+            )
+            time.sleep(_LOCAL_SQL_RETRY_DELAY_SECONDS)
+    raise RuntimeError(f"Local DB SQL failed: {last_error}")
+
+
+def _run_local_victoria_sql_once(sql: str) -> str:
     container = _local_victoria_db_container()
     if container:
         result = subprocess.run(
@@ -4993,10 +5194,7 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Claude keychain refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Claude keychain refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Claude keychain refresh error: {exc}")
@@ -5047,10 +5245,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Codex refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Codex refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Codex refresh error: {exc}")
@@ -5368,10 +5563,11 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     (``_refresh_local_compute_tokens_for_run``): prod can have zero *bench-usable*
     gpt_code (Codex) integrations (the usable rows are non-DEV / pooling-off, or
     Codex is quota-blocked). The live-mode tasks that take this overlay (browser,
-    payment) run on claude_code, not Codex, so gating them on gpt_code is a FALSE
-    infra failure — it dropped every live task while the pre-flight for the same
-    run already tolerated the exact same absence. A genuinely Codex-dependent task
-    still fails at runtime when its Codex call fails, not falsely here.
+    payment) do not spawn Codex, so gating them on gpt_code is a FALSE infra
+    failure. When Anthropic is excluded, their ordinary root/browser turns still
+    use the GPT-family provider waterfall (including OpenRouter); that is distinct
+    from requiring a gpt_code integration for a Codex sandbox. A genuinely
+    Codex-dependent task still fails at its own strict credential gate.
     """
     if _is_simulate_mode():
         print("    🌍 simulate mode — skipping the live credential overlay")
@@ -5384,7 +5580,10 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     # keep their own strict credential gates downstream. Without this, an exhausted
     # org-wide Codex quota failed every browser task at the fixture (0/8 ecommerce).
     if _anthropic_family_excluded():
-        synced_compute_tokens = _sync_compute_tokens(required_token_types=("gpt",))
+        synced_compute_tokens = _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        )
     else:
         synced_compute_tokens = _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
@@ -5406,7 +5605,7 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     Real local tasks refresh from the verified shared workspace. Simulated cloud
-    stacks already restore the current dated seed dump and deliberately have no
+    stacks already restore the canonical base fixture and deliberately have no
     second source DB endpoint, so they use that restored credential state.
     """
     if not _is_local_base_url(base_url):
@@ -5415,7 +5614,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     if _anthropic_family_excluded():
-        if not _sync_compute_tokens(required_token_types=("gpt",)):
+        if not _sync_compute_tokens(
+            tolerate_gpt_code_unavailable=True,
+            required_token_types=("gpt",),
+        ):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
         if not database_url:
@@ -5444,6 +5646,13 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     # above: it drops every live task before an agent is ever created, so the
     # slice cannot produce a verdict at all. Tasks that genuinely require
     # claudeAuth keep their own strict gates downstream.
+    # Always tolerate. Deriving this from a funded Anthropic key is the
+    # fail-closed form that killed epoch 4 of the ecommerce descent: the dev
+    # claude_code row was EXPIRED and the rest rate-limited, so three tasks
+    # died on 'No usable claude_code integrations after sync' at $0.00,
+    # before an agent existed. claude_code only routes inference to Anthropic
+    # at $0 instead of the paid waterfall; the Rose pools race OpenRouter
+    # without it. Cost degradation is announced below instead.
     tolerate_missing_claude = True
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
@@ -5696,6 +5905,11 @@ def _restore_live_fixture_scenarios(manifests: list[dict]) -> None:
             _restore_amazon_passkey_scenario(manifest)
 
 
+async def _restore_live_fixture_scenarios_async(manifests: list[dict]) -> None:
+    """Restore blocking browser fixtures without freezing concurrent task polling."""
+    await asyncio.to_thread(_restore_live_fixture_scenarios, manifests)
+
+
 LIVE_FIXTURE_APPLIERS = {
     "live": _apply_live_fixture,
 }
@@ -5723,6 +5937,13 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     required_cookie_domains = tuple(str(d).strip() for d in raw_required_domains if str(d).strip())
     # Same reasoning as the blanket pre-flight above: a missing Claude compute
     # token degrades cost, it does not remove a capability the task needs.
+    # Always tolerate. Deriving this from a funded Anthropic key is the
+    # fail-closed form that killed epoch 4 of the ecommerce descent: the dev
+    # claude_code row was EXPIRED and the rest rate-limited, so three tasks
+    # died on 'No usable claude_code integrations after sync' at $0.00,
+    # before an agent existed. claude_code only routes inference to Anthropic
+    # at $0 instead of the paid waterfall; the Rose pools race OpenRouter
+    # without it. Cost degradation is announced below instead.
     tolerate_missing_claude = True
     ctx = LiveFixtureContext(
         base_url=base_url,
@@ -5737,9 +5958,12 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
         applier = LIVE_FIXTURE_APPLIERS.get(name)
         if applier is None:
             raise RuntimeError(f"{task.name}: unknown live_fixture '{name}'")
-        manifests.append(applier(ctx))
+        # Credential overlays shell out to seed processes and can take minutes.
+        # Keep that blocking work off the event loop so an unrelated benchmark
+        # lane can still poll its agent and observe completion before its cap.
+        manifests.append(await asyncio.to_thread(applier, ctx))
     if task.name == AMAZON_PASSKEY_TASK_NAME and not _is_simulate_mode():
-        manifests.append(_apply_amazon_passkey_scenario(ctx))
+        manifests.append(await asyncio.to_thread(_apply_amazon_passkey_scenario, ctx))
     return manifests
 
 
@@ -6639,6 +6863,50 @@ def _webdecoy_exact_score_from_network_log(index_path: Path) -> Optional[float]:
     return scored_entries[-1][1]
 
 
+def _webdecoy_engine_version_from_network_log(index_path: Path) -> Optional[str]:
+    """Read the FCaptcha engine version the demo page advertised ("Running vX.Y.Z").
+
+    The gated score is produced by a third-party detector we do not control, so a
+    vendor release can move it with no change on our side. Capturing the version
+    next to the score is what makes those two cases distinguishable after the fact.
+    """
+    if not index_path.exists():
+        return None
+    try:
+        index = json.loads(index_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    entries = index.get("entries", [])
+    if not isinstance(entries, list):
+        return None
+
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        if "webdecoy.com/product/fcaptcha-demo" not in str(entry.get("url") or ""):
+            continue
+        body_file = entry.get("body_file")
+        if not isinstance(body_file, str) or not body_file:
+            continue
+        try:
+            body = (index_path.parent / body_file).read_text(errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"Running v([0-9]+(?:\.[0-9]+)*)", body)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _webdecoy_engine_version_from_recordings(data: dict) -> Optional[str]:
+    for index_path in _webdecoy_network_recording_paths(data):
+        version = _webdecoy_engine_version_from_network_log(index_path)
+        if version is not None:
+            return version
+    return None
+
+
 def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     scores: List[float] = []
     for index_path in _webdecoy_network_recording_paths(data):
@@ -6693,10 +6961,24 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     # code change — the current external anti-bot floor (Steel proxy IP reputation)
     # sits 0.003 above the prior ratchet. Resume ratcheting DOWN as the floor improves.
     WEBDECOY_RISK_RATCHET = 0.163
+    # Engine version is diagnostic only — it NEVER relaxes the comparison above.
+    # It exists so a vendor recalibration is visible in the failure line instead of
+    # being misread as an anti-detection regression on our side. Reference points:
+    # FCaptcha v1.14.0/v1.15.0 scored a bit-identical 0.15595 across 14 runs and 13
+    # distinct egress IPs (2026-07-18..07-26); the v1.18.0 release moved the same
+    # unchanged client to 0.18296 while every reported categoryScore sat at 0.
     if final_score > WEBDECOY_RISK_RATCHET:
+        engine_version = _webdecoy_engine_version_from_recordings(data)
+        version_note = (
+            f" [FCaptcha engine v{engine_version}; a version change here means the third-party"
+            f" detector was recalibrated — compare against the version on the last passing run"
+            f" before treating this as an anti-detection regression]"
+            if engine_version
+            else ""
+        )
         return False, (
             f"FCaptcha {score_source} risk score {final_score:.3f} exceeds ratchet {WEBDECOY_RISK_RATCHET:.3f} "
-            f"(lower = more human; this gate only ratchets down, never up)"
+            f"(lower = more human; this gate only ratchets down, never up){version_note}"
         )
     return True, None
 
@@ -7313,22 +7595,42 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
         if not isinstance(text_value, str):
             text_value = json.dumps(text_value, default=str)
         metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        evidence_metadata = {
+            key: metadata[key]
+            for key in (
+                "action_type",
+                "toolName",
+                "toolStatus",
+                "url",
+                "title",
+                "browser_session_metadata",
+            )
+            if key in metadata
+        }
         evidence.append(
             {
                 "role": role or "UNKNOWN",
                 "text": text_value[:12000],
-                "metadata": {
-                    key: metadata[key]
-                    for key in (
-                        "action_type",
-                        "toolName",
-                        "toolStatus",
-                        "url",
-                        "title",
-                        "browser_session_metadata",
-                    )
-                    if key in metadata
-                },
+                "metadata": evidence_metadata,
+            }
+        )
+    # The frontend renders completionSummary metadata as the root agent's final
+    # answer card, while its backing TOOL message normally has empty text. Give
+    # the semantic judge the same summary + outputs as one normalized assistant
+    # row; omit tool usage and cost metadata that are not part of that answer.
+    summaries = _final_completion_summaries(data)
+    if summaries:
+        completion = summaries[-1]
+        outputs = completion.get("outputs")
+        payload = {
+            "summary": str(completion.get("summary") or "")[:12000],
+            "outputs": outputs[:100] if isinstance(outputs, list) else [],
+        }
+        evidence.append(
+            {
+                "role": "ASSISTANT",
+                "text": json.dumps(payload, default=str),
+                "metadata": {"evidence_type": "final_completion"},
             }
         )
     evidence.append({"benchmark_state": data.get("_benchmark", {})})
@@ -7946,6 +8248,13 @@ async def run_single_task(
 ) -> TaskResult:
     """Run a single benchmark task. Returns TaskResult."""
     _validate_task_target(task, base_url)
+    # The SMS supervisor is not a Temporal agent — it is an in-backend tool loop
+    # woken by an inbound text. It gets its own driver; everything around this
+    # call (selection, concurrency, history, run records) is unchanged.
+    if task.runner == "sms":
+        from benchmarks.sms_runner import build_deps_from_module, run_sms_task
+
+        return await run_sms_task(base_url, task, build_deps_from_module(sys.modules[__name__]))
     # Parallel suites can queue a long-running Claude task for several minutes.
     # A credential that was available during the suite-level preflight may be
     # invalidated or enter cooldown before this task obtains its execution slot.
@@ -7955,9 +8264,19 @@ async def run_single_task(
         print(f"  ⚠ Claude Code credentials unavailable at task dispatch — skipping: {task.name}")
         return _claude_code_credential_skip_result(task)
     previous_benchmark_user_id = os.environ.get("BENCHMARK_RUN_USER_ID")
-    task_user_id = _benchmark_user_id_for_task(task.name, base_url)
-    if task_user_id is not None:
-        os.environ["BENCHMARK_RUN_USER_ID"] = task_user_id
+    # Includes the non-admin payment identities: the admin funding path mints a company-funded card
+    # with no personal Stripe hold, which the lifecycle tasks explicitly assert.
+    # `_benchmark_user_id_for_task` is base-URL aware (it declines to redirect a sandbox payment
+    # task pointed at a remote stack, where the synthetic fixture user does not exist) and honors
+    # the harness env override; `benchmark_run_user_id_for_task` supplies the production lifecycle
+    # identity, which only exists there.
+    run_user_id_override = _benchmark_user_id_for_task(task.name, base_url)
+    if run_user_id_override is None and task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
+        run_user_id_override = benchmark_run_user_id_for_task(task.name)
+    if run_user_id_override:
+        os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
+    if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
+        await _preflight_production_payment_identity(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
@@ -8406,9 +8725,7 @@ async def run_single_task(
 
         if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME and passed:
             try:
-                payment_confirmation_error = await validate_agent_payment_confirmation_contract(
-                    data, agent_id
-                )
+                payment_confirmation_error = await validate_agent_payment_confirmation_contract(data, agent_id)
                 if payment_confirmation_error:
                     passed = False
                     failure_reason = payment_confirmation_error
@@ -8731,7 +9048,7 @@ async def run_single_task(
                 _run_plaid_transactions_fixture("cleanup")
             except Exception as exc:
                 print(f"    ⚠ Failed to clean up synthetic Plaid transaction fixture: {exc}")
-        _restore_live_fixture_scenarios(live_fixture_manifests)
+        await _restore_live_fixture_scenarios_async(live_fixture_manifests)
         if previous_benchmark_user_id is None:
             os.environ.pop("BENCHMARK_RUN_USER_ID", None)
         else:
@@ -8785,11 +9102,11 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
     explicit_task_names = task_names_from_args(args)
     if explicit_task_names:
         tasks = [get_task_by_name(name) for name in explicit_task_names]
-        non_agent_tasks = [task for task in tasks if task.runner != "agent"]
-        if non_agent_tasks:
-            names = ", ".join(f"{task.name} ({task.runner})" for task in non_agent_tasks)
+        unsupported = [task for task in tasks if task.runner not in RUNNABLE_TASK_RUNNERS]
+        if unsupported:
+            names = ", ".join(f"{task.name} ({task.runner})" for task in unsupported)
             raise ValueError(
-                f"Task(s) {names} are not agent evals — run them via "
+                f"Task(s) {names} are not runnable here — run them via "
                 f"benchmarks/run_eval_suite.py or their own test runner, not run_benchmark.py."
             )
     elif args.suite:
@@ -8815,7 +9132,7 @@ def resolve_tasks(args) -> List[BenchmarkTask]:
         # Suite selection only runs complete benchmark evals. `status == "incomplete"`
         # entries (missing fixtures/judges) are skipped; explicit --task still targets
         # incomplete agent evals for dev iteration.
-        tasks = [t for t in tasks if t.runner == "agent" and t.status == "ready"]
+        tasks = [t for t in tasks if t.runner in RUNNABLE_TASK_RUNNERS and t.status == "ready"]
         if not getattr(args, "prod", False):
             tasks = [t for t in tasks if not t.production_only]
 
@@ -9216,9 +9533,10 @@ async def _terminate_stale_workflows():
     prevents cascading resource exhaustion.
     """
     try:
-        from temporalio.client import Client, TLSConfig
+        from temporalio.client import Client
 
         from config import load_config
+        from temporal_connection import temporal_connect_options
 
         workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
         if not workspace:
@@ -9247,12 +9565,11 @@ async def _terminate_stale_workflows():
 
         client = await Client.connect(
             config.temporal.address,
-            namespace=config.temporal.namespace,
-            tls=TLSConfig(client_cert=None, client_private_key=None),
-            rpc_metadata={
-                "temporal-namespace": config.temporal.namespace,
-                "Authorization": f"Bearer {config.temporal.api_key}",
-            },
+            **temporal_connect_options(
+                config.temporal.address,
+                config.temporal.namespace,
+                config.temporal.api_key,
+            ),
         )
 
         query = f'TaskQueue = "{task_queue}" AND ExecutionStatus = "Running"'
@@ -9500,6 +9817,12 @@ def _parallel_task_runners(
         "on",
     }
     browser_profile_writer = None if isolated_browser_profiles else asyncio.Semaphore(1)
+    # The SMS supervisor is a per-user singleton: one phone, one SmsSession row,
+    # one web_search fixture file. Two SMS tasks in flight together interleave
+    # inbound texts on the same transcript, and each one's _reset_session wipes
+    # the other's. Serialize them against each other; they still run alongside
+    # non-SMS work.
+    sms_surface = asyncio.Semaphore(1)
 
     async def run_with_batch_limit(task: BenchmarkTask) -> TaskResult:
         if semaphore is None:
@@ -9512,6 +9835,11 @@ def _parallel_task_runners(
             # Acquire the resource-specific lock first so a queued browser task
             # does not consume a general slot that non-browser work can use.
             async with browser_profile_writer:
+                return await run_with_batch_limit(task)
+        # getattr: the parallel-scheduler test drives this with a minimal task
+        # stub, and a missing runner just means the default agent runner.
+        if getattr(task, "runner", "agent") == "sms":
+            async with sms_surface:
                 return await run_with_batch_limit(task)
         return await run_with_batch_limit(task)
 
@@ -9551,9 +9879,7 @@ def _parallel_task_phases(
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
     if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
         auth_reading_siblings = [
-            task
-            for task in tasks
-            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+            task for task in tasks if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
         ]
         if not auth_reading_siblings:
             exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)

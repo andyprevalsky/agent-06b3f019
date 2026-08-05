@@ -10,6 +10,7 @@ import {
   getAgent,
   createAgent as createAgentAPI,
   postMessage as postMessageAPI,
+  uploadAttachment as uploadAttachmentAPI,
   resumeAgent as resumeAgentAPI,
   pauseAgent as pauseAgentAPI,
   checkAndRespondToAttentionRequest as checkAttentionAPI,
@@ -43,6 +44,10 @@ export async function createAgent(payload: CreateAgentPayload) {
 
 export async function postMessage(agentId: string, message: string, attachments?: FilePointer[]) {
   return postMessageAPI(agentId, message, attachments);
+}
+
+export async function uploadAttachment(file: File, onProgress?: (progress: number) => void) {
+  return uploadAttachmentAPI(file, onProgress);
 }
 
 // ── Agent lifecycle ───────────────────────────────────────────────────────

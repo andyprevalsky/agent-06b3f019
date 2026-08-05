@@ -360,24 +360,56 @@ export function buildFingerprintScript(fp: FingerprintData): string {
                 }
               } catch (e) {}
 
-              // Override timezone via Intl.DateTimeFormat
+              // Override timezone so format output matches the user's location.
+              // CRITICAL: patching only resolvedOptions().timeZone is insufficient —
+              // format() and Date#toLocaleString still use the host TZ (Kernel VMs
+              // are Eastern). Force fp.timezone into options unless the caller set
+              // an explicit timeZone. Chromium's Date#toLocale* path does not always
+              // go through the Intl.DateTimeFormat constructor we replace, so patch
+              // those methods too.
+              const _withUserTimeZone = (options) => {
+                if (!fp.timezone) return options;
+                if (options === undefined || options === null) {
+                  return { timeZone: fp.timezone };
+                }
+                if (typeof options === 'object' && options.timeZone === undefined) {
+                  return Object.assign({}, options, { timeZone: fp.timezone });
+                }
+                return options;
+              };
               const originalDateTimeFormat = Intl.DateTimeFormat;
               Intl.DateTimeFormat = function(...args) {
-                const instance = new originalDateTimeFormat(...args);
+                const locales = args[0];
+                const callerOptions = args[1];
+                const options = _withUserTimeZone(callerOptions);
+                const instance = new originalDateTimeFormat(locales, options);
                 const originalResolvedOptions = instance.resolvedOptions.bind(instance);
+                const callerSetTimeZone =
+                  callerOptions !== undefined &&
+                  callerOptions !== null &&
+                  typeof callerOptions === 'object' &&
+                  callerOptions.timeZone !== undefined;
                 instance.resolvedOptions = function() {
-                  const options = originalResolvedOptions();
-                  options.timeZone = fp.timezone;
-                  return options;
+                  const resolved = originalResolvedOptions();
+                  // Only advertise the user location when the caller did not
+                  // request a different explicit timeZone.
+                  if (fp.timezone && !callerSetTimeZone) resolved.timeZone = fp.timezone;
+                  return resolved;
                 };
                 return instance;
               };
               Intl.DateTimeFormat.prototype = originalDateTimeFormat.prototype;
               Intl.DateTimeFormat.supportedLocalesOf = originalDateTimeFormat.supportedLocalesOf;
 
+              for (const method of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
+                const original = Date.prototype[method];
+                Date.prototype[method] = function(locales, options) {
+                  return original.call(this, locales, _withUserTimeZone(options));
+                };
+              }
+
               // Override Date.prototype.getTimezoneOffset
               if (fp.timezoneOffset !== undefined) {
-                const originalGetTimezoneOffset = Date.prototype.getTimezoneOffset;
                 Date.prototype.getTimezoneOffset = function() {
                   return fp.timezoneOffset;
                 };

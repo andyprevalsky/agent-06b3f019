@@ -47,6 +47,16 @@ require_text "$FORMAT" "reproduction command that failed before the change and n
   "Detail must name the unchanged failing-then-passing test"
 require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
+require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
+  "approval requests must include a concrete FE agent link"
+require_text "$FORMAT" 'verified rendered' \
+  "approval requests must report successful FE-link verification"
+require_text "$FORMAT" 'verified reachable' \
+  "approval requests must distinguish HTTP reachability from visual rendering"
+require_text "$FORMAT" 'expired/unreachable' \
+  "approval requests must report dead FE links honestly"
+require_text "$FORMAT" 'restore an archived viewer without rerunning a' \
+  "approval requests must restore archived FE evidence when safe"
 require_text "$FORMAT" "Never invent a failing test." \
   "approval requests must distinguish proactive changes from reproduced failures"
 

@@ -370,11 +370,11 @@ class GrepTool(BaseModel):
                 "gmail",
                 "imessage",
                 "whatsapp",
-                "sms",
                 "network",
                 "agent_network",
                 "transactions",
                 "documents",
+                "summary",
             ]
         ]
     ] = Field(
@@ -385,12 +385,18 @@ class GrepTool(BaseModel):
             "concrete sources (e.g. [\"email\"], or [\"email\", \"imessage\"]). Omit entirely to "
             "search the local defaults (messages, network, agent_network). "
             "Channels of the user's communications: email searches the user's email/Gmail; "
-            "imessage searches iMessage; whatsapp searches WhatsApp; sms searches SMS. "
+            "imessage searches iMessage (including SMS stored in the Mac Messages DB); "
+            "whatsapp searches WhatsApp. "
             "messages is the umbrella over all communication channels (use only when the channel "
             "is genuinely unknown). network searches contact records. agent_network searches all "
             "message roles in the current agent tree and returns role/location metadata. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "summary returns a compact, precomputed inventory with message counts, date ranges, "
+            "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
+            "aggregate questions such as total messages, date coverage, or most-contacted threads; "
+            "then use the concrete channel source to inspect exact message text. Thread identifiers "
+            "in the summary are valid contact identifiers when no human-readable name is stored. "
             "If a named source's connector isn't connected, the search returns a 'source not "
             "connected' notice and the user is automatically asked to connect it - do NOT retry "
             "that source; continue with the sources you can reach."
@@ -403,11 +409,11 @@ class GrepTool(BaseModel):
             "gmail",
             "imessage",
             "whatsapp",
-            "sms",
             "network",
             "agent_network",
             "transactions",
             "documents",
+            "summary",
         ]
     ] = Field(
         default=None,
@@ -465,12 +471,18 @@ class GrepTool(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(
         default=None,
         description=(
-            "Source-specific nested filters. For transactions: since, until, account, min_amount, "
-            "max_amount, status ('posted', 'pending', or 'all'), include_pending_in_totals. "
-            "For messages: person and since. For documents: document_source, since, until, path, and tag; "
+            "Nested per-source filters. Each source accepts only its own keys:\n"
+            "  messages (and email, gmail, imessage, whatsapp): person, since, path\n"
+            "  network: path\n"
+            "  agent_network: path\n"
+            "  transactions: since, until, account, min_amount, max_amount, "
+            "status ('posted', 'pending', or 'all'), include_pending_in_totals, path\n"
+            "  documents: document_source, since, until, tag, path\n"
             "documents is an umbrella corpus, so set document_source to the concrete provider "
             "(chatgpt, claude, apple_notes, or obsidian). "
-            "Unsupported filters are rejected by the backend for the selected source."
+            "`path` takes a path from an earlier result "
+            "(e.g. 'network/Andy Prevalsky.contact', 'messages/+15551234567.thread') "
+            "to scope the search to that record or thread."
         ),
     )
     person: Optional[str] = Field(
@@ -647,7 +659,13 @@ class SpawnAgentTool(BaseModel):
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
             "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
             "cross-domain multi-step work; 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out."
+            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+            "identity - an email address and phone number it can read delivered messages at, including "
+            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+            "user has connected as an integration; any other address, including one you compose from the "
+            "user's name, is write-only to it."
         )
     )
     goal: str = Field(

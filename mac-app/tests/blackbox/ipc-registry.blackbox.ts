@@ -1005,6 +1005,48 @@ describe('ipc-registry: whatsapp channels', () => {
     expect(result.success).toBe(false);
     expect(result.error).toBe('qr-timeout');
   });
+
+  it('whatsapp:connect refuses to dial WhatsApp when there is no machine session', async () => {
+    // Pairing uploads history to the backend, so an unauthenticated connect must
+    // fail BEFORE a QR is ever shown — otherwise the user pairs their phone and
+    // every later flush is silently dropped for lack of a session.
+    authGetSession.mockReset();
+    authGetSession.mockResolvedValue(null);
+
+    const result = await invoke<{ success: boolean; error?: string }>('whatsapp:connect');
+    expect(result.success).toBe(false);
+    expect(waConnect).not.toHaveBeenCalled();
+  });
+
+  it('whatsapp:disconnect wraps errors as {success:false, error}', async () => {
+    waDisconnect.mockRejectedValueOnce(new Error('socket-stuck'));
+    const result = await invoke<{ success: boolean; error?: string }>('whatsapp:disconnect');
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('socket-stuck');
+  });
+
+  it('whatsapp:logout wraps errors as {success:false, error}', async () => {
+    waLogout.mockRejectedValueOnce(new Error('creds-locked'));
+    const result = await invoke<{ success: boolean; error?: string }>('whatsapp:logout');
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('creds-locked');
+  });
+
+  it('falls back to a generic message when the thrown error carries no message', async () => {
+    // getErrorMessage() passes an Error's own (empty) message straight through,
+    // so the `|| default` arm is what keeps the renderer from showing a blank
+    // error string.
+    waDisconnect.mockRejectedValueOnce(new Error(''));
+    await expect(
+      invoke<{ success: boolean; error?: string }>('whatsapp:disconnect')
+    ).resolves.toEqual({ success: false, error: 'Disconnect failed' });
+
+    waLogout.mockRejectedValueOnce(new Error(''));
+    await expect(invoke<{ success: boolean; error?: string }>('whatsapp:logout')).resolves.toEqual({
+      success: false,
+      error: 'Logout failed',
+    });
+  });
 });
 
 describe('ipc-registry: telegram channels (non-backend)', () => {

@@ -118,6 +118,10 @@ async function main() {
       lastSuccessfulSyncAt: new Date(),
       config: { encryptedCredentials },
       poolingEnabled,
+      // CODEX_TOKEN_POOLING_ENABLED is an explicit operator choice, so pin it as
+      // an override — the account-level poolTokensByDefault policy must not
+      // silently re-pool a token this script deliberately kept out of the pool.
+      poolingEnabledOverride: poolingEnabled,
       rateLimitedUntil: null,
       failureReason: null,
     },
@@ -129,6 +133,10 @@ async function main() {
       lastSuccessfulSyncAt: new Date(),
       config: { encryptedCredentials },
       poolingEnabled,
+      // CODEX_TOKEN_POOLING_ENABLED is an explicit operator choice, so pin it as
+      // an override — the account-level poolTokensByDefault policy must not
+      // silently re-pool a token this script deliberately kept out of the pool.
+      poolingEnabledOverride: poolingEnabled,
       rateLimitedUntil: null,
       failureReason: null,
     },

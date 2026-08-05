@@ -1120,8 +1120,8 @@
   {
     "name": "browser-agent-amazon-cookie-payment",
     "title": "Amazon Cookie Auth Payment Write Lock",
-    "description": "Buy a qualifying Amazon beanie through the normal cart path and complete the purchase.",
-    "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Use my saved/default Amazon payment method and shipping address; do not request or add a new payment card when a valid saved method is already selected. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
+    "description": "Buy one black beanie on Amazon for less than $35 without using Buy Now.",
+    "prompt": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1138,12 +1138,9 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1152,58 +1149,6 @@
     },
     "tool_count_scope": "root",
     "start_phase": "execute",
-    "response_schema": {
-      "fields": [
-        {
-          "name": "selected_beanie_title",
-          "type": "str",
-          "required": true,
-          "description": "Exact title of the purchased black beanie"
-        },
-        {
-          "name": "selected_beanie_url",
-          "type": "str",
-          "required": true,
-          "description": "Amazon product URL of the purchased black beanie"
-        },
-        {
-          "name": "selected_beanie_price_usd",
-          "type": "float",
-          "required": true,
-          "description": "Grounded item price in USD, below 35"
-        },
-        {
-          "name": "quality_evidence",
-          "type": "str",
-          "required": true,
-          "description": "Grounded rating and review count or material details observed on the product page"
-        },
-        {
-          "name": "order_confirmation_id",
-          "type": "str",
-          "required": true,
-          "description": "Amazon order number from the confirmation page"
-        },
-        {
-          "name": "purchase_completed",
-          "type": "bool",
-          "required": true,
-          "description": "True only after the order was placed"
-        },
-        {
-          "name": "cart_checkout_used",
-          "type": "bool",
-          "required": true,
-          "description": "True when Add to Cart and Proceed to checkout were used"
-        },
-        {
-          "name": "buy_now_used",
-          "type": "bool",
-          "required": true,
-          "description": "False when the forbidden Buy Now path was not used"
-        }
-      ]
-    },
     "environment": {
       "mode": "live",
       "db_fixtures": [],
@@ -1221,7 +1166,7 @@
       "live_targets": [
         "https://www.amazon.com"
       ],
-      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to complete one auto-approved cart purchase.",
+      "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to reach the final Amazon purchase write lock. The runner leaves that request unresolved and does not place the order.",
       "live_cookie_domains": [
         "amazon.com"
       ],
@@ -1236,7 +1181,7 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved purchase approval: payment-card approval or final write approval",
+          "Exactly one final Amazon purchase write lock is triggered and left unresolved",
           "The approval request identifies the beanie and its price"
         ],
         "checks": [
@@ -1247,10 +1192,6 @@
             "type": "browser_agent_session_count",
             "min": 1,
             "max": 1
-          },
-          {
-            "type": "agent_status",
-            "value": "COMPLETED"
           },
           {
             "type": "approval_request_count",
@@ -1269,11 +1210,12 @@
         "id": "amazon-beanie-checkout-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The selected product is one black beanie priced under $35, and grounded rating, review, material, or product-detail evidence supports that it is well-made",
-          "The agent uses the normal cart and checkout path rather than Buy Now",
-          "The trajectory shows the qualifying purchase completed after exactly one approved purchase boundary: payment-card approval or final write approval"
+          "The selected product is one black beanie priced under $35",
+          "The trajectory does not use the Buy Now button",
+          "The final Place your order or Pay now action triggers exactly one unresolved write_lock request",
+          "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Pass only when browser/tool evidence grounds the exact product, price, quality basis, normal cart path, and completed purchase. Authentication assistance, unsupported quality claims, or use of Buy Now is a failure."
+        "judge_prompt": "Pass only when browser/tool evidence grounds one black beanie priced under $35, shows no use of the Buy Now button, and stops at exactly one unresolved final Amazon purchase write lock before the order is placed. Fail for authentication assistance, payment-card approval, use of Buy Now, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1414,7 +1356,7 @@
   {
     "name": "browser-toast-nopa-write-lock",
     "title": "Toast Nopa Fish Order - Cloudflare Challenge + Payment Card",
-    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building using the official Toast pickup flow. Start the browser order at https://order.toasttab.com/online/nopafish for Nopa Fish, 1 Ferry Building Suite 31, San Francisco, CA. Inspect the live Toast menu, choose the closest matching single rocky fish sandwich item (currently often named The Rocky Sandwich), add quantity 1, proceed through checkout, and stop at/handle the write-lock approval before placing the order as the harness expects. Do not use Google, DoorDash, Uber Eats, or other delivery-platform search as the primary path; only fall back away from Toast if the Toast ordering page itself is technically blocked, and report the exact blocker.",
+    "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1433,41 +1375,6 @@
     "attachment": null,
     "approval_handling": "ignore",
     "expected_attention_kind": "payment_approval",
-    "expected_payment_receipt": {
-      "merchant": "Nopa Fish (Toast - order.toasttab.com)",
-      "currency": "USD",
-      "lineItems": [
-        {
-          "name": "The Rocky Sandwich",
-          "quantity": 1
-        }
-      ],
-      "requiredFields": [
-        "merchant",
-        "currency",
-        "lineItems",
-        "fees",
-        "subtotalCents",
-        "totalCents",
-        "fingerprint",
-        "userId",
-        "agentId"
-      ],
-      "requiredLineItemFields": [
-        "name",
-        "imageUrl",
-        "productUrl",
-        "rating",
-        "reviewCount",
-        "unitPriceCents",
-        "quantity",
-        "lineTotalCents"
-      ],
-      "requiredFeeFields": [
-        "label",
-        "amountCents"
-      ]
-    },
     "success_on_payment_card_request": true,
     "start_phase": "execute",
     "environment": {
@@ -1481,29 +1388,27 @@
         "order.toasttab.com",
         "payment_approval"
       ],
-      "secrets": [],
+      "secrets": [
+        "live_browser_auth"
+      ],
       "live_targets": [
         "https://order.toasttab.com/online/nopafish"
       ],
-      "context_notes": "Live Toast menu and guest-checkout flow. The live fixture scopes browser-state refresh to Toast before the payment-card approval probe, but no saved login is required.",
+      "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe.",
       "live_cookie_domains": [
         "toasttab.com"
       ]
     },
     "evaluators": [
       {
-        "id": "toast-payment-receipt",
-        "method": "static_check",
+        "id": "toast-order-semantics",
+        "method": "single_turn_llm_judge",
         "criteria": [
-          "A validated payment-card request names Nopa Fish on Toast and contains one The Rocky Sandwich line item",
-          "The approval contains every required receipt, line-item, fee, identity, and fingerprint field",
-          "The complete receipt satisfies the request_payment_card schema"
+          "The browser and payment-request evidence semantically identify Nopa Fish at the Ferry Building using the official Toast checkout, regardless of exact display-label or URL syntax",
+          "The evidence semantically contains exactly one rocky fish sandwich, allowing the live menu item to use a more specific product name such as The Rocky Sandwich",
+          "The run stops at one unresolved payment-card request and does not enter card details or place the order"
         ],
-        "checks": [
-          {
-            "type": "expected_payment_receipt"
-          }
-        ]
+        "judge_prompt": "Judge the entire outcome from visible browser, tool, and payment-request evidence by meaning rather than exact strings. Fail a different business, non-Toast checkout, wrong item or quantity, missing unresolved card request, entered card details, or a completed order."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -2521,6 +2426,10 @@
       ],
       "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
     },
+    "context_gates": {
+      "integrations": false,
+      "recent_communications": false
+    },
     "evaluators": [
       {
         "id": "primary",
@@ -2651,7 +2560,7 @@
     "name": "browser-bing-search-single-result",
     "title": "Browser Bing Search Single Result",
     "description": "Use the browser agent to perform a Bing search and return one result.",
-    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
+    "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2798,6 +2707,28 @@
         "openKinds": []
       }
     },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+    },
     "bench": "pipeline-e2e",
     "group": "daily",
     "min_steps": {
@@ -2899,6 +2830,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3003,6 +2956,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3131,6 +3106,28 @@
         "openKinds": []
       }
     },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
+    },
     "bench": "pipeline-e2e"
   },
   {
@@ -3202,9 +3199,9 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "stripePaymentIntentCount": 0,
+        "stripePaymentIntentCount": 1,
         "cardCount": 1,
-        "stripeProviderPaymentIntentCount": 0,
+        "stripeProviderPaymentIntentCount": 1,
         "agentCardProviderCardCount": 1,
         "agentCardProviderTransferCount": 1,
         "agentCardProviderUnlinkedTransferCount": 0
@@ -3218,8 +3215,16 @@
         "status": "RECLAIMED",
         "amountCents": 100
       },
-      "stripeHold": null,
-      "stripeRefund": null,
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 100,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 100
+      },
+      "stripeRefund": {
+        "status": "succeeded",
+        "amountCents": 100
+      },
       "agentCard": {
         "balanceCents": 0
       },
@@ -3250,7 +3255,7 @@
         "api.roselabs.ai",
         "roselabs.ai"
       ],
-      "context_notes": "Production-only bounded lifecycle. The task uses the production admin identity, so Rose fronts the card through AgentCard company_flow without a Stripe capture. The card is never submitted to a merchant; benchmark cleanup must reclaim the AgentCard organization transfer."
+      "context_notes": "Production-only bounded lifecycle. The harness runs as NON-ADMIN BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID (00000000-0000-4000-8000-000000000107) so resolveAndIssuePurchaseCard creates a live Stripe hold (admin/company_flow never authorizes a hold). The card is never submitted to a merchant; benchmark cleanup must close the card, reclaim the AgentCard organization transfer, and refund the Stripe capture."
     },
     "bench": "pipeline-e2e"
   },
@@ -4319,6 +4324,500 @@
       "feature:auth-preserving-challenge-recovery",
       ".context/blue-bottle-bench-findings.md",
       "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
+    ]
+  },
+  {
+    "name": "whatsapp-history-recall",
+    "title": "WhatsApp History Recall",
+    "description": "Answer three factual questions about synced WhatsApp history using local data search.",
+    "prompt": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "grep",
+      "whatsapp",
+      "messages"
+    ],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
+      "live_fixtures": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "The canonical Victoria base fixture includes frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
+    },
+    "evaluators": [
+      {
+        "id": "whatsapp-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "agent_status",
+            "value": "COMPLETED"
+          }
+        ]
+      },
+      {
+        "id": "whatsapp-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own WhatsApp data (grep against the whatsapp/messages source, or the local data summary) rather than answering from assumption",
+          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?'; direction and timestamp are optional details",
+          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823; its approximately 2197-message subtotal is optional",
+          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages spanning about July 2022 to July 2026; the roughly 561 contacts/threads count is optional",
+          "All three questions are answered in the final response"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation that the answer does include must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable, a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Do not require optional supporting statistics that the user did not ask for, such as the top contact's message subtotal or the number of contacts/threads. Score 1.0 only when all three requested answers are present and each matches the expected value. Score 0.0 if any requested answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "user:whatsapp-bench-2026-07-29"
+    ]
+  },
+  {
+    "name": "agent-payment-production-purchase",
+    "title": "Agent Payment Production Completed Purchase",
+    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" — do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 — do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-production"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "min_steps": {
+      "browser": 2
+    },
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "production_only": true,
+    "response_schema": {
+      "fields": [
+        {
+          "name": "one_time_payment_card_last4",
+          "type": "str",
+          "required": true,
+          "description": "Last four digits of the one-time card issued for this purchase"
+        },
+        {
+          "name": "payment_succeeded",
+          "type": "bool",
+          "required": true,
+          "description": "True only when Stripe confirmed the payment succeeded"
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "stripePaymentIntentCount": 1,
+        "stripeProviderPaymentIntentCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "totalCents": 100
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 100
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 100,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 100
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 100,
+        "transferredCents": 100,
+        "livemode": true
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "production-backend",
+        "production-frontend"
+      ],
+      "secrets": [
+        "stripe-live",
+        "agentcard-live"
+      ],
+      "live_targets": [
+        "roselabs.ai",
+        "checkout.stripe.com",
+        "api.roselabs.ai"
+      ],
+      "context_notes": "Production COMPLETED-purchase path on OUR OWN hosted /test_payment (distinct from the abandonment probe). Place order hands off to a real hosted Stripe Checkout on the Rose Labs account, which is the only way a live Rose-minted card can be authorized — AgentCard's test_charge is sandbox-only. The abandonment task covers the void/reclaim/refund path and must stay separate."
+    },
+    "bench": "pipeline-e2e"
+  },
+  {
+    "name": "browser-1015-eventim-request-card",
+    "title": "1015 Folsom Eventim Antibot to Payment Card Request",
+    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show — payment boundary only, no purchase.",
+    "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, proceed through checkout, and stop when Rose requests a payment card. Do not submit payment, place the order, or complete the purchase. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot",
+      "ecommerce",
+      "ticketing"
+    ],
+    "group": "daily",
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "payment_approval",
+    "expected_payment_receipt": {
+      "merchant": "1015 Folsom (Eventim - eventim.us)",
+      "merchantBusinessAliases": [
+        "1015 Folsom",
+        "1015",
+        "Eventim US",
+        "See Tickets",
+        "SeeTickets"
+      ],
+      "currency": "USD",
+      "requiredFields": [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId"
+      ],
+      "requiredLineItemFields": [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents"
+      ],
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
+    },
+    "success_on_payment_card_request": true,
+    "min_tool_counts": {
+      "spawn_agent": 1
+    },
+    "min_steps": {
+      "browser": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "eventim.us",
+        "request_payment_card",
+        "antibot"
+      ],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
+      "live_targets": [
+        "https://1015.com/",
+        "https://wl.eventim.us/",
+        "https://eventim.us/"
+      ],
+      "context_notes": "Reproduces prod agent ec03b6f2-744f-433a-87d0-e4cf7758818a (Yousuke Yukimatsu / 1015 Folsom), which reached Eventim then burned the $2 cap on Cloudflare/AXS antibot. The benchmark fixes venue + official Eventim US primary checkout, keeps artist/date flexible across upcoming 1015 Folsom shows with live inventory, and treats a single unresolved payment-card request as success. Never approve the charge or complete purchase. Secondary/resale marketplaces are forbidden. Local baseline 2026-08-05: FAIL — Cloudflare Access Denied hard-block on eventim.us/wl.eventim.us through challenge recovery; timed out at 1200s / ~15c without a payment-card request.",
+      "live_cookie_domains": [
+        "eventim.us",
+        "1015.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "eventim-1015-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The run stops after exactly one unresolved payment-card approval on the grounded Eventim US checkout for 1015 Folsom",
+          "The approval identifies 1015 Folsom / Eventim, a ticket line item, and a total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "1015"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "eventim-1015-payment-boundary-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The pending payment approval is for exactly one ticket to an upcoming 1015 Folsom show purchased through official Eventim US primary checkout",
+          "Artist/date may be any upcoming purchasable Eventim-ticketed 1015 Folsom show; sold-out or waitlist-only listings are not success",
+          "No AXS/StubHub/SeatGeek/Ticketmaster-resale or other secondary marketplace path is used for checkout",
+          "No tables, bottle service, VIP packages, add-ons, insurance, donations, or multi-ticket cart is purchased",
+          "The trajectory ends at exactly one unresolved payment-card approval grounded to eventim.us; the harness does not approve it, and a completed purchase or generic write-lock alone is not success"
+        ],
+        "judge_prompt": "Review the browser transcript and pending payment evidence. Pass only if the agent used the official 1015 Folsom Eventim US primary ticketing flow for any upcoming show with live inventory, selected a single cheapest available ticket, defeated or recovered past antibot walls as needed, and stopped at exactly one unresolved payment-card request grounded to eventim.us / wl.eventim.us. Fail for secondary/resale marketplaces, waitlist-only/sold-out dead ends without a payment-card request, fabricated checkout facts, payment submission, or a completed purchase."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "yes",
+    "label_eval": "Single unresolved Eventim US payment-card request for one upcoming 1015 Folsom ticket; no purchase completed.",
+    "label_notes": "Artist/date intentionally flexible so the bench survives after a specific show date passes. Provenance: prod cost-cap agent wrecked on antibot after Eventim/AXS.",
+    "source": [
+      "prod-agent:ec03b6f2-744f-433a-87d0-e4cf7758818a",
+      "coverage-gap:eventim-1015-antibot-payment-boundary"
+    ]
+  },
+  {
+    "name": "sms-supervisor-open-spawns-agent",
+    "title": "SMS Supervisor: Open → Spawn Then Stop",
+    "description": "The restaurant is open. One text must produce one reply, one spawned agent, and then silence -- the agent reports its own lifecycle from there.",
+    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "sms",
+      "regression"
+    ],
+    "group": "daily",
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "status": "ready",
+    "runner": "sms",
+    "bench": "pipeline-e2e",
+    "sms_script": {
+      "seed_agents": [],
+      "settle_seconds": 20,
+      "turn_timeout_seconds": 120,
+      "turns": [
+        {
+          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "min_outbound": 1,
+          "max_outbound": 1,
+          "allow_spend": true
+        }
+      ],
+      "web_search_fixture": {
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. OPEN NOW and accepting online orders for ASAP pickup. Menu: Lok Lak $18.50, Kuy Teav $16.00, Num Pang $14.00.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. Currently open and accepting ASAP pickup orders.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
+    },
+    "evaluators": [
+      {
+        "id": "sms-open-spawn-contract",
+        "method": "static_check",
+        "criteria": [
+          "The request produces exactly one outbound SMS from the supervisor",
+          "Exactly one agent is started to do the work",
+          "The run ends by calling attempt_completion"
+        ],
+        "checks": [
+          {
+            "type": "sms_outbound_budget"
+          },
+          {
+            "type": "sms_agents_started",
+            "count": 1
+          },
+          {
+            "type": "sms_completion_accepted"
+          }
+        ]
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "prod SMS thread +19729777432 2026-07-27T20:50-20:51Z (SmsSession transcript [100]-[104])"
+    ]
+  },
+  {
+    "name": "sms-supervisor-closed-no-spawn",
+    "title": "SMS Supervisor: Closed → Answer, Spawn Nothing",
+    "description": "The restaurant is temporarily closed and not accepting orders. The supervisor must say so and stop — no agent started, no budget raised.",
+    "prompt": "SMS 1: \"Order me a lum lok Togo from the ferry building asap\"",
+    "timeout_seconds": 420,
+    "is_chat_mode": false,
+    "expected_tools": [],
+    "tags": [
+      "sms",
+      "regression"
+    ],
+    "group": "daily",
+    "price_limit_cents": 25,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": null,
+    "status": "ready",
+    "runner": "sms",
+    "bench": "pipeline-e2e",
+    "sms_script": {
+      "seed_agents": [],
+      "settle_seconds": 20,
+      "turn_timeout_seconds": 120,
+      "turns": [
+        {
+          "inbound": "Order me a lum lok Togo from the ferry building asap",
+          "min_outbound": 1,
+          "max_outbound": 1,
+          "allow_spend": false
+        }
+      ],
+      "web_search_fixture": {
+        "default": "**Lunette Cambodia- Ferry Building | Toast**\nLunette. 1 Ferry Building, Shop 24, San Francisco, CA 94111. TEMPORARILY CLOSED — closed for kitchen renovations through August 15. Not accepting orders. Online ordering is disabled.\n\n**Lunette | Ferry Building Marketplace**\nCambodian street food from chef Mona Leña. Shop 24, ground floor. This vendor is temporarily closed for renovations and is not taking pickup or delivery orders at this time.\n\n**Señor Sisig to Open New Location at the Ferry Building This Summer | Eater SF**\nThe Filipino fusion favorite is taking over a stall on the marketplace's south end, joining Lunette and Gott's Roadside."
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
+    },
+    "evaluators": [
+      {
+        "id": "sms-closed-no-spawn-contract",
+        "method": "static_check",
+        "criteria": [
+          "The request produces exactly one outbound SMS from the supervisor",
+          "No agent is started and no budget is raised, because the store is closed",
+          "The run ends by calling attempt_completion"
+        ],
+        "checks": [
+          {
+            "type": "sms_outbound_budget"
+          },
+          {
+            "type": "sms_no_unrequested_spend"
+          },
+          {
+            "type": "sms_completion_accepted"
+          }
+        ]
+      },
+      {
+        "id": "sms-closed-states-closure",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The reply tells the user the store is closed"
+        ],
+        "judge_prompt": "Search told the assistant the restaurant is closed. Score 1.0 if the reply conveys to the user that it is closed or unavailable right now, in any wording. Score 0.0 only if a reader would NOT learn the place is closed. Judge the fact conveyed, not the phrasing, tone, length, or whether it promises anything."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": [
+      "prod SMS thread +19729777432 2026-07-27T20:50Z; local bench run 2026-07-28 where the supervisor reported the closure and spawned an ordering agent anyway"
     ]
   }
 ]

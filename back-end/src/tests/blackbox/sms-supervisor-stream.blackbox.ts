@@ -31,11 +31,11 @@ import {
   StructuredOutputAccumulator,
   StructuredOutputCardinalityError,
 } from '../../providers/rose/structuredOutput';
+import { SUPERVISOR_FALLBACK_MESSAGE } from '../../providers/smsSupervisor/supervisorHandler';
 import {
   finalizeSupervisorResponse,
-  SUPERVISOR_FALLBACK_MESSAGE,
   type SupervisorResponse,
-} from '../../providers/smsSupervisor/supervisorHandler';
+} from '../../providers/smsSupervisor/supervisorLlm';
 import {
   callWithRetries,
   dispatchToolSafely,

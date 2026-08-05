@@ -26,6 +26,8 @@ export async function searchConversationMatchRows(params: {
   limit: number;
   offset: number;
   personId?: string;
+  /** Set when `filters.path` addresses one message rather than a whole thread. */
+  messageId?: string;
   since?: Date;
   channel?: string;
 }): Promise<MessageGrepRow[]> {
@@ -40,6 +42,8 @@ export async function searchConversationMatchRows(params: {
     params.channel === undefined
       ? Prisma.empty
       : Prisma.sql`AND m.channel::text = ${params.channel}`;
+  const messageFilter =
+    params.messageId === undefined ? Prisma.empty : Prisma.sql`AND m.id = ${params.messageId}`;
 
   return prisma.$queryRaw<MessageGrepRow[]>`
     SELECT
@@ -58,6 +62,7 @@ export async function searchConversationMatchRows(params: {
     INNER JOIN "Person" p ON p.id = m."personId"
     WHERE p."userId" = ${params.userId}
       AND ${predicate}
+      ${messageFilter}
       ${personFilter}
       ${sinceFilter}
       ${channelFilter}

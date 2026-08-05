@@ -1,4 +1,4 @@
-import { IntegrationStatus, type AgentStatus } from '@prisma/client';
+import { IntegrationStatus, PurchaseSpendStatus, type AgentStatus } from '@prisma/client';
 
 import { prisma } from '../../providers/database';
 import { isRealWaitlistPerson } from '../../providers/waitlistIdentity';
@@ -24,6 +24,15 @@ export interface UserCreatedRecord {
 
 export interface WaitlistSignupRecord {
   createdAt: Date;
+}
+
+/** Cleared platform commerce (AgentCard + confirmed structured-output orders). */
+export interface GmvRecord {
+  userId: string;
+  agentId: string | null;
+  totalCents: number;
+  createdAt: Date;
+  provider: string;
 }
 
 export interface SubscriptionUserRecord {
@@ -137,6 +146,28 @@ export async function findSubscriptionUsersByCustomerIds(
   return prisma.subscription.findMany({
     where: { stripeCustomerId: { in: stripeCustomerIds } },
     select: { userId: true, stripeCustomerId: true },
+  });
+}
+
+/**
+ * Platform GMV ledger rows: every CLEARED PurchaseSpend in the window.
+ * Includes AgentCard mint clearances and order_confirmation rows harvested from
+ * agent/browser structured outputs (amount + confirmation id).
+ * Attribution uses createdAt (order initiation / confirmation capture time).
+ */
+export async function findClearedGmvBetween(start: Date, end: Date): Promise<GmvRecord[]> {
+  return prisma.purchaseSpend.findMany({
+    where: {
+      status: PurchaseSpendStatus.CLEARED,
+      createdAt: { gte: start, lt: end },
+    },
+    select: {
+      userId: true,
+      agentId: true,
+      totalCents: true,
+      createdAt: true,
+      provider: true,
+    },
   });
 }
 

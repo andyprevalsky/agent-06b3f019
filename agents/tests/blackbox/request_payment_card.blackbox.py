@@ -804,6 +804,10 @@ async def run_all_tests():
     )
     await result.record_async("agentcard_status_boundary", test_agentcard_status_activity_boundary)
     teardown_mock()
+    result.record(
+        "normalize_payload_accepts_serialized_browser_tool_args",
+        test_normalize_payload_accepts_serialized_browser_tool_args,
+    )
     return result.all_passed
 
 

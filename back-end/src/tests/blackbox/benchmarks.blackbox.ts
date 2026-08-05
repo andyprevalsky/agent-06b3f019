@@ -66,7 +66,7 @@ const BenchmarkTaskSchema = z.object({
   start_phase: z.string().nullable(),
   // Unified eval-catalog contract (additive, optional — validated by agents/benchmarks/long_horizon.py)
   status: z.enum(['ready', 'incomplete']).optional(),
-  runner: z.enum(['agent', 'vitest']).optional(),
+  runner: z.enum(['agent', 'vitest', 'sms']).optional(),
   description: z.string().min(1).optional(),
   environment: z
     .object({
@@ -253,14 +253,26 @@ async function testList_tagsAreKnown() {
   if (res.status !== 200) return;
   const body = res.data as { tasks: BenchmarkTask[] };
   const knownSet = new Set(KNOWN_TAGS);
+  // Report EVERY unknown tag in one pass. Throwing on the first one makes a
+  // task that adds N new tags cost N full coverage reruns to discover.
+  const unknown = new Map<string, string[]>();
   for (const task of body.tasks) {
     for (const tag of task.tags) {
       if (!knownSet.has(tag)) {
-        throw new Error(
-          `Task "${task.name}" has unknown tag "${tag}". Known: ${KNOWN_TAGS.join(', ')}`
-        );
+        const owners = unknown.get(tag) ?? [];
+        if (!owners.includes(task.name)) owners.push(task.name);
+        unknown.set(tag, owners);
       }
     }
+  }
+  if (unknown.size > 0) {
+    const detail = [...unknown.entries()]
+      .map(([tag, tasks]) => `"${tag}" (${tasks.join(', ')})`)
+      .join('; ');
+    throw new Error(
+      `${unknown.size} unknown tag(s): ${detail}. ` +
+        `Add them to benchmarks-known-tags.ts. Known: ${KNOWN_TAGS.join(', ')}`
+    );
   }
 }
 

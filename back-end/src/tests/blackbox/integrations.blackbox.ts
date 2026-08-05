@@ -484,6 +484,14 @@ async function testWhatsappUpload_noAuth() {
   assertStatus(res.status, 401, res.data);
 }
 
+async function testWhatsappConnect_noAuth() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+  assertStatus(res.status, 401, res.data);
+}
+
 async function testTelegramConnect_noAuth() {
   const res = await request(`${BASE_URL}/api/integrations/telegram/connect`, {
     method: 'POST',
@@ -1207,6 +1215,51 @@ async function testWhatsappUpload_happyPath() {
   });
   assertStatus(res.status, 200, res.data);
   assertSchema(MessagingUploadResponse, res.data, 'whatsapp happy');
+}
+
+async function testWhatsappConnect_happyPath() {
+  const res = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(ctx.accessToken1!),
+  });
+  assertStatus(res.status, 200, res.data);
+  assertSchema(TelegramConnectResponse, res.data, 'whatsapp connect');
+}
+
+/**
+ * Re-connecting an existing WhatsApp integration must merge config, not clobber
+ * it — re-pairing is routine and must not drop stored integration settings.
+ */
+async function testWhatsappConnect_preservesExistingConfig() {
+  const { accessToken } = await createAnonSession();
+
+  const createRes = await request(`${BASE_URL}/api/integrations`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify({
+      name: 'whatsapp',
+      type: 'DATA_SOURCE',
+      config: { existingPolicy: 'preserve-me', nested: { value: 1 } },
+    }),
+  });
+  assertStatus(createRes.status, 200, createRes.data);
+
+  const connectRes = await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  assertStatus(connectRes.status, 200, connectRes.data);
+  const body = assertSchema(TelegramConnectResponse, connectRes.data, 'whatsapp connect preserve');
+  const integration = IntegrationSchema.passthrough().parse(body.integration);
+  const config = integration.config as Record<string, unknown>;
+  assert(
+    config.existingPolicy === 'preserve-me',
+    `Expected existing config to survive, got ${JSON.stringify(config)}`
+  );
+  assert(
+    typeof config.lastConnectedAt === 'string',
+    `Expected lastConnectedAt string, got ${JSON.stringify(config)}`
+  );
 }
 
 async function testTelegramConnect_happyPath() {
@@ -3161,6 +3214,26 @@ async function testBoundary_telegramConnectNoOutbound() {
   );
 }
 
+/**
+ * POST /api/integrations/whatsapp/connect makes NO outbound calls.
+ * All work is local (DB upsert only).
+ */
+async function testBoundary_whatsappConnectNoOutbound() {
+  const token = captureToken('whatsapp-connect');
+
+  await request(`${BASE_URL}/api/integrations/whatsapp/connect`, {
+    method: 'POST',
+    headers: { ...authHeaders(ctx.accessToken1!), 'X-Capture-Token': token },
+  });
+
+  const calls = await readCapturesForToken(token);
+  const relevant = filterInfraCalls(calls);
+  assert(
+    relevant.length === 0,
+    `Expected 0 outbound calls for whatsapp/connect, got ${relevant.length}: ${JSON.stringify(relevant.map((c) => c.url))}`
+  );
+}
+
 // ==================== OAUTH START / CALLBACK / INTEGRATION CRUD COVERAGE ====================
 
 // 1. OAuth start: gmail with returnUrl
@@ -4971,6 +5044,182 @@ async function testGptCodeUpload_clearsExpiredAndRateLimitState() {
 }
 
 // =====================================================================
+// Account-level token pooling default
+// ---------------------------------------------------------------------
+// `User.poolTokensByDefault` is an ACCOUNT policy: when on, every compute
+// credential that account syncs must land pool-eligible, so the pool is never
+// a single point of failure when the owner's own token hits its rate-limit
+// window. `Integration.poolingEnabledOverride` is the explicit per-integration
+// choice and always wins; null means "inherit the account default".
+// Regression net for the 3-agent benchmark wipeout where the only connected
+// claude_code row had pool=false and fetchPoolToken had nothing to rotate to.
+// =====================================================================
+
+async function setAccountPoolDefault(userId: string, enabled: boolean): Promise<void> {
+  // User.userId is the Supabase auth id — the same key Integration.userId uses.
+  await prisma.user.update({ where: { userId }, data: { poolTokensByDefault: enabled } });
+}
+
+async function uploadClaudeCredentials(accessToken: string): Promise<void> {
+  const encryptedCredentials = buildCredentialPayload(
+    `sk-ant-oat-acctdefault-${crypto.randomBytes(8).toString('hex')}`
+  );
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encryptPayload({ encryptedCredentials })),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function uploadGptCredentials(accessToken: string): Promise<void> {
+  const encryptedCredentials = buildGptCredentialPayload(
+    `gpt-acctdefault-${crypto.randomBytes(8).toString('hex')}`,
+    `acct-${crypto.randomBytes(6).toString('hex')}`
+  );
+  const res = await request(`${BASE_URL}/api/integrations/gpt-code/credentials/upload`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+    body: JSON.stringify(encryptPayload({ encryptedCredentials })),
+  });
+  assertStatus(res.status, 200, res.data);
+}
+
+async function readCredentialRow(userId: string, name: 'claude_code' | 'gpt_code') {
+  return prisma.integration.findUnique({ where: { userId_name: { userId, name } } });
+}
+
+// Account default ON -> a freshly synced Claude token is pool-eligible.
+async function testAccountPoolDefault_claudeSyncInheritsEnabled() {
+  const caller = await createAnonSession();
+  await setAccountPoolDefault(caller.userId, true);
+  const ids: string[] = [];
+
+  try {
+    await uploadClaudeCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'claude_code');
+    assert(row !== null, 'upload must create a claude_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === true,
+      `synced token must inherit poolTokensByDefault=true (got ${row!.poolingEnabled})`
+    );
+    assert(
+      row!.poolingEnabledOverride === null,
+      'inheriting the account default must NOT record a per-integration override'
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Account default ON -> a freshly synced GPT token is pool-eligible too.
+async function testAccountPoolDefault_gptSyncInheritsEnabled() {
+  const caller = await createAnonSession();
+  await setAccountPoolDefault(caller.userId, true);
+  const ids: string[] = [];
+
+  try {
+    await uploadGptCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'gpt_code');
+    assert(row !== null, 'upload must create a gpt_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === true,
+      `synced GPT token must inherit poolTokensByDefault=true (got ${row!.poolingEnabled})`
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Account default OFF -> unchanged behavior, token stays out of the pool.
+async function testAccountPoolDefault_syncStaysUnpooledWhenDefaultOff() {
+  const caller = await createAnonSession();
+  const ids: string[] = [];
+
+  try {
+    const user = await prisma.user.findUnique({ where: { userId: caller.userId } });
+    assert(
+      user?.poolTokensByDefault === false,
+      'new accounts must default to poolTokensByDefault=false'
+    );
+
+    await uploadClaudeCredentials(caller.accessToken);
+    const row = await readCredentialRow(caller.userId, 'claude_code');
+    assert(row !== null, 'upload must create a claude_code integration');
+    ids.push(row!.id);
+    assert(
+      row!.poolingEnabled === false,
+      'account default OFF must keep the synced token out of the pool'
+    );
+  } finally {
+    await cleanupIntegrations(ids);
+  }
+}
+
+// Explicit per-integration override beats the account policy in BOTH directions.
+async function testAccountPoolDefault_explicitOverrideWins() {
+  const optOut = await createAnonSession();
+  const optIn = await createAnonSession();
+  const optOutInt = await seedClaudeIntegration(optOut.userId, { poolingEnabled: true });
+  const optInInt = await seedClaudeIntegration(optIn.userId, { poolingEnabled: false });
+
+  try {
+    // Account says "pool everything", operator explicitly excluded this token.
+    await setAccountPoolDefault(optOut.userId, true);
+    await prisma.integration.update({
+      where: { id: optOutInt.id },
+      data: { poolingEnabledOverride: false },
+    });
+    await uploadClaudeCredentials(optOut.accessToken);
+    const optOutRow = await readCredentialRow(optOut.userId, 'claude_code');
+    assert(
+      optOutRow?.poolingEnabled === false,
+      'explicit override=false must beat account default=true on re-sync'
+    );
+
+    // Account says "do not pool", operator explicitly opted this token in.
+    await prisma.integration.update({
+      where: { id: optInInt.id },
+      data: { poolingEnabledOverride: true },
+    });
+    await uploadClaudeCredentials(optIn.accessToken);
+    const optInRow = await readCredentialRow(optIn.userId, 'claude_code');
+    assert(
+      optInRow?.poolingEnabled === true,
+      'explicit override=true must beat account default=false on re-sync'
+    );
+  } finally {
+    await cleanupIntegrations([optOutInt.id, optInInt.id]);
+  }
+}
+
+// Re-syncing a rotated token must never silently drain the pool.
+async function testAccountPoolDefault_resyncKeepsPooledToken() {
+  const caller = await createAnonSession();
+  const userInt = await seedClaudeIntegration(caller.userId, { poolingEnabled: true });
+
+  try {
+    const before = await readCredentialRow(caller.userId, 'claude_code');
+    assert(
+      before?.poolingEnabled === true && before.poolingEnabledOverride === null,
+      'fixture must start pooled with no explicit override'
+    );
+
+    await uploadClaudeCredentials(caller.accessToken);
+
+    const after = await readCredentialRow(caller.userId, 'claude_code');
+    assert(
+      after?.poolingEnabled === true,
+      're-syncing a token must not reset an already-pooled integration'
+    );
+  } finally {
+    await cleanupIntegrations([userInt.id]);
+  }
+}
+
+// =====================================================================
 // Claude Code CLI exhaustion detection
 // ---------------------------------------------------------------------
 // When the Claude Code CLI inside an E2B sandbox prints
@@ -5790,6 +6039,7 @@ async function runAll() {
     { name: 'DELETE /:name no auth -> 401', fn: testDelete_noAuth },
     { name: 'POST /imessage/upload no auth -> 401', fn: testImessageUpload_noAuth },
     { name: 'POST /whatsapp/upload no auth -> 401', fn: testWhatsappUpload_noAuth },
+    { name: 'POST /whatsapp/connect no auth -> 401', fn: testWhatsappConnect_noAuth },
     { name: 'POST /telegram/connect no auth -> 401', fn: testTelegramConnect_noAuth },
     { name: 'POST /telegram/upload no auth -> 401', fn: testTelegramUpload_noAuth },
     { name: 'POST /cookies/upload no auth -> 401', fn: testCookiesUpload_noAuth },
@@ -5877,6 +6127,11 @@ async function runAll() {
     { name: 'POST /imessage/upload happy path', fn: testImessageUpload_happyPath },
     { name: 'POST /whatsapp/upload empty contacts -> 400', fn: testWhatsappUpload_emptyContacts },
     { name: 'POST /whatsapp/upload happy path', fn: testWhatsappUpload_happyPath },
+    { name: 'POST /whatsapp/connect happy path', fn: testWhatsappConnect_happyPath },
+    {
+      name: 'POST /whatsapp/connect preserves existing config',
+      fn: testWhatsappConnect_preservesExistingConfig,
+    },
     { name: 'POST /telegram/connect happy path', fn: testTelegramConnect_happyPath },
     { name: 'POST /telegram/upload empty contacts -> 400', fn: testTelegramUpload_emptyContacts },
     { name: 'POST /telegram/upload happy path', fn: testTelegramUpload_happyPath },
@@ -6362,6 +6617,26 @@ async function runAll() {
       fn: testClaudeCodeUpload_clearsRateLimitCooldown,
     },
     {
+      name: 'account pooling default -- synced Claude token inherits enabled',
+      fn: testAccountPoolDefault_claudeSyncInheritsEnabled,
+    },
+    {
+      name: 'account pooling default -- synced GPT token inherits enabled',
+      fn: testAccountPoolDefault_gptSyncInheritsEnabled,
+    },
+    {
+      name: 'account pooling default -- OFF keeps synced token unpooled',
+      fn: testAccountPoolDefault_syncStaysUnpooledWhenDefaultOff,
+    },
+    {
+      name: 'account pooling default -- explicit per-integration override wins',
+      fn: testAccountPoolDefault_explicitOverrideWins,
+    },
+    {
+      name: 'account pooling default -- re-sync keeps an already-pooled token',
+      fn: testAccountPoolDefault_resyncKeepsPooledToken,
+    },
+    {
       name: 'claude-code exhaustion -- pool token marked rate-limited at parsed reset time',
       fn: testClaudeCodeExhaustion_marksPoolToken,
     },
@@ -6408,6 +6683,10 @@ async function runAll() {
         fn: testBoundary_emailMessagesValidationNoOutbound,
       },
       { name: 'boundary -- passwords/request SMS boundary', fn: testBoundary_passwordsRequestSms },
+      {
+        name: 'boundary -- whatsapp/connect no outbound',
+        fn: testBoundary_whatsappConnectNoOutbound,
+      },
       {
         name: 'boundary -- telegram/connect no outbound',
         fn: testBoundary_telegramConnectNoOutbound,

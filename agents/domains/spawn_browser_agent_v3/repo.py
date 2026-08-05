@@ -411,6 +411,16 @@ _TRANSIENT_INIT_FAILURE_MARKERS = (
     "no healthy",
     "temporarily unavailable",
     "try again",
+    # A proxy can also fail BELOW the provider API: allocation succeeds, then the
+    # browser's CDP navigation to start_url dies inside the tunnel. Chrome reports
+    # these as net::ERR_*, which carried no marker and so classified FATAL — the
+    # bounded fresh-proxy retry in handler.py was skipped and the activity escaped
+    # to Temporal, which replayed the identical doomed spawn (prod agent c8dc9824
+    # burned 124 retries / 900s this way, never reaching the payment step it was
+    # benchmarking). A dead tunnel is retryable for the same reason an unhealthy
+    # proxy is: a fresh init reallocates a different one.
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
 )
 
 

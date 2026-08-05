@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlparse
 
 import structlog
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from domains.web_fetch.repo import (
     download_files_batch,
@@ -27,12 +28,76 @@ from domains.web_fetch.repo import (
 
 logger = structlog.get_logger()
 
+
 class WebFetchProvidersFailed(RuntimeError):
     """Both scrape providers failed, with retryability classified at provider boundary."""
 
     def __init__(self, message: str, *, retryable: bool) -> None:
         super().__init__(message)
         self.retryable = retryable
+
+
+FETCHABLE_URL_SCHEMES = ("http", "https")
+
+
+def _fetchable_url_rejection_reason(url: str) -> Optional[str]:
+    """Return why ``url`` cannot be fetched over HTTP, or None when it can."""
+    candidate = (url or "").strip()
+    if not candidate:
+        return "no URL was provided"
+
+    try:
+        parsed = urlparse(candidate)
+    except ValueError as e:  # malformed IPv6 literals, bad ports, etc.
+        return f"it is not a parseable URL ({e})"
+
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in FETCHABLE_URL_SCHEMES:
+        return (
+            f"scheme {parsed.scheme or '(none)'!r} is not fetchable — web_fetch only "
+            "accepts absolute http:// or https:// URLs"
+        )
+
+    try:
+        host = (parsed.hostname or "").strip().lower()
+    except ValueError as e:
+        return f"it has an invalid hostname ({e})"
+    if not host:
+        return "it has no hostname"
+    # A real host is either dotted (example.com, 10.0.0.1), an IPv6 literal, or
+    # bare "localhost". Anything else — "internal", "network" — is fabricated.
+    if "." not in host and ":" not in host and host != "localhost":
+        return f"{host!r} is not a resolvable hostname"
+
+    return None
+
+
+def assert_fetchable_url(url: str) -> str:
+    """Reject non-fetchable strings before any paid provider call.
+
+    Agents routinely hand ``web_fetch`` identifiers that merely look
+    URL-shaped: grep result paths emitted by our own data domain
+    (``network/+19729777432.contact``, ``messages/<thread>.thread``),
+    fabricated internal hosts (``https://internal/...``), or a bare
+    scheme-less token. Each of those previously burned a Firecrawl call plus a
+    Parallel Extract fallback and still returned nothing useful.
+
+    Fails loudly and non-retryably so the agent sees a real tool error and
+    picks a real URL. Deliberately does NOT try to repair the input — a
+    guessed scheme or host would just move the wasted call downstream.
+    """
+    reason = _fetchable_url_rejection_reason(url)
+    if reason is None:
+        return url.strip()
+
+    raise ApplicationError(
+        f"web_fetch cannot fetch {url!r}: {reason}. Pass an absolute http(s) URL to a real "
+        "web page. Local identifiers such as grep result paths "
+        "(e.g. 'network/<name>.contact', 'messages/<thread>.thread') are not web URLs — "
+        "read them with the grep tool instead.",
+        type="WebFetchProvidersFailed",
+        non_retryable=True,
+    )
 
 
 def get_filename_from_url(url: str) -> str:
@@ -48,6 +113,10 @@ async def scrape_url(url: str) -> Dict[str, Any]:
     Firecrawl is primary. Parallel Extract is the public-page fallback when
     Firecrawl rejects a site, times out, or otherwise fails.
     """
+    # Guard the provider boundary: a non-fetchable string must never cost a
+    # Firecrawl + Parallel Extract round trip.
+    assert_fetchable_url(url)
+
     activity.heartbeat(f"Firecrawl scrape: {url[:80]}")
     try:
         return await fetch_firecrawl_scrape(url)
@@ -62,9 +131,9 @@ async def scrape_url(url: str) -> Dict[str, Any]:
         try:
             return await fetch_parallel_extract(url)
         except Exception as parallel_error:
-            retryable = is_retryable_provider_error(
-                "Firecrawl", firecrawl_error
-            ) or is_retryable_provider_error("Parallel Extract", parallel_error)
+            retryable = is_retryable_provider_error("Firecrawl", firecrawl_error) or is_retryable_provider_error(
+                "Parallel Extract", parallel_error
+            )
             raise WebFetchProvidersFailed(
                 "web_fetch failed with Firecrawl and Parallel Extract. "
                 f"Firecrawl error: {firecrawl_error}; Parallel Extract error: {parallel_error}",

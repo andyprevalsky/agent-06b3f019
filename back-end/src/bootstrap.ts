@@ -7,11 +7,15 @@
  * The dynamic import is deliberate: static imports can initialize providers
  * before top-level validation runs under TypeScript development runners.
  */
-import dotenv from 'dotenv';
-
+import { applyResolvedBenchmarkAgentCardIds } from './domains/test-payment/config';
+import { loadDotenvWithCallerOverrides } from './providers/loadDotenvWithCallerOverrides';
 import { assertProductionEnvironment } from './providers/productionEnvironment';
 
-dotenv.config();
+// Cursor Cloud can inject truncated BENCHMARK_AGENTCARD_* values into process
+// env. Prefer back-end/.env (override) and normalize org/cardholder as a pair,
+// while preserving isolated-stack PORT / DATABASE_URL / TEMPORAL_TASK_QUEUE.
+loadDotenvWithCallerOverrides();
+applyResolvedBenchmarkAgentCardIds();
 assertProductionEnvironment(process.env);
 
 import('./server').catch((error: unknown) => {

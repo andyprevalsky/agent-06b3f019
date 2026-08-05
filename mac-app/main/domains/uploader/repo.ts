@@ -10,7 +10,7 @@
  */
 
 import { config } from '../../base/config';
-import { UPLOAD_ENDPOINTS } from './config';
+import { UPLOAD_ENDPOINTS, WHATSAPP_CONNECT_ENDPOINT } from './config';
 import type { IMessageUploadPayload, UploadStrategy } from './types';
 
 /** Result of a single upload HTTP call — unwrapped for the service layer. */
@@ -63,6 +63,22 @@ export function postWhatsAppContacts(
   accessToken: string
 ): Promise<UploadHttpResult> {
   return postContactsJson('whatsapp', contacts, accessToken);
+}
+
+/**
+ * Mark the WhatsApp integration CONNECTED. Payload-free: called the moment the
+ * Baileys socket pairs, so the first history-sync batch has a CONNECTED
+ * integration to upload against.
+ */
+export async function postWhatsAppConnect(accessToken: string): Promise<UploadHttpResult> {
+  const response = await fetch(`${config.apiUrl}${WHATSAPP_CONNECT_ENDPOINT}`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+  });
+  return toResult(response);
 }
 
 /** POST a Telegram contacts blob to the dedicated endpoint. */

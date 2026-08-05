@@ -1,4 +1,4 @@
-import { prisma } from './database';
+import { runTransactionWithRetry } from './database';
 import { resumeAgentWorkflow } from './agentResume';
 import { createMessage } from './messages';
 import { createLogger } from './logger';
@@ -65,7 +65,7 @@ export async function completeAuthAssistanceForUser(
   userId: string,
   now = new Date()
 ): Promise<AuthAssistanceCompletionResult> {
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await runTransactionWithRetry(async (tx) => {
     const request = await tx.userAuthAssistanceRequest.findUnique({
       where: { id },
       include: {
@@ -101,13 +101,7 @@ export async function completeAuthAssistanceForUser(
         },
         include: { context: true },
       });
-      const steelContextId = session?.provider === 'steel' ? session.providerProfileId : null;
-      if (
-        session === null ||
-        session === undefined ||
-        typeof steelContextId !== 'string' ||
-        steelContextId === ''
-      ) {
+      if (session === null || session === undefined) {
         return {
           status: 'missing_steel_context' as const,
           request,
@@ -115,54 +109,71 @@ export async function completeAuthAssistanceForUser(
         };
       }
 
-      const steelAuth = await tx.steelSessionAuth.upsert({
-        where: {
-          userId_contextId_authRealm: {
+      if (session.provider === 'steel') {
+        const steelContextId = session.providerProfileId;
+        if (typeof steelContextId !== 'string' || steelContextId === '') {
+          return {
+            status: 'missing_steel_context' as const,
+            request,
+            workflowId: request.attentionRequest.workflowId,
+          };
+        }
+
+        const steelAuth = await tx.steelSessionAuth.upsert({
+          where: {
+            userId_contextId_authRealm: {
+              userId,
+              contextId: steelContextId,
+              authRealm: request.authRealm,
+            },
+          },
+          create: {
             userId,
             contextId: steelContextId,
             authRealm: request.authRealm,
+            authenticatedAt: now,
+            disabledAt: null,
+            disabledReason: null,
           },
-        },
-        create: {
-          userId,
-          contextId: steelContextId,
-          authRealm: request.authRealm,
-          authenticatedAt: now,
-          disabledAt: null,
-          disabledReason: null,
-        },
-        update: {
-          authenticatedAt: now,
-          disabledAt: null,
-          disabledReason: null,
-        },
-      });
-      await tx.browserContext.update({
-        where: { id: session.context.id },
-        data: { contextId: steelContextId },
-      });
-      await tx.browserProviderProfile.upsert({
-        where: {
-          contextId_provider: {
+          update: {
+            authenticatedAt: now,
+            disabledAt: null,
+            disabledReason: null,
+          },
+        });
+        await tx.browserContext.update({
+          where: { id: session.context.id },
+          data: { contextId: steelContextId },
+        });
+        await tx.browserProviderProfile.upsert({
+          where: {
+            contextId_provider: {
+              contextId: session.context.id,
+              provider: 'steel',
+            },
+          },
+          create: {
             contextId: session.context.id,
             provider: 'steel',
+            profileId: steelContextId,
           },
-        },
-        create: {
-          contextId: session.context.id,
-          provider: 'steel',
-          profileId: steelContextId,
-        },
-        update: { profileId: steelContextId },
-      });
-      await tx.browserSession.update({
-        where: { id: session.id },
-        data: {
-          providerProfileSource: 'steel_session_auth',
-          providerProfilePersist: true,
-        },
-      });
-      steelSessionAuthId = steelAuth.id;
+          update: { profileId: steelContextId },
+        });
+        await tx.browserSession.update({
+          where: { id: session.id },
+          data: {
+            providerProfileSource: 'steel_session_auth',
+            providerProfilePersist: true,
+          },
+        });
+        steelSessionAuthId = steelAuth.id;
+      } else if (session.provider !== 'kernel') {
+        return {
+          status: 'missing_steel_context' as const,
+          request,
+          workflowId: request.attentionRequest.workflowId,
+        };
+      }
     }
 
     const completed = await tx.userAuthAssistanceRequest.update({

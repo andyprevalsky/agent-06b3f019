@@ -179,6 +179,7 @@ def test_pool_registry_lookup():
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
+    assert ultra.waterfall[-1] == "openai/gpt-5.6-sol"
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
     assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
     assert lite.waterfall != ultra.waterfall
@@ -3067,7 +3068,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3158,7 +3159,53 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["google/gemini-3.1-pro-preview"]
+    assert models_seen == ["openai/gpt-5.6-terra"]
+    assert any(c.kind == "content" for c in chunks)
+
+
+async def test_ultra_structured_output_falls_through_second_layer_invalid_request():
+    """The ultra pool retains a structured-output-capable fallback after its 2nd layer 400s.
+
+    Named for the SLOT, not the model: this pinned `google/gemini-3.1-pro-preview` until that
+    model was dropped from the waterfall for 400ing, at which point the test kept passing
+    against a model the pool no longer tries. Derive the models from the registry instead.
+    """
+    ultra_waterfall = [
+        model for model in get_pool("rose-1-ultra").waterfall if not model.startswith("anthropic/")
+    ]
+    second_layer, third_layer = ultra_waterfall[0], ultra_waterfall[1]
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {"choices": [{"delta": {"content": '{"ok":true}'}, "finish_reason": "stop"}]},
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    models_seen: list[str] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        models_seen.append(body["model"])
+        if body["model"] == second_layer:
+            return httpx.Response(400, text="invalid structured-output argument")
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "hi"}],
+            response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
+            openrouter_key="ork-test",
+            request_id="r-ultra-structured-fallback",
+            exclude_anthropic_family=True,
+        )
+    )
+
+    # A third layer must exist and be reached: a 2-model ultra waterfall would leave structured
+    # output with no fallback at all once the second layer rejects the request.
+    assert models_seen == [second_layer, third_layer]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3735,7 +3782,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3785,7 +3832,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["google/gemini-3.1-pro-preview"]
+    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -4553,6 +4600,47 @@ async def test_client_rotation_preserves_native_tool_contract_across_provider_ty
         "attempt_completion",
     }
     assert captured_gpt_request["tool_choice"] == "any"
+
+
+async def test_client_waterfall_preserves_native_agent_action_tools():
+    """OpenRouter must not receive AgentAction as an incompatible strict schema."""
+    AgentAction = create_agent_action_model(["spawn_agent", "attempt_completion"])
+    captured_waterfall_request = {}
+
+    async def successful_waterfall(**kwargs):
+        captured_waterfall_request.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "openai/gpt-5.6-sol"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": "{}", "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    with (
+        patch("providers.rose.client._openai_api_key", return_value=""),
+        patch("providers.rose.client.waterfall_complete", successful_waterfall),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-x").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "Finish the task"}],
+                response_model=AgentAction,
+                call_site="execute_loop",
+                _exclude_anthropic_family=True,
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured_waterfall_request["response_format"] is None
+    assert {tool["name"] for tool in captured_waterfall_request["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+    assert captured_waterfall_request["tool_choice"] == "any"
 
 
 async def test_client_splits_pydantic_model_to_claude_native_tools():
@@ -5874,6 +5962,10 @@ async def run_all_tests():
     )
     await r.record_async("waterfall_uses_anthropic_native_tools", test_waterfall_uses_anthropic_with_native_tools)
     await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
+    await r.record_async(
+        "ultra_structured_output_falls_through_second_layer_invalid_request",
+        test_ultra_structured_output_falls_through_second_layer_invalid_request,
+    )
     await r.record_async("waterfall_all_failed", test_waterfall_all_failed_raises_with_step_errors)
     await r.record_async("waterfall_cache_metrics", test_waterfall_reports_cache_metrics_from_openrouter)
 
@@ -5957,6 +6049,10 @@ async def run_all_tests():
     await r.record_async(
         "client_rotation_preserves_native_tool_contract",
         test_client_rotation_preserves_native_tool_contract_across_provider_types,
+    )
+    await r.record_async(
+        "client_waterfall_preserves_native_agent_action_tools",
+        test_client_waterfall_preserves_native_agent_action_tools,
     )
     await r.record_async("client_pydantic_native_tools_split", test_client_splits_pydantic_model_to_claude_native_tools)
     await r.record_async(

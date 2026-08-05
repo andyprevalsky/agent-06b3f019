@@ -61,7 +61,6 @@ const GrepResponse = z.object({
       'email',
       'imessage',
       'whatsapp',
-      'sms',
       'network',
       'agent_network',
       'transactions',
@@ -838,6 +837,142 @@ async function testPersonAndSinceFilters(userId: string): Promise<void> {
   }
 }
 
+/**
+ * Regression for prod agent e14d5abb-1ff9-40f2-a910-2d3a1e9bb1cc (2026-08-03).
+ *
+ * grep printed `network/Andy H. Ramcke.contact` and
+ * `messages/<thread>.thread/<id>`; the explore agent fed them back as
+ * `filters.path` and got HTTP 400 INVALID_GREP_PARAM, then tried web_fetch on the
+ * same strings and burned four paid provider calls. grep advertises grep
+ * semantics, so an address it prints must be an address it accepts.
+ *
+ * This drives real emitted values -- it greps first, then feeds the returned
+ * `path` back verbatim. It does not hard-code a path, so it cannot pass by
+ * agreeing with a fixture.
+ */
+async function testEmittedPathRoundTrips(userId: string): Promise<void> {
+  // network: grep -> take the emitted path -> feed it back
+  let res = await requestGrep(userId, { pattern: 'Lighthouse', source: 'network' });
+  assertStatus(res.status, 200, res.data);
+  const network = assertBody(res.data);
+  if (network.matches.length === 0) {
+    throw new Error('network seed produced no match to round-trip');
+  }
+  const networkPath = network.matches[0].path;
+
+  res = await requestGrep(userId, {
+    pattern: 'Lighthouse',
+    source: 'network',
+    filters: { path: networkPath },
+  });
+  assertStatus(res.status, 200, res.data);
+  const networkScoped = assertBody(res.data);
+  if (networkScoped.matches.length !== 1 || networkScoped.matches[0].path !== networkPath) {
+    throw new Error(
+      `network path ${networkPath} did not select its own record: ${JSON.stringify(networkScoped)}`
+    );
+  }
+
+  // messages: the same round-trip, and a thread prefix addresses the whole thread
+  res = await requestGrep(userId, { pattern: 'Ledger entry', source: 'messages' });
+  assertStatus(res.status, 200, res.data);
+  const messages = assertBody(res.data);
+  if (messages.matches.length === 0) {
+    throw new Error('messages seed produced no match to round-trip');
+  }
+  const messagePath = messages.matches[0].path;
+
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    filters: { path: messagePath },
+  });
+  assertStatus(res.status, 200, res.data);
+  const messageScoped = assertBody(res.data);
+  if (messageScoped.matches.length !== 1 || messageScoped.matches[0].path !== messagePath) {
+    throw new Error(
+      `message path ${messagePath} did not select its own record: ${JSON.stringify(messageScoped)}`
+    );
+  }
+
+  const threadPrefix = messagePath.slice(0, messagePath.lastIndexOf('/'));
+  res = await requestGrep(userId, {
+    pattern: 'Ledger entry',
+    source: 'messages',
+    filters: { path: threadPrefix },
+  });
+  assertStatus(res.status, 200, res.data);
+  const threadScoped = assertBody(res.data);
+  if (threadScoped.matches.length < 1) {
+    throw new Error(`thread prefix ${threadPrefix} selected nothing`);
+  }
+  for (const match of threadScoped.matches) {
+    if (!match.path.startsWith(`${threadPrefix}/`)) {
+      throw new Error(`thread prefix leaked a foreign match: ${match.path}`);
+    }
+  }
+
+  // transactions, documents, agent_network: same invariant, every emitting source.
+  for (const [source, pattern] of [
+    ['transactions', 'Starbucks'],
+    ['documents', 'Calypso'],
+  ] as const) {
+    res = await requestGrep(userId, { pattern, source });
+    assertStatus(res.status, 200, res.data);
+    const seed = assertBody(res.data);
+    if (seed.matches.length === 0) {
+      throw new Error(`${source} seed produced no match to round-trip`);
+    }
+    const emitted = seed.matches[0].path;
+
+    res = await requestGrep(userId, { pattern, source, filters: { path: emitted } });
+    assertStatus(res.status, 200, res.data);
+    const scoped = assertBody(res.data);
+    if (scoped.matches.length !== 1 || scoped.matches[0].path !== emitted) {
+      throw new Error(
+        `${source} path ${emitted} did not select its own record: ${JSON.stringify(scoped)}`
+      );
+    }
+  }
+
+  // The printed account label must also round-trip: results show `<name> ****<mask>`,
+  // which previously matched neither a.name nor a.mask and returned nothing.
+  res = await requestGrep(userId, { pattern: 'Starbucks', source: 'transactions' });
+  assertStatus(res.status, 200, res.data);
+  const txn = assertBody(res.data);
+  const accountLine = /account: (.+)/.exec(txn.matches[0]?.content ?? '');
+  if (accountLine) {
+    res = await requestGrep(userId, {
+      pattern: 'Starbucks',
+      source: 'transactions',
+      filters: { account: accountLine[1].trim() },
+    });
+    assertStatus(res.status, 200, res.data);
+    const byAccount = assertBody(res.data);
+    if (byAccount.matches.length === 0) {
+      throw new Error(`printed account label "${accountLine[1].trim()}" selected nothing`);
+    }
+  }
+
+  // A path printed for another source is a caller error, not an empty result.
+  res = await requestGrep(userId, {
+    pattern: 'anything',
+    source: 'network',
+    filters: { path: messagePath },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'cross-source path');
+
+  // And the string the agent invented is still rejected.
+  res = await requestGrep(userId, {
+    pattern: 'anything',
+    source: 'network',
+    filters: { path: 'https://internal/messages/+19729777432.thread' },
+  });
+  assertStatus(res.status, 400, res.data);
+  requireInvalidGrepParam(res.data, 'non-grep path');
+}
+
 async function testSourceSpecificFilterValidation(userId: string): Promise<void> {
   let res = await requestGrep(userId, {
     pattern: 'Starbucks',
@@ -1134,13 +1269,20 @@ async function testSourceStatus(userId: string): Promise<void> {
   }
 
   // A non-gmail connector-backed source returns the stub connect URL.
-  const smsRes = await requestSourceStatus(userId, 'sms');
-  assertStatus(smsRes.status, 200, smsRes.data);
-  const smsBody = SourceStatusResponse.parse(smsRes.data);
-  const sms = smsBody.statuses[0];
-  if (sms?.connectUrl !== 'https://roselabs.ai/connect/sms' || sms.connected !== false) {
-    throw new Error(`Expected sms stub connect URL, got ${JSON.stringify(smsBody)}`);
+  const whatsappRes = await requestSourceStatus(userId, 'whatsapp');
+  assertStatus(whatsappRes.status, 200, whatsappRes.data);
+  const whatsappBody = SourceStatusResponse.parse(whatsappRes.data);
+  const whatsapp = whatsappBody.statuses[0];
+  if (
+    whatsapp?.connectUrl !== 'https://roselabs.ai/connect/whatsapp' ||
+    whatsapp.connected !== false
+  ) {
+    throw new Error(`Expected whatsapp stub connect URL, got ${JSON.stringify(whatsappBody)}`);
   }
+
+  // sms is not a grep source (Mac SMS is ingested via imessage / IMESSAGE).
+  const smsRes = await requestSourceStatus(userId, 'sms');
+  assertStatus(smsRes.status, 400, smsRes.data);
 
   // Documents is an umbrella grep source; concrete document providers are
   // separate connector keys for source-connect gates.
@@ -1235,6 +1377,7 @@ async function runAll(): Promise<void> {
     ['realistic safe patterns are allowed', () => testRealisticPatternsAllowed(userId)],
     ['person and since narrow messages', () => testPersonAndSinceFilters(userId)],
     ['source-specific filters are validated', () => testSourceSpecificFilterValidation(userId)],
+    ['emitted path round-trips as filters.path', () => testEmittedPathRoundTrips(userId)],
     ['documents filters work', () => testDocumentFilters(userId)],
     ['transactions filters and aggregates work', () => testTransactionFiltersAndAggregates(userId)],
     ['transaction grep is tenant isolated', () => testTransactionTenantIsolation(userId)],

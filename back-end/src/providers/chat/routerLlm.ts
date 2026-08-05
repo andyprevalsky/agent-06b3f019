@@ -4,7 +4,6 @@
  * Uses the in-process Rose completions client for streaming.
  */
 
-import { z } from 'zod';
 import {
   createStreamingCompletion,
   markCacheable,
@@ -35,32 +34,17 @@ import { delayedCacheStreamHedge, type CacheLookupResult } from './delayedCacheS
 import type { ChatProviderRoute } from './phaseModels';
 import { runCacheWriteInBackground } from './backgroundCacheWrite';
 import { ROUTER_JSON_SCHEMA } from './routerDecisionJsonSchema';
+import {
+  isValidRouterCacheJson,
+  parseRouterDecisionJson,
+  type RouterDecision,
+} from './routerDecision';
+
+export { RouterDecisionSchema } from './routerDecision';
+export type { RouterDecision } from './routerDecision';
 
 const log = createLogger('RouterLLM');
 const ROUTER_CACHE_GRACE_MS = 25;
-
-// ============================================
-// Zod Schema for Router Decision
-// ============================================
-export const RouterDecisionSchema = z.discriminatedUnion('action', [
-  z.object({
-    action: z.literal('direct_answer'),
-    reasoning: z.string(),
-  }),
-  z.object({
-    action: z.literal('web_search'),
-    reasoning: z.string(),
-    query: z.string(),
-  }),
-  z.object({
-    action: z.literal('start_superintelligence'),
-    reasoning: z.string(),
-    goal: z.string(),
-    mode: z.enum(['plan', 'execute']), // plan for 3+ tool calls, execute for 1-2
-  }),
-]);
-
-export type RouterDecision = z.infer<typeof RouterDecisionSchema>;
 
 // ============================================
 // Router Response with streaming metadata
@@ -411,6 +395,13 @@ export async function callRouterLlm(params: {
         const hit = await cacheGet(cacheKey);
         const json = hit.hit ? (hit.value as { json?: unknown } | null)?.json : undefined;
         if (typeof json === 'string' && json.length > 0) {
+          if (!isValidRouterCacheJson(json)) {
+            log.warn('fast_cache.chat_router_invalid', {
+              agentId: params.agentId,
+              key: cacheKey,
+            });
+            return { hit: false };
+          }
           log.info('fast_cache.chat_router_hit', { agentId: params.agentId, key: cacheKey });
           return { hit: true, value: json };
         }
@@ -583,26 +574,6 @@ export async function callRouterLlm(params: {
   // Combine for parsing - use accumulatedJson for JSON parsing
   const fullJson = structuredOutput.finalText();
 
-  const cacheGoal = fastMode.goal;
-  if (fcKey && !fcCacheWon && fullJson !== '' && cacheGoal !== null && fastModeWrite) {
-    runCacheWriteInBackground(
-      () =>
-        cacheSet({
-          key: fcKey,
-          kind: 'llm',
-          goalHash: goalHash(cacheGoal),
-          value: { json: fullJson },
-        }),
-      () => log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
-      (error) =>
-        log.warn('fast_cache.chat_router_store_failed', {
-          agentId: params.agentId,
-          key: fcKey,
-          error: error instanceof Error ? error.message : String(error),
-        })
-    );
-  }
-
   // Broadcast final "done" signal for reasoning stream
   await broadcastAssistantStream(
     params.agentId,
@@ -657,9 +628,9 @@ export async function callRouterLlm(params: {
     throw new Error('Router LLM returned no content');
   }
 
-  let parsed: unknown;
+  let decision: RouterDecision;
   try {
-    parsed = JSON.parse(fullJson);
+    decision = parseRouterDecisionJson(fullJson);
   } catch (error) {
     log.error('[RouterLLM] Failed to parse JSON response', {
       agentId: params.agentId,
@@ -670,42 +641,24 @@ export async function callRouterLlm(params: {
     throw new Error(`Failed to parse router response as JSON: ${fullJson.substring(0, 200)}`);
   }
 
-  const raw = parsed as {
-    reasoning: string;
-    action: 'direct_answer' | 'web_search' | 'start_superintelligence';
-    query?: string;
-    goal?: string;
-    mode?: 'plan' | 'execute';
-  };
-
-  // Validate action-specific fields
-  if (raw.action === 'web_search' && !raw.query) {
-    throw new Error('web_search action requires a query');
-  }
-  if (raw.action === 'start_superintelligence' && !raw.goal) {
-    throw new Error('start_superintelligence action requires a goal');
-  }
-
-  // Construct the properly typed decision
-  let decision: RouterDecision;
-  switch (raw.action) {
-    case 'direct_answer':
-      decision = { action: 'direct_answer', reasoning: raw.reasoning };
-      break;
-    case 'web_search':
-      decision = { action: 'web_search', reasoning: raw.reasoning, query: raw.query! };
-      break;
-    case 'start_superintelligence':
-      // Default to 'plan' if mode not provided (backward compatibility)
-      decision = {
-        action: 'start_superintelligence',
-        reasoning: raw.reasoning,
-        goal: raw.goal!,
-        mode: raw.mode || 'plan',
-      };
-      break;
-    default:
-      throw new Error(`Unknown action: ${raw.action}`);
+  const cacheGoal = fastMode.goal;
+  if (fcKey && !fcCacheWon && cacheGoal !== null && fastModeWrite) {
+    runCacheWriteInBackground(
+      () =>
+        cacheSet({
+          key: fcKey,
+          kind: 'llm',
+          goalHash: goalHash(cacheGoal),
+          value: { json: fullJson },
+        }),
+      () => log.info('fast_cache.chat_router_stored', { agentId: params.agentId, key: fcKey }),
+      (error) =>
+        log.warn('fast_cache.chat_router_store_failed', {
+          agentId: params.agentId,
+          key: fcKey,
+          error: error instanceof Error ? error.message : String(error),
+        })
+    );
   }
 
   log.info('[RouterLLM] Decision', {

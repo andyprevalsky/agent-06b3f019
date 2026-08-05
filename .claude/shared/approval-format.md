@@ -31,6 +31,16 @@ read-only evidence and post-action verification instead.
 List the approval snapshot ID or Git SHA when the approval is snapshot-scoped.
 Then list the complete scope as clickable file-and-line links.
 
+Every approval must include a dedicated line in this exact form:
+`**FE link:** [Open agent](<frontend-agent-url>) — <verification status>`.
+The URL must open the concrete agent run that proves the reported failure or
+outcome, not a generic dashboard. Check it immediately before presenting the
+approval and report `verified rendered`, `verified reachable` (when only an HTTP
+and agent-data probe is available), or `expired/unreachable` honestly.
+Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
+viewer works. If the workflow can restore an archived viewer without rerunning a
+gated action, restore it before requesting approval.
+
 ## Before Behavior
 
 Describe the observable behavior before the proposed change or action. State
@@ -57,6 +67,6 @@ End with one explicit approval question and unambiguous response syntax:
 - **Request an edit** when the owning workflow supports edits:
   `<approval-id> edit: <instruction>`
 
-An approval is invalid if any required section or in-scope file link is
-missing. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a
-new approval ID and present all four sections again.
+An approval is invalid if any required section, in-scope file link, or concrete
+FE agent link is missing. Approval remains snapshot-scoped: if an in-scope hunk
+changes, issue a new approval ID and present all four sections again.

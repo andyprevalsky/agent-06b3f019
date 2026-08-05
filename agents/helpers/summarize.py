@@ -312,11 +312,25 @@ def _message_text(msg: Dict[str, Any]) -> str:
     return _json_dumps_safe(text)
 
 
+# The chars-÷-4 heuristic under-counts JSON-heavy tool payloads (observed 308k
+# actual Anthropic tokens reported as <80k), so every estimate is padded by this
+# factor. Single definition — loop.run_agent re-exports it.
+ESTIMATE_SAFETY_MULTIPLIER = 1.4
+
+
 def _estimate_tokens_for_compaction(value: str) -> int:
-    return max(1, int(len(value) / 4 * 1.4))
+    return max(1, int(len(value) / 4 * ESTIMATE_SAFETY_MULTIPLIER))
 
 
 def _message_summary_weight(msg: Dict[str, Any]) -> int:
+    """Estimated tokens one message costs, counting everything that is rendered.
+
+    A message's payload frequently lives entirely in metadata: production
+    ASSISTANT tool-call rows carry an empty ``text`` with the whole call under
+    ``metadata.tool_calls``, and TOOL rows carry results under
+    ``metadata.structured_response``. Anything counted here must therefore
+    include those fields, or such rows score ~0 while still costing real tokens.
+    """
     meta = msg.get("metadata") or {}
     rendered_parts = [_message_text(msg)]
     if meta.get("structured_response") is not None:
@@ -328,6 +342,43 @@ def _message_summary_weight(msg: Dict[str, Any]) -> int:
     if meta.get("file_pointer") or msg.get("file_pointer"):
         rendered_parts.append(_json_dumps_safe(meta.get("file_pointer") or msg.get("file_pointer")))
     return _estimate_tokens_for_compaction("\n".join(rendered_parts))
+
+
+def estimate_context_tokens(context: List[Dict[str, Any]]) -> int:
+    """THE estimator for "how big is this context?".
+
+    Used by the agent loop's overflow trigger (``run_agent._estimate_tokens``
+    delegates here), by the compactor's tail budget
+    (``split_head_middle_tail``), and by the compaction-effectiveness guard.
+    One function so those three can never disagree.
+
+    Prod agent e14d5abb (2026-08-03) is why: the loop counted only ``m["text"]``
+    while the compactor counted text plus metadata payloads. Discarding 60
+    text-empty tool rows removed ~0 tokens by the loop's books but the added
+    summary was fully counted, so compaction *grew* the measured context by
+    1698 tokens and the agent hard-failed.
+
+    Sub-agent internal rows (``metadata.subAgentId``) are excluded because
+    ``loop.context_utils.filter_internal_subagent_messages`` strips them before
+    the context is ever sent to the model.
+    """
+    return sum(
+        _message_summary_weight(msg)
+        for msg in context
+        if not (msg.get("metadata") or {}).get("subAgentId")
+    )
+
+
+def compaction_saved_ratio(original_tokens: int, compressed_tokens: int) -> float:
+    """Signed fraction of the context that compaction removed.
+
+    NEGATIVE when compaction grew the context — never clamped to 0.0. A clamp
+    makes "compaction added 1698 tokens" look identical to "compaction saved
+    nothing" in logs and in the MIN_AUTOCOMPACT_SAVINGS_RATIO comparison.
+    """
+    if original_tokens <= 0:
+        return 0.0
+    return (original_tokens - compressed_tokens) / original_tokens
 
 
 def _expand_tool_pairs(
@@ -607,6 +658,30 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             + [context[i] for i in tail_indices]
         )
 
+        # A compaction that does not shrink the context is a failed compaction.
+        # Handing it back would replace the context with a LARGER one and then
+        # trip the caller's overflow trigger anyway (prod agent e14d5abb).
+        original_tokens = estimate_context_tokens(context)
+        compressed_tokens = estimate_context_tokens(new_context)
+        if compressed_tokens >= original_tokens:
+            logger.error(
+                "Compaction did not reduce context; rejecting result",
+                original_messages=len(context),
+                compressed_messages=len(new_context),
+                original_tokens=original_tokens,
+                compressed_tokens=compressed_tokens,
+                saved_ratio=compaction_saved_ratio(original_tokens, compressed_tokens),
+                summary_length=len(summary),
+            )
+            return {
+                "context": None,
+                "usage": usage,
+                "success": False,
+                "error": f"compaction did not reduce context ({original_tokens} -> {compressed_tokens} estimated tokens)",
+                "original_tokens": original_tokens,
+                "compressed_tokens": compressed_tokens,
+            }
+
         logger.info(
             "Context compacted",
             original_messages=len(context),
@@ -614,10 +689,18 @@ Write only the summary, starting with "{COMPACTION_SUMMARY_PREFIX}" prefix.
             middle=len(middle_indices),
             tail=len(tail_indices),
             summary_length=len(summary),
+            original_tokens=original_tokens,
+            compressed_tokens=compressed_tokens,
             tokens_used=usage.get("total_tokens", 0),
         )
 
-        return {"context": new_context, "usage": usage, "success": True}
+        return {
+            "context": new_context,
+            "usage": usage,
+            "success": True,
+            "original_tokens": original_tokens,
+            "compressed_tokens": compressed_tokens,
+        }
 
     except Exception as e:
         logger.error("Failed to compress context", error=str(e))

@@ -1,4 +1,5 @@
 import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
+import { getOrgCardholderVerificationStatus } from './org-onboarding';
 import { extractAgentCardOrgWallet } from './org-wallet-monitor';
 import { retryWithBackoff } from '../retry';
 
@@ -18,11 +19,90 @@ const MAX_RATE_LIMIT_ATTEMPTS = 4;
 const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
+const BENCHMARK_CARDHOLDER_EMAIL = 'agentcard-benchmark@roselabs.ai';
 
 export interface AgentCardSandboxFloat {
   balanceCents: number;
   availableCents: number;
   committedCents: number;
+}
+
+export interface AgentCardSandboxCardholder {
+  id: string;
+  email?: string;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+function extractCardholders(result: unknown): AgentCardSandboxCardholder[] {
+  const outer = asRecord(result);
+  const structured = asRecord(outer?.structuredContent) ?? outer;
+  const raw = structured?.cardholders;
+  if (!Array.isArray(raw)) {
+    throw new Error('AgentCard list_cardholders returned no cardholders array');
+  }
+  return raw.flatMap((item) => {
+    const record = asRecord(item);
+    const id = optionalString(record?.id);
+    if (id === undefined) return [];
+    return [
+      {
+        id,
+        ...(optionalString(record?.email) !== undefined
+          ? { email: optionalString(record?.email) }
+          : {}),
+      },
+    ];
+  });
+}
+
+function preferredBenchmarkCardholderIds(
+  env: Record<string, string | undefined> = process.env
+): string[] {
+  const preferred = [env.BENCHMARK_AGENTCARD_CARDHOLDER_ID, env.AGENTCARD_CARDHOLDER_ID]
+    .map((value) => value?.trim())
+    .filter((value): value is string => value !== undefined && value !== '');
+  return [...new Set(preferred)];
+}
+
+/**
+ * Resolve a sandbox org cardholder that actually exists for the OAuth client.
+ *
+ * Stale `BENCHMARK_AGENTCARD_CARDHOLDER_ID` values previously seeded Integration
+ * rows that made every `create_card` return "Cardholder not found", which the
+ * purchase path then rewrote as a funding-in-progress retry loop.
+ */
+export async function resolveBenchmarkCardholderId(
+  preferredIds: string[] = preferredBenchmarkCardholderIds(),
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<string> {
+  const cardholders = extractCardholders(await callOrgTool('list_cardholders', {}));
+  if (cardholders.length === 0) {
+    throw new Error(
+      'AgentCard sandbox org has no cardholders. Create one in sandbox mode at ' +
+        `${AGENTCARD_DASHBOARD_URL} (auth uses AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET).`
+    );
+  }
+
+  for (const preferredId of preferredIds) {
+    if (cardholders.some((cardholder) => cardholder.id === preferredId)) {
+      return preferredId;
+    }
+  }
+
+  const byEmail = cardholders.find(
+    (cardholder) => cardholder.email?.toLowerCase() === BENCHMARK_CARDHOLDER_EMAIL
+  );
+  if (byEmail !== undefined) return byEmail.id;
+  return cardholders[0].id;
 }
 
 function minSandboxFloatCents(env: Record<string, string | undefined> = process.env): number {
@@ -96,4 +176,57 @@ export async function ensureAgentCardSandboxFloat(
     availableCents: wallet.availableCents,
     committedCents: wallet.committedCents,
   };
+}
+
+function maskCardholderId(value: string): string {
+  if (value.length <= 8) return value;
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
+function isCardholderNotFoundMessage(message: string): boolean {
+  return /\bcardholder not found\b/i.test(message);
+}
+
+/**
+ * Confirm the benchmark cardholder exists in the same OAuth org as the sandbox wallet float
+ * check. Wallet balance alone is insufficient: a mismatched BENCHMARK_AGENTCARD_CARDHOLDER_ID
+ * passes float verification but mint loops forever on "Cardholder not found".
+ */
+export async function ensureBenchmarkOrgCardholder(
+  cardholderId: string,
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<{ verificationStatus: string }> {
+  const trimmedCardholderId = cardholderId.trim();
+  if (trimmedCardholderId === '') {
+    throw new Error(
+      'BENCHMARK_AGENTCARD_CARDHOLDER_ID is required for the AgentCard payment lifecycle fixture'
+    );
+  }
+
+  let verificationStatus: string;
+  try {
+    verificationStatus = await getOrgCardholderVerificationStatus(trimmedCardholderId, {
+      callOrgTool,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isCardholderNotFoundMessage(message)) {
+      throw new Error(
+        'AgentCard benchmark cardholder does not exist in the OAuth org tied to ' +
+          'AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET. Set BENCHMARK_AGENTCARD_ORG_ID and ' +
+          'BENCHMARK_AGENTCARD_CARDHOLDER_ID together to a cardholder that belongs to that org ' +
+          `(wallet float passed but cardholder ${maskCardholderId(trimmedCardholderId)} was not found).`
+      );
+    }
+    throw new Error(`AgentCard benchmark cardholder readiness check failed: ${message}`);
+  }
+
+  if (verificationStatus !== 'verified' && verificationStatus !== 'approved') {
+    throw new Error(
+      `AgentCard benchmark cardholder is not KYC-ready (${verificationStatus}); ` +
+        'complete sandbox cardholder verification before running the payment lifecycle gate.'
+    );
+  }
+
+  return { verificationStatus };
 }

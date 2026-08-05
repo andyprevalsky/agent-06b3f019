@@ -53,8 +53,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import type { RequestPaymentCardPayload } from '@/lib/realtime-types';
 import { respondToAttentionRequest, rejectAttentionRequest, useToast } from '../hooks';
-import { ApprovalPaymentReceipt } from './ApprovalPaymentReceipt';
-import { MarkdownText } from './MarkdownText';
+import { ApprovalScrollBody } from './ApprovalCardBody';
 
 interface PendingApproval {
   attentionRequestId: string;
@@ -220,56 +219,12 @@ function useHasMoreBelow(resetKey?: string) {
   return { scrollerRef, contentRef, hasMoreBelow, onScroll: measure };
 }
 
-interface ApprovalDetailsProps {
-  pendingApproval: PendingApproval;
-  scrollState: ReturnType<typeof useHasMoreBelow>;
-}
-
-function ApprovalDetails({ pendingApproval, scrollState }: ApprovalDetailsProps) {
-  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = scrollState;
-  return (
-    <div className="relative flex min-h-0 flex-1 flex-col">
-      <div
-        ref={scrollerRef}
-        onScroll={onScroll}
-        tabIndex={0}
-        role="region"
-        aria-label="Approval details"
-        className="min-h-0 flex-1 overflow-y-auto"
-      >
-        <div ref={contentRef}>
-          {pendingApproval.imageUrl && (
-            <div className="mb-3 flex justify-center">
-              <img
-                src={pendingApproval.imageUrl}
-                alt="Request context"
-                className="max-w-[200px] max-h-[150px] rounded-md object-contain"
-              />
-            </div>
-          )}
-          <div className="mb-3 text-sm text-foreground">
-            <MarkdownText text={pendingApproval.question} breaks />
-          </div>
-          {pendingApproval.requestPaymentCard && (
-            <ApprovalPaymentReceipt receipt={pendingApproval.requestPaymentCard} />
-          )}
-        </div>
-      </div>
-      {hasMoreBelow && (
-        <div
-          data-testid="approval-scroll-more"
-          aria-hidden
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-background to-transparent"
-        />
-      )}
-    </div>
-  );
-}
-
 export default function ApprovalChip({ pendingApproval, onApprovalHandled }: ApprovalChipProps) {
   const [contextInput, setContextInput] = useState('');
   const [actionState, setActionState] = useState<ActionState>(null);
-  const scrollState = useHasMoreBelow(pendingApproval?.attentionRequestId);
+  const { scrollerRef, contentRef, hasMoreBelow, onScroll } = useHasMoreBelow(
+    pendingApproval?.attentionRequestId,
+  );
   const { handleAccept, handleReject } = useApprovalHandlers({
     pendingApproval,
     contextInput,
@@ -302,7 +257,13 @@ export default function ApprovalChip({ pendingApproval, onApprovalHandled }: App
               <span className="text-sm font-medium text-foreground">Approval Required</span>
             </div>
           </div>
-          <ApprovalDetails pendingApproval={pendingApproval} scrollState={scrollState} />
+          <ApprovalScrollBody
+            scrollerRef={scrollerRef}
+            contentRef={contentRef}
+            onScroll={onScroll}
+            hasMoreBelow={hasMoreBelow}
+            pendingApproval={pendingApproval}
+          />
           <div className="mb-3 shrink-0 pt-3">
             <Input
               placeholder="Add context (optional)..."

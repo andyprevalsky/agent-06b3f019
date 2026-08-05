@@ -11,7 +11,7 @@
  *     the same `startGmailOAuthApi` flow as `useGmailConnect`; open in the Mac
  *     app's system browser when embedded, else same-tab so the redirect returns.
  *   - Mac-only src   → deep-link `roselabs://connect-source?...` so the Mac app
- *     opens its native connect modal (iMessage / SMS / WhatsApp / Telegram).
+ *     opens its native connect modal (iMessage / WhatsApp / Telegram).
  *   - subscription / kyc / other → open the carried URL (Stripe Checkout / KYC
  *     hosted links are minted fresh at raise-time and stay valid).
  */
@@ -23,7 +23,7 @@ import type { GateMetadata } from './types';
 /** Sources connected through a Gmail-style web OAuth flow. */
 const GMAIL_OAUTH_SOURCES = new Set(['gmail', 'email']);
 /** Sources that connect through the Mac app (device sync / QR / login). */
-const MAC_APP_CONNECT_SOURCES = new Set(['imessage', 'sms', 'whatsapp', 'telegram']);
+const MAC_APP_CONNECT_SOURCES = new Set(['imessage', 'whatsapp', 'telegram']);
 
 export interface GateConnectContext {
   requestId: string;
@@ -33,7 +33,11 @@ export interface GateConnectContext {
 /** Parse the concrete source from a source_connect gate ("source_connect:gmail"). */
 export function gateSourceKey(gate: GateMetadata): string | null {
   const match = /^source_connect:(.+)$/.exec(gate.gateKey);
-  return match ? match[1] : null;
+  if (!match) return null;
+  const source = match[1];
+  // Legacy persisted gates used `sms` before the phantom source was removed;
+  // route them to the current iMessage Mac-app connect path.
+  return source === 'sms' ? 'imessage' : source;
 }
 
 /**

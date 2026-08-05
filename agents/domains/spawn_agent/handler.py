@@ -17,6 +17,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
+from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
     EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
@@ -38,11 +39,11 @@ from domains.spawn_agent.service import (
 from helpers.attachments import extract_attachments_from_context, fetch_parent_attachments_activity
 from helpers.tracing import span
 from tools.base import EventType, MessageStatus, ToolEvent, ToolManager
-from tools.gate import GateRejectedError, build_source_connect_gate, raise_gate_direct
 from tools.spawn_browser_agent_v3 import get_manager as get_browser_manager
 from tools.spawn_claude_code_agent import get_manager as get_code_manager
 from tools.spawn_sub_agents import get_manager as get_sub_agent_manager
 from tools.spawn_sub_agents import spawn_sub_agents_batch_activity
+from utils.source_connect_gates import raise_source_connect_gates
 from utils.tool_call_ids import spawn_group_id
 
 logger = structlog.get_logger()
@@ -303,6 +304,7 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
         *,
         task_id: Optional[str] = None,
+        local_data_summary: Optional[str] = None,
         display_goal: Optional[str] = None,
         capture_tool_results: Optional[List[str]] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
@@ -316,10 +318,10 @@ class SpawnAgentManager(ToolManager):
         tool-call outputs. This is out-of-band so the 100+ KB trace never gets
         persisted into message metadata or shipped across activity boundaries.
 
-        Contact discovery + message-thread lookup happen inside the explore
-        agent on demand via the grep tool's network / agent_network_* /
-        messages source modes — we no longer prefetch network_metadata or
-        local_data_summary before spawning.
+        Detailed contact discovery + message-thread lookup happen inside the
+        explore agent on demand via grep. A compact aggregate data summary is
+        prefetched into dynamic user context so counts, date ranges, and top
+        threads do not require scanning the full message corpus.
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
@@ -338,6 +340,18 @@ class SpawnAgentManager(ToolManager):
         )
 
         try:
+            context_gates = tool_call.get("context_gates") or {}
+            if local_data_summary is None:
+                if context_gates.get("recent_communications", True):
+                    local_data_summary = await workflow.execute_activity(
+                        fetch_local_data_summary,
+                        args=[workflow_instance.user_id],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                else:
+                    local_data_summary = ""
+
             # Resolve requested attachments from workflow context
             attachment_texts: List[str] = []
             requested_attachments = tool_call.get("attachments")
@@ -408,6 +422,7 @@ class SpawnAgentManager(ToolManager):
                 if hasattr(workflow_instance, "_active_gpt_pool_id")
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
+            world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -433,10 +448,9 @@ class SpawnAgentManager(ToolManager):
                     getattr(workflow_instance, "max_context_tokens", None) or 200_000,
                     depth,
                     explore_max_iterations,
+                    world_model_mode,
+                    local_data_summary,
                 ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
                 activity_handle = workflow.start_activity(
                     spawn_explore_agent_activity,
                     args=activity_args,
@@ -481,8 +495,9 @@ class SpawnAgentManager(ToolManager):
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
             # Data sources the explore tried to grep but whose connector isn't
-            # connected. When present the explore is a FAILED sub-agent, and the
-            # parent (spawn_agent) raises one blocking source_connect gate each.
+            # connected. Keep them on the event so the parent can raise one
+            # blocking source_connect gate each — but do NOT mark the explore
+            # itself ERROR; the result already includes a not-connected notice.
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
@@ -516,19 +531,16 @@ class SpawnAgentManager(ToolManager):
             if explore_error_reason:
                 event_data["error_reason"] = explore_error_reason
                 event_metadata["error_reason"] = explore_error_reason
-            event_message = (
-                explore_error_reason
-                if (unavailable_sources or explore_failed) and explore_error_reason
-                else explore_result
-            )
+            # User-visible message is the explore result (including any
+            # not-connected notice). Only genuine explore failures swap in
+            # error_reason / ERROR status.
+            event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
 
-            # FINISHED with result and usage — or ERROR when a required data
-            # source wasn't connected (the explore couldn't finish its job).
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
                 message=event_message,
-                status=MessageStatus.ERROR if unavailable_sources or explore_failed else MessageStatus.FINISHED,
+                status=MessageStatus.ERROR if explore_failed else MessageStatus.FINISHED,
                 data=event_data,
                 metadata=event_metadata,
             )
@@ -900,43 +912,10 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     # A required data source wasn't connected: raise one blocking source_connect
     # gate per source (dedup/fan-in collapses duplicates across sub-agents). Each
     # gate posts its own card to the main chat and blocks until the user resolves
-    # it. The explore stays FAILED so the main agent re-spawns once connected.
+    # it. The explore itself stays FINISHED with a not-connected notice in its
+    # result so partial findings are not clobbered for the user/parent.
     if unavailable_sources:
-        await _raise_source_connect_gates(workflow_instance, unavailable_sources)
+        await raise_source_connect_gates(workflow_instance, unavailable_sources)
 
     workflow.logger.info(f"[spawn_agent] Finished type={agent_type}, events={event_count}, last_status={last_status}")
     return last_status, last_result
-
-
-async def _raise_source_connect_gates(workflow_instance, unavailable_sources: List[Dict]) -> None:
-    """Raise a blocking source_connect gate for each unavailable data source.
-
-    Runs in workflow context (has ``_handle_tool_event``/``_signal_responses``),
-    mirroring the subscription gate in spawn_browser_agent_v3. A declined gate
-    is swallowed — the explore already failed, so the main agent reports the gap.
-    """
-    for status in unavailable_sources:
-        if not isinstance(status, dict):
-            continue
-        source = str(status.get("source") or "")
-        if not source:
-            continue
-        connector = str(status.get("connector") or source)
-        connect_url = str(status.get("connectUrl") or "")
-        pretty = connector.replace("_", " ").title()
-        # Key the gate by the CONNECTOR, not the raw grep source. The OAuth
-        # callback resolves `source_connect:<providerKey>` (e.g. "gmail"), so a
-        # gate keyed on the source alias ("email") would never auto-resolve and
-        # the workflow would park forever. Connector-keying also dedups sources
-        # that share one connector (email + gmail → one Gmail gate).
-        gate = build_source_connect_gate(
-            connector,
-            f"Connect {pretty} so Rose can use your {source}",
-            f"This task needs your {source} data, but {pretty} isn't connected yet — "
-            "tap to connect and I'll pick right back up.",
-            connect_url,
-        )
-        try:
-            await raise_gate_direct(workflow_instance, gate, gate_key=f"source_connect:{connector}")
-        except GateRejectedError:
-            workflow.logger.info(f"[spawn_agent] source_connect gate declined for {connector}")

@@ -12,11 +12,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import Callable
+
+
+def _trusted_github_host() -> str:
+    """Host gh should talk to (GH_HOST override, else github.com)."""
+    return (os.environ.get("GH_HOST") or "github.com").strip() or "github.com"
 
 
 PENDING_STATES = {
@@ -84,66 +90,179 @@ def normalize_status(entry: dict[str, object]) -> ReviewStatus:
     return ReviewStatus(normalized, False, False, kind, entry)
 
 
-def _gh_json(command: list[str]) -> object:
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+def _gh_json(command: list[str], *, timeout: float | None = None) -> object:
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ReviewWaitError(
+            f"gh timed out after {timeout:g}s: {' '.join(command)}"
+        ) from error
     if completed.returncode != 0:
-        raise ReviewWaitError(completed.stderr.strip() or "gh command failed")
+        raise ReviewWaitError(completed.stderr.strip() or " ".join(command) + " failed")
     try:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as error:
-        raise ReviewWaitError("gh command returned invalid JSON") from error
+        raise ReviewWaitError("gh returned invalid JSON") from error
 
 
-def _repo_slug(repo: str | None) -> str:
+def _parse_repo_ref(repo: str) -> tuple[str | None, str]:
+    """Split optional ``HOST/OWNER/REPO`` into ``(hostname, OWNER/REPO)``."""
+    parts = [part for part in repo.split("/") if part]
+    if len(parts) == 2:
+        return None, "/".join(parts)
+    if len(parts) >= 3:
+        return parts[0], "/".join(parts[-2:])
+    raise ReviewWaitError(f"repo must be OWNER/REPO or HOST/OWNER/REPO, got {repo!r}")
+
+
+def _repo_slug(repo: str | None, *, timeout: float | None = None) -> str:
     if repo:
-        return repo
-    payload = _gh_json(["gh", "repo", "view", "--json", "nameWithOwner"])
-    if not isinstance(payload, dict) or not isinstance(payload.get("nameWithOwner"), str):
-        raise ReviewWaitError("could not resolve OWNER/REPO for REST status fallback")
-    return payload["nameWithOwner"]
+        _hostname, slug = _parse_repo_ref(repo)
+        del _hostname
+        return slug
+    payload = _gh_json(["gh", "repo", "view", "--json", "nameWithOwner"], timeout=timeout)
+    if not isinstance(payload, dict) or not payload.get("nameWithOwner"):
+        raise ReviewWaitError("could not resolve OWNER/REPO for commit status fallback")
+    return str(payload["nameWithOwner"])
 
 
-def _rest_status_payload(pr: str, repo: str | None, expected_hint: str | None = None) -> dict[str, object]:
-    """Build a statusCheckRollup-shaped payload from the REST commit status API.
-
-    Fine-grained tokens often can read REST statuses but not GraphQL
-    ``statusCheckRollup`` (the field ``gh pr view --json statusCheckRollup``
-    queries). Prefer GraphQL; fall back here so cloud deploys are not blocked.
-    """
-    pr_payload = _gh_json(
-        (["gh", "pr", "view", pr, "--repo", repo] if repo else ["gh", "pr", "view", pr])
-        + ["--json", "headRefOid"]
-    )
-    if not isinstance(pr_payload, dict):
-        raise ReviewWaitError("gh pr view returned a non-object payload")
-    head = str(pr_payload.get("headRefOid") or "")
-    if not head:
-        raise ReviewWaitError("gh pr view returned no headRefOid")
-    slug = _repo_slug(repo)
-    status_payload = _gh_json(["gh", "api", f"repos/{slug}/commits/{head}/status"])
-    if not isinstance(status_payload, dict):
-        raise ReviewWaitError("REST commit status returned a non-object payload")
-    rollup: list[dict[str, object]] = []
-    for entry in status_payload.get("statuses") or []:
-        if not isinstance(entry, dict):
-            continue
-        rollup.append(
-            {
-                "__typename": "StatusContext",
-                "context": entry.get("context"),
-                "state": str(entry.get("state") or "").upper(),
-                "description": entry.get("description"),
-            }
+def _gh_api_json(
+    endpoint: str,
+    *,
+    repo: str | None = None,
+    timeout: float | None = None,
+    paginate: bool = False,
+) -> object:
+    hostname: str | None = None
+    if repo:
+        hostname, _slug = _parse_repo_ref(repo)
+    if hostname and hostname != _trusted_github_host():
+        raise ReviewWaitError(
+            f"refusing untrusted GitHub host {hostname!r}; "
+            f"expected {_trusted_github_host()!r}"
         )
-    return {"headRefOid": head, "statusCheckRollup": rollup}
+    command = ["gh", "api"]
+    if hostname:
+        command.extend(["--hostname", hostname])
+    if paginate:
+        command.append("--paginate")
+    command.append(endpoint)
+    return _gh_json(command, timeout=timeout)
 
 
-def gh_payload(pr: str, repo: str | None = None) -> dict[str, object]:
+def gh_commit_status_rollup(
+    head: str,
+    repo: str | None = None,
+    *,
+    timeout: float | None = None,
+) -> list[dict[str, object]]:
+    """Build a StatusContext-shaped rollup from the REST commit status API.
+
+    Some cloud-agent tokens can read ``gh pr view --json headRefOid`` and
+    ``/commits/{sha}/status``, but GraphQL ``statusCheckRollup`` and the
+    Checks API return 403. Commit statuses remain sufficient for CodeRabbit.
+    """
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ReviewWaitError("commit status fallback exceeded its time budget")
+        return left
+
+    slug = _repo_slug(repo, timeout=_remaining())
+    endpoint = f"repos/{slug}/commits/{head}/status?per_page=100"
+    # ``gh api --paginate`` concatenates JSON arrays; for the combined status
+    # object we walk Link headers by requesting pages until statuses empty.
+    rollup: list[dict[str, object]] = []
+    page = 1
+    max_pages = 20
+    while page <= max_pages:
+        page_endpoint = f"{endpoint}&page={page}"
+        payload = _gh_api_json(page_endpoint, repo=repo, timeout=_remaining())
+        if not isinstance(payload, dict):
+            raise ReviewWaitError("commit status API returned a non-object payload")
+        statuses = payload.get("statuses")
+        if not isinstance(statuses, list) or not statuses:
+            break
+        for entry in statuses:
+            if not isinstance(entry, dict):
+                continue
+            context = entry.get("context")
+            state = entry.get("state")
+            if not context or not state:
+                continue
+            mapped: dict[str, object] = {
+                "__typename": "StatusContext",
+                "context": context,
+                "state": str(state).upper(),
+            }
+            # Preserve description when present so callers can detect
+            # non-substantive CodeRabbit successes ("Review skipped", etc.).
+            if entry.get("description") is not None:
+                mapped["description"] = entry.get("description")
+            rollup.append(mapped)
+        if len(statuses) < 100:
+            break
+        page += 1
+    # GitHub returns statuses newest-first; coderabbit_entry uses matches[-1]
+    # so reverse so the newest status is last.
+    rollup.reverse()
+    return rollup
+
+
+def _validate_repo_ref(repo: str | None) -> None:
+    """Reject untrusted HOST/OWNER/REPO refs before any gh invocation."""
+    if not repo:
+        return
+    hostname, _slug = _parse_repo_ref(repo)
+    if hostname and hostname != _trusted_github_host():
+        raise ReviewWaitError(
+            f"refusing untrusted GitHub host {hostname!r}; "
+            f"expected {_trusted_github_host()!r}"
+        )
+
+
+def gh_payload(
+    pr: str,
+    repo: str | None = None,
+    *,
+    timeout: float | None = None,
+) -> dict[str, object]:
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ReviewWaitError("gh_payload exceeded its time budget")
+        return left
+
+    _validate_repo_ref(repo)
+
     command = ["gh", "pr", "view", pr]
     if repo:
         command.extend(["--repo", repo])
     command.extend(["--json", "headRefOid,statusCheckRollup"])
-    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_remaining(),
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ReviewWaitError("gh timed out: gh pr view") from error
     if completed.returncode == 0:
         try:
             payload = json.loads(completed.stdout)
@@ -152,11 +271,27 @@ def gh_payload(pr: str, repo: str | None = None) -> dict[str, object]:
         if not isinstance(payload, dict):
             raise ReviewWaitError("gh pr view returned a non-object payload")
         return payload
-    err = completed.stderr.strip() or "gh pr view failed"
-    # GraphQL statusCheckRollup is frequently inaccessible to fine-grained PATs.
-    if "statusCheckRollup" in err or "Resource not accessible" in err:
-        return _rest_status_payload(pr, repo)
-    raise ReviewWaitError(err)
+
+    stderr = completed.stderr.strip()
+    # Limited tokens often fail only on statusCheckRollup; recover HEAD alone
+    # and synthesize the rollup from the REST commit status endpoint.
+    if "statusCheckRollup" not in stderr and "Resource not accessible" not in stderr:
+        raise ReviewWaitError(stderr or "gh pr view failed")
+
+    head_command = ["gh", "pr", "view", pr]
+    if repo:
+        head_command.extend(["--repo", repo])
+    head_command.extend(["--json", "headRefOid"])
+    head_payload = _gh_json(head_command, timeout=_remaining())
+    if not isinstance(head_payload, dict):
+        raise ReviewWaitError("gh pr view headRefOid returned a non-object payload")
+    head = str(head_payload.get("headRefOid") or "")
+    if not head:
+        raise ReviewWaitError("gh pr view did not return headRefOid")
+    return {
+        "headRefOid": head,
+        "statusCheckRollup": gh_commit_status_rollup(head, repo, timeout=_remaining()),
+    }
 
 
 def wait_for_review(
@@ -166,14 +301,32 @@ def wait_for_review(
     repo: str | None,
     timeout_seconds: float,
     poll_seconds: float,
-    loader: Callable[[str, str | None], dict[str, object]] = gh_payload,
+    loader: Callable[[str, str | None], dict[str, object]] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     progress: Callable[[str], None] | None = None,
 ) -> ReviewStatus:
     deadline = time.monotonic() + timeout_seconds
     last_message = ""
+
+    def default_loader(pr_number: str, repo_name: str | None) -> dict[str, object]:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
+                f"within {timeout_seconds:g}s (last state: MISSING)"
+            )
+        return gh_payload(pr_number, repo_name, timeout=remaining)
+
+    active_loader = loader or default_loader
+
     while True:
-        payload = loader(pr, repo)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
+                f"within {timeout_seconds:g}s (last state: MISSING)"
+            )
+        payload = active_loader(pr, repo)
         actual_head = str(payload.get("headRefOid") or "")
         if actual_head != expected_head:
             raise ReviewWaitError(
@@ -198,7 +351,7 @@ def wait_for_review(
                 f"CodeRabbit did not reach a terminal state on {expected_head[:12]} "
                 f"within {timeout_seconds:g}s (last state: {status.state})"
             )
-        sleeper(max(0.0, poll_seconds))
+        sleeper(max(0.0, min(poll_seconds, deadline - time.monotonic())))
 
 
 def parse_args() -> argparse.Namespace:

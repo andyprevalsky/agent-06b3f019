@@ -32,14 +32,6 @@ const writeErrorLine = (message: string): void => {
 };
 
 const ErrorResponse = z.object({ error: z.string() });
-const VapiToolResponse = z.object({
-  results: z.array(
-    z.object({
-      toolCallId: z.string(),
-      result: z.string(),
-    })
-  ),
-});
 const ItemsResponse = z.object({
   items: z
     .array(
@@ -142,7 +134,10 @@ const tests: Array<[string, () => Promise<void>]> = [
       try {
         await configureBenchmarkAgentCardSetup(
           { userId, action: 'complete' },
-          { getCardholderVerificationStatus: async () => 'not_started' }
+          {
+            resolveCardholderId: async () => 'cardholder-unverified-fixture',
+            getCardholderVerificationStatus: async () => 'not_started',
+          }
         );
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);
@@ -504,105 +499,6 @@ const tests: Array<[string, () => Promise<void>]> = [
         else process.env.PHONE_BENCHMARK_PAYMENT_AUDIT_PATH = previous;
         await rm(tmp, { recursive: true, force: true });
       }
-    },
-  ],
-  [
-    'Vapi phone payment tool returns tool-call result envelope on validation failure',
-    async () => {
-      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
-        method: 'POST',
-        body: JSON.stringify({
-          message: {
-            type: 'tool-calls',
-            toolCallList: [
-              {
-                id: 'toolu_phone_payment_missing_cvc',
-                name: 'complete_test_payment',
-                arguments: {
-                  card_number: '4242 4242 4242 4242',
-                  expiration: '12/30',
-                  billing_zip: '78731',
-                },
-              },
-            ],
-          },
-        }),
-      });
-      assertStatus(response.status, 200, response.data);
-      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
-      assert(
-        body.results[0].toolCallId === 'toolu_phone_payment_missing_cvc',
-        'wrong tool call id'
-      );
-      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
-      assert(result.status === 'failed', 'expected failed result');
-      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
-    },
-  ],
-  [
-    'Vapi phone payment tool accepts JSON-string tool arguments',
-    async () => {
-      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
-        method: 'POST',
-        body: JSON.stringify({
-          message: {
-            type: 'tool-calls',
-            toolCallList: [
-              {
-                id: 'toolu_phone_payment_string_args',
-                name: 'complete_test_payment',
-                arguments: JSON.stringify({
-                  card_number: '4242 4242 4242 4242',
-                  expiration: '12/30',
-                  billing_zip: '78731',
-                }),
-              },
-            ],
-          },
-        }),
-      });
-      assertStatus(response.status, 200, response.data);
-      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
-      assert(
-        body.results[0].toolCallId === 'toolu_phone_payment_string_args',
-        'wrong tool call id'
-      );
-      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
-      assert(result.status === 'failed', 'expected failed result');
-      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
-    },
-  ],
-  [
-    'Vapi phone payment tool accepts nested function toolCalls payload',
-    async () => {
-      const response = await request('/api/test-payment/vapi-phone-payment-tool', {
-        method: 'POST',
-        body: JSON.stringify({
-          message: {
-            type: 'tool-calls',
-            toolCalls: [
-              {
-                id: 'call_nested_missing_cvc',
-                type: 'function',
-                function: {
-                  name: 'complete_test_payment',
-                  arguments: {
-                    card_number: '4242 4242 4242 4242',
-                    expiration: '12/30',
-                    billing_zip: '78731',
-                  },
-                },
-              },
-            ],
-          },
-        }),
-      });
-      assertStatus(response.status, 200, response.data);
-      const body = assertSchema(VapiToolResponse, response.data, 'vapi payment tool');
-      assert(body.results[0].toolCallId === 'call_nested_missing_cvc', 'wrong tool call id');
-      const result = JSON.parse(body.results[0].result) as { status?: string; error?: string };
-      assert(result.status === 'failed', 'expected failed result');
-      assert(String(result.error || '').includes('cvc'), `expected cvc error, got ${result.error}`);
     },
   ],
 ];

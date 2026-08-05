@@ -1,0 +1,196 @@
+#!/usr/bin/env tsx
+/**
+ * Recovery + idempotency of the real-merchant (hosted Stripe Checkout) settlement.
+ *
+ * Stripe has ALREADY captured before `settleRoseCardStripeCheckout` runs, so the reconciliation
+ * that follows must be retryable. The regression these tests pin: settlement used to load the
+ * correlated purchase HELD-only, so the instant the HELD -> CHARGING claim landed the row stopped
+ * matching its own lookup. A failed CLEARED write (pool timeout, restart, transient DB error) then
+ * stranded the purchase in CHARGING and every retry of the SAME paid Checkout session 404'd —
+ * money captured, purchase never cleared. The same held-only filter also 404'd a shopper who
+ * simply reloaded a successful return URL.
+ *
+ * The fakes below emulate the real SQL semantics, not the happy path:
+ *   - claim        = `updateMany where status = HELD`     -> only a HELD row can be claimed
+ *   - markCleared  = `updateMany where status = CHARGING` -> only a CHARGING row can clear
+ * so "settles exactly once" is enforced by the store, not by the assertion.
+ */
+
+import assert from 'node:assert/strict';
+import { PurchaseSpendStatus } from '@prisma/client';
+import {
+  settleRoseCardStripeCheckout,
+  type CheckoutHeldPurchase,
+} from '../../providers/agentcard/checkout-settlement';
+import { AgentCardSandboxSettlementError } from '../../providers/agentcard/sandbox-settlement';
+
+const LAST4 = '2679';
+const AMOUNT_CENTS = 4396;
+
+interface Harness {
+  row: CheckoutHeldPurchase;
+  claims: string[];
+  clears: string[];
+  failNextClear: boolean;
+  dependencies: Parameters<typeof settleRoseCardStripeCheckout>[1];
+}
+
+function harness(status: PurchaseSpendStatus = PurchaseSpendStatus.HELD): Harness {
+  const state: Harness = {
+    row: {
+      id: 'purchase-1',
+      userId: 'user-1',
+      agentId: 'agent-1',
+      cardId: 'card-1',
+      stripePaymentIntentId: 'pi_hold_1',
+      totalCents: AMOUNT_CENTS,
+      status,
+    },
+    claims: [],
+    clears: [],
+    failNextClear: false,
+    dependencies: {},
+  };
+
+  state.dependencies = {
+    findPurchaseForCheckout: async (purchaseId) => (purchaseId === state.row.id ? state.row : null),
+    getCardLast4: async () => LAST4,
+    // `updateMany where status = HELD` -> a second claim can never win.
+    claimHeldPurchaseForCharge: async (purchaseId) => {
+      if (purchaseId !== state.row.id || state.row.status !== PurchaseSpendStatus.HELD)
+        return false;
+      state.row.status = PurchaseSpendStatus.CHARGING;
+      state.claims.push(purchaseId);
+      return true;
+    },
+    // `updateMany where status = CHARGING` inside a transaction -> a second clear throws.
+    markPurchaseCleared: async (purchaseId) => {
+      if (state.failNextClear) {
+        state.failNextClear = false;
+        // Exactly what a Prisma P2024 pool timeout looks like to this caller: the claim is already
+        // durably CHARGING, and the CLEARED write never happened.
+        throw new Error('Timed out fetching a new connection from the connection pool');
+      }
+      if (state.row.status !== PurchaseSpendStatus.CHARGING) {
+        throw new AgentCardSandboxSettlementError(
+          'AgentCard sandbox charge did not clear the purchase',
+          502
+        );
+      }
+      state.row.status = PurchaseSpendStatus.CLEARED;
+      state.clears.push(purchaseId);
+    },
+  };
+
+  return state;
+}
+
+function paidCheckout(overrides: Partial<Parameters<typeof settleRoseCardStripeCheckout>[0]> = {}) {
+  return { purchaseId: 'purchase-1', last4: LAST4, amountCents: AMOUNT_CENTS, ...overrides };
+}
+
+async function main(): Promise<void> {
+  // ── 1. Fault injection: the CLEARED write fails once, then the SAME paid Checkout is retried. ──
+  {
+    const state = harness();
+    state.failNextClear = true;
+
+    await assert.rejects(
+      () => settleRoseCardStripeCheckout(paidCheckout(), state.dependencies),
+      /connection pool/,
+      'the first attempt must surface the failed CLEARED write, not swallow it'
+    );
+    assert.equal(
+      state.row.status,
+      PurchaseSpendStatus.CHARGING,
+      'the failed attempt leaves the captured purchase mid-transition'
+    );
+
+    // The retry carries the same session identity: same purchase id, same captured amount, same
+    // charged card. It must FINISH the transition rather than 404 on a no-longer-HELD row.
+    const retried = await settleRoseCardStripeCheckout(paidCheckout(), state.dependencies);
+    assert.deepEqual(retried, {
+      purchaseId: 'purchase-1',
+      cardId: 'card-1',
+      stripePaymentIntentId: 'pi_hold_1',
+    });
+    assert.equal(state.row.status, PurchaseSpendStatus.CLEARED, 'no stuck CHARGING purchase');
+    assert.deepEqual(state.claims, ['purchase-1'], 'the retry must not re-claim');
+    assert.deepEqual(state.clears, ['purchase-1'], 'settled exactly once — no double-charge');
+
+    // A third delivery of the same success_url replays the settled result instead of erroring.
+    const replayed = await settleRoseCardStripeCheckout(paidCheckout(), state.dependencies);
+    assert.deepEqual(replayed, retried);
+    assert.deepEqual(state.clears, ['purchase-1'], 'a reloaded return URL must not clear twice');
+  }
+
+  // ── 2. Reloading a successful return URL on an already-CLEARED purchase is a no-op replay. ──
+  {
+    const state = harness(PurchaseSpendStatus.CLEARED);
+    const result = await settleRoseCardStripeCheckout(paidCheckout(), state.dependencies);
+    assert.equal(result.purchaseId, 'purchase-1');
+    assert.deepEqual(state.clears, [], 'an already-cleared purchase must not be re-cleared');
+    assert.deepEqual(state.claims, []);
+  }
+
+  // ── 3. A DIFFERENT checkout must not ride the recoverable path. ──
+  // The reconciliation identity is (purchaseId, capturedAmount, chargedCardLast4) and it is
+  // re-proved on EVERY call, including the CHARGING/CLEARED recovery branches.
+  for (const status of [PurchaseSpendStatus.CHARGING, PurchaseSpendStatus.CLEARED]) {
+    const wrongAmount = harness(status);
+    await assert.rejects(
+      () =>
+        settleRoseCardStripeCheckout(
+          paidCheckout({ amountCents: AMOUNT_CENTS + 1 }),
+          wrongAmount.dependencies
+        ),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError && error.statusCode === 409,
+      `a different captured amount must not settle a ${status} purchase`
+    );
+    assert.deepEqual(wrongAmount.clears, [], 'amount mismatch must never clear');
+
+    const wrongCard = harness(status);
+    await assert.rejects(
+      () => settleRoseCardStripeCheckout(paidCheckout({ last4: '9999' }), wrongCard.dependencies),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError && error.statusCode === 409,
+      `a different charged card must not settle a ${status} purchase`
+    );
+    assert.deepEqual(wrongCard.clears, [], 'card mismatch must never clear');
+  }
+
+  // ── 4. A purchase in a non-settleable status is rejected, not silently reconciled. ──
+  {
+    const state = harness(PurchaseSpendStatus.VOIDED);
+    await assert.rejects(
+      () => settleRoseCardStripeCheckout(paidCheckout(), state.dependencies),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError &&
+        error.statusCode === 409 &&
+        error.message.includes('VOIDED'),
+      'a VOIDED purchase cannot be reconciled to a paid checkout'
+    );
+    assert.deepEqual(state.clears, []);
+  }
+
+  // ── 5. A purchase that does not exist still fails closed with a 404. ──
+  {
+    const state = harness();
+    await assert.rejects(
+      () =>
+        settleRoseCardStripeCheckout(
+          paidCheckout({ purchaseId: 'missing-purchase' }),
+          state.dependencies
+        ),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError && error.statusCode === 404,
+      'an unknown purchase reference must not settle anything'
+    );
+    assert.deepEqual(state.clears, []);
+  }
+
+  process.stdout.write('AgentCard checkout settlement recovery tests passed\n');
+}
+
+void main();

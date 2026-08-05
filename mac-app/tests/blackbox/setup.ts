@@ -3,6 +3,14 @@ import { afterAll, afterEach, beforeAll } from 'vitest';
 import { server } from './msw/server';
 import { clearCaptures } from './msw/capture';
 
+/**
+ * Cloud/dev hosts often inject real TELEGRAM_API_* secrets into the process.
+ * messaging-telegram config captures those at module load; clear them before
+ * any test file imports so "credentials absent" cases stay deterministic.
+ */
+delete process.env.TELEGRAM_API_ID;
+delete process.env.TELEGRAM_API_HASH;
+
 class MemoryStorage implements Storage {
   private readonly store = new Map<string, string>();
 
