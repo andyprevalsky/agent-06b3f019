@@ -1078,7 +1078,14 @@ ensure_ngrok_domain_reserved() {
                 exit 1
             }
         fi
-        if printf '%s\n' "$page_body" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
+        if printf '%s\n' "$page_body" | python3 -c '
+import json
+import sys
+
+requested_domain = sys.argv[1]
+reserved_domains = json.load(sys.stdin).get("reserved_domains") or []
+sys.exit(not any(item.get("domain") == requested_domain for item in reserved_domains))
+' "$domain"; then
             echo "🌐 Reserved domain already exists: $domain"
             return 0
         fi

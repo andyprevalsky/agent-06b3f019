@@ -156,6 +156,37 @@ class ReviewWaitTest(unittest.TestCase):
         )
         self.assertEqual(len(calls), 1)
 
+    def test_commit_status_rollup_bounds_pages_and_shares_timeout_budget(self) -> None:
+        timeouts: list[float | None] = []
+
+        def fake_gh_json(command: list[str], timeout=None) -> object:
+            timeouts.append(timeout)
+            if command[:2] == ["gh", "api"] and any(
+                part.startswith("repos/acme/rose/commits/abc/status") for part in command
+            ):
+                # Always return a full page so pagination would loop forever
+                # without the max_pages bound.
+                return {
+                    "statuses": [
+                        {"context": f"ctx-{len(timeouts)}", "state": "success"}
+                        for _ in range(100)
+                    ]
+                }
+            raise AssertionError(command)
+
+        original = MODULE._gh_json
+        MODULE._gh_json = fake_gh_json
+        try:
+            rollup = MODULE.gh_commit_status_rollup(
+                "abc", repo="acme/rose", timeout=30.0
+            )
+        finally:
+            MODULE._gh_json = original
+
+        self.assertEqual(len(rollup), 20 * 100)
+        self.assertEqual(len(timeouts), 20)
+        self.assertTrue(all(t is not None and 0 < float(t) <= 30.0 for t in timeouts))
+
     def test_gh_payload_falls_back_when_status_check_rollup_forbidden(self) -> None:
         head = "c" * 40
         calls: list[list[str]] = []

@@ -68,3 +68,13 @@ grep -qE -- '--limit 100\b' "$RUN_SH" || { echo "FAIL: run.sh must list reserved
 ! grep -qE -- '--limit 1000\b' "$RUN_SH" || { echo "FAIL: run.sh still requests --limit 1000 from ngrok" >&2; exit 1; }
 echo "PASS: run.sh respects ngrok reserved-domains page-size cap"
 
+# Domain existence checks must compare JSON values literally — interpolating
+# $domain into grep treats dots as regex wildcards and can false-match.
+if grep -nE 'grep -q.*"domain".*"\$domain"' "$RUN_SH" >/dev/null; then
+  echo "FAIL: run.sh must not regex-match reserved domain names via grep" >&2
+  exit 1
+fi
+grep -q 'item.get("domain") == requested_domain' "$RUN_SH" \
+  || { echo "FAIL: run.sh must literally compare reserved domain JSON values" >&2; exit 1; }
+echo "PASS: run.sh compares reserved domains as exact JSON values"
+

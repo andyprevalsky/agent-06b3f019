@@ -479,9 +479,16 @@ async def spawn_explore_agent_activity(
             )
             if isinstance(result, dict):
                 for st in result.get("unavailable_sources") or []:
-                    key = st.get("source") if isinstance(st, dict) else st
-                    if key and not any(u.get("source") == key for u in unavailable_sources_collected):
-                        unavailable_sources_collected.append(st)
+                    if isinstance(st, dict):
+                        source = st.get("source")
+                        normalized = st
+                    else:
+                        source = str(st) if st else None
+                        normalized = {"source": source} if source else None
+                    if source and normalized and not any(
+                        u.get("source") == source for u in unavailable_sources_collected
+                    ):
+                        unavailable_sources_collected.append(normalized)
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
             if not attachment_texts and not has_usable_tool_evidence:
                 return {

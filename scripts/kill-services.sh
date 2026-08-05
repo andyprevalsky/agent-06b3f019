@@ -228,7 +228,10 @@ benchmark_controller_for_pid() {
         fi
         local ppid
         ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        # Evaluate PID 1 before ending the walk: on Fly cloudbench the boot
+        # command is PID 1 and can be a real controller ancestor. Stop only on
+        # absent/zero/self parents (same contract as is_self_ancestor).
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ] && return 1
         current="$ppid"
     done
 }

@@ -157,15 +157,26 @@ def gh_commit_status_rollup(
     ``/commits/{sha}/status``, but GraphQL ``statusCheckRollup`` and the
     Checks API return 403. Commit statuses remain sufficient for CodeRabbit.
     """
-    slug = _repo_slug(repo, timeout=timeout)
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+
+    def _remaining() -> float | None:
+        if deadline is None:
+            return None
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise ReviewWaitError("commit status fallback exceeded its time budget")
+        return left
+
+    slug = _repo_slug(repo, timeout=_remaining())
     endpoint = f"repos/{slug}/commits/{head}/status?per_page=100"
     # ``gh api --paginate`` concatenates JSON arrays; for the combined status
     # object we walk Link headers by requesting pages until statuses empty.
     rollup: list[dict[str, object]] = []
     page = 1
-    while True:
+    max_pages = 20
+    while page <= max_pages:
         page_endpoint = f"{endpoint}&page={page}"
-        payload = _gh_api_json(page_endpoint, repo=repo, timeout=timeout)
+        payload = _gh_api_json(page_endpoint, repo=repo, timeout=_remaining())
         if not isinstance(payload, dict):
             raise ReviewWaitError("commit status API returned a non-object payload")
         statuses = payload.get("statuses")

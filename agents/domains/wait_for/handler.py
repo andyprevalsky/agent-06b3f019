@@ -287,10 +287,13 @@ class WaitForManager(ToolManager):
                 # Route explore events as spawn_agent messages (correct toolName for FE grouping)
                 await workflow_instance._handle_tool_event(event, explore_tool_call_id, "spawn_agent")
 
-                # Capture usage from the FINISHED event (raw tool results come via the collector)
-                if event.status == MessageStatus.FINISHED and event.data:
-                    explore_usage = event.data.get("usage", {})
-                    explore_unavailable_sources = event.data.get("unavailable_sources") or []
+                # Usage is FINISHED-only; unavailable_sources can also arrive on
+                # ERROR when an explore had connector gaps plus another failure.
+                if event.data:
+                    if event.status == MessageStatus.FINISHED:
+                        explore_usage = event.data.get("usage", {})
+                    if "unavailable_sources" in event.data:
+                        explore_unavailable_sources = event.data.get("unavailable_sources") or []
 
             # Direct _spawn_explore callers must raise source_connect gates the
             # same way execute_tool does; wait_for previously dropped them.

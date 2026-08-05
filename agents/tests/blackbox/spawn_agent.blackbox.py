@@ -2028,6 +2028,48 @@ async def test_spawn_explore_agent_activity_unavailable_sources_still_completed(
     assert "No Amazon orders in reachable sources." in result["result"]
     assert "Source(s) not connected: email" in result["result"]
 
+
+async def test_spawn_explore_agent_activity_normalizes_scalar_unavailable_sources():
+    """Scalar unavailable_sources entries become {source: ...} records for notices/gates."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "partial",
+            "usage": {"llm": [], "service": []},
+            "unavailable_sources": ["email", {"source": "email"}],
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        execute_tool = kwargs["execute_tool"]
+        await execute_tool("grep", {"pattern": "amazon", "sources": ["email"]}, "tc1")
+        return {
+            "status": "completed",
+            "final_response": "partial research",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch(
+            "providers.fast_cache.client.resolve_agent_fast_mode",
+            new=AsyncMock(return_value=(False, "g", True, None)),
+        ),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(agent_id="a", user_id="u", goal="g", model="m")
+
+    assert result["status"] == "completed"
+    assert result["unavailable_sources"] == [{"source": "email"}]
+    assert "Source(s) not connected: email" in result["result"]
+
+
 async def test_spawn_explore_agent_activity_rejects_tool_free_completion():
     """A child cannot report successful research without any tool evidence."""
     from unittest.mock import patch
@@ -2623,6 +2665,10 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_unavailable_sources_still_completed",
         test_spawn_explore_agent_activity_unavailable_sources_still_completed,
+    )
+    await r.record_async(
+        "explore_activity_normalizes_scalar_unavailable_sources",
+        test_spawn_explore_agent_activity_normalizes_scalar_unavailable_sources,
     )
     await r.record_async(
         "explore_activity_rejects_tool_free_completion",

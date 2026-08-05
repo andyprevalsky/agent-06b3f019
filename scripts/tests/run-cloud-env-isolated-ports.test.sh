@@ -41,4 +41,12 @@ out=$(cd "$TMP" && BENCHMARK_ISOLATED_RUN=true CONDUCTOR_PORT=3201 CONDUCTOR_WOR
 out=$(cd "$TMP" && CONDUCTOR_PORT=3201 CONDUCTOR_WORKSPACE_NAME=bench-x bash probe.sh)
 [ "$out" = "port=3001 ws=shared-ws" ] || { echo "FAIL shared cloud-env wins: $out" >&2; exit 1; }
 
+# AgentCard lifecycle launches run.sh --benchmark and must export the isolated
+# flag + CONDUCTOR_PORT so .cloud-env cannot collapse onto the shared port.
+LIFECYCLE="$ROOT/scripts/run-agentcard-lifecycle-task.sh"
+grep -qE '^export CONDUCTOR_PORT$' "$LIFECYCLE" \
+  || { echo "FAIL: run-agentcard-lifecycle-task.sh must export CONDUCTOR_PORT" >&2; exit 1; }
+grep -qE '^export BENCHMARK_ISOLATED_RUN=true$' "$LIFECYCLE" \
+  || { echo "FAIL: run-agentcard-lifecycle-task.sh must export BENCHMARK_ISOLATED_RUN=true" >&2; exit 1; }
+
 echo "run-cloud-env-isolated-ports: OK"

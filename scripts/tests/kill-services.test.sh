@@ -457,4 +457,21 @@ if ! grep -q '"\$ppid" = "\$current"' <<<"$protection_walk_source"; then
 fi
 echo "PASS: is_self_ancestor classifies PID 1 instead of bailing before it"
 
+# Same PID-1 contract for benchmark_controller_for_pid: a controller that is PID 1
+# (or reached via parent=1) must still be classified before the walk ends.
+controller_walk_source=$(awk '/^benchmark_controller_for_pid\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh")
+if [[ -z "$controller_walk_source" ]]; then
+    echo "FAIL: could not read benchmark_controller_for_pid" >&2
+    exit 1
+fi
+if grep -q '"\$ppid" = "1"' <<<"$controller_walk_source"; then
+    echo "FAIL: benchmark_controller_for_pid still stops on PID 1 before classifying it" >&2
+    exit 1
+fi
+if ! grep -q '"\$ppid" = "\$current"' <<<"$controller_walk_source"; then
+    echo "FAIL: benchmark_controller_for_pid must stop on self-parent loops, not PID 1" >&2
+    exit 1
+fi
+echo "PASS: benchmark_controller_for_pid classifies PID 1 instead of bailing before it"
+
 echo "All kill-services tests passed."

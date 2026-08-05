@@ -588,6 +588,76 @@ async def test_handler_condition_check_messages_carry_explore_task_id():
     assert all(e.metadata.get("exploreTaskId") for e in reestablish)
 
 
+async def test_handler_condition_raises_source_connect_gates_from_explore_error():
+    """ERROR explore events with unavailable_sources still raise source_connect gates."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import EventType, MessageStatus, ToolEvent
+    from tools.spawn_agent import SpawnAgentManager
+
+    unavailable = [
+        {
+            "source": "email",
+            "connector": "gmail",
+            "connected": False,
+            "connectUrl": "https://roselabs.ai/connect/gmail",
+        }
+    ]
+    gate_calls = []
+
+    async def fake_spawn_explore(
+        self,
+        wf,
+        tool_call,
+        explore_tool_call_id,
+        *,
+        task_id=None,
+        display_goal=None,
+        capture_tool_results=None,
+    ):
+        yield ToolEvent(
+            type=EventType.POST_MESSAGE,
+            title="Explore failed",
+            message="partial + failure",
+            status=MessageStatus.ERROR,
+            metadata={"agentType": "explore", "taskId": task_id},
+            data={"unavailable_sources": unavailable},
+        )
+
+    async def fake_raise_gates(workflow_instance, sources):
+        gate_calls.append(list(sources))
+
+    fake = _FakeWFModule(
+        activity_results={
+            "evaluate_condition_activity": {"satisfied": True, "reasoning": "ok"},
+        }
+    )
+    restore = _patch_handler_workflow(fake)
+    orig_spawn = SpawnAgentManager._spawn_explore
+    SpawnAgentManager._spawn_explore = fake_spawn_explore
+    try:
+        with patch(
+            "domains.spawn_agent.handler._raise_source_connect_gates",
+            new=fake_raise_gates,
+        ):
+            await _collect(
+                WaitForManager().execute_tool(
+                    workflow_instance=_WFInstance(),
+                    tool_call={
+                        "description": "the deploy to be ready",
+                        "condition": "deploy ready",
+                        "check_interval_seconds": 30,
+                        "max_checks": 1,
+                    },
+                    tool_call_id="tc",
+                )
+            )
+    finally:
+        SpawnAgentManager._spawn_explore = orig_spawn
+        restore()
+
+    assert gate_calls == [unavailable]
+
+
 # ── pending_timestamp_wait_to_resume (deploy-migration resume) ────
 
 
@@ -766,6 +836,10 @@ async def run_all_tests():
     await r.record_async("handler_cond_fetch_fail", test_handler_condition_network_fetch_failure_tolerated)
     await r.record_async("handler_cond_gates_off", test_handler_condition_gates_off_skip_fetch)
     await r.record_async("handler_cond_explore_task_id", test_handler_condition_check_messages_carry_explore_task_id)
+    await r.record_async(
+        "handler_cond_error_unavailable_sources",
+        test_handler_condition_raises_source_connect_gates_from_explore_error,
+    )
     r.record("resume_interrupted_future", test_resume_interrupted_future_wait_returns_target)
     r.record("resume_interrupted_past", test_resume_interrupted_past_wait_returns_target)
     r.record("resume_completed_none", test_resume_completed_wait_returns_none)
