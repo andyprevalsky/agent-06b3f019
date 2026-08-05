@@ -1,7 +1,10 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { createLogger } from '../../providers/logger';
 import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
+
+const log = createLogger('TestPayment');
 import {
   abandonTestPayment,
   configureBenchmarkAgentCardSetup,
@@ -235,6 +238,12 @@ router.post(
         res.status(error.statusCode).json({ error: error.message });
         return;
       }
+      // Surface the real cause. A bare 500 here hid a stranded-purchase bug for
+      // an entire benchmark run: the underlying charge error was swallowed and
+      // every retry then reported only "No matching held AgentCard purchase".
+      log.error('Confirm test payment failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       res.status(500).json({ error: 'Failed to confirm test payment' });
     }
   })

@@ -160,6 +160,9 @@ async function main(): Promise<void> {
           ],
           getCardPan: async () => '4242424242420640',
           claimHeldPurchaseForCharge: async () => true,
+          // Injected so the release path stays in-memory; without it this unit
+          // test reaches the real Prisma client.
+          releaseHeldPurchaseClaim: async () => {},
           testCharge: async () => ({ isError: true, message: 'declined' }),
         }
       ),
@@ -168,6 +171,94 @@ async function main(): Promise<void> {
       error.statusCode === 402 &&
       error.message.includes('declined')
   );
+
+  // Regression: a failed charge must RELEASE the claim so a retry can settle.
+  //
+  // `claimHeldPurchaseForCharge` latches HELD -> CHARGING. Before the fix,
+  // nothing put it back when the charge threw, so the purchase was stranded:
+  // every retry selects on `status: HELD`, finds nothing, and 404s forever
+  // while the wallet transfer stays FUNDED and the issued card goes unspent.
+  // Seen live in agent-payment-setup-resume — one 500 then six consecutive
+  // "No matching held AgentCard purchase was found" 404s until the 900s cap.
+  {
+    const released: string[] = [];
+    let held = true;
+
+    const deps = () => ({
+      // Mirrors the real query: it only returns purchases still in HELD.
+      findHeldPurchasesByTotal: async () =>
+        held
+          ? [
+              {
+                id: 'purchase-retry',
+                userId: 'user-1',
+                cardId: 'card-retry',
+                stripePaymentIntentId: 'pi_hold_retry',
+              },
+            ]
+          : [],
+      getCardPan: async () => '4242424242420640',
+      claimHeldPurchaseForCharge: async () => {
+        held = false;
+        return true;
+      },
+      releaseHeldPurchaseClaim: async (purchaseId: string) => {
+        released.push(purchaseId);
+        held = true;
+      },
+      markPurchaseCleared: async () => {},
+    });
+
+    // First attempt: the charge throws (the observed 500).
+    await assert.rejects(
+      settleAgentCardSandboxPayment(
+        { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          ...deps(),
+          testCharge: async () => {
+            throw new Error('sandbox charge exploded');
+          },
+        }
+      )
+    );
+    assert.deepEqual(released, ['purchase-retry'], 'failed charge must release the claim');
+
+    // Second attempt on the same purchase must now find and settle it.
+    const retry = await settleAgentCardSandboxPayment(
+      { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+      { ...deps(), testCharge: async () => ({ isError: false }) }
+    );
+    assert.equal(retry.purchaseId, 'purchase-retry', 'retry after a failed charge must settle');
+  }
+
+  // A declined charge (402) must release the claim too — it is equally retryable.
+  {
+    const released: string[] = [];
+    await assert.rejects(
+      settleAgentCardSandboxPayment(
+        { cardNumber: '4242424242420640', amountCents: 4396, merchant: 'Rose Labs Test Payment' },
+        {
+          findHeldPurchasesByTotal: async () => [
+            {
+              id: 'purchase-declined',
+              userId: 'user-1',
+              cardId: 'card-declined',
+              stripePaymentIntentId: 'pi_hold_declined',
+            },
+          ],
+          getCardPan: async () => '4242424242420640',
+          claimHeldPurchaseForCharge: async () => true,
+          releaseHeldPurchaseClaim: async (purchaseId: string) => {
+            released.push(purchaseId);
+          },
+          testCharge: async () => ({ isError: true, message: 'declined' }),
+        }
+      ),
+      (error: unknown) =>
+        error instanceof AgentCardSandboxSettlementError && error.statusCode === 402
+    );
+    assert.deepEqual(released, ['purchase-declined'], 'declined charge must release the claim');
+  }
 
   process.stdout.write('AgentCard sandbox settlement tests passed\n');
 }
