@@ -11,12 +11,37 @@ from datetime import timedelta
 from typing import Any, Callable, List, Optional, TypeVar
 
 import structlog
+from temporalio.exceptions import ApplicationError
 
 from utils.error_utils import extract_error_message
 
 logger = structlog.get_logger()
 
 T = TypeVar("T")
+
+
+def _is_non_retryable_error(error: BaseException, retry_policy: Optional[Any]) -> bool:
+    """Mirror Temporal's non-retryable classification for the in-activity shim.
+
+    Temporal stops retrying when the failure is an ``ApplicationError`` with
+    ``non_retryable=True``, or when the failure's type appears in the retry
+    policy's ``non_retryable_error_types``. This shim replaces
+    ``workflow.execute_activity`` for activity-to-activity calls, so it must
+    honour both — otherwise a deterministic failure (e.g. web_fetch rejecting a
+    bad URL) is retried anyway and costs double.
+
+    Non-``ApplicationError`` exceptions are matched by class name, which is the
+    type Temporal's failure converter assigns them.
+    """
+    if isinstance(error, ApplicationError) and error.non_retryable:
+        return True
+
+    non_retryable_types = getattr(retry_policy, "non_retryable_error_types", None) or ()
+    if not non_retryable_types:
+        return False
+
+    error_type = error.type if isinstance(error, ApplicationError) else type(error).__name__
+    return error_type in non_retryable_types
 
 
 async def call_temporal_activity_from_activity(
@@ -81,6 +106,13 @@ async def call_temporal_activity_from_activity(
 
         except Exception as e:
             last_error = e
+            if _is_non_retryable_error(e, retry_policy):
+                logger.warning(
+                    f"Activity failed non-retryably (attempt {attempt + 1}/{max_attempts}) — not retrying",
+                    func=func.__name__,
+                    error=extract_error_message(e),
+                )
+                raise
             logger.warning(
                 f"Activity failed (attempt {attempt + 1}/{max_attempts})",
                 func=func.__name__,

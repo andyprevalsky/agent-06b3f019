@@ -829,19 +829,67 @@ async def test_verifier_score_1_returns_completed():
 
 
 async def test_estimate_tokens():
-    """_estimate_tokens applies the chars/4 × safety-multiplier heuristic."""
-    from loop.run_agent import ESTIMATE_SAFETY_MULTIPLIER, _estimate_tokens
+    """_estimate_tokens counts everything rendered, not just m["text"].
 
-    context = [
+    It is the SAME function the compactor uses (helpers.summarize.
+    estimate_context_tokens). Prod agent e14d5abb (2026-08-03) hard-failed
+    because the two disagreed: this counted only text, so text-empty ASSISTANT
+    rows carrying their whole payload in metadata.tool_calls scored ~0 and
+    dropping them "saved" nothing while the added summary was fully counted —
+    compaction grew the context by 1698 tokens.
+    """
+    from helpers.summarize import estimate_context_tokens
+    from loop.run_agent import _estimate_tokens
+
+    text_only = [
         {"text": "Hello world this is a test message", "metadata": {}},
         {"text": "Another message here with more content", "metadata": {}},
     ]
+    assert _estimate_tokens(text_only) == estimate_context_tokens(text_only) > 0
 
-    result = _estimate_tokens(context)
+    # Production-shaped rows: empty text, payload entirely in metadata. These
+    # must carry real weight, not ~0.
+    metadata_only = [
+        {
+            "role": "ASSISTANT",
+            "text": "",
+            "metadata": {
+                "tool_calls": [{"tool": "spawn_agent", "tool_call_id": "tc-1", "goal": "find a phone number " * 50}]
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "",
+            "metadata": {
+                "toolName": "grep",
+                "structured_response": {"matches": [{"path": "network/contact.contact"}] * 20},
+            },
+        },
+    ]
+    assert _estimate_tokens(metadata_only) > 100
+    assert _estimate_tokens(metadata_only) == estimate_context_tokens(metadata_only)
 
-    total_text = "\n".join([m["text"] for m in context])
-    expected = int((len(total_text) / 4) * ESTIMATE_SAFETY_MULTIPLIER)
-    assert result == expected
+
+async def test_compress_context_rejects_non_shrinking_result():
+    """A "compaction" that returns a LARGER context is a failure, not a success.
+
+    Adopting it guarantees the overflow trigger fires again on the next check —
+    the loop that killed prod agent e14d5abb. The activity runs out-of-process
+    (possibly on an older build), so the caller re-checks rather than trusting
+    success=True.
+    """
+    from loop.run_agent import _compress_context
+
+    context = [{"role": "USER", "text": "original body " * 100}]
+    grown = [{"role": "USER", "text": "summary that is somehow even longer " * 100}]
+
+    async def mock_execute_activity(fn, args=None, **kwargs):
+        return {"context": grown, "usage": {}, "success": True}
+
+    result_ctx, success = await _compress_context(mock_execute_activity, context, "rose-lite")
+
+    assert success is False
+    assert result_ctx is context
 
 
 async def test_compress_context_returns_new_context_on_success():
@@ -864,7 +912,9 @@ async def test_compress_context_returns_new_context_on_success():
     async def on_tokens(in_, out_, model, **kwargs):
         tokens_recorded.append((in_, out_, model, kwargs))
 
-    context = [{"role": "USER", "text": "hi"}]
+    # Input must genuinely exceed the compacted output: _compress_context
+    # rejects a result that does not shrink the context.
+    context = [{"role": "USER", "text": "hi there, this is the pre-compaction body. " * 20}]
     result_ctx, success = await _compress_context(
         mock_execute_activity,
         context,
@@ -1216,7 +1266,14 @@ async def test_compress_context_activity_exception_preserves_original():
 
 
 async def test_run_agent_errors_when_compaction_still_over_trigger():
-    """Successful but ineffective compaction should not continue_as_new or call the LLM."""
+    """Successful but ineffective compaction should not continue_as_new or call the LLM.
+
+    ``_compress_context`` is patched out here, so this covers the loop-level
+    contract only: a compaction that lands at or above the trigger returns
+    status=error. The producer-side guard (reject a compaction that does not
+    shrink the context at all) is covered by
+    ``test_compress_context_rejects_non_shrinking_result``.
+    """
     import loop.run_agent as run_mod
 
     async def system_prompt():
@@ -1258,6 +1315,58 @@ async def test_run_agent_errors_when_compaction_still_over_trigger():
 
     assert result["status"] == "error"
     assert "Context compression ineffective" in result["message"]
+    assert result["context"] == initial_context
+
+
+async def test_run_agent_errors_when_compactor_breaker_open_over_trigger():
+    """An open compactor circuit breaker must fail loudly, not send an oversized context.
+
+    The breaker guard at the top of the loop used to only *skip* compaction, so
+    after MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES the loop fell through and shipped
+    an over-window context to the provider on every remaining iteration — a
+    length error that says nothing about compaction.
+    """
+    import loop.run_agent as run_mod
+
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM must not be called with an un-compactable oversized context")
+
+    async def fail_compress(**kwargs):
+        raise AssertionError("compaction must not be attempted while the breaker is open")
+
+    initial_context = [{"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}]
+
+    with (
+        patch.object(run_mod, "EFFECTIVE_OUTPUT_RESERVATION", 0),
+        patch.object(run_mod, "AUTOCOMPACT_BUFFER_TOKENS", 10),
+        patch.object(run_mod, "MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES", 0),  # breaker already open
+        patch.object(run_mod, "_compress_context", new=AsyncMock(side_effect=fail_compress)),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        result = await run_mod.run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=initial_context,
+            is_inside_temporal_activity=True,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=1,
+            max_context_tokens=100,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert result["status"] == "error"
+    assert "Context compression unavailable" in result["message"]
     assert result["context"] == initial_context
 
 
@@ -1899,6 +2008,9 @@ async def run_all_tests():
         "compress_context_returns_new_context_on_success", test_compress_context_returns_new_context_on_success
     )
     await r.record_async(
+        "compress_context_rejects_non_shrinking_result", test_compress_context_rejects_non_shrinking_result
+    )
+    await r.record_async(
         "compress_context_forwards_compute_token_context", test_compress_context_forwards_compute_token_context
     )
     await r.record_async(
@@ -1928,6 +2040,10 @@ async def run_all_tests():
     await r.record_async(
         "run_agent_errors_when_compaction_still_over_trigger",
         test_run_agent_errors_when_compaction_still_over_trigger,
+    )
+    await r.record_async(
+        "run_agent_errors_when_compactor_breaker_open_over_trigger",
+        test_run_agent_errors_when_compactor_breaker_open_over_trigger,
     )
     await r.record_async(
         "run_verifier_posts_in_progress_and_finished", test_run_verifier_posts_in_progress_and_finished

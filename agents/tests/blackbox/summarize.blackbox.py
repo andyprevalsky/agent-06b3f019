@@ -362,6 +362,201 @@ async def test_compress_context_prompt_includes_structured_tool_metadata():
     assert "spawn_general_purpose_agent_for_each" in prompts[0]
 
 
+def _build_production_shaped_context():
+    """Prod-shaped context: tool payloads live in metadata, not in ``text``.
+
+    Mirrors prod agent e14d5abb-1ff9-40f2-a910-2d3a1e9bb1cc (2026-08-03), where
+    every ASSISTANT row had an empty ``text`` with the whole tool payload under
+    ``metadata.tool_calls``, and every TOOL row carried its result under
+    ``metadata.structured_response``.
+    """
+    ctx = [
+        {"role": "SYSTEM", "text": "You are Rose.", "metadata": {}},
+        {"role": "USER", "text": "Find Andy Prevalsky's phone number.", "metadata": {}},
+    ]
+    for i in range(30):
+        ctx.append(
+            {
+                "role": "ASSISTANT",
+                "text": "",
+                "metadata": {
+                    "tool_calls": [
+                        {
+                            "tool": "spawn_agent",
+                            "tool_call_id": f"toolu_{i}",
+                            "goal": "Find contact information for Andy Prevalsky. " * 40,
+                        }
+                    ]
+                },
+            }
+        )
+        ctx.append(
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "grep",
+                    "structured_response": {"matches": [{"path": f"network/contact-{i}.contact"}] * 20},
+                },
+            }
+        )
+    # Tail: rows with real text, large enough that 4 alone satisfy KEEP_RECENT_TOKENS.
+    for i in range(4):
+        ctx.append(
+            {
+                "role": "ASSISTANT",
+                "text": f"step {i}: " + ("reasoning about the contact record. " * 500),
+                "metadata": {},
+            }
+        )
+    return ctx
+
+
+async def test_compress_context_reduces_metadata_heavy_context():
+    """Compaction must SHRINK a production-shaped context, never grow it.
+
+    Prod agent e14d5abb (2026-08-03) hard-failed with
+    ``{"context_tokens": 429743, "compressed_tokens": 431441, "trigger": 167000}``
+    — compaction ADDED 1698 tokens and the loop returned status=error.
+
+    Root cause was two disagreeing estimators: the loop's overflow check counted
+    only ``m["text"]`` while the compactor counted text PLUS
+    ``metadata.tool_calls``/``structured_response``/``attachments``/
+    ``file_pointer``. Prod ASSISTANT rows carry an empty ``text`` with the whole
+    payload in metadata, so discarding them removed ~0 *measured* tokens while
+    the new summary — which IS text — was fully measured. Net: measured growth.
+
+    This test measures with the caller's estimator (``run_agent._estimate_tokens``,
+    the one that gates the trigger) and asserts it agrees with the compactor's.
+    """
+    from helpers import summarize
+    import helpers.llm as llm_mod
+    from loop.run_agent import _estimate_tokens
+
+    summary_text = "SUMMARY OF EARLIER WORK: " + ("the explore agent searched local data. " * 60)
+
+    async def fake_llm(messages, **kwargs):
+        return {"content": summary_text, "usage": {"total_tokens": 100}}
+
+    ctx = _build_production_shaped_context()
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            out = await summarize.compress_context(context=ctx, iteration_count=25, model="m")
+
+    assert out["success"] is True, out
+    compressed = out["context"]
+    assert len(compressed) < len(ctx)
+
+    before = _estimate_tokens(ctx)
+    after = _estimate_tokens(compressed)
+    assert after < before, (
+        f"compaction GREW the measured context: {before} -> {after} tokens "
+        f"while discarding {len(ctx) - len(compressed)} messages"
+    )
+
+    # One estimator: the loop's trigger check and the compactor must agree, or
+    # compaction can 'succeed' by the compactor's books and grow by the loop's.
+    assert before == summarize.estimate_context_tokens(ctx)
+    assert after == summarize.estimate_context_tokens(compressed)
+
+
+async def test_compress_context_rejects_summary_bigger_than_the_middle():
+    """A summary larger than the turns it replaces is a FAILED compaction.
+
+    Handing that back would swap the context for a bigger one and immediately
+    re-trip the caller's overflow trigger — the loop that killed prod agent
+    e14d5abb. The compactor must detect non-reduction itself instead of
+    silently returning a grown context with success=True.
+    """
+    from helpers import summarize
+    import helpers.llm as llm_mod
+
+    async def fake_llm(messages, **kwargs):
+        # Summarizer that "summarizes" into something far larger than its input.
+        return {"content": "verbose restatement of everything. " * 400, "usage": {"total_tokens": 10}}
+
+    ctx = _build_test_context(n_pairs=5)
+
+    with patch("temporalio.activity.heartbeat"):
+        with patch.object(llm_mod, "call_llm", fake_llm):
+            with patch.object(summarize, "KEEP_RECENT_TOKENS", 1):
+                out = await summarize.compress_context(context=ctx, iteration_count=10, model="m")
+
+    assert out["success"] is False
+    assert out["context"] is None
+    assert "did not reduce context" in out.get("error", "")
+    assert out["compressed_tokens"] >= out["original_tokens"]
+
+
+async def test_compaction_saved_ratio_can_go_negative():
+    """A compaction that GROWS the context must report a NEGATIVE saved ratio.
+
+    The prod incident logged ``saved_ratio: 0.0`` for a compaction that added
+    1698 tokens, because run_agent clamped it with ``max(0.0, ...)``. Growth was
+    therefore indistinguishable from "saved nothing" in both the log line and
+    the MIN_AUTOCOMPACT_SAVINGS_RATIO comparison.
+    """
+    from unittest.mock import MagicMock
+
+    import loop.run_agent as run_mod
+    from helpers.summarize import compaction_saved_ratio
+
+    # 1. The shared accounting helper is signed, never clamped.
+    assert compaction_saved_ratio(429743, 431441) < 0
+    assert compaction_saved_ratio(100, 50) == 0.5
+    assert compaction_saved_ratio(0, 10) == 0.0
+
+    # 2. The agent loop actually surfaces that negative ratio.
+    async def system_prompt():
+        return "System prompt"
+
+    async def verifier_prompt():
+        return "Verifier prompt"
+
+    async def fake_compress_context(**kwargs):
+        # Compaction that grew the context, exactly like the prod incident.
+        return [{"role": "USER", "text": "y" * 1200, "timestamp": "2024-01-01T00:00:00Z"}], True
+
+    async def fail_llm(**kwargs):
+        raise AssertionError("LLM should not be called after ineffective compaction")
+
+    initial_context = [{"role": "USER", "text": "x" * 400, "timestamp": "2024-01-01T00:00:00Z"}]
+    captured_logger = MagicMock()
+
+    with (
+        patch.object(run_mod, "logger", captured_logger),
+        patch.object(run_mod, "EFFECTIVE_OUTPUT_RESERVATION", 0),
+        patch.object(run_mod, "AUTOCOMPACT_BUFFER_TOKENS", 10),
+        patch.object(run_mod, "_compress_context", new=AsyncMock(side_effect=fake_compress_context)),
+        patch.object(run_mod, "call_llm_structured_streaming", new=AsyncMock(side_effect=fail_llm)),
+    ):
+        result = await run_mod.run_agent(
+            agent_id="agent-test",
+            user_id="user-test",
+            system_prompt=system_prompt,
+            verifier_prompt_generator=verifier_prompt,
+            model="rose-labs/rose-1-lite",
+            tools=["attempt_completion"],
+            initial_context=initial_context,
+            is_inside_temporal_activity=True,
+            build_messages=lambda context, prompt: [{"role": "system", "content": prompt}],
+            max_iterations=1,
+            max_context_tokens=100,
+            skip_verification=True,
+            skip_status_updates=True,
+        )
+
+    assert result["status"] == "error"
+    ratios = [
+        call.kwargs["saved_ratio"]
+        for call in captured_logger.error.call_args_list
+        if call.args and call.args[0] == "Compaction did not get below overflow trigger"
+    ]
+    assert ratios, f"overflow error never logged: {captured_logger.error.call_args_list}"
+    assert ratios[0] < 0, f"growth reported as {ratios[0]}; the max(0.0, ...) clamp is back"
+
+
 async def test_split_head_middle_tail_uses_recent_token_budget():
     """Recent tail grows until the token budget is reached, then preserves pairs."""
     from helpers import summarize
@@ -782,6 +977,18 @@ async def run_all_tests():
     await r.record_async(
         "compress_context_prompt_includes_structured_tool_metadata",
         test_compress_context_prompt_includes_structured_tool_metadata,
+    )
+    await r.record_async(
+        "compress_context_reduces_metadata_heavy_context",
+        test_compress_context_reduces_metadata_heavy_context,
+    )
+    await r.record_async(
+        "compress_context_rejects_summary_bigger_than_the_middle",
+        test_compress_context_rejects_summary_bigger_than_the_middle,
+    )
+    await r.record_async(
+        "compaction_saved_ratio_can_go_negative",
+        test_compaction_saved_ratio_can_go_negative,
     )
     await r.record_async("split_head_middle_tail_uses_recent_token_budget", test_split_head_middle_tail_uses_recent_token_budget)
     await r.record_async("compress_context_strips_analysis_block", test_compress_context_strips_analysis_block)

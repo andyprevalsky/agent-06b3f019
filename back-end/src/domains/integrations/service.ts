@@ -449,25 +449,58 @@ export async function sendPasswordRequest(userId: string, request: string) {
 
 export class CredentialEnvelopeError extends Error {}
 
+/**
+ * Effective pool eligibility for a compute credential the account just synced.
+ *
+ * Precedence:
+ *   1. explicit per-integration override (`Integration.poolingEnabledOverride`)
+ *   2. account policy (`User.poolTokensByDefault`) — can only RAISE eligibility
+ *   3. whatever the row already had (fresh rows: not pooled)
+ *
+ * The account policy never lowers an already-pooled token, so the mac-app
+ * pushing a rotated token on every refresh can't silently drain the pool. An
+ * operator who deliberately excludes (or includes) one token sets the override,
+ * which wins over the account policy in both directions.
+ */
+export function resolveSyncedPoolingEnabled(params: {
+  accountDefault: boolean;
+  existing?: { poolingEnabled: boolean; poolingEnabledOverride: boolean | null } | null;
+}): boolean {
+  const override = params.existing?.poolingEnabledOverride;
+  if (override !== null && override !== undefined) return override;
+  if (params.accountDefault) return true;
+  return params.existing?.poolingEnabled ?? false;
+}
+
+async function resolvePoolingForCredentialSync(userId: string, name: string): Promise<boolean> {
+  const [accountDefault, existing] = await Promise.all([
+    repo.findUserPoolTokensByDefault(userId),
+    repo.findIntegrationPoolingState(userId, name),
+  ]);
+  return resolveSyncedPoolingEnabled({ accountDefault, existing });
+}
+
 export async function uploadClaudeCodeCredentials(userId: string, encryptedCredentials: string) {
   const check = verifyCredentialEnvelopeDecryptable(encryptedCredentials);
   if (!check.ok) {
     log.error('Rejecting undecryptable Claude Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  log.info('Storing Claude Code credentials', { userId });
+  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'claude_code');
+  log.info('Storing Claude Code credentials', { userId, poolingEnabled });
   await repo.upsertIntegrationRaw({
     userId,
     name: 'claude_code',
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
+    poolingEnabled,
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  log.info('Claude Code credentials stored', { userId });
+  log.info('Claude Code credentials stored', { userId, poolingEnabled });
 }
 
 export async function uploadGptCodeCredentials(userId: string, encryptedCredentials: string) {
@@ -476,19 +509,21 @@ export async function uploadGptCodeCredentials(userId: string, encryptedCredenti
     log.error('Rejecting undecryptable GPT Code credentials', { userId, reason: check.reason });
     throw new CredentialEnvelopeError(check.reason);
   }
-  log.info('Storing GPT Code credentials', { userId });
+  const poolingEnabled = await resolvePoolingForCredentialSync(userId, 'gpt_code');
+  log.info('Storing GPT Code credentials', { userId, poolingEnabled });
   await repo.upsertIntegrationRaw({
     userId,
     name: 'gpt_code',
     type: IntegrationType.TOOL_SETUP,
     status: IntegrationStatus.CONNECTED,
     isActive: true,
+    poolingEnabled,
     lastSyncAt: new Date(),
     lastSuccessfulSyncAt: new Date(),
     config: { encryptedCredentials },
     updateExtra: { failureReason: null, rateLimitedUntil: null, lastUsedAt: null },
   });
-  log.info('GPT Code credentials stored', { userId });
+  log.info('GPT Code credentials stored', { userId, poolingEnabled });
 }
 
 export async function getClaudeCodeToken(

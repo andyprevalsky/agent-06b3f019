@@ -1136,14 +1136,22 @@ def _filter_context_for_execute_verifier(context: List[Dict[str, Any]]) -> List[
 
 
 def _context_timestamp(msg: Dict[str, Any]) -> datetime:
+    """Always tz-aware, so two of these are always comparable.
+
+    A timestamp string without an offset ("2026-01-01T00:00:00") parses naive
+    while the missing-timestamp fallback is aware; comparing the two raises
+    TypeError. Every return path is normalized to UTC to make that impossible.
+    """
     ts = msg.get("timestamp") or msg.get("created_at") or msg.get("createdAt")
     if isinstance(ts, datetime):
         return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
     if isinstance(ts, str) and ts:
         try:
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except ValueError:
             pass
+        else:
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     return datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
@@ -1199,6 +1207,74 @@ def _verifier_context_has_successful_browser_result(context: List[Dict[str, Any]
     return any(_is_successful_browser_tool_result(msg) for msg in context)
 
 
+def _terminal_tool_call_id(msg: Dict[str, Any]) -> Optional[str]:
+    """toolCallId of a TOOL row that carries a terminal result, else None."""
+    if str(msg.get("role", "")).upper() != "TOOL":
+        return None
+    metadata = msg.get("metadata", {}) or {}
+    if metadata.get("toolStatus") not in ("FINISHED", "ERROR"):
+        return None
+    tool_call_id = metadata.get("toolCallId")
+    return str(tool_call_id) if tool_call_id else None
+
+
+def drop_rows_never_sent_to_model(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop context rows that no converter ever emits to a provider.
+
+    Must run BEFORE collapse_duplicate_tool_results: a row dropped later could
+    otherwise win the dedup on timestamp and take the real tool result with it,
+    leaving the tool_use orphaned.
+
+    IN_PROGRESS rows survive — convert_context_to_messages still needs them for
+    timestamp grouping, and they are never candidates for the terminal dedup.
+    """
+    return [
+        msg
+        for msg in context
+        if not is_excluded_from_model(msg)
+        and not is_internal_subagent_message(msg)
+        and not (
+            str(msg.get("role", "")).upper() == "TOOL" and _is_cloud_agent_lifecycle_tool(msg.get("metadata", {}) or {})
+        )
+    ]
+
+
+def collapse_duplicate_tool_results(context: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep only the latest terminal TOOL row per toolCallId.
+
+    Every provider requires exactly one result per tool call. Anthropic rejects
+    the whole request with 400 "each tool_use must have a single result. Found
+    multiple `tool_result` blocks with id: <id>" and Google answers 400
+    INVALID_ARGUMENT, so a duplicate takes down every leg of the pool at once
+    rather than degrading.
+
+    Several tools legitimately persist two terminal rows for one call:
+    spawn_browser_agent writes "✓ Task Completed"/"Task Failed" from inside the
+    activity (spawn_browser_agent_v3/handler.py) and "Browser automation
+    complete"/"failed" from the manager boundary, and spawn_claude_code_agent
+    has the same shape. The context is therefore allowed to hold both rows, and
+    the one-result-per-call invariant belongs here — at the single boundary
+    where context becomes provider messages — so no tool can violate it and no
+    converter can forget it.
+
+    Non-terminal rows (IN_PROGRESS, rows without a toolCallId) are untouched;
+    callers still need IN_PROGRESS rows for timestamp grouping.
+    """
+    latest_index_by_id: Dict[str, int] = {}
+    for index, msg in enumerate(context):
+        tool_call_id = _terminal_tool_call_id(msg)
+        if not tool_call_id:
+            continue
+        incumbent = latest_index_by_id.get(tool_call_id)
+        # Strict `>`: ties keep the EARLIER row, preserving the semantics of the
+        # inline dedup this replaced in build_llm_messages.
+        if incumbent is None or _context_timestamp(msg) > _context_timestamp(context[incumbent]):
+            latest_index_by_id[tool_call_id] = index
+
+    kept = set(latest_index_by_id.values())
+    return [msg for index, msg in enumerate(context) if _terminal_tool_call_id(msg) is None or index in kept]
+
+
 def convert_context_to_messages(
     context: List[Dict[str, Any]],
     include_system: bool = True,
@@ -1231,6 +1307,13 @@ def convert_context_to_messages(
     """
     messages = []
 
+    # One tool_result per tool_use, enforced before anything is emitted. Tools
+    # that persist both an in-activity completion row and a manager-boundary
+    # result row would otherwise produce two `role: tool` messages sharing a
+    # tool_call_id, which every provider rejects with a 400. Drop the never-sent
+    # rows first so one of them can't win the dedup and orphan the tool_use.
+    context = collapse_duplicate_tool_results(drop_rows_never_sent_to_model(context))
+
     # Sort context by timestamp to ensure chronological order
     # This is critical after polling for new user messages or continue-as-new
     def parse_timestamp(ts: str) -> datetime:
@@ -1258,15 +1341,17 @@ def convert_context_to_messages(
                 tool_start_times[tool_call_id] = msg.get("timestamp", "")
 
     def get_timestamp(msg: Dict[str, Any]) -> datetime:
-        """Get timestamp for sorting. FINISHED tool messages use their IN_PROGRESS timestamp."""
-        meta = msg.get("metadata", {}) or {}
-
-        # For FINISHED tool messages, use the IN_PROGRESS timestamp if available
-        # This keeps tool results grouped with their ASSISTANT tool_call, not separated by USER messages
-        if msg.get("role") == "TOOL" and meta.get("toolStatus") == "FINISHED":
-            tool_call_id = meta.get("toolCallId")
-            if tool_call_id and tool_call_id in tool_start_times:
-                return parse_timestamp(tool_start_times[tool_call_id])
+        """Get timestamp for sorting. Terminal tool messages use their IN_PROGRESS timestamp."""
+        # For terminal tool messages, use the IN_PROGRESS timestamp if available.
+        # This keeps tool results grouped with their ASSISTANT tool_call rather
+        # than separated by whatever arrived while the tool ran. ERROR counts as
+        # terminal exactly like FINISHED: a verifier TOOL row lands between the
+        # two as `role: assistant`, which _ensure_tool_result_pairing treats as a
+        # run boundary, so an un-anchored ERROR row gets a synthetic result AND
+        # its real one — two tool_result blocks for one tool_use.
+        tool_call_id = _terminal_tool_call_id(msg)
+        if tool_call_id and tool_call_id in tool_start_times:
+            return parse_timestamp(tool_start_times[tool_call_id])
 
         return parse_timestamp(msg.get("timestamp", ""))
 
@@ -1289,17 +1374,12 @@ def convert_context_to_messages(
     declared_tool_ids = set()
     declared_tool_names: Dict[str, str] = {}
 
+    # Excluded / sub-agent-internal / cloud-lifecycle rows were already removed by
+    # drop_rows_never_sent_to_model above — do not re-filter them here.
     for msg in sorted_context:
         role = msg.get("role", "ASSISTANT")
         content = msg.get("text", "")
         metadata = msg.get("metadata", {}) or {}  # Handle explicit None values
-
-        if is_excluded_from_model(msg):
-            continue
-
-        # Skip ALL sub-agent internal messages regardless of role
-        if is_internal_subagent_message(msg):
-            continue
 
         if role == "SYSTEM":
             if include_system:
@@ -1344,10 +1424,9 @@ def convert_context_to_messages(
             messages.append(assistant_msg)
 
         elif role == "TOOL":
-            if _is_cloud_agent_lifecycle_tool(metadata):
-                continue
-
-            # Skip IN_PROGRESS messages - only send FINISHED results to LLM
+            # Skip IN_PROGRESS messages - only send terminal results to LLM.
+            # (They are kept in `context` above because get_timestamp anchors
+            # terminal rows to their IN_PROGRESS timestamp.)
             if metadata.get("toolStatus") == "IN_PROGRESS":
                 continue
 
@@ -1396,7 +1475,12 @@ def convert_context_to_messages(
                 system_content = _append_llm_context_sections_preserving_reference(system_content, sections)
                 messages.append({"role": "system", "content": system_content})
 
-    return messages
+    # Same closing provider-invariant guard build_llm_messages runs. Both
+    # converters feed the same providers, so both owe the same contract:
+    # every declared tool_use gets exactly one tool_result, and no tool_result
+    # is orphaned. Without it, an activity that died before writing its
+    # terminal row leaves an orphan tool_use and Anthropic 400s the request.
+    return _ensure_tool_result_pairing(messages)
 
 
 def inject_llm_only_user_preamble(
@@ -1473,72 +1557,21 @@ async def build_llm_messages(
     # (FINISHED/ERROR) per toolCallId.
     context = _filter_superseded_browser_protocol_failures(context)
 
-    def parse_timestamp(ts) -> datetime:
-        """Parse timestamp to datetime, return epoch for invalid/missing."""
-        from datetime import timezone
+    # One tool_result per tool_use — same two passes, same order, that
+    # convert_context_to_messages runs. Single definition for both converters.
+    context = collapse_duplicate_tool_results(drop_rows_never_sent_to_model(context))
 
-        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        if not ts:
-            return epoch
-        if isinstance(ts, datetime):
-            if ts.tzinfo is None:
-                return ts.replace(tzinfo=timezone.utc)
-            return ts
-        try:
-            # ISO format: 2024-01-15T10:30:00.000Z
-            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            return epoch
+    filtered_context = [
+        msg
+        for msg in context
+        if not (
+            msg.get("role", "").upper() == "TOOL" and (msg.get("metadata", {}) or {}).get("toolStatus") == "IN_PROGRESS"
+        )
+    ]
 
-    tool_messages_by_id: Dict[str, Dict] = {}  # toolCallId -> latest terminal message
-    filtered_context = []
-
-    for msg in context:
-        role = msg.get("role", "").upper()
-        metadata = msg.get("metadata", {}) or {}
-
-        if is_excluded_from_model(msg):
-            continue
-
-        # Skip ALL sub-agent internal messages regardless of role
-        if is_internal_subagent_message(msg):
-            continue
-
-        if role == "TOOL":
-            tool_status = metadata.get("toolStatus")
-            tool_call_id = metadata.get("toolCallId")
-
-            if _is_cloud_agent_lifecycle_tool(metadata):
-                continue
-
-            # Skip IN_PROGRESS messages
-            if tool_status == "IN_PROGRESS":
-                continue
-
-            # For terminal tool messages, keep only the latest per toolCallId
-            if tool_status in ("FINISHED", "ERROR") and tool_call_id:
-                existing = tool_messages_by_id.get(tool_call_id)
-                if existing:
-                    # Compare timestamps properly, keep the later one
-                    existing_ts = parse_timestamp(existing.get("timestamp"))
-                    new_ts = parse_timestamp(msg.get("timestamp"))
-                    if new_ts > existing_ts:
-                        tool_messages_by_id[tool_call_id] = msg
-                else:
-                    tool_messages_by_id[tool_call_id] = msg
-                continue
-
-            # TOOL messages without toolCallId or non-FINISHED status - include as-is
-            filtered_context.append(msg)
-        else:
-            # Non-TOOL messages - include as-is
-            filtered_context.append(msg)
-
-    # Add the deduplicated TOOL FINISHED messages back
-    filtered_context.extend(tool_messages_by_id.values())
-
-    # Sort by timestamp to maintain order (using proper parsing)
-    filtered_context.sort(key=lambda x: parse_timestamp(x.get("timestamp")))
+    # Sort by timestamp to maintain order. Same _context_timestamp the dedup
+    # keys on, so the row that wins the dedup can't then sort somewhere else.
+    filtered_context.sort(key=_context_timestamp)
 
     # Use filtered context for the rest of the function
     context = filtered_context
@@ -1554,7 +1587,7 @@ async def build_llm_messages(
         ts = msg.get("timestamp")
         if not ts:
             return ""
-        dt = parse_timestamp(ts)
+        dt = _context_timestamp(msg)
         if dt.year == 1970:
             return ""
         return f"[{dt.isoformat(timespec='minutes')}] "

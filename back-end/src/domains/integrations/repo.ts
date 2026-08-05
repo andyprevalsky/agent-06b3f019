@@ -131,6 +131,12 @@ export async function upsertIntegrationRaw(params: {
   isActive?: boolean;
   lastSyncAt?: Date;
   lastSuccessfulSyncAt?: Date;
+  /**
+   * Effective pool eligibility for this sync. Written on create AND update so a
+   * re-sync materializes the account policy; callers resolve it from the
+   * account default + any explicit per-integration override.
+   */
+  poolingEnabled?: boolean;
   updateExtra?: Record<string, unknown>;
 }) {
   return prisma.integration.upsert({
@@ -147,6 +153,7 @@ export async function upsertIntegrationRaw(params: {
       config: params.config ?? {},
       status: params.status ?? IntegrationStatus.NOT_CONNECTED,
       ...(params.isActive !== undefined && { isActive: params.isActive }),
+      ...(params.poolingEnabled !== undefined && { poolingEnabled: params.poolingEnabled }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
       ...(params.lastSuccessfulSyncAt !== undefined && {
         lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
@@ -157,6 +164,7 @@ export async function upsertIntegrationRaw(params: {
       config: params.config ?? {},
       ...(params.status !== undefined && { status: params.status }),
       ...(params.isActive !== undefined && { isActive: params.isActive }),
+      ...(params.poolingEnabled !== undefined && { poolingEnabled: params.poolingEnabled }),
       ...(params.lastSyncAt !== undefined && { lastSyncAt: params.lastSyncAt }),
       ...(params.lastSuccessfulSyncAt !== undefined && {
         lastSuccessfulSyncAt: params.lastSuccessfulSyncAt,
@@ -273,5 +281,7 @@ export {
   bulkUpsertPasskeys,
   bulkUpsertCacheStorage,
   findUserById,
+  findUserPoolTokensByDefault,
+  findIntegrationPoolingState,
   findIntegrationById,
 } from './repo.bulk';

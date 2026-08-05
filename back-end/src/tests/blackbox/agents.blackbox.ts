@@ -36,6 +36,7 @@ async function runAll(): Promise<void> {
   await import('./agents-configuration.cases');
   await import('./agents-edge-routes.cases');
   await import('./agents-batch.cases');
+  await import('./agents-liveness-reconcile.cases');
   const {
     testBoundary_createAgentModelPricing,
     testBoundary_createAgentGeoip,
