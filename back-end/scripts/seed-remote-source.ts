@@ -307,14 +307,19 @@ function normalizeRows(rows: SeedRow[], model: ModelMetadata): SeedRow[] {
   );
 }
 
+/**
+ * JSON parses `numeric` into a double, and normalizeField then rebuilds a
+ * Decimal from that already-rounded value, so Decimal needs the lossless CSV
+ * path just as much as BigInt. This is the single source of truth for that
+ * decision: the `Accept` header and the response parser MUST agree, or we ask
+ * for JSON and then parse it as CSV.
+ */
+function requiresLosslessNumbers(model: ModelMetadata): boolean {
+  return model.fields.some((field) => field.type === 'BigInt' || field.type === 'Decimal');
+}
+
 async function responseRows(response: Response, model: ModelMetadata): Promise<SeedRow[]> {
-  // JSON parses `numeric` into a double, and normalizeField then rebuilds a
-  // Decimal from that already-rounded value. Decimal needs the CSV path just as
-  // much as BigInt does.
-  const requiresLosslessNumbers = model.fields.some(
-    (field) => field.type === 'BigInt' || field.type === 'Decimal'
-  );
-  if (requiresLosslessNumbers) return parseCsvRows(await response.text());
+  if (requiresLosslessNumbers(model)) return parseCsvRows(await response.text());
   const value = (await response.json()) as unknown;
   if (!Array.isArray(value)) {
     throw new Error(`Supabase HTTPS seed read returned non-array JSON for ${model.name}`);
@@ -400,9 +405,7 @@ async function fetchUnchunkedModelRows(
       url,
       {
         headers: {
-          Accept: model.fields.some((field) => field.type === 'BigInt')
-            ? 'text/csv'
-            : 'application/json',
+          Accept: requiresLosslessNumbers(model) ? 'text/csv' : 'application/json',
           apikey: options.serviceRoleKey,
           Authorization: `Bearer ${options.serviceRoleKey}`,
           Range: `${offset}-${offset + pageSize - 1}`,
