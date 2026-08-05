@@ -2743,6 +2743,40 @@ def test_build_openrouter_body_includes_optionals():
     assert body["seed"] == 7
 
 
+def test_named_tool_choice_degrades_only_for_google_routes():
+    """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
+
+    A forced tool reaching a Google model used to fail the whole call with
+    INVALID_ARGUMENT, which killed the agent outright when Google was the last
+    reachable waterfall step. Google must receive "required" instead; every
+    other provider must keep the exact named form. The required-tool contract
+    is still enforced after the response in helpers/llm.py, so this only
+    changes the wire form, never what the caller accepts.
+    """
+    forced = {"name": "attempt_completion"}
+    tools = [{"type": "function", "function": {"name": "attempt_completion"}}]
+    common = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": tools,
+        "response_format": None,
+        "temperature": None,
+        "max_tokens": None,
+        "seed": None,
+    }
+
+    google = build_openrouter_body(model="google/gemini-3.1-pro-preview", tool_choice=forced, **common)
+    assert google["tool_choice"] == "required", (
+        "Google routes must not receive the named tool_choice form they reject"
+    )
+
+    for model in ("openai/gpt-5.6-terra", "moonshotai/kimi-k2.5", "zai-glm-4.7"):
+        other = build_openrouter_body(model=model, tool_choice=forced, **common)
+        assert other["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "attempt_completion"},
+        }, f"{model} must keep the exact named tool_choice"
+
+
 def test_build_openrouter_body_provider_fast_mode():
     body = build_openrouter_body(
         model="anthropic/claude-opus-4.8",
@@ -5565,6 +5599,10 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record(
+        "named_tool_choice_degrades_only_for_google",
+        test_named_tool_choice_degrades_only_for_google_routes,
+    )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)

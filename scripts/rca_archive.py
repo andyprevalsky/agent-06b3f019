@@ -566,6 +566,8 @@ def main() -> int:
             return 1
         print(f"RCA archive OK ({len(load_cases())} cases)")
         return 0
+    if args.command == "new":
+        return new_case(args.slug)
     return 2
 
 
