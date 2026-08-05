@@ -2186,7 +2186,15 @@ async def test_spawn_explore_agent_activity_ignores_unrequested_best_effort_sour
 
 
 async def test_spawn_explore_agent_activity_keeps_named_source_failure_required():
-    """A source named by the goal still blocks even with a best-effort hint."""
+    """A source named by the goal is still reported even with a best-effort hint.
+
+    Mirrors the opportunistic-source case above: there the disconnected source
+    is dropped entirely because the goal never asked for it. Here the goal names
+    Gmail, so the gap must survive into `unavailable_sources` and the visible
+    notice — the parent's source_connect gate depends on it. The run itself
+    stays `completed`: disconnected sources are a gap notice, not a hard explore
+    failure (see the explore activity's own comment).
+    """
     from unittest.mock import AsyncMock, MagicMock, patch
 
     from domains.spawn_agent.service import spawn_explore_agent_activity
@@ -2225,9 +2233,10 @@ async def test_spawn_explore_agent_activity_keeps_named_source_failure_required(
             local_data_summary="messages/ 2 threads, 42 messages",
         )
 
-    assert result["status"] == "error"
+    assert result["status"] == "completed"
+    assert result["error_reason"] is None
     assert result["unavailable_sources"] == [{"source": "gmail", "connected": False}]
-    assert result["error_reason"] == "required data source(s) not connected: gmail"
+    assert "⚠️ Source(s) not connected: gmail" in result["final_response"]
 
 
 async def test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results():

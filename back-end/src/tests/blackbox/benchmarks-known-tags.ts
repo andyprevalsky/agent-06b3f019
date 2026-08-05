@@ -80,4 +80,8 @@ export const KNOWN_TAGS = [
   // drive the real inbound-SMS path (see agents/benchmarks/sms_runner.py and
   // sms-supervisor-bluebottle-no-hallucinate).
   'sms',
+  // WhatsApp recall slice — tasks that read the frozen WhatsApp history baked
+  // into the canonical base fixture (see whatsapp-history-recall in tasks.json).
+  'whatsapp',
+  'messages',
 ];
