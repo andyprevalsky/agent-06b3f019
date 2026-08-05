@@ -21,8 +21,6 @@
  *   npx tsx src/tests/blackbox/admin-health-waitlist.blackbox.ts
  */
 
-import { randomInt } from 'node:crypto';
-
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
@@ -31,6 +29,7 @@ import { getWaitlistPeople } from '../../domains/admin-health/service.waitlist';
 import { findWaitlistPeople } from '../../domains/admin-health/repo';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
+import { uniqueRealWaitlistPhone } from './waitlistTestPhone';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
@@ -124,21 +123,6 @@ function assertSchema<T>(schema: z.ZodType<T>, data: unknown, label: string): T 
   return result.data;
 }
 
-// A unique fake phone per seeding test so parallel cases never collide on the
-// Waitlist.phone unique constraint or on each other's account rows.
-/**
- * A number that reads as a real signup but can never route to a handset: NANP
- * 555-0100..555-0199 is the officially fictional subscriber range.
- *
- * It deliberately avoids the +1555/+1999 prefixes, which are classified as
- * waitlist fixtures and therefore excluded from the real-people surfaces — a
- * row seeded there could not exercise the inclusion path at all.
- */
-function uniquePhone(): string {
-  const areaCode = randomInt(200, 990);
-  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
-}
-
 async function testList_noAuth() {
   const res = await request(`${BASE_URL}/api/admin-health/waitlist`);
   assertStatus(res.status, 401, res.data);
@@ -156,7 +140,7 @@ async function testList_nonAdminForbidden() {
 async function testList_adminListsSeededPerson() {
   const marker = `wlcase-wlp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const email = `${marker}@waitlist-case.dev`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   try {
     await prisma.waitlist.create({
       data: { name: marker, email, phone, variant: 'gated-login' },
@@ -206,7 +190,7 @@ async function testList_paginatesNewestFirst() {
   const marker = `wlcase-wlpage-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
   const rows = [1, 2, 3].map((position) => ({
     name: `${marker}-${position}`,
-    phone: `${uniquePhone()}${position}`,
+    phone: `${uniqueRealWaitlistPhone()}${position}`,
     variant: 'gated-login',
     createdAt: new Date(`2099-01-0${position}T00:00:00.000Z`),
   }));
@@ -294,7 +278,7 @@ async function testInvite_missingIdempotencyKey400() {
 // null). A re-send is idempotent.
 async function testInvite_happyPathFlagsAndMarks() {
   const marker = `wlcase-invite-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
     const created = await prisma.waitlist.create({
@@ -362,7 +346,7 @@ async function testInvite_happyPathFlagsAndMarks() {
 // can see who is still gated vs. already in the app.
 async function testGetWaitlistPeople_derivesAccountStatus() {
   const marker = `wlcase-wlstatus-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
     await prisma.waitlist.create({ data: { name: marker, phone, variant: 'gated-login' } });
@@ -397,7 +381,7 @@ async function testGetWaitlistPeople_derivesAccountStatus() {
 // even without a redeemed invite code.
 async function testGetWaitlistPeople_subscriptionClearsGated() {
   const marker = `wlcase-wlsub-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
     await prisma.waitlist.create({ data: { name: marker, phone, variant: 'gated-login' } });

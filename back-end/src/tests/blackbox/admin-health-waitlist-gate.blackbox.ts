@@ -18,29 +18,17 @@
  *   bash scripts/run-blackbox-tests.sh admin-health-waitlist-gate
  */
 
-import { randomInt } from 'node:crypto';
-
 import { config } from 'dotenv';
 
 import { checkInviteCode } from '../../domains/invite-codes/service';
 import { prisma } from '../../providers/database';
 import { markOffWaitlistByPhone } from '../../providers/inviteGate';
+import { uniqueRealWaitlistPhone } from './waitlistTestPhone';
 
 // Refuse to seed fixtures into prod when this file is run directly (bypassing
 // the runner, which is what put ~2,690 fixture rows in the prod Waitlist table).
 import './assertLocalDatabase';
 config();
-
-/**
- * A number that reads as a real signup but can never route to a handset: NANP
- * 555-0100..555-0199 is the officially fictional subscriber range. It avoids
- * the +1555/+1999 prefixes, which the real-person filter treats as fixtures.
- */
-function uniquePhone(): string {
-  const areaCode = randomInt(200, 990);
-  return `+1${areaCode}555${String(randomInt(100, 200)).padStart(4, '0')}`;
-}
-
 // checkInviteCode surfaces the off-waitlist flag so onboarding can show the
 // subscription view; the flag alone does NOT clear the gate.
 /**
@@ -50,7 +38,7 @@ function uniquePhone(): string {
  */
 async function testGatedSignup_recordsEmailAndNameOnTheWaitlistRow() {
   const marker = `wlcase-gated-contact-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   const email = `${marker}@waitlist-case.dev`;
   try {
     await prisma.user.create({
@@ -71,7 +59,7 @@ async function testGatedSignup_recordsEmailAndNameOnTheWaitlistRow() {
 /** A later login must fill a blank email left by an earlier phone-only row. */
 async function testGatedSignup_backfillsEmailOntoAnExistingPhoneOnlyRow() {
   const marker = `wlcase-gated-backfill-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   const email = `${marker}@waitlist-case.dev`;
   try {
     // The shape every pre-existing gated-login row has in production.
@@ -95,7 +83,7 @@ async function testGatedSignup_backfillsEmailOntoAnExistingPhoneOnlyRow() {
 /** Details already on the row (admin-curated or roster-imported) must survive. */
 async function testGatedSignup_neverClobbersDetailsAlreadyOnTheRow() {
   const marker = `wlcase-gated-noclobber-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   const curated = `${marker}-curated@waitlist-case.dev`;
   try {
     await prisma.waitlist.create({
@@ -129,8 +117,8 @@ async function testGatedSignup_neverClobbersDetailsAlreadyOnTheRow() {
  */
 async function testGatedSignup_survivesEmailAlreadyOwnedByAnotherRow() {
   const marker = `wlcase-gated-dupe-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
-  const otherPhone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
+  const otherPhone = uniqueRealWaitlistPhone();
   const email = `${marker}@waitlist-case.dev`;
   try {
     await prisma.waitlist.create({
@@ -209,7 +197,7 @@ async function testCheckInviteCode_activeSubscriptionClearsGate() {
 // granting access, and is idempotent so a re-send never double-writes.
 async function testMarkOffWaitlist_setsFlagIdempotent() {
   const marker = `wlcase-flag-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const phone = uniquePhone();
+  const phone = uniqueRealWaitlistPhone();
   try {
     await prisma.user.create({ data: { userId: marker, phone, usedInviteCode: null } });
 

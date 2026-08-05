@@ -879,6 +879,47 @@ def test_transform_messages_for_openai_adds_cache_breakpoints():
     assert msgs[0]["content"] == "you are helpful"
 
 
+def test_transform_messages_for_openai_stamps_tool_call_type():
+    """Google (via OpenRouter) rejects an assistant tool_call without OpenAI's
+    ``type: "function"`` with 400 "The conversation transcript is malformed",
+    which silently demotes the pool to its weakest leg. Producers currently
+    hand-write the field; this keeps the invariant enforced, not conventional.
+    See back-end sibling: rose.blackbox.ts "OpenAI tool_calls carry the function
+    type discriminator".
+    """
+    msgs = [
+        {"role": "system", "content": "s"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "a", "function": {"name": "f", "arguments": "{}"}}],
+        },
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "b", "name": "g"}]},
+        # Responses-dialect calls carry `call_id`; chat-dialect tool results are
+        # matched by `id`, so it has to be mapped across.
+        {"role": "assistant", "content": "", "tool_calls": [{"call_id": "c", "name": "h"}]},
+        {"role": "tool", "tool_call_id": "c", "content": "done"},
+    ]
+    out = transform_messages_for_openai(msgs)
+
+    nested = out[1]["tool_calls"][0]
+    assert nested["type"] == "function", nested
+    assert nested["function"]["name"] == "f", nested
+
+    # The flat {id, name} shape our own transforms accept is not valid OpenAI
+    # dialect; it must be lifted, not passed through.
+    flat = out[2]["tool_calls"][0]
+    assert flat["type"] == "function", flat
+    assert flat["function"]["name"] == "g", flat
+
+    mapped = out[3]["tool_calls"][0]
+    assert mapped["type"] == "function", mapped
+    assert mapped["id"] == "c", f"call_id must map to the chat-dialect id: {mapped}"
+
+    # Callers' message objects must not be mutated.
+    assert "type" not in msgs[1]["tool_calls"][0], msgs[1]
+
+
 def test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached():
     from utils.prompts import SYSTEM_PROMPT_DYNAMIC_BOUNDARY
 
@@ -2703,6 +2744,40 @@ def test_build_openrouter_body_includes_optionals():
     assert body["seed"] == 7
 
 
+def test_named_tool_choice_degrades_only_for_google_routes():
+    """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
+
+    A forced tool reaching a Google model used to fail the whole call with
+    INVALID_ARGUMENT, which killed the agent outright when Google was the last
+    reachable waterfall step. Google must receive "required" instead; every
+    other provider must keep the exact named form. The required-tool contract
+    is still enforced after the response in helpers/llm.py, so this only
+    changes the wire form, never what the caller accepts.
+    """
+    forced = {"name": "attempt_completion"}
+    tools = [{"type": "function", "function": {"name": "attempt_completion"}}]
+    common = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": tools,
+        "response_format": None,
+        "temperature": None,
+        "max_tokens": None,
+        "seed": None,
+    }
+
+    google = build_openrouter_body(model="google/gemini-3.1-pro-preview", tool_choice=forced, **common)
+    assert google["tool_choice"] == "required", (
+        "Google routes must not receive the named tool_choice form they reject"
+    )
+
+    for model in ("openai/gpt-5.6-terra", "moonshotai/kimi-k2.5", "zai-glm-4.7"):
+        other = build_openrouter_body(model=model, tool_choice=forced, **common)
+        assert other["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "attempt_completion"},
+        }, f"{model} must keep the exact named tool_choice"
+
+
 def test_build_openrouter_body_provider_fast_mode():
     body = build_openrouter_body(
         model="anthropic/claude-opus-4.8",
@@ -2808,6 +2883,66 @@ async def test_waterfall_skips_anthropic_for_response_format():
 
     assert models_seen == ["google/gemini-3.1-pro-preview"]
     assert any(c.kind == "content" for c in chunks)
+
+
+async def test_waterfall_uses_anthropic_with_native_tools():
+    """Native tools avoid the Anthropic response_format incompatibility."""
+    sse_ok = "\n".join(
+        _openai_sse(
+            [
+                {
+                    "choices": [
+                        {
+                            "delta": {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call-complete",
+                                        "type": "function",
+                                        "function": {"name": "attempt_completion", "arguments": "{}"},
+                                    }
+                                ]
+                            },
+                            "finish_reason": "tool_calls",
+                        }
+                    ]
+                },
+                {"usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+            ]
+        )
+    )
+    bodies: list[dict] = []
+
+    def handler(req):
+        body = json.loads(req.content.decode())
+        bodies.append(body)
+        return httpx.Response(200, text=sse_ok, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+    chunks = await _drain(
+        waterfall_complete(
+            pool_spec=get_pool("rose-1-ultra"),
+            messages=[{"role": "user", "content": "finish"}],
+            tools=[
+                {
+                    "name": "attempt_completion",
+                    "description": "Finish the task",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice={"name": "attempt_completion"},
+            openrouter_key="ork-test",
+            request_id="r-anthropic-native-tools",
+        )
+    )
+
+    assert [body["model"] for body in bodies] == ["anthropic/claude-opus-4.8"]
+    assert "response_format" not in bodies[0]
+    assert bodies[0]["tool_choice"] == {
+        "type": "function",
+        "function": {"name": "attempt_completion"},
+    }
+    assert any(c.kind == "tool_call" for c in chunks)
 
 
 async def test_waterfall_excludes_anthropic_family_when_requested():
@@ -5312,6 +5447,65 @@ async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
     assert tool_names == {"web_fetch", "attempt_completion"}
 
 
+async def test_rose_client_preserves_native_tools_for_waterfall():
+    """The final OpenRouter fallback must keep AgentAction as native tools.
+
+    Anthropic OpenRouter models reject the equivalent response_format request,
+    so dropping this projection makes an exhausted funded key skip a healthy
+    fallback provider.
+    """
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _WebFetchTool(BaseModel):
+        tool: Literal["web_fetch"]
+        url: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _ExploreAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_WebFetchTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_waterfall(**kwargs):
+        captured.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "anthropic/claude-opus-4.8"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "attempt_completion", "arguments": "{}", "id": "call-complete"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    previous_gpt = os.environ.pop("GPT_API_KEY", None)
+    previous_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+    try:
+        with patch("providers.rose.client.waterfall_complete", _fake_waterfall):
+            await _drain(
+                RoseClient(openrouter_key="ork-test").complete(
+                    pool="rose-1-ultra",
+                    messages=[{"role": "user", "content": "browse"}],
+                    response_model=_ExploreAction,
+                )
+            )
+    finally:
+        if previous_gpt is not None:
+            os.environ["GPT_API_KEY"] = previous_gpt
+        if previous_anthropic is not None:
+            os.environ["ANTHROPIC_API_KEY"] = previous_anthropic
+
+    assert captured.get("tool_choice") == "any"
+    assert captured.get("response_format") is None
+    tool_names = {tool["name"] for tool in (captured.get("tools") or [])}
+    assert tool_names == {"web_fetch", "attempt_completion"}
+
+
 # =====================================================================
 # Test runner
 # =====================================================================
@@ -5386,6 +5580,10 @@ async def run_all_tests():
     r.record("reconstruct_envelope", test_reconstruct_agent_response_envelope)
     r.record("reconstruct_non_dict_input", test_reconstruct_agent_response_handles_non_dict_input)
     r.record("openai_messages_cache_breakpoints", test_transform_messages_for_openai_adds_cache_breakpoints)
+    r.record(
+        "openai_messages_tool_call_type_discriminator",
+        test_transform_messages_for_openai_stamps_tool_call_type,
+    )
     r.record(
         "openai_messages_multi_boundary_cached",
         test_transform_messages_for_openai_multi_boundary_system_blocks_are_cached,
@@ -5478,12 +5676,17 @@ async def run_all_tests():
     )
 
     r.record("openrouter_body_optionals", test_build_openrouter_body_includes_optionals)
+    r.record(
+        "named_tool_choice_degrades_only_for_google",
+        test_named_tool_choice_degrades_only_for_google_routes,
+    )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format
     )
+    await r.record_async("waterfall_uses_anthropic_native_tools", test_waterfall_uses_anthropic_with_native_tools)
     await r.record_async("waterfall_excludes_anthropic_family", test_waterfall_excludes_anthropic_family_when_requested)
     await r.record_async(
         "ultra_structured_output_falls_through_gemini_invalid_request",
@@ -5636,6 +5839,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_api_key_tools_without_oauth",
         test_rose_client_synthesizes_native_tools_for_api_key_without_oauth,
+    )
+    await r.record_async(
+        "rose_client_preserves_native_tools_for_waterfall",
+        test_rose_client_preserves_native_tools_for_waterfall,
     )
 
     teardown_mock()

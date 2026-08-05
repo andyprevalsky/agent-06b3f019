@@ -55,6 +55,8 @@ export interface ChatLlmUsage {
   total_tokens: number;
   cache_creation_input_tokens: number;
   cache_read_input_tokens: number;
+  model: string;
+  from_fast_cache: boolean;
 }
 
 export interface RouterResponse {
@@ -450,6 +452,8 @@ export async function callRouterLlm(params: {
     total_tokens: 0,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
+    model: '',
+    from_fast_cache: false,
   };
   let actualModel = '';
   let usageData:
@@ -662,6 +666,9 @@ export async function callRouterLlm(params: {
     reasoning: decision.reasoning.substring(0, 100),
     streamedChunks: sequence,
   });
+
+  usage.model = actualModel || params.model;
+  usage.from_fast_cache = fcCacheWon;
 
   return {
     decision,

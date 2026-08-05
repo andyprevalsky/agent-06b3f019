@@ -273,6 +273,18 @@ describe('lib/supabase', () => {
     await expect(createAnonymousSession()).rejects.toThrow('boom');
   });
 
+  it('storeSession normalizes a millisecond expiry before any persistence boundary', () => {
+    const session = mockSession();
+    const millisecondExpiry = (session.expires_at as number) * 1000;
+
+    storeSession({ ...session, expires_at: millisecondExpiry });
+
+    const stored = JSON.parse(localStorage.getItem('rose-session') ?? '{}') as {
+      expires_at?: number;
+    };
+    expect(stored.expires_at).toBe(Math.floor(millisecondExpiry / 1000));
+  });
+
   it('signOut clears the session', async () => {
     mockSession();
     await signOut();

@@ -38,7 +38,9 @@ function upstreamStatus(error: unknown): number | undefined {
  * A `TestPaymentError` is a deliberate, already-explained outcome, so it answers with its own status
  * and message. Anything else is an UNEXPECTED failure — most often an upstream Stripe or AgentCard
  * error — and used to collapse into a bare 500 whose cause appeared in NO log at all, which made a
- * repeatedly failing benchmark effectively undiagnosable from the backend log. Such errors are now
+ * repeatedly failing benchmark effectively undiagnosable from the backend log (the recorded
+ * occurrences on 2026-07-11 and 2026-07-14 were never root-caused for exactly that reason). Such
+ * errors are now
  * logged with their message, upstream status/code and stack before the opaque body is returned, so
  * the response stays client-safe (no upstream detail leaks) while the cause is always recoverable.
  */

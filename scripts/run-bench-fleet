@@ -4836,6 +4836,34 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
             || fail_autoscaler "could not reconcile worker readiness outcomes"
         reconcile_worker_failure_outcomes "$bench" "$out" \
             || fail_autoscaler "could not reconcile worker failure outcomes"
+        # The fake-controller regression for terminal proof needs to hold the
+        # exact state "capacity fully accepted, child not yet complete" without
+        # relying on this loop's scheduler timing. This branch is unreachable
+        # outside the explicit fake Fly environment used by the harness.
+        if [ -n "${CLOUDBENCH_FAKE_DIR:-}" ] \
+            && [ "${CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY:-0}" = "1" ]; then
+            local test_ready_workers test_tracked_workers
+            test_ready_workers="$(_ready_pool_ids "$out")"
+            test_tracked_workers="$(_pool_ids "$out")"
+            if [ "$test_ready_workers" -ge "$want" ] \
+                && [ "$test_tracked_workers" = "$test_ready_workers" ] \
+                && ! find "$out" -maxdepth 1 -name 'worker-*.pending' \
+                    -print -quit 2>/dev/null | grep -q . \
+                && ready_workers_operational "$out"; then
+                # The boundary must survive the controller's whole final
+                # acceptance pass, so the normal path holds here until teardown
+                # signals this process. The release marker is the harness's
+                # explicit escape hatch, and the deadline is only an anti-wedge
+                # backstop far beyond any scenario's runtime — never the
+                # synchronization this case depends on.
+                : > "$out/autoscaler.test-held-after-ready"
+                local test_hold_deadline=$((SECONDS + 600))
+                while [ ! -e "$out/autoscaler.test-release-after-ready" ] \
+                    && [ "$SECONDS" -lt "$test_hold_deadline" ]; do
+                    sleep 0.2
+                done
+            fi
+        fi
         sleep "$AUTOSCALE_POLL"
     done
 }

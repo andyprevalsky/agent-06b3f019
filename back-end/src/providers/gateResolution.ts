@@ -13,7 +13,7 @@ import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import { getTemporalClient } from './temporal';
 import { createLogger } from './logger';
-import { findDeploymentFencedToolMessage, lockToolCallLifecycle } from './toolLifecycleMessages';
+import { findDeploymentFencedToolMessage } from './toolLifecycleMessages';
 import { lockAgentWorkflowGeneration } from './workflowGeneration';
 
 const log = createLogger('GateResolution');
@@ -82,7 +82,8 @@ async function signalAllWaiters(request: ResolvableGateRequest, response: string
 
 export async function finishAttentionMessages(
   tx: Prisma.TransactionClient,
-  request: ResolvableGateRequest
+  request: ResolvableGateRequest,
+  workflowGenerationAlreadyLocked = false
 ): Promise<number> {
   const pendingMessages = await tx.message.findMany({
     where: {
@@ -108,14 +109,21 @@ export async function finishAttentionMessages(
   });
 
   let finishedCount = 0;
+  let workflowGenerationLocked = workflowGenerationAlreadyLocked;
   for (const message of pendingMessages) {
     if (message.metadata === null || Array.isArray(message.metadata)) continue;
     const metadata = message.metadata as Prisma.JsonObject;
     const toolCallId = metadata.toolCallId;
     if (typeof toolCallId === 'string' && toolCallId.length > 0) {
       const workflowGeneration = message.workflowGeneration ?? request.agentId;
-      await lockAgentWorkflowGeneration(tx, request.agentId);
-      await lockToolCallLifecycle(tx, request.agentId, workflowGeneration, toolCallId);
+      if (!workflowGenerationLocked) {
+        await lockAgentWorkflowGeneration(tx, request.agentId);
+        workflowGenerationLocked = true;
+      }
+      // Every lifecycle writer takes the generation lock in shared mode before
+      // its tool-call lock. Holding the exclusive generation lock therefore
+      // proves that no lifecycle writer can overlap this cleanup; taking the
+      // subordinate lock again only adds a transaction-expiring round trip.
       const deploymentFence = await findDeploymentFencedToolMessage(
         tx,
         request.agentId,
@@ -124,20 +132,19 @@ export async function finishAttentionMessages(
       );
       if (deploymentFence !== null) continue;
     }
-    const current = await tx.message.findUnique({ where: { id: message.id } });
-    if (current?.metadata === null || Array.isArray(current?.metadata)) continue;
-    const currentMetadata = current?.metadata as Prisma.JsonObject | undefined;
-    if (currentMetadata?.toolStatus !== 'IN_PROGRESS') continue;
-    await tx.message.update({
-      where: { id: message.id },
+    const updated = await tx.message.updateMany({
+      // Compare-and-swap the metadata snapshot returned above. Lifecycle-aware
+      // messages are serialized by the advisory locks; legacy messages without
+      // a toolCallId still cannot overwrite a concurrent terminal transition.
+      where: { id: message.id, metadata: { equals: metadata } },
       data: {
         metadata: {
-          ...currentMetadata,
+          ...metadata,
           toolStatus: 'FINISHED',
         },
       },
     });
-    finishedCount += 1;
+    finishedCount += updated.count;
   }
 
   return finishedCount;
@@ -154,21 +161,23 @@ export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
 ): Promise<{ resolved: boolean }> {
+  // Merge keeps both sides: main's generation lock plus the single atomic
+  // UPDATE ... RETURNING (race-free, and ordered so a response can never hold
+  // the row while waiting on deployment cleanup's generation lock), wrapped in
+  // this branch's transient-start retry so a contended pool surfaces as a retry
+  // rather than a hard gate-resolution failure.
   const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(async (tx) => {
-    const updated = await tx.agentAttentionRequest.updateMany({
-      where: { id: request.id, userResponse: null },
-      data: { userResponse: response },
-    });
-    const current = await tx.agentAttentionRequest.findUnique({
-      where: { id: request.id },
-    });
-    if (current === null) {
-      throw new Error(`Attention request ${request.id} disappeared during resolution`);
+    await lockAgentWorkflowGeneration(tx, request.agentId);
+    const [current] = await tx.$queryRaw<ResolvableGateRequest[]>`
+      UPDATE "AgentAttentionRequest"
+      SET "userResponse" = ${response}, "updatedAt" = CURRENT_TIMESTAMP
+      WHERE id = ${request.id} AND "userResponse" IS NULL
+      RETURNING id, "workflowId", "agentId", metadata
+    `;
+    if (current === undefined) {
+      return { fresh: null, finishedMessageCount: 0, resolved: false };
     }
-    if (updated.count === 0) {
-      return { fresh: current, finishedMessageCount: 0, resolved: false };
-    }
-    const finishedCount = await finishAttentionMessages(tx, request);
+    const finishedCount = await finishAttentionMessages(tx, current, true);
     return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
   });
   log.info('Resolved attention request read model', {
@@ -177,7 +186,7 @@ export async function resolveAndSignal(
     finished_message_count: finishedMessageCount,
     resolved,
   });
-  if (!resolved) return { resolved: false };
+  if (!resolved || fresh === null) return { resolved: false };
   await signalAllWaiters(fresh, response);
   return { resolved: true };
 }

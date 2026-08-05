@@ -26,6 +26,9 @@ export interface CompletionMessage {
   tool_calls?: Array<{
     id?: string;
     call_id?: string;
+    /** OpenAI's discriminator. Strict validators (Google via OpenRouter) reject
+     *  an assistant tool_call without it and fail the entire transcript. */
+    type?: 'function';
     name?: string;
     arguments?: unknown;
     function?: { name?: string; arguments?: unknown };

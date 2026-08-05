@@ -1,5 +1,6 @@
 import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
 import { extractAgentCardOrgWallet } from './org-wallet-monitor';
+import { retryWithBackoff } from '../retry';
 
 /**
  * Minimum sandbox pool the benchmark payment fixture requires, in cents.
@@ -13,6 +14,8 @@ import { extractAgentCardOrgWallet } from './org-wallet-monitor';
  * top-up target. Override with BENCHMARK_AGENTCARD_MIN_FLOAT_CENTS.
  */
 const DEFAULT_MIN_SANDBOX_FLOAT_CENTS = 10_000;
+const MAX_RATE_LIMIT_ATTEMPTS = 4;
+const MAX_RATE_LIMIT_WAIT_MS = 65_000;
 
 const AGENTCARD_DASHBOARD_URL = 'https://dashboard.agentcard.sh';
 
@@ -33,6 +36,28 @@ function formatUsd(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+function retryAfterMs(error: unknown, nowMs: number = Date.now()): number | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/rate limit exceeded/i.test(message)) return undefined;
+  const match = message.match(/["']?retryAfter["']?\s*:\s*(\d+)/i);
+  if (!match) return undefined;
+  const retryAtMs = Number(match[1]);
+  if (!Number.isFinite(retryAtMs)) return undefined;
+  return Math.max(0, retryAtMs - nowMs) + 250;
+}
+
+async function readWalletWithRateLimitRetry(callOrgTool: AgentCardOrgToolCaller): Promise<unknown> {
+  return retryWithBackoff(() => callOrgTool('get_company_wallet', {}), {
+    maxRetries: MAX_RATE_LIMIT_ATTEMPTS,
+    isRetryable: (error) => {
+      const waitMs = retryAfterMs(error);
+      return waitMs !== undefined && waitMs <= MAX_RATE_LIMIT_WAIT_MS;
+    },
+    getBackoffDelayMs: (error) => retryAfterMs(error) ?? 0,
+    component: 'AgentCardBenchmarkFloat',
+  });
+}
+
 /**
  * Confirm the AgentCard sandbox company wallet holds enough float for the
  * benchmark payment lifecycle.
@@ -48,7 +73,7 @@ export async function ensureAgentCardSandboxFloat(
   minCents: number = minSandboxFloatCents(),
   callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
 ): Promise<AgentCardSandboxFloat> {
-  const wallet = extractAgentCardOrgWallet(await callOrgTool('get_company_wallet', {}));
+  const wallet = extractAgentCardOrgWallet(await readWalletWithRateLimitRetry(callOrgTool));
 
   if (wallet.livemode) {
     throw new Error(

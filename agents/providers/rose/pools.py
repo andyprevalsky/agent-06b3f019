@@ -13,7 +13,7 @@ Model contract (P1):
     rose-1-lite:
         claudeAuth = claude-sonnet-5
         gptAuth    = gpt-5.6-terra
-        waterfall  = google/gemini-3.5-flash -> moonshotai/kimi-k2.7-code
+        waterfall  = google/gemini-3.5-flash -> moonshotai/kimi-k3
 
     rose-1-ultra:
         claudeAuth = claude-fable-5
@@ -72,7 +72,7 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-terra",
         waterfall=(
             "google/gemini-3.5-flash",
-            "moonshotai/kimi-k2.7-code",
+            "moonshotai/kimi-k3",
         ),
     ),
     "rose-1-ultra": PoolSpec(

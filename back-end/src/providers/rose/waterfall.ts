@@ -14,6 +14,7 @@ import { RoseAllFailed, RoseError, RoseStallError, type RoseStepError } from './
 import type { PoolSpec } from './pools';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
+import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionMessage, ResponseFormat, RoseStreamChunk } from './types';
 
 const log = createLogger('RoseWaterfall');
@@ -51,7 +52,7 @@ export function buildOpenRouterBody(opts: {
 }): Record<string, unknown> {
   const body: Record<string, unknown> = {
     model: opts.model,
-    messages: opts.messages,
+    messages: normalizeOpenAiToolCalls(opts.messages),
     stream: true,
     stream_options: { include_usage: true },
   };

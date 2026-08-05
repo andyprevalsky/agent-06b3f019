@@ -469,6 +469,53 @@ def test_keychain_refresh_is_inert_without_macos_security():
     seed.assert_not_called()
 
 
+def test_codex_refresh_targets_only_the_isolated_database_and_enables_pooling():
+    seen: dict[str, object] = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        seen["cwd"] = kwargs["cwd"]
+        seen["env"] = kwargs["env"]
+        return _Result(0)
+
+    with (
+        patch.object(rb.sys, "platform", "darwin"),
+        patch.object(rb.Path, "is_file", return_value=True),
+        patch.object(
+            rb,
+            "load_env_var",
+            return_value="test-only-credential-encryption-key",
+        ),
+        patch.object(rb, "_run_seed_subprocess", side_effect=fake_run),
+        patch("builtins.print"),
+    ):
+        assert (
+            rb._refresh_local_gpt_token_from_codex_auth(
+                "postgresql://postgres:postgres@localhost:55005/victoria"
+            )
+            is True
+        )
+
+    assert seen["command"] == ["npx", "tsx", "scripts/sync-codex-token.ts"]
+    assert seen["cwd"] == rb.REPO_ROOT / "back-end"
+    env = seen["env"]
+    assert isinstance(env, dict)
+    assert env["DATABASE_URL"] == "postgresql://postgres:postgres@localhost:55005/victoria"
+    assert env["DIRECT_URL"] == "postgresql://postgres:postgres@localhost:55005/victoria"
+    assert env["CLAUDE_CREDENTIAL_DECRYPTION_KEY"] == "test-only-credential-encryption-key"
+    assert env["CODEX_TOKEN_POOLING_ENABLED"] == "true"
+
+
+def test_codex_refresh_is_inert_without_local_auth_file():
+    with (
+        patch.object(rb.sys, "platform", "darwin"),
+        patch.object(rb.Path, "is_file", return_value=False),
+        patch.object(rb, "_run_seed_subprocess") as seed,
+    ):
+        assert rb._refresh_local_gpt_token_from_codex_auth("postgresql://local/victoria") is False
+    seed.assert_not_called()
+
+
 def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_sync():
     calls: list[str] = []
 
@@ -498,6 +545,7 @@ def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_
 
 def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
     captured: dict[str, object] = {}
+    calls: list[str] = []
 
     def fake_sync(
         *,
@@ -508,6 +556,7 @@ def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
         captured["required"] = required_token_types
         captured["gpt"] = tolerate_gpt_code_unavailable
         captured["claude"] = tolerate_claude_code_unavailable
+        calls.append("source-sync")
         return True
 
     with (
@@ -519,10 +568,19 @@ def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
             new=AsyncMock(side_effect=AssertionError("Anthropic fallback must not be checked")),
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(
+            rb,
+            "_refresh_local_gpt_token_from_codex_auth",
+            side_effect=lambda _url: calls.append("codex-overlay") or True,
+        ),
     ):
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
 
+    # gpt-only sync, and a quota-blocked gpt_code (Codex) integration must not fail the run: the
+    # excluded-Anthropic path still overlays this machine's Codex auth as a separate, required step.
     assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
+    assert calls == ["source-sync", "codex-overlay"]
 
 
 def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():

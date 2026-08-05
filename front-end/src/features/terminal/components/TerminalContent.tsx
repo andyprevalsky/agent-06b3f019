@@ -14,7 +14,7 @@
  *   currentView === 'benchmarks'   → <BenchmarksView /> (team-gated tab)
  *   currentView === 'agents'       → agent chat / landing
  *   open-agent deep link           → force 'agents' even from browse/settings
- *   agents + inspectionContext     → floating read-only account identity badge
+ *   agents + inspectionContext     → compact read-only pill in global control rail
  */
 
 import { useState, useMemo, lazy } from 'react';

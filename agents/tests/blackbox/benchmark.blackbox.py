@@ -206,9 +206,7 @@ def test_agent_payment_output_blob_is_key_agnostic():
     # The regression: agent emitted `order_id`, not `order_confirmation_id`.
     assert "tp_c9123127" in blob_for({"order_id": "tp_c9123127", "total_amount_paid": 43.96})
     # Legacy/alternate key names surface too.
-    assert "tp_c5053b1b" in blob_for(
-        {"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96}
-    )
+    assert "tp_c5053b1b" in blob_for({"order_confirmation_id": "tp_c5053b1b", "total_price_paid": 43.96})
     # No populated browser output → empty blob (the semantic gate fails closed on empty).
     assert _extract_agent_payment_output_blob({"messages": []}) == ""
 
@@ -264,13 +262,9 @@ def test_cloud_fleet_controller_detaches_by_default():
     """A launcher/session death must not bypass the paid fleet's EXIT cleanup."""
     repo_root = Path(__file__).resolve().parents[3]
     fleet = (repo_root / "scripts" / "run-bench-fleet").read_text()
-    detach_default = next(
-        line.strip() for line in fleet.splitlines() if line.startswith("DETACH=")
-    )
+    detach_default = next(line.strip() for line in fleet.splitlines() if line.startswith("DETACH="))
 
-    assert detach_default == 'DETACH="1"', (
-        f"fleet launch mode was {detach_default}; paid runs must detach by default"
-    )
+    assert detach_default == 'DETACH="1"', f"fleet launch mode was {detach_default}; paid runs must detach by default"
     assert '--wait)           DETACH="1"; WAIT_FOR_DETACHED="1"' in fleet
     assert '--foreground)     DETACH="0"' in fleet
     assert "--recover-stale-owner)" in fleet
@@ -278,9 +272,7 @@ def test_cloud_fleet_controller_detaches_by_default():
     assert "volume_id=%s" in fleet
     assert "Never sweep app-global unattached" in fleet
     assert fleet.index(detach_default) < fleet.index("while [ $# -gt 0 ]")
-    assert fleet.index("cloudbench_detach_reexec") < fleet.index(
-        "cloudbench_controller_lock_acquire"
-    )
+    assert fleet.index("cloudbench_detach_reexec") < fleet.index("cloudbench_controller_lock_acquire")
 
 
 def test_cloudbench_prisma_freshness_behavior_is_in_permanent_gate():
@@ -562,7 +554,9 @@ async def test_parallel_benchmark_scheduler_overlaps_isolated_browser_profiles()
     with patch.dict(os.environ, {"BENCHMARK_ISOLATED_BROWSER_PROFILES": "true"}):
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
-    assert max_active_browser_tasks == 2, f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
+    assert max_active_browser_tasks == 2, (
+        f"browser tasks did not overlap; observed concurrency={max_active_browser_tasks}"
+    )
 
 
 async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles():
@@ -592,8 +586,7 @@ async def test_parallel_benchmark_scheduler_serializes_shared_browser_profiles()
         await asyncio.gather(*_parallel_task_runners(tasks, 2, runner))
 
     assert max_active_browser_tasks == 1, (
-        "shared browser profiles lost one-writer protection; "
-        f"observed concurrency={max_active_browser_tasks}"
+        f"shared browser profiles lost one-writer protection; observed concurrency={max_active_browser_tasks}"
     )
 
 
@@ -900,11 +893,14 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
     wrong_structured_request, wrong_structured_messages = _captured_toast_payment_approval(
         merchant="Nopa Fish (Toast - order.doordash.com)"
     )
-    assert _validate_payment_receipt(
-        task,
-        wrong_structured_request,
-        messages=wrong_structured_messages,
-    ) is not None
+    assert (
+        _validate_payment_receipt(
+            task,
+            wrong_structured_request,
+            messages=wrong_structured_messages,
+        )
+        is not None
+    )
 
     current_request, toast_messages = _captured_toast_payment_approval()
     _, doordash_messages = _captured_toast_payment_approval()
@@ -912,11 +908,14 @@ def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
         message["metadata"]["subAgentId"] = "doordash-browser-task"
         message["metadata"]["browser_url"] = "https://kernel.example/live/doordash-session"
     doordash_messages[0]["metadata"]["title"] = "Navigated → https://order.doordash.com/nopafish"
-    assert _validate_payment_receipt(
-        task,
-        current_request,
-        messages=[*toast_messages, *doordash_messages],
-    ) is not None
+    assert (
+        _validate_payment_receipt(
+            task,
+            current_request,
+            messages=[*toast_messages, *doordash_messages],
+        )
+        is not None
+    )
 
 
 def test_payment_benchmark_enables_bundled_frontend_before_stack_start():
@@ -1028,10 +1027,7 @@ def test_payment_benchmark_accepts_org_client_credentials_from_dotenv(tmp_path):
     from benchmarks import local
 
     env_path = tmp_path / ".env"
-    env_path.write_text(
-        'AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\n'
-        'AGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n'
-    )
+    env_path.write_text('AGENTCARD_ORG_OAUTH_CLIENT_ID="client-id"\nAGENTCARD_ORG_OAUTH_CLIENT_SECRET="acs_secret"\n')
     local.validate_agentcard_org_credentials(
         ["agent-payment-test-shop"],
         env={},
@@ -1132,21 +1128,25 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding "
-            "path can produce"
+            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
 
 
 def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
-    """The PRODUCTION payment tasks have the same hard requirement as their sandbox siblings.
+    """The PRODUCTION payment tasks must run on an identity that can satisfy their own contract.
 
-    `agent-payment-production-abandonment` is /deploy Step 13c and asserts `stripeHold.status ==
-    succeeded`. Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal
-    Stripe hold; the admin branch calls `issueAdminCompanyCard`, which never creates a payment
-    intent. The default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving these tasks
-    on it makes the production gate unpassable by construction -- which is exactly how it broke.
+    Only the NON-admin branch of `resolveAndIssuePurchaseCard` authorizes a personal Stripe hold;
+    the admin branch calls `issueAdminCompanyCard`, which never creates a payment intent. The
+    default benchmark user is a hardcoded ADMIN_USER_IDS entry, so leaving a hold-asserting task on
+    it makes the production gate unpassable by construction -- which is exactly how it broke.
+
+    The charge expectation itself is owned by the payment tasks, not by this guard: a task may
+    legitimately declare a personal hold (`stripeHold.status == succeeded`) or the admin no-charge
+    contract (`stripeHold: null`). Pinning one of those here made the guard disagree with a
+    definition that shipped separately. So assert the INVARIANT that actually matters -- a task that
+    expects a hold must not run as an admin -- and let the task own which contract it declares.
     """
     import re
 
@@ -1161,9 +1161,7 @@ def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(
-        r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts
-    )
+    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts)
     assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
         "production payment identity drifted between the harness and the back-end: "
@@ -1182,10 +1180,17 @@ def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
         task = get_task_by_name(name)
         assert task.production_only, f"{name} must stay production_only"
         assert benchmark_run_user_id_for_task(name) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
-            f"{name} must run as the non-admin production payment identity, otherwise its "
-            "stripeHold assertion cannot be satisfied"
+            f"{name} must run as the non-admin production payment identity, otherwise a "
+            "stripeHold expectation cannot be satisfied"
         )
-        assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded"
+        # The task owns WHICH contract it declares; this guard owns that the declaration is
+        # satisfiable by the identity it runs on. A declared hold requires the non-admin path,
+        # which the identity assertion above already pins.
+        hold = task.expected_payment_lifecycle["stripeHold"]
+        assert hold is None or hold["status"] == "succeeded", (
+            f"{name} declares an unexpected stripeHold contract: {hold!r}. Expected either the "
+            "admin no-charge contract (null) or a succeeded personal hold."
+        )
 
 
 def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
@@ -1519,8 +1524,8 @@ async def test_abandonment_waits_between_funding_reclaim_and_purchase_void():
     assert reads == 1
 
 
-async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
-    """One provider timeout cannot erase an already-started durable compensation."""
+async def test_abandonment_tolerates_provider_outage_beyond_three_lifecycle_reads():
+    """AgentCard throttling can outlast the old three-read cutoff and still recover."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
 
@@ -1530,7 +1535,7 @@ async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
         nonlocal reads
         reads += 1
-        if reads == 1:
+        if reads <= 4:
             raise RuntimeError('500 {"error":"Failed to read test payment lifecycle"}')
         return task.expected_payment_lifecycle
 
@@ -1548,32 +1553,52 @@ async def test_abandonment_tolerates_one_transient_lifecycle_read_failure():
     )
 
     assert result["purchase"]["status"] == "VOIDED"
-    assert reads == 2
+    assert reads == 5
 
 
-async def test_abandonment_surfaces_three_consecutive_lifecycle_read_failures():
-    """The transient guard stays bounded and reports a persistent provider outage."""
+async def test_abandonment_surfaces_lifecycle_outage_at_reconciliation_deadline():
+    """A persistent provider outage stays bounded by the reconciliation deadline."""
+    from types import SimpleNamespace
+
     import pytest
 
+    import benchmarks.run_benchmark as bench
     from benchmarks.benchmark_tasks import get_task_by_name
-    from benchmarks.run_benchmark import _wait_for_expected_payment_lifecycle
+
+    reads = 0
+    clock_reads = 0
 
     async def fetch_lifecycle(_base_url: str, _agent_id: str) -> dict:
+        nonlocal reads
+        reads += 1
         raise RuntimeError("upstream unavailable")
 
-    with pytest.raises(RuntimeError, match="unavailable after 3 consecutive reads"):
-        await _wait_for_expected_payment_lifecycle(
-            "http://localhost:55120",
-            "agent-123",
-            get_task_by_name("agent-payment-abandonment"),
-            {
-                "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
-                "walletFunding": {"status": "RECLAIM_FAILED"},
-            },
-            timeout_seconds=1,
-            poll_interval_seconds=0,
-            fetch_lifecycle=fetch_lifecycle,
-        )
+    def monotonic() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        return 0 if clock_reads < 7 else 1
+
+    # Replace only the benchmark module's clock. Patching time.monotonic on the
+    # shared stdlib module also changes asyncio's event-loop clock, making the
+    # number of simulated reads scheduler-dependent.
+    with patch.object(bench, "time", SimpleNamespace(monotonic=monotonic)):
+        with pytest.raises(
+            RuntimeError,
+            match="unavailable at the reconciliation deadline after 3 consecutive reads",
+        ):
+            await bench._wait_for_expected_payment_lifecycle(
+                "http://localhost:55120",
+                "agent-123",
+                get_task_by_name("agent-payment-abandonment"),
+                {
+                    "purchase": {"status": "FUNDING_RECLAIM_FAILED"},
+                    "walletFunding": {"status": "RECLAIM_FAILED"},
+                },
+                timeout_seconds=1,
+                poll_interval_seconds=0,
+                fetch_lifecycle=fetch_lifecycle,
+            )
+    assert reads == 3
 
 
 async def test_initial_payment_lifecycle_retries_one_transient_provider_failure():
@@ -1664,7 +1689,10 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert "exactly $1.00" in production.prompt
     assert production.expected_payment_receipt["totalCents"] == 100
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
-    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["integrity"]["stripePaymentIntentCount"] == 0
+    assert production.expected_payment_lifecycle["integrity"]["stripeProviderPaymentIntentCount"] == 0
+    assert production.expected_payment_lifecycle["stripeHold"] is None
+    assert production.expected_payment_lifecycle["stripeRefund"] is None
     assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["transferredCents"] == 0
     assert production.expected_payment_lifecycle["orgTransfer"]["releasedCents"] == 100
@@ -2633,9 +2661,7 @@ async def test_declared_evaluator_hydrates_completion_sms_receipt():
                 "skipped": True,
                 "reason": "benchmark_agent",
                 "messagePreview": (
-                    f"Done: {summary}\n"
-                    "Pickup Time: 7:41 AM\n"
-                    "View agent: https://roselabs.ai/?agent-id=root-blue-bottle"
+                    f"Done: {summary}\nPickup Time: 7:41 AM\nView agent: https://roselabs.ai/?agent-id=root-blue-bottle"
                 ),
             },
         }
@@ -3551,8 +3577,7 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
         assert captured["env"]["SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL"] == prisma_source
 
         same_database_source = (
-            "postgres://source-user:one@DB.EXAMPLE.COM/victoria"
-            "?sslmode=require&application_name=seed&schema=public"
+            "postgres://source-user:one@DB.EXAMPLE.COM/victoria?sslmode=require&application_name=seed&schema=public"
         )
         env_path.write_text(f"DATABASE_URL={same_database_source}\n")
         seed_called = False
@@ -3568,8 +3593,7 @@ def test_compute_token_source_contract_preserves_prisma_dsn_and_rejects_self_sou
                 bench,
                 "_local_victoria_database_url",
                 return_value=(
-                    "postgresql://target-user:two@db.example.com:5432/victoria"
-                    "?connection_limit=50&pool_timeout=30"
+                    "postgresql://target-user:two@db.example.com:5432/victoria?connection_limit=50&pool_timeout=30"
                 ),
             ),
             patch.object(bench, "_shared_workspace_database_url", return_value=None),
@@ -6065,7 +6089,7 @@ def test_source_connect_gate_benchmark_enables_non_purchase_gates():
 
 
 def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
-    """Cloudbench's executable task-env resolution must export the worker gate flag."""
+    """Cloudbench's task-env resolution exports gates and fails closed on resolver errors."""
     import subprocess
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -6107,9 +6131,34 @@ def test_cloudbench_source_connect_gate_benchmark_enables_non_purchase_gates():
     assert disabled.returncode == 0, disabled.stderr
     assert disabled.stdout == ""
 
+    with tempfile.TemporaryDirectory() as fake_bin_dir:
+        fake_python = Path(fake_bin_dir) / "python3"
+        fake_python.write_text("#!/bin/sh\nexit 42\n")
+        fake_python.chmod(0o755)
+        resolver_failure = subprocess.run(
+            ["bash", str(script)],
+            env={
+                **base_env,
+                "BENCH_TASKS": "gate-source-connect-gmail",
+                "CLOUDBENCH_TASK_GATE_PYTHON": str(fake_python),
+            },
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    assert resolver_failure.returncode == 42
+    assert "task gate resolution failed (exit 42)" in resolver_failure.stderr
+
 
 def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
-    """A broken task catalog must not silently disable source-connect gates."""
+    """A broken task catalog must not silently disable source-connect gates.
+
+    Companion to the resolver-failure case above: that one proves a resolver that dies silently
+    still fails closed, this one proves the resolver's own diagnostics reach the operator instead
+    of being swallowed. The gate interpreter is selected with CLOUDBENCH_TASK_GATE_PYTHON, and a
+    non-{0,10} exit is propagated verbatim so the real cause is never flattened away.
+    """
     repo_root = Path(__file__).resolve().parents[3]
     script = repo_root / "scripts" / "cloudbench-run.sh"
 
@@ -6121,8 +6170,7 @@ def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
             ["bash", str(script)],
             env={
                 **os.environ,
-                "PATH": f"{temp_dir}{os.pathsep}{os.environ['PATH']}",
-                "CLOUDBENCH_PYTHON_BIN": str(fake_python),
+                "CLOUDBENCH_TASK_GATE_PYTHON": str(fake_python),
                 "CLOUDBENCH_REPO_DIR": str(repo_root),
                 "CLOUDBENCH_SEED_BUDGET_LIB": str(repo_root / "scripts" / "lib" / "cloudbench-seed-budget.sh"),
                 "CLOUDBENCH_PRINT_TASK_ENV": "1",
@@ -6134,9 +6182,9 @@ def test_cloudbench_task_gate_resolution_fails_closed_on_catalog_error():
             check=False,
         )
 
-    assert result.returncode == 1
+    assert result.returncode == 23
     assert "catalog-unavailable" in result.stderr
-    assert "failed to resolve benchmark task gate requirements" in result.stderr
+    assert "task gate resolution failed (exit 23)" in result.stderr
 
 
 def test_cloudbench_test_payment_benchmarks_enable_bundled_frontend_env():
@@ -7005,8 +7053,8 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
-        local_bench._prime_local_seed_dump_from_shared_stack = (
-            lambda path: captured.setdefault("primed_seed_dump", path) is path
+        local_bench._prime_local_seed_dump_from_shared_stack = lambda path: (
+            captured.setdefault("primed_seed_dump", path) is path
         )
         with tempfile.TemporaryDirectory() as tmp:
             context_dir = Path(tmp) / "isolated-run"
@@ -7232,7 +7280,13 @@ def test_local_start_services_reaps_only_its_real_process_group():
                     (
                         "import pathlib, subprocess, sys, time; "
                         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "pid_path = pathlib.Path(sys.argv[1]); "
+                        "pending_path = pid_path.with_suffix('.tmp'); "
+                        "pid_file = pending_path.open('w'); "
+                        "time.sleep(0.2); "
+                        "pid_file.write(str(child.pid)); "
+                        "pid_file.close(); "
+                        "pending_path.replace(pid_path); "
                         "time.sleep(60)"
                     ),
                     str(child_pid_path),
@@ -7386,6 +7440,7 @@ def test_local_port_range_allocation_is_reserved_across_processes():
         child_base_text = child.stdout.readline().strip()
         assert child_base_text.isdigit(), f"child port allocation failed: {child_base_text!r}"
         child_base = int(child_base_text)
+
         def occupied(base):
             return {base + offset for offset in local_bench.PORT_RANGE_OFFSETS}
 
@@ -8742,9 +8797,7 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
-        result = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
-        )
+        result = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
     assert result is None
 
     # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
@@ -8758,15 +8811,11 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
             }
         ),
     ):
-        failure = asyncio.run(
-            _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
-        )
+        failure = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
     assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
 
     # No populated output → judged as missing without an LLM call.
-    empty = asyncio.run(
-        _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
-    )
+    empty = asyncio.run(_judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep"))
     assert empty is not None and "no populated output schema" in empty
 
     # REUSABLE / not overfitted: the same judge works for a totally different task's schema
@@ -8813,20 +8862,11 @@ def test_admin_bypass_card_mint_variant_wiring():
     from benchmarks.benchmark_tasks import get_task_by_name
 
     # Both variants share the depleted purchase-subscription fixture...
-    assert (
-        GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
-        == "purchase-subscription"
-    )
+    assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == "purchase-subscription"
     assert GATE_FIXTURE_TASK_MODES[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == "purchase-subscription"
     # ...but run as different users: a synthetic admin vs a plain non-admin.
-    assert (
-        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME]
-        == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
-    )
-    assert (
-        GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME]
-        == PURCHASE_SUBSCRIPTION_GATE_USER_ID
-    )
+    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_ADMIN_BYPASS_TASK_NAME] == ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+    assert GATE_FIXTURE_TASK_USER_IDS[PURCHASE_SUBSCRIPTION_GATE_TASK_NAME] == PURCHASE_SUBSCRIPTION_GATE_USER_ID
     assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID != PURCHASE_SUBSCRIPTION_GATE_USER_ID
 
     non_admin = get_task_by_name(PURCHASE_SUBSCRIPTION_GATE_TASK_NAME)
@@ -11271,12 +11311,12 @@ async def run_all_tests():
         test_abandonment_waits_between_funding_reclaim_and_purchase_void,
     )
     await r.record_async(
-        "abandonment_tolerates_transient_lifecycle_read",
-        test_abandonment_tolerates_one_transient_lifecycle_read_failure,
+        "abandonment_tolerates_extended_lifecycle_outage",
+        test_abandonment_tolerates_provider_outage_beyond_three_lifecycle_reads,
     )
     await r.record_async(
         "abandonment_bounds_persistent_lifecycle_outage",
-        test_abandonment_surfaces_three_consecutive_lifecycle_read_failures,
+        test_abandonment_surfaces_lifecycle_outage_at_reconciliation_deadline,
     )
     await r.record_async(
         "initial_payment_lifecycle_tolerates_transient_read",

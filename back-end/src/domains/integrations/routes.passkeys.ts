@@ -6,7 +6,7 @@
 import { type RequestHandler, type Response, Router } from 'express';
 // eslint-disable-next-line no-restricted-imports -- Express file upload middleware, configured per-route
 import multer from 'multer';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticateMachineUpload } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
@@ -41,7 +41,7 @@ function hasEncryptedFields(body: Record<string, unknown>): body is {
 /** POST /api/integrations/passkeys/upload */
 router.post(
   '/passkeys/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.none() as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;

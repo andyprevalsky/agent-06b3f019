@@ -46,9 +46,16 @@ class WaitForManager(ToolManager):
         until_timestamp = tool_call.get("until_timestamp")
         condition = tool_call.get("condition")
         description = tool_call.get("description")
+        # resume=True (deploy-migration re-arm): an already-elapsed target
+        # completes immediately instead of erroring "in the past". Require a
+        # strict boolean True so only the internal _resume_interrupted_wait path
+        # enables it — a truthy string (e.g. an LLM-forwarded "false") must not.
+        resume = tool_call.get("resume") is True
 
         if until_timestamp:
-            async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id):
+            async for event in self._timestamp_mode(
+                workflow_instance, until_timestamp, tool_call_id, resume=resume
+            ):
                 yield event
         elif condition:
             if not isinstance(description, str) or not 3 <= len(description) <= 80:
@@ -85,6 +92,7 @@ class WaitForManager(ToolManager):
         workflow_instance: Any,
         until_timestamp: str,
         tool_call_id: str,
+        resume: bool = False,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Wait until a specific timestamp."""
         try:
@@ -106,6 +114,18 @@ class WaitForManager(ToolManager):
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
+            if resume:
+                # Deploy migration re-armed a wait whose target elapsed during
+                # downtime — treat it as satisfied so the agent proceeds without
+                # depending on the LLM to re-issue wait_for.
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message=f"Reached {until_timestamp} (target already elapsed during deploy)",
+                    status=MessageStatus.FINISHED,
+                    metadata={"waitForMode": "timestamp", "resumed": True},
+                )
+                return
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="wait_for failed",

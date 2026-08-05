@@ -57,6 +57,7 @@ AGENT_PAYMENT_TASK_NAMES = {
     "agent-payment-abandonment",
     "agent-payment-setup-resume",
 }
+BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
@@ -66,6 +67,11 @@ TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
 # asserts. Must equal run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID and
 # BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
 AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Same identity, reached through the harness-wide env override so `run_benchmark` and this launcher
+# cannot drift: `configure_task_environment` publishes it and `seed_payment_fixture` reads it back.
+# Must equal run_benchmark.AGENT_PAYMENT_BENCHMARK_USER_ID.
+AGENT_PAYMENT_BENCHMARK_USER_ID = AGENT_PAYMENT_LIFECYCLE_USER_ID
+AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
 # Counterpart to the above: the ADMIN funding path keeps its own benchmark, run as a synthetic
 # admin. Must equal run_benchmark.ADMIN_SUBSCRIPTION_BYPASS_USER_ID.
 ADMIN_BYPASS_TASK_NAME = "gate-subscription-card-mint-admin-bypass"
@@ -729,7 +735,14 @@ def validate_agentcard_org_credentials(
     )
 
 
-def configure_task_environment(tasks: Sequence[str]) -> None:
+def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) -> None:
+    # The local runner owns both the isolated stack and the later benchmark
+    # subprocesses. Keep their isolation view aligned so credential refreshes
+    # can safely enable synthetic-user pooling only for the per-run database.
+    if isolated:
+        os.environ["BENCHMARK_ISOLATED_RUN"] = "true"
+    else:
+        os.environ.pop("BENCHMARK_ISOLATED_RUN", None)
     if needs_frontend_tunnel(tasks):
         os.environ["BENCHMARK_BUNDLED_FRONTEND"] = "true"
     selected = set(tasks)
@@ -743,6 +756,17 @@ def configure_task_environment(tasks: Sequence[str]) -> None:
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
+        # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
+        # token pool-eligible only after stack selection proves this run owns an isolated database;
+        # never let shared-stack/use-existing modes mutate credential-pool eligibility.
+        if isolated:
+            os.environ["SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS"] = "1"
+        else:
+            os.environ.pop("SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS", None)
+        os.environ.setdefault(
+            AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
+            AGENT_PAYMENT_BENCHMARK_USER_ID,
+        )
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
@@ -773,7 +797,14 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DATABASE_URL": database_url,
         "DIRECT_URL": database_url,
     }
-    payment_user_id = os.environ.get("BENCHMARK_USER_ID", AGENT_PAYMENT_LIFECYCLE_USER_ID)
+    # `configure_task_environment` publishes the payment identity on
+    # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, so read it back here rather than re-deriving it: the
+    # seeded fixture and the identity the tasks actually run as can then never disagree.
+    payment_user_id = (
+        os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
+        or os.environ.get("BENCHMARK_USER_ID", "").strip()
+        or AGENT_PAYMENT_LIFECYCLE_USER_ID
+    )
     print(f"Seeding Stripe test billing fixture for the payment-lifecycle user {payment_user_id}")
     subprocess.run(
         [
@@ -1837,15 +1868,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv or sys.argv[1:])
     selected_tasks = tasks_from_args(args)
     validate_agentcard_org_credentials(selected_tasks)
-    configure_task_environment(selected_tasks)
     if checkpoint_requested(args) and len(selected_tasks) != 1:
         raise ValueError("--checkpoint requires exactly one resolved benchmark task")
+    stack = build_service_stack(args)
+    configure_task_environment(selected_tasks, isolated=stack.isolated)
     process: subprocess.Popen | None = None
     frontend_tunnel: FrontendTunnel | None = None
     imessage_relay: IMessageRelay | None = None
     dashboard: DashboardServer | None = None
     result_paths: list[Path] = []
-    stack = build_service_stack(args)
     previous_isolated_browser_profiles = os.environ.get("BENCHMARK_ISOLATED_BROWSER_PROFILES")
     if stack.isolated:
         # Both the service stack and run_benchmark.py inherit this. Provider

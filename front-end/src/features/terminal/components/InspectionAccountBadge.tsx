@@ -1,4 +1,10 @@
-import type { InspectionContext } from '@/lib/api';
+import { Eye } from 'lucide-react';
+import { useLayoutEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
+
+import { TOP_RIGHT_INSPECTION_SLOT_ID } from '@/components/TopRightControls';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import type { InspectionContext } from '@/lib/api/types';
 
 interface InspectionAccountBadgeProps {
   context: InspectionContext | null;
@@ -7,40 +13,58 @@ interface InspectionAccountBadgeProps {
 /**
  * STATE MACHINE: Admin account inspection badge
  *
- * [HIDDEN] -- foreign run response includes owner identity --> [VISIBLE]
- * [VISIBLE] -- select own/another run or clear selection ----> [HIDDEN]
- * [VISIBLE] -- foreign identity response replaces context ----> [VISIBLE, UPDATED]
+ * [HIDDEN] -- foreign run response includes owner identity --> [PORTALLED PILL]
+ * [PORTALLED PILL] -- hover/focus --> [IDENTITY TOOLTIP]
+ * [PORTALLED PILL] -- select own/another run or clear selection --> [HIDDEN]
+ * [PORTALLED PILL] -- foreign identity replaces context --> [PORTALLED PILL, UPDATED]
  */
 export function InspectionAccountBadge({ context }: InspectionAccountBadgeProps) {
-  if (context === null) return null;
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
 
-  return (
-    <aside
-      aria-live="polite"
-      className="fixed left-1/2 top-16 z-[60] w-[calc(100vw-2rem)] max-w-2xl -translate-x-1/2 rounded-xl border border-amber-500/70 bg-amber-50/95 px-4 py-3 text-amber-950 shadow-xl backdrop-blur-md dark:bg-amber-950/95 dark:text-amber-50"
-      data-testid="inspection-account-badge"
-      role="status"
-    >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-sm font-semibold">Inspecting User Account:</p>
-        <span className="rounded-full bg-amber-200/80 px-2 py-0.5 text-xs font-medium text-amber-950 dark:bg-amber-800 dark:text-amber-50">
-          Read-only
-        </span>
-      </div>
-      <dl className="mt-2 grid gap-x-5 gap-y-1 text-xs sm:grid-cols-3 sm:text-sm">
-        <IdentityField label="Name" value={context.name} />
-        <IdentityField label="Phone" value={context.phone} />
-        <IdentityField label="Email" value={context.email} />
-      </dl>
-    </aside>
+  useLayoutEffect(() => {
+    setSlot(document.getElementById(TOP_RIGHT_INSPECTION_SLOT_ID));
+  }, []);
+
+  if (context === null || slot === null) return null;
+
+  const primaryLabel = context.name ?? context.phone ?? context.email ?? context.user_id;
+  const identitySummary = [context.name, context.phone, context.email]
+    .filter((value): value is string => value !== null)
+    .join(', ');
+
+  return createPortal(
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <aside
+          aria-label={`Inspecting ${identitySummary || context.user_id} (read-only)`}
+          aria-live="polite"
+          className="flex min-w-0 max-w-[16rem] items-center gap-1.5 rounded-full border border-border/60 bg-background/90 px-3 py-1.5 text-xs font-medium text-foreground shadow-lg backdrop-blur-md"
+          data-testid="inspection-account-badge"
+          role="status"
+          tabIndex={0}
+        >
+          <Eye className="h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-300" />
+          <span className="truncate">Inspecting {primaryLabel}</span>
+        </aside>
+      </TooltipTrigger>
+      <TooltipContent align="end" side="bottom" className="max-w-xs">
+        <p className="text-xs font-semibold">Inspecting user account · Read-only</p>
+        <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-xs">
+          <IdentityField label="Name" value={context.name} />
+          <IdentityField label="Phone" value={context.phone} />
+          <IdentityField label="Email" value={context.email} />
+        </dl>
+      </TooltipContent>
+    </Tooltip>,
+    slot,
   );
 }
 
 function IdentityField({ label, value }: { label: string; value: string | null }) {
   return (
-    <div className="min-w-0">
-      <dt className="font-medium text-amber-800 dark:text-amber-200">{label}</dt>
-      <dd className="break-words">{value ?? 'Not provided'}</dd>
-    </div>
+    <>
+      <dt className="font-medium text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words">{value ?? 'Not provided'}</dd>
+    </>
   );
 }

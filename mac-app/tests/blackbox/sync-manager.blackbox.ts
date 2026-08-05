@@ -598,3 +598,91 @@ describe('sync-manager blackbox', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-account write protection
+// ---------------------------------------------------------------------------
+
+/**
+ * Every sync below uploads data harvested from THIS machine — the operator's
+ * iMessage history, browser cookies and passwords, and compute credentials —
+ * authenticated as the current session. While an admin is impersonating, that
+ * session belongs to the TARGET user, so an unguarded sync writes the operator's
+ * personal data into someone else's account. That is silent cross-account
+ * corruption that cannot be un-written, so nothing may leave the machine.
+ *
+ * The signal is the server-signed RFC 8693 `act` (actor) claim the backend
+ * stamps onto impersonated sessions.
+ */
+describe('sync-manager refuses to sync while impersonating', () => {
+  /** Build an unsigned JWT whose payload carries the given claims. */
+  const jwtWith = (claims: Record<string, unknown>): string => {
+    const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    return `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64(claims)}.sig`;
+  };
+
+  const impersonatedSession = {
+    access_token: jwtWith({ sub: 'target-user', act: { sub: 'admin-user' } }),
+    refresh_token: 'r',
+    expires_at: Date.now() + 60 * 60 * 1000,
+    user: { id: 'target-user' },
+  } as unknown as Awaited<ReturnType<typeof AuthService.getSession>>;
+
+  const ownSession = {
+    access_token: jwtWith({ sub: 'admin-user' }),
+    refresh_token: 'r',
+    expires_at: Date.now() + 60 * 60 * 1000,
+    user: { id: 'admin-user' },
+  } as unknown as Awaited<ReturnType<typeof AuthService.getSession>>;
+
+  let restoreFetch: (() => void) | null = null;
+
+  beforeEach(async () => {
+    // Static singletons: without this each case inherits the previous cache.
+    await resetSyncManagerState();
+    // Every platform under test reports CONNECTED, so the only thing that can
+    // stop a sync in these cases is the impersonation guard itself.
+    restoreFetch = installFetchCapture({
+      '/api/integrations': integrationsResponder(['imessage', 'chrome', 'claude_code', 'gpt_code']),
+    });
+  });
+
+  afterEach(async () => {
+    await SyncManager.stopAll();
+    restoreFetch?.();
+    restoreFetch = null;
+  });
+
+  it('uploads nothing from any platform while impersonating', async () => {
+    vi.mocked(AuthService.getSession).mockResolvedValue(impersonatedSession);
+
+    await SyncManager.syncNow('imessage');
+    await SyncManager.syncNow('cookies');
+    await SyncManager.syncNow('browserState');
+    await SyncManager.syncNow('compute');
+
+    expect(IMessageSync.sync).not.toHaveBeenCalled();
+    expect(CookieSync.sync).not.toHaveBeenCalled();
+    expect(BrowserStateSync.sync).not.toHaveBeenCalled();
+    expect(ClaudeCredentialSync.syncExistingCredentialsIfChanged).not.toHaveBeenCalled();
+    expect(GptCredentialSync.syncExistingCredentialsIfChanged).not.toHaveBeenCalled();
+  });
+
+  it('does not arm real-time watchers while impersonating', async () => {
+    vi.mocked(AuthService.getSession).mockResolvedValue(impersonatedSession);
+
+    await SyncManager.startAll();
+
+    expect(IMessageSync.startRealTimeSync).not.toHaveBeenCalled();
+    expect(IMessageQueueService.start).not.toHaveBeenCalled();
+    expect(SyncManager.isActive()).toBe(false);
+  });
+
+  it('still syncs normally on the operator OWN account', async () => {
+    vi.mocked(AuthService.getSession).mockResolvedValue(ownSession);
+
+    await SyncManager.syncNow('imessage');
+
+    expect(IMessageSync.sync).toHaveBeenCalled();
+  });
+});

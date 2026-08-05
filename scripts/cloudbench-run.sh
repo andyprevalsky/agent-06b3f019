@@ -63,13 +63,6 @@ CURRENT_RUN_ARTIFACT_SCRIPT="${CLOUDBENCH_CURRENT_RUN_ARTIFACT_SCRIPT:-$REPO_DIR
 PREPARE_PATCH_SCRIPT="${CLOUDBENCH_PREPARE_PATCH_SCRIPT:-$REPO_DIR/scripts/cloudbench-prepare-patch.sh}"
 STATUS_SERVER_SCRIPT="${CLOUDBENCH_STATUS_SERVER_SCRIPT:-$REPO_DIR/scripts/cloudbench-status-server.py}"
 BENCHMARK_TARGET_SCRIPT="${CLOUDBENCH_BENCHMARK_TARGET_SCRIPT:-$REPO_DIR/scripts/cloudbench-benchmark-target.py}"
-if [ -n "${CLOUDBENCH_PYTHON_BIN:-}" ]; then
-    TASK_CATALOG_PYTHON="$CLOUDBENCH_PYTHON_BIN"
-elif [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
-    TASK_CATALOG_PYTHON="$REPO_DIR/agents/venv/bin/python"
-else
-    TASK_CATALOG_PYTHON=python3
-fi
 
 # ── Inputs (env) ────────────────────────────────────────────────────────────
 REF="${REF:-}"
@@ -205,25 +198,34 @@ read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
-if ! BENCH_NEEDS_SOURCE_CONNECT="$(
-    PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" "$TASK_CATALOG_PYTHON" - "${BENCH_TASK_LIST[@]}" <<'PY'
+TASK_GATE_PYTHON="${CLOUDBENCH_TASK_GATE_PYTHON:-}"
+if [ -z "$TASK_GATE_PYTHON" ] && [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
+    TASK_GATE_PYTHON="$REPO_DIR/agents/venv/bin/python"
+fi
+if [ -z "$TASK_GATE_PYTHON" ]; then
+    TASK_GATE_PYTHON="$(command -v python3 || true)"
+fi
+if [ -z "$TASK_GATE_PYTHON" ]; then
+    echo "[cloudbench] FATAL: no Python interpreter is available for task gate resolution" >&2
+    exit 1
+fi
+PYTHONPATH="$REPO_DIR/agents${PYTHONPATH:+:$PYTHONPATH}" "$TASK_GATE_PYTHON" - "${BENCH_TASK_LIST[@]}" <<'PY'
 import sys
 
 from benchmarks.benchmark_tasks import selected_tasks_require_gate_type
 
-print("1" if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else "0")
+raise SystemExit(0 if selected_tasks_require_gate_type(sys.argv[1:], "source_connect") else 10)
 PY
-    )"
-then
-    echo "[cloudbench] FATAL: failed to resolve benchmark task gate requirements" >&2
-    exit 1
-fi
-case "$BENCH_NEEDS_SOURCE_CONNECT" in
-    1) TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1") ;;
-    0) ;;
+task_gate_status=$?
+case "$task_gate_status" in
+    0)
+        TASK_WORKER_ENV+=("NON_PURCHASE_GATES_ENABLED=1")
+        ;;
+    10)
+        ;;
     *)
-        echo "[cloudbench] FATAL: invalid source-connect gate resolution: $BENCH_NEEDS_SOURCE_CONNECT" >&2
-        exit 1
+        echo "[cloudbench] FATAL: task gate resolution failed (exit $task_gate_status)" >&2
+        exit "$task_gate_status"
         ;;
 esac
 for task_name in "${BENCH_TASK_LIST[@]}"; do

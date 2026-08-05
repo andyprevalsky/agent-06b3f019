@@ -3,7 +3,7 @@
  */
 
 import { type Response, Router } from 'express';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticateMachineUpload } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import * as service from './service';
@@ -18,7 +18,7 @@ function requestUserId(req: AuthRequest): string | undefined {
 /** POST /api/integrations/documents/upload */
 router.post(
   '/documents/upload',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = requestUserId(req);
     if (userId === undefined || userId === null || userId === '') {

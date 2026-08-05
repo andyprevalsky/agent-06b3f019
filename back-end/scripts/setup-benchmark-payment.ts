@@ -84,31 +84,68 @@ async function seedAgentCardConnection(
 /**
  * Keep the fixture user solvent without destroying its ledger. `getUserUsage` computes
  * `remaining = credits - toolUsage`, so a synthetic user accumulates usage across runs and would
- * eventually be gated at OUT_OF_CREDITS. Add only the deficit, so repeated seeding is idempotent.
+ * eventually be gated at OUT_OF_CREDITS. Add only the deficit, so repeated seeding is idempotent;
+ * the advisory lock serializes the read-then-top-up against concurrent setup processes (parallel
+ * benchmark lanes seed the same identity), which would otherwise both observe the same deficit.
  */
 async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Promise<void> {
-  const now = new Date();
-  const [creditTotal, usageTotal] = await Promise.all([
-    prisma.credit.aggregate({
-      where: { userId, OR: [{ expirationDate: null }, { expirationDate: { gt: now } }] },
-      _sum: { amountCents: true },
-    }),
-    prisma.toolUsage.aggregate({ where: { userId }, _sum: { totalCostCents: true } }),
-  ]);
-  const availableCents = creditTotal._sum.amountCents ?? 0;
-  const usedCents = usageTotal._sum.totalCostCents ?? 0;
-  const deficitCents = usedCents + BENCHMARK_CREDIT_HEADROOM_CENTS - availableCents;
-  if (deficitCents <= 0) {
-    console.log(
-      `Benchmark credit balance already sufficient for ${userId} ` +
-        `($${((availableCents - usedCents) / 100).toFixed(2)} remaining)`
-    );
+  await prisma.$transaction(
+    async (tx) => {
+      // Prisma cannot deserialize PostgreSQL's `void` return type, so materialize the lock call
+      // and project a supported scalar instead of selecting pg_advisory_xact_lock directly.
+      await tx.$queryRaw`
+        WITH acquired AS MATERIALIZED (
+          SELECT pg_advisory_xact_lock(
+            hashtext(${`benchmark-payment-credit:${userId}`})::bigint
+          )
+        )
+        SELECT 1 AS locked FROM acquired
+      `;
+      const now = new Date();
+      const [creditTotal, usageTotal] = await Promise.all([
+        tx.credit.aggregate({
+          where: { userId, OR: [{ expirationDate: null }, { expirationDate: { gt: now } }] },
+          _sum: { amountCents: true },
+        }),
+        tx.toolUsage.aggregate({ where: { userId }, _sum: { totalCostCents: true } }),
+      ]);
+      const availableCents = creditTotal._sum.amountCents ?? 0;
+      const usedCents = usageTotal._sum.totalCostCents ?? 0;
+      const deficitCents = usedCents + BENCHMARK_CREDIT_HEADROOM_CENTS - availableCents;
+      if (deficitCents <= 0) {
+        console.log(
+          `Benchmark credit balance already sufficient for ${userId} ` +
+            `($${((availableCents - usedCents) / 100).toFixed(2)} remaining)`
+        );
+        return;
+      }
+      await tx.credit.create({ data: { userId, amountCents: deficitCents, expirationDate: null } });
+      console.log(
+        `Topped up benchmark credits for ${userId} by $${(deficitCents / 100).toFixed(2)} ` +
+          `(used $${(usedCents / 100).toFixed(2)})`
+      );
+    },
+    { maxWait: 10_000, timeout: 10_000 }
+  );
+}
+
+/**
+ * Restrict destructive fixture replacement to the two dedicated, disposable lifecycle identities.
+ * Everything below rewrites one-per-user rows (Subscription, agentcard Integration) and clears the
+ * benchmark's PurchaseSpend history, so aiming it at a real account would clobber that account.
+ * `assertUserMatchesMode` then pins WHICH of the two a given invocation may touch.
+ */
+function assertDedicatedBenchmarkUser(userId: string): void {
+  if (
+    userId === BENCHMARK_PAYMENT_LIFECYCLE_USER_ID ||
+    userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID
+  ) {
     return;
   }
-  await prisma.credit.create({ data: { userId, amountCents: deficitCents, expirationDate: null } });
-  console.log(
-    `Topped up benchmark credits for ${userId} by $${(deficitCents / 100).toFixed(2)} ` +
-      `(used $${(usedCents / 100).toFixed(2)})`
+  throw new Error(
+    `Refusing to seed payment fixtures for ${userId}; this command is restricted to the ` +
+      `dedicated benchmark users ${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID} (sandbox) and ` +
+      `${BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID} (production)`
   );
 }
 
@@ -118,12 +155,13 @@ async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Pro
  * `issueAdminCompanyCard` and make those assertions unsatisfiable, so fail loudly instead.
  */
 function assertNonAdminBenchmarkUser(userId: string): void {
-  if (!isAdminUser(userId)) return;
-  throw new Error(
-    `Refusing to seed the payment-lifecycle fixture for admin user ${userId}: admins mint ` +
-      'company-funded cards with no Stripe hold, so the lifecycle benchmarks can never pass. ' +
-      `Use the dedicated non-admin benchmark user (${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID}).`
-  );
+  if (isAdminUser(userId)) {
+    throw new Error(
+      `Refusing to seed the payment-lifecycle fixture for admin user ${userId}: admins mint ` +
+        'company-funded cards with no Stripe hold, so the lifecycle benchmarks can never pass. ' +
+        `Use the dedicated non-admin benchmark user (${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID}).`
+    );
+  }
 }
 
 function argValue(name: string): string | undefined {
@@ -411,6 +449,7 @@ async function main(): Promise<void> {
     process.env.BENCHMARK_USER_ID,
     defaultUserId,
   ]);
+  assertDedicatedBenchmarkUser(userId);
   assertUserMatchesMode(userId, mode);
   assertNonAdminBenchmarkUser(userId);
   const prisma = new PrismaClient();

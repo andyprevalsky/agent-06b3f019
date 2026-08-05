@@ -23,6 +23,10 @@ import { config } from '../../base/config';
 import { getErrorMessage } from '../../../shared/utils/error';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
+import {
+  IMPERSONATED_MACHINE_DATA_MESSAGE,
+  sessionForLocalMachineData,
+} from '../auth/impersonation';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { CODEX_NPM_PACKAGE, GPT_CREDENTIAL_UPLOAD_PATH, RSA_PUBLIC_KEY_PEM } from './config';
 import {
@@ -188,9 +192,13 @@ export interface SyncCredentialsOptions {
 }
 
 export async function syncCredentials(opts: SyncCredentialsOptions): Promise<SyncResult> {
-  const session = await AuthService.getSession();
+  const currentSession = await AuthService.getSession();
+  const session = sessionForLocalMachineData(currentSession);
   if (!session) {
-    return { success: false, message: 'Not authenticated' };
+    return {
+      success: false,
+      message: currentSession === null ? 'Not authenticated' : IMPERSONATED_MACHINE_DATA_MESSAGE,
+    };
   }
 
   const { sendStatus } = opts;
@@ -234,9 +242,13 @@ export async function syncCredentials(opts: SyncCredentialsOptions): Promise<Syn
 }
 
 export async function syncExistingCredentialsIfChanged(): Promise<SyncResult> {
-  const session = await AuthService.getSession();
+  const currentSession = await AuthService.getSession();
+  const session = sessionForLocalMachineData(currentSession);
   if (!session) {
-    return { success: false, message: 'Not authenticated' };
+    return {
+      success: false,
+      message: currentSession === null ? 'Not authenticated' : IMPERSONATED_MACHINE_DATA_MESSAGE,
+    };
   }
 
   const credentialsJson = readCodexAuthFile();
