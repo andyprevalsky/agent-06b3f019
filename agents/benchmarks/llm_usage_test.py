@@ -18,7 +18,7 @@ def test_classifies_every_required_auth_path_and_openrouter_slot() -> None:
         "claude-fable-5",
     )
     assert classify_model("anthropic/claude-opus-4.8")[0] == "openrouter_model_1"
-    assert classify_model("google/gemini-3.1-pro-preview")[0] == "openrouter_model_2"
+    assert classify_model("openai/gpt-5.6-terra")[0] == "openrouter_model_2"
     assert classify_usage_item(
         {
             "model": "rose-labs/rose-1-ultra",

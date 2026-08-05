@@ -2,7 +2,10 @@
 /* eslint-disable no-console */
 
 import assert from 'node:assert/strict';
-import { ensureAgentCardSandboxFloat } from '../../providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  ensureBenchmarkOrgCardholder,
+} from '../../providers/agentcard/benchmark-float';
 
 function walletResult(cents: {
   balance: number;
@@ -108,6 +111,56 @@ async function main(): Promise<void> {
       assert.match(message, /sandbox/i);
       return true;
     });
+  }
+
+  // Wallet float alone is insufficient: the cardholder must exist in the OAuth org.
+  {
+    const callOrgTool = async (name: string) => {
+      if (name === 'get_cardholder_kyc_status') {
+        throw new Error('get_cardholder_kyc_status failed: Cardholder not found');
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+    await assert.rejects(
+      () => ensureBenchmarkOrgCardholder('cardholder-missing', callOrgTool),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(message, /does not exist in the OAuth org/i);
+        assert.match(message, /wallet float passed/i);
+        return true;
+      }
+    );
+  }
+
+  // A present cardholder must also be KYC-ready before the lifecycle gate proceeds.
+  {
+    const callOrgTool = async (name: string, args: Record<string, unknown>) => {
+      if (name === 'get_cardholder_kyc_status') {
+        assert.equal(args.cardholder_id, 'cardholder-pending');
+        return {
+          structuredContent: { kyc_status: 'pending' },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+    await assert.rejects(
+      () => ensureBenchmarkOrgCardholder('cardholder-pending', callOrgTool),
+      /not KYC-ready \(pending\)/i
+    );
+  }
+
+  {
+    const callOrgTool = async (name: string, args: Record<string, unknown>) => {
+      if (name === 'get_cardholder_kyc_status') {
+        assert.equal(args.cardholder_id, 'cardholder-ready');
+        return {
+          structuredContent: { kyc_status: 'verified' },
+        };
+      }
+      throw new Error(`unexpected tool ${name}`);
+    };
+    const status = await ensureBenchmarkOrgCardholder('cardholder-ready', callOrgTool);
+    assert.deepEqual(status, { verificationStatus: 'verified' });
   }
 
   console.log('AgentCard benchmark sandbox float tests passed');
