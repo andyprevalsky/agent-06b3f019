@@ -51,6 +51,33 @@ async function main(): Promise<void> {
     });
   }
 
+  // Shared sandbox rate limits expose an absolute retry timestamp. Bootstrap waits for the
+  // advertised window and retries instead of failing the lifecycle gate before a task exists.
+  {
+    let calls = 0;
+    const callOrgTool = async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('Streamable HTTP error: {"error":"Rate limit exceeded","retryAfter":0}');
+      }
+      return walletResult({ balance: 32_416, available: 32_416 });
+    };
+    const float = await ensureAgentCardSandboxFloat(10_000, callOrgTool);
+    assert.equal(calls, 2, 'retries a rate-limited wallet read');
+    assert.equal(float.availableCents, 32_416);
+  }
+
+  // Non-rate-limit failures remain immediate and are never masked by retries.
+  {
+    let calls = 0;
+    const callOrgTool = async () => {
+      calls += 1;
+      throw new Error('authentication failed');
+    };
+    await assert.rejects(ensureAgentCardSandboxFloat(10_000, callOrgTool), /authentication failed/);
+    assert.equal(calls, 1, 'does not retry unrelated failures');
+  }
+
   // A pool below the floor fails loud and early with an actionable, non-interactive message.
   {
     const callOrgTool = async () => walletResult({ balance: 5_000, available: 5_000 });

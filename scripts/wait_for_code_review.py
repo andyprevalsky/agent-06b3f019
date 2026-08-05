@@ -178,13 +178,16 @@ def gh_commit_status_rollup(
             state = entry.get("state")
             if not context or not state:
                 continue
-            rollup.append(
-                {
-                    "__typename": "StatusContext",
-                    "context": context,
-                    "state": str(state).upper(),
-                }
-            )
+            mapped: dict[str, object] = {
+                "__typename": "StatusContext",
+                "context": context,
+                "state": str(state).upper(),
+            }
+            # Preserve description when present so callers can detect
+            # non-substantive CodeRabbit successes ("Review skipped", etc.).
+            if entry.get("description") is not None:
+                mapped["description"] = entry.get("description")
+            rollup.append(mapped)
         if len(statuses) < 100:
             break
         page += 1

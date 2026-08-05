@@ -9,7 +9,7 @@ interface SavePersonalInfoResult {
   saveSettings: () => Promise<void>;
 }
 
-/** Handles saving personal info (name, address). */
+/** Handles saving personal identity and delivery details. */
 export function useSavePersonalInfo(
   userData: UserData,
   setError: (e: string | null) => void,
@@ -24,6 +24,8 @@ export function useSavePersonalInfo(
       setSaved(false);
       await savePersonalInfoApi({
         name: userData.name,
+        email: userData.email,
+        deliveryRecipientName: userData.deliveryRecipientName,
         addressLine1: userData.addressLine1,
         addressLine2: userData.addressLine2,
         city: userData.city,

@@ -23,6 +23,8 @@ export interface RetryOptions {
   initialBackoffMs?: number;
   /** Fixed backoff delays per attempt. Overrides exponential if provided. */
   fixedDelays?: number[];
+  /** Dynamic delay for an error, such as an API-provided absolute retry timestamp. */
+  getBackoffDelayMs?: (error: unknown, attempt: number) => number;
   /** HTTP status codes that should trigger a retry (default: 408, 429, 502, 503, 504) */
   retryableStatusCodes?: Set<number>;
   /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
@@ -52,12 +54,32 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getBackoffDelay(attempt: number, opts: RetryOptions): number {
-  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
-    return opts.fixedDelays[attempt - 1];
+/**
+ * Node stores a timer delay in a signed 32-bit int. Anything larger (or NaN, or
+ * non-finite) silently collapses to a 1ms timer, which would turn a long
+ * rate-limit backoff into a hot retry loop.
+ */
+export const MAX_BACKOFF_DELAY_MS = 2_147_483_647;
+
+/** Bound a candidate delay to a finite, non-negative, timer-safe value. `null` if unusable. */
+function normalizeDelayMs(value: number): number | null {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  return Math.min(Math.max(0, value), MAX_BACKOFF_DELAY_MS);
+}
+
+function getBackoffDelay(error: unknown, attempt: number, opts: RetryOptions): number {
+  if (opts.getBackoffDelayMs) {
+    const dynamic = normalizeDelayMs(opts.getBackoffDelayMs(error, attempt));
+    if (dynamic !== null) return dynamic;
+    log.warn(
+      `${opts.component ?? 'Retry'}: discarding non-finite dynamic backoff delay on attempt ${attempt}, falling back to exponential backoff`
+    );
+  } else if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+    const fixed = normalizeDelayMs(opts.fixedDelays[attempt - 1]);
+    if (fixed !== null) return fixed;
   }
-  const base = opts.initialBackoffMs ?? 1000;
-  return base * Math.pow(2, attempt - 1);
+  const base = normalizeDelayMs(opts.initialBackoffMs ?? 1000) ?? 1000;
+  return Math.min(base * Math.pow(2, attempt - 1), MAX_BACKOFF_DELAY_MS);
 }
 
 function defaultIsRetryable(error: unknown): boolean {
@@ -104,7 +126,7 @@ export async function retryWithBackoff<T>(
       lastError = error;
 
       if (attempt < maxRetries && isRetryable(error)) {
-        const delay = getBackoffDelay(attempt, opts);
+        const delay = getBackoffDelay(error, attempt, opts);
         log.warn(`${component}: attempt ${attempt}/${maxRetries} failed, retrying in ${delay}ms`, {
           error: error instanceof Error ? error.message : String(error),
         });

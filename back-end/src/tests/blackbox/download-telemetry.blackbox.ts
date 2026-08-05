@@ -240,7 +240,6 @@ test('accepts telemetry before retryable Amplitude delivery finishes', async (co
   const outboundBody = amplitudeBody(context.userId, payload);
   await seedAmplitude(outboundBody, 503);
   const captureToken = `download-retry-${Date.now()}`;
-  const startedAt = Date.now();
 
   const response = await request('/api/download-telemetry', {
     method: 'POST',
@@ -250,9 +249,22 @@ test('accepts telemetry before retryable Amplitude delivery finishes', async (co
     },
     body: JSON.stringify(payload),
   });
+  // Sample the delivery progress the instant the response lands, before any
+  // other await can let the retry sequence advance.
+  const deliveredWhenAccepted = await captures(captureToken);
 
   assert(response.status === 202, `expected 202, got ${response.status}`);
-  assert(Date.now() - startedAt < 500, '202 response waited for Amplitude retry backoff');
+  // The property under test is that the route ACCEPTS before the retry sequence
+  // finishes — a causal ordering, not a duration. Asserting a fixed wall-clock
+  // budget (previously 500ms, against 700ms of total backoff) made this fail
+  // whenever the full coverage run put enough load on the host to slow an
+  // ordinary round trip, which says nothing about whether the handler awaited
+  // delivery. A blocking implementation can only respond once all three
+  // attempts are done, so it is caught here regardless of how slow the box is.
+  assert(
+    deliveredWhenAccepted.length < 3,
+    `202 waited for the full Amplitude retry sequence: ${deliveredWhenAccepted.length}/3 attempts had already completed when the response arrived`
+  );
   const outbound = await waitForCaptures(captureToken, 3);
   assert(outbound.length === 3, `expected three Amplitude attempts, got ${outbound.length}`);
 });

@@ -6679,6 +6679,120 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = prior_ephemeral_tunnel
 
 
+def _run_ngrok_reservation(stub_body: str, **env: str) -> subprocess.CompletedProcess:
+    """Drive ensure_ngrok_domain_reserved against a stubbed `ngrok` binary."""
+    helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        stub = Path(tmp, "ngrok")
+        stub.write_text(f"#!/usr/bin/env bash\n{stub_body}\n")
+        stub.chmod(0o755)
+
+        exports = "".join(f"export {key}={value!r}\n" for key, value in env.items())
+        command = (
+            "set -eo pipefail\n"
+            f"source {helper!s}\n"
+            f'export PATH="{tmp}:$PATH"\n'
+            f"{exports}"
+            "ensure_ngrok_domain_reserved rose-testworktree.ngrok.app\n"
+            "echo REACHED_TUNNEL_START\n"
+        )
+        return subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+
+
+def test_ngrok_domain_reservation_survives_a_rejected_api_key():
+    """A stale NGROK_API_KEY must warn, not tear down the whole stack.
+
+    `--domain` binds with only an agent authtoken on our plan, so pre-reserving
+    the domain is advisory. This path used to `exit 1` on any API rejection,
+    so a rotated-out key killed every run.sh that merely had the variable set —
+    even though the tunnel it was gating would have come up fine. An absent key
+    was tolerated while a stale one was fatal, which is exactly backwards.
+    """
+    result = _run_ngrok_reservation(
+        'echo "ERROR:  HTTP 403: invalid [ERR_NGROK_203]" >&2\nexit 1',
+        # Well-formed FIRSTPART_SECONDPART, so this exercises API rejection
+        # rather than the malformed-key short-circuit above it.
+        NGROK_API_KEY="34D2revokedKeyFirstPart_2revokedKeySecondPart",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    # The rejection is still surfaced — degraded, not silently swallowed.
+    assert "ERR_NGROK_203" in result.stdout
+
+
+def test_ngrok_domain_reservation_survives_a_rejected_create():
+    """A domain that cannot be reserved must still fall through to the bind."""
+    result = _run_ngrok_reservation(
+        'if [ "$2" = "reserved-domains" ] && [ "$3" = "create" ]; then\n'
+        '  echo "ERROR:  HTTP 403: domain unavailable" >&2; exit 1\n'
+        "fi\n"
+        'echo "{\\"reserved_domains\\":[]}"',
+        NGROK_API_KEY="valid-key-unavailable-domain",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+
+
+def _ngrok_key_defect(key: str) -> str:
+    """Return the defect ngrok_api_key_defect reports for a key ('' if clean)."""
+    helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
+    command = f'source {helper!s}\nngrok_api_key_defect "$1" || true\n'
+    result = subprocess.run(
+        ["bash", "-c", command, "_", key], capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
+
+
+def test_ngrok_api_key_defect_names_the_stray_quote():
+    """A quote captured inside the .env value must be named, not left to a 403.
+
+    The real incident: `NGROK_API_KEY="<token>'"` in every workspace's .env. The
+    trailing apostrophe made a valid key return 403 "properly formed, but it is
+    invalid", which got filed as a stale key and left unfixed for a week. The
+    fix was deleting one character, so the defect has to be self-describing.
+    """
+    defect = _ngrok_key_defect("3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx'")
+
+    assert "quote" in defect, defect
+
+
+def test_ngrok_api_key_defect_distinguishes_key_id_from_token():
+    """The dashboard's `ak_...` ID is not the token, and must not be accepted."""
+    defect = _ngrok_key_defect("ak_3EXAMPLEfirstPARTnotAreal01")
+
+    assert "ID" in defect, defect
+
+
+def test_ngrok_api_key_defect_passes_a_well_formed_token():
+    """A clean FIRSTPART_SECONDPART token reports no defect."""
+    assert _ngrok_key_defect("3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx") == ""
+
+
+def test_ngrok_malformed_api_key_skips_reservation_without_an_api_call():
+    """A malformed key must short-circuit before burning an API round-trip."""
+    result = _run_ngrok_reservation(
+        'echo "STUB_SHOULD_NOT_RUN"; exit 1',
+        NGROK_API_KEY="3EXAMPLEfirstPARTnotAreal01_3EXAMPLEsecondPARTx'",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    assert "STUB_SHOULD_NOT_RUN" not in result.stdout
+    assert "quote" in result.stdout, result.stdout
+
+
+def test_ngrok_domain_reservation_skips_without_an_api_key():
+    """No API key is the normal benchmark path: skip silently, never call ngrok."""
+    result = _run_ngrok_reservation('echo "STUB_SHOULD_NOT_RUN"; exit 1')
+
+    assert result.returncode == 0, result.stderr
+    assert "REACHED_TUNNEL_START" in result.stdout, result.stdout
+    assert "STUB_SHOULD_NOT_RUN" not in result.stdout
+
+
 def test_local_shared_stack_preserves_public_tunnel_mode():
     """The shared dev stack must retain its configured stable tunnel mode."""
     from benchmarks import local as local_bench
@@ -6870,7 +6984,13 @@ def test_local_start_services_reaps_only_its_real_process_group():
                     (
                         "import pathlib, subprocess, sys, time; "
                         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "pid_path = pathlib.Path(sys.argv[1]); "
+                        "pending_path = pid_path.with_suffix('.tmp'); "
+                        "pid_file = pending_path.open('w'); "
+                        "time.sleep(0.2); "
+                        "pid_file.write(str(child.pid)); "
+                        "pid_file.close(); "
+                        "pending_path.replace(pid_path); "
                         "time.sleep(60)"
                     ),
                     str(child_pid_path),
@@ -10645,6 +10765,31 @@ async def run_all_tests():
     r.record(
         "local_shared_public_tunnel_mode",
         test_local_shared_stack_preserves_public_tunnel_mode,
+    )
+    r.record(
+        "ngrok_reservation_survives_rejected_api_key",
+        test_ngrok_domain_reservation_survives_a_rejected_api_key,
+    )
+    r.record(
+        "ngrok_reservation_survives_rejected_create",
+        test_ngrok_domain_reservation_survives_a_rejected_create,
+    )
+    r.record(
+        "ngrok_reservation_skips_without_api_key",
+        test_ngrok_domain_reservation_skips_without_an_api_key,
+    )
+    r.record("ngrok_api_key_defect_stray_quote", test_ngrok_api_key_defect_names_the_stray_quote)
+    r.record(
+        "ngrok_api_key_defect_id_vs_token",
+        test_ngrok_api_key_defect_distinguishes_key_id_from_token,
+    )
+    r.record(
+        "ngrok_api_key_defect_accepts_valid_token",
+        test_ngrok_api_key_defect_passes_a_well_formed_token,
+    )
+    r.record(
+        "ngrok_malformed_key_skips_api_call",
+        test_ngrok_malformed_api_key_skips_reservation_without_an_api_call,
     )
     r.record(
         "local_start_services_readiness_cleanup",

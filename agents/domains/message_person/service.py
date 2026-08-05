@@ -117,8 +117,8 @@ def build_conversation_summary(context: list[dict[str, Any]]) -> str:
 def extract_user_name(system_name: str, user_context_section: str) -> str:
     """Extract the user's real name from user context, falling back to system_name."""
     for line in user_context_section.split("\n"):
-        if line.strip().startswith("Name:"):
-            extracted = line.strip().replace("Name:", "").strip()
+        if line.strip().startswith("Full Name:"):
+            extracted = line.strip().removeprefix("Full Name:").strip()
             if extracted:
                 return extracted
     return system_name

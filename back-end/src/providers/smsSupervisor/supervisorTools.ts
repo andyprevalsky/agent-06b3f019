@@ -28,6 +28,7 @@ import {
   deleteAgentRecursive,
   resolveAgentPrefix,
   smsIntendsAgentReply,
+  unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
 
@@ -184,7 +185,7 @@ export async function dispatchToolCall(
         result = { tool, success: false, result: '', error: 'Environment context unavailable' };
         break;
       default:
-        result = { tool, success: false, result: '', error: `Unknown tool: ${tool}` };
+        result = { tool, success: false, result: '', error: unknownSupervisorToolError(tool) };
     }
 
     log.info('Tool dispatch complete', {
@@ -366,6 +367,9 @@ async function validateIncreaseBudget(
   };
 }
 
+/** Agent-run LLM/tool budget ceiling on the SMS surface (not purchase amount). */
+const MAX_SMS_AGENT_RUN_BUDGET_DOLLARS = 2;
+
 function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp[]): ToolResult {
   if (!args.goal || typeof args.goal !== 'string' || args.goal.trim().length === 0) {
     return {
@@ -374,6 +378,27 @@ function validateStartNewAgent(args: StartNewAgentArgs, pendingWrites: PendingOp
       result: '',
       error: 'goal is required and must be a non-empty string',
     };
+  }
+  if (args.budget_dollars !== undefined) {
+    if (!Number.isFinite(args.budget_dollars) || args.budget_dollars <= 0) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error: `budget_dollars must be a positive number, got ${args.budget_dollars}`,
+      };
+    }
+    if (args.budget_dollars > MAX_SMS_AGENT_RUN_BUDGET_DOLLARS) {
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error:
+          `budget_dollars is the agent-run LLM/tool budget (default $1, max $${MAX_SMS_AGENT_RUN_BUDGET_DOLLARS}), ` +
+          'NOT the purchase price. Purchases are approved separately via attention requests. ' +
+          `Retry with budget_dollars <= ${MAX_SMS_AGENT_RUN_BUDGET_DOLLARS}.`,
+      };
+    }
   }
   const provisionalId = randomUUID();
   pendingWrites.push({ kind: 'start_new_agent', args, provisionalId });
