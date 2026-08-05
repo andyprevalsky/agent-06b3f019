@@ -8045,7 +8045,14 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         host_restore.chmod(0o755)
 
         docker = tmp_path / "docker"
-        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
+        # Drain redirected stdin for archive restores; never block on a TTY.
+        docker.write_text(
+            '#!/bin/sh\n'
+            'echo "docker $*" >> "$COMMAND_LOG"\n'
+            'if [ -t 0 ]; then exit 0; fi\n'
+            'cat >/dev/null\n'
+            'exit 0\n'
+        )
         docker.chmod(0o755)
 
         result = subprocess.run(
@@ -8067,6 +8074,7 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
             },
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
         )
 
@@ -8087,7 +8095,13 @@ def test_seed_dump_restore_supports_plain_sql_base_images():
         dump = tmp_path / "base-image.sql"
         dump.write_text("-- PostgreSQL database dump\nSELECT 1;\n")
         docker = tmp_path / "docker"
-        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
+        docker.write_text(
+            '#!/bin/sh\n'
+            'echo "docker $*" >> "$COMMAND_LOG"\n'
+            'if [ -t 0 ]; then exit 0; fi\n'
+            'cat >/dev/null\n'
+            'exit 0\n'
+        )
         docker.chmod(0o755)
 
         result = subprocess.run(
@@ -8109,11 +8123,14 @@ def test_seed_dump_restore_supports_plain_sql_base_images():
             },
             text=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
             check=False,
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
         calls = command_log.read_text()
+        # Schema reset uses non-interactive docker exec; SQL load uses -i + stdin.
+        assert "docker exec victoria-db-owned-run psql" in calls
         assert "docker exec -i victoria-db-owned-run psql" in calls
         assert "pg_restore" not in calls
 

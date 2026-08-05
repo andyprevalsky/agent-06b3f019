@@ -133,3 +133,35 @@ def test_extract_structured_gmv_list_nested():
     assert capture is not None
     assert capture["totalCents"] == 4200
     assert capture["confirmationId"] == "ORD-A1"
+
+
+def test_extract_structured_gmv_prefers_total_amount_paid_over_line_item_price():
+    """setup-resume shape: total_amount_paid must beat purchased_products[].price."""
+    capture = extract_structured_gmv(
+        {
+            "total_amount_paid": 43.96,
+            "purchased_products": [
+                {"name": "Aurora Notebook", "price": 12},
+                {"name": "Ceramic Mug", "price": 9},
+                {"name": "Canvas Tote", "price": 15},
+            ],
+            "order_confirmation_id": "tp_60b2f90f",
+        }
+    )
+    assert capture is not None
+    assert capture["totalCents"] == 4396
+    assert capture["confirmationId"] == "tp_60b2f90f"
+    assert capture["amountKey"] == "total_amount_paid"
+
+
+def test_extract_structured_gmv_recognizes_total_paid():
+    capture = extract_structured_gmv(
+        {
+            "total_paid": "$43.96",
+            "purchased_products": ["Aurora Notebook", "Ceramic Mug", "Canvas Tote"],
+            "order_confirmation_id": "tp_66930a77",
+        }
+    )
+    assert capture is not None
+    assert capture["totalCents"] == 4396
+    assert capture["amountKey"] == "total_paid"

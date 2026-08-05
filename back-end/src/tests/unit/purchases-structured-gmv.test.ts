@@ -162,6 +162,47 @@ async function main(): Promise<void> {
     });
   });
 
+  await withUser(async (userId) => {
+    const agentId = await seedAgent(userId);
+    await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId,
+        fingerprint: `agentcard-setup-resume-${agentId}`,
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: { lineItems: [], totalCents: 4396 },
+        totalCents: 4396,
+        status: PurchaseSpendStatus.CLEARED,
+        provider: 'agentcard',
+        cardId: `card-${agentId}`,
+        stripePaymentIntentId: `pi_${agentId.replace(/-/g, '').slice(0, 24)}`,
+      },
+    });
+
+    // Exact structured_response shape from agent-payment-setup-resume: must skip
+    // because AgentCard already covers $43.96 (not record a $12 unknown-merchant stub).
+    const skipped = await recordStructuredGmv({
+      userId,
+      agentId,
+      structured: {
+        total_amount_paid: 43.96,
+        purchased_products: [
+          { name: 'Aurora Notebook', price: 12 },
+          { name: 'Ceramic Mug', price: 9 },
+          { name: 'Canvas Tote', price: 15 },
+        ],
+        order_confirmation_id: 'tp_60b2f90f',
+      },
+      source: 'unit.setup-resume-shape',
+    });
+    assert.deepEqual(skipped, {
+      status: 'skipped',
+      reason: 'agentcard_purchase_exists',
+    });
+    const count = await prisma.purchaseSpend.count({ where: { agentId } });
+    assert.equal(count, 1);
+  });
+
   process.stdout.write('purchases structured gmv: passed\n');
 }
 
