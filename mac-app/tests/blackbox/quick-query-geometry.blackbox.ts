@@ -49,6 +49,14 @@ describe('quickQueryGeometry', () => {
     win.isDestroyed.mockReturnValue(false);
     applyQuickQueryWindowHeight(win, 9999);
     expect(win.setContentSize).toHaveBeenCalledWith(500, 480);
+
+    // typeof NaN === 'number', but Math.round(NaN) stays NaN — must fall back.
+    expect(resizeQuickQueryWindow(win, { height: Number.NaN })).toEqual({ success: true });
+    expect(win.setContentSize).toHaveBeenCalledWith(500, 100);
+    expect(resizeQuickQueryWindow(win, { height: Number.POSITIVE_INFINITY })).toEqual({
+      success: true,
+    });
+    expect(win.setContentSize).toHaveBeenCalledWith(500, 100);
   });
 
   it('parseFileDragActive and getDevLauncherUrl cover falsy / env paths', () => {

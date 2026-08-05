@@ -33,11 +33,13 @@ export function resizeQuickQueryWindow(
     return { success: false };
   }
 
-  const height =
-    payload !== null &&
-    typeof payload === 'object' &&
-    typeof (payload as QuickQueryResizePayload).height === 'number'
+  const rawHeight =
+    payload !== null && typeof payload === 'object'
       ? (payload as QuickQueryResizePayload).height
+      : undefined;
+  const height =
+    typeof rawHeight === 'number' && Number.isFinite(rawHeight)
+      ? rawHeight
       : LAUNCHER_WINDOW_HEIGHT;
 
   applyQuickQueryWindowHeight(quickWindow, height);

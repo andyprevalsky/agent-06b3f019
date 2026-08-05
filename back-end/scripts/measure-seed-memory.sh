@@ -86,11 +86,11 @@ docker exec -i "$SRC_CONTAINER" pg_restore -U postgres -d postgres --no-owner --
     < "$DUMP" >/dev/null 2>&1 || true   # non-fatal: dumps carry role/ext noise
 # Cookie is the fidelity-critical table the gate fingerprints below. Canonical
 # base dumps can have empty MessageRecord (messages still live in Message), so
-# Cookie is the durable "dump is non-empty" probe.
+# Cookie (for the seeded DEV user) is the durable "dump is non-empty" probe.
 SRC_ROWS="$(docker exec "$SRC_CONTAINER" psql -U postgres -tAc \
-    'SELECT COUNT(*) FROM "Cookie"' 2>/dev/null | tr -d " ")"
-echo "   source Cookie rows: ${SRC_ROWS:-0}" | tee -a "$SUMMARY"
-[ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no Cookie rows — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
+    "SELECT COUNT(*) FROM \"Cookie\" WHERE \"userId\" = '$DEV_USER_ID'" 2>/dev/null | tr -d " ")"
+echo "   source Cookie rows (userId=$DEV_USER_ID): ${SRC_ROWS:-0}" | tee -a "$SUMMARY"
+[ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no Cookie rows for seed user — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
 export SEED_REMOTE_DATABASE_URL="postgresql://postgres:postgres@localhost:$SRC_PORT/postgres"
 
 origin_fingerprint() {
@@ -197,7 +197,18 @@ for i in $(seq 1 "$RUNS"); do
             /usr/bin/time -v npx tsx scripts/seed-local.ts > "$log" 2>&1
         rc=$?
         os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"
-        os_peak_bytes=$(( ${os_peak_kb:-0} * 1024 ))
+        if [ -n "${os_peak_kb:-}" ]; then
+            os_peak_bytes=$(( os_peak_kb * 1024 ))
+        else
+            os_peak_bytes=""
+        fi
+    fi
+    # A successful seed with no parseable OS RSS is a measurement defect, not a
+    # 0MB win — fail the run instead of defaulting missing output to zero.
+    if [ "$rc" = 0 ] && { [ -z "${os_peak_bytes:-}" ] || [ "$os_peak_bytes" = 0 ]; }; then
+        echo "❌ run $i: could not parse OS peak RSS from time output" | tee -a "$SUMMARY"
+        printf 'could not parse OS peak RSS from time output\n' >> "$log"
+        rc=87
     fi
     fidelity="not-run"
     if [ "$rc" = 0 ]; then
