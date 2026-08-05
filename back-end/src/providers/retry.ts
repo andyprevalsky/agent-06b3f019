@@ -118,25 +118,13 @@ export async function retryWithBackoff<T>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Only the operation itself belongs in this try. Result-path callbacks run
+    // after it so a bug in `shouldRetryResult`/`beforeRetryResult` surfaces as
+    // itself instead of being caught below and reclassified as an operation
+    // failure (which would discard an already-resolved result).
+    let result: T;
     try {
-      const result = await fn();
-      const retryableResult = opts.shouldRetryResult && (await opts.shouldRetryResult(result));
-
-      if (retryableResult && attempt < maxRetries) {
-        await opts.beforeRetryResult?.(result);
-        const delay = getBackoffDelay(undefined, attempt, opts);
-        log.warn(
-          `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
-        );
-        await sleep(delay);
-        continue;
-      }
-
-      if (!retryableResult && attempt > 1) {
-        log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
-      }
-
-      return result;
+      result = await fn();
     } catch (error) {
       lastError = error;
 
@@ -151,6 +139,27 @@ export async function retryWithBackoff<T>(
 
       throw error;
     }
+
+    const retryableResult = opts.shouldRetryResult && (await opts.shouldRetryResult(result));
+
+    if (retryableResult && attempt < maxRetries) {
+      await opts.beforeRetryResult?.(result);
+      // There is no error on the result path, so the dynamic `getBackoffDelayMs`
+      // hook is deliberately skipped rather than invoked with `undefined`.
+      const base = normalizeDelayMs(opts.initialBackoffMs ?? 1000) ?? 1000;
+      const delay = Math.min(base * Math.pow(2, attempt - 1), MAX_BACKOFF_DELAY_MS);
+      log.warn(
+        `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
+      );
+      await sleep(delay);
+      continue;
+    }
+
+    if (!retryableResult && attempt > 1) {
+      log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
+    }
+
+    return result;
   }
 
   throw lastError;

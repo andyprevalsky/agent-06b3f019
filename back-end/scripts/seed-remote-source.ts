@@ -502,9 +502,12 @@ async function fetchModelRows(
     rows.push(...results.flat());
   }
 
-  const uniqueRows = [
-    ...new Map(rows.map((row) => [String(row.id ?? JSON.stringify(row)), row])).values(),
-  ];
+  // `JSON.stringify` throws on BigInt, and several models (cookie tables among
+  // them) carry BigInt columns while others have no `id` to key on — which is
+  // exactly when this fallback runs. Serialize BigInt as a string instead.
+  const dedupeKey = (row: Record<string, unknown>): string =>
+    String(row.id ?? JSON.stringify(row, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)));
+  const uniqueRows = [...new Map(rows.map((row) => [dedupeKey(row), row])).values()];
   const sorted = sortRows(uniqueRows, args);
   const start = args.skip ?? 0;
   return sorted.slice(start, args.take === undefined ? undefined : start + args.take);

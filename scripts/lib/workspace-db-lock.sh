@@ -56,6 +56,14 @@ acquire_workspace_db_lock() {
     local budget="${ROSE_WORKSPACE_DB_LOCK_WAIT_SECONDS:-1800}"
     local poll="${ROSE_WORKSPACE_DB_LOCK_POLL_SECONDS:-2}"
 
+    # A non-positive or non-integer poll makes `sleep` return immediately while
+    # `elapsed` never advances, so the wait loop spins forever and the configured
+    # timeout is never reached. Reject bad timing values up front.
+    if ! [[ "$budget" =~ ^(0|[1-9][0-9]*)$ ]] || ! [[ "$poll" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ Workspace DB lock timing must be integer seconds (wait >= 0, poll >= 1); got wait='$budget' poll='$poll'." >&2
+        return 1
+    fi
+
     [ -n "$key" ] || {
         echo "❌ acquire_workspace_db_lock requires a database container name." >&2
         return 1

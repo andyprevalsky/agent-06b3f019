@@ -7,6 +7,12 @@ import { resolveCodexCodeAuthEnvs } from '../../providers/e2b';
 import { prisma } from '../../providers/database';
 import { testPersistOutput_coolsExhaustedOAuthCredential } from './codex-code-oauth-feedback.case';
 import {
+  testCodexCreditSkip_matchesLiveOutOfCreditsWording,
+  testCodexCreditSkip_readsNestedErrorObject,
+  testCodexCreditSkip_successStillWins,
+  testCodexCreditSkip_authRevocationStillFailsHard,
+} from './codex-credit-skip.case';
+import {
   CredentialExhaustionSkip,
   codexSmokeCreditSkipReason,
   testCreditExhaustion_neverOverridesSuccessSentinel,
@@ -278,51 +284,6 @@ function testResolveCodexAuthEnvs_apiKeyFallback() {
     'falls back to OPENAI_API_KEY when no OAuth credential (e.g. token rate-limited/exhausted)'
   );
   assert(envs.CODEX_AUTH_JSON === undefined, 'no OAuth auth.json in fallback');
-}
-
-function testCodexCreditSkip_matchesLiveOutOfCreditsWording() {
-  // Verbatim from the 2026-08-05 deploy: the pattern had "out of credits" but
-  // OpenAI emits "no credits remaining", so the smoke hard-failed a pure
-  // funding state and forced a manual BLACKBOX_TEST_SKIP_DOMAINS bypass.
-  const message =
-    'stream disconnected before completion: You have no credits remaining. ' +
-    'Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.';
-  assert(
-    codexSmokeCreditSkipReason(message, []) !== null,
-    'live "no credits remaining" wording must be recognized as credit exhaustion'
-  );
-}
-
-function testCodexCreditSkip_readsNestedErrorObject() {
-  // The provider sends `{"error": {"message": "..."}}`; the detector only read
-  // `error` when it was a bare string, so the nested funding signal was missed
-  // even once the wording matched.
-  const events = [
-    {
-      type: 'error',
-      error: { message: 'You have no credits remaining. Add credits to continue.' },
-    },
-  ];
-  assert(
-    codexSmokeCreditSkipReason('no sentinel here', events) !== null,
-    'nested error.message must be searched for funding-exhaustion signals'
-  );
-}
-
-function testCodexCreditSkip_successStillWins() {
-  assert(
-    codexSmokeCreditSkipReason('CODEX_E2B_DONE', [
-      { type: 'error', error: { message: 'You have no credits remaining.' } },
-    ]) === null,
-    'a run that produced the success sentinel can never be downgraded to a skip'
-  );
-}
-
-function testCodexCreditSkip_authRevocationStillFailsHard() {
-  assert(
-    codexSmokeCreditSkipReason('401 Unauthorized: please log out and sign in again', []) === null,
-    'auth/OAuth revocation is user-fixable and must remain a hard failure, not a funding skip'
-  );
 }
 
 function testResolveCodexAuthEnvs_noCredsNoKeyThrows() {

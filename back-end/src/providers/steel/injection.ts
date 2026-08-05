@@ -14,37 +14,11 @@ import {
   injectPermissionState,
   injectScrollbarState,
 } from './injectionState';
-
-const DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = 15_000;
-const DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS = 15_000;
-
-function credentialCdpConnectTimeoutMs(): number {
-  const configured = Number(process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
-}
-
-function browserStateInjectionTimeoutMs(): number {
-  const configured = Number(process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS;
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
+import {
+  browserStateInjectionTimeoutMs,
+  credentialCdpConnectTimeoutMs,
+  withTimeout,
+} from './injectionTimeouts';
 
 interface CookieBundleCandidate {
   id: string;
@@ -660,6 +634,11 @@ export async function injectUserData(
     });
 
     const stateTimeoutMs = browserStateInjectionTimeoutMs();
+    // Deliberately propagates. `steel-injection.blackbox.ts` cements that a
+    // browser-state timeout REJECTS rather than resuming with partial state:
+    // a session silently missing localStorage/IndexedDB/permissions is harder
+    // to diagnose than a loud, bounded failure. Do not soften this without
+    // changing that invariant first.
     await withTimeout(
       (async () => {
         for (const injectState of injectionTasks) {

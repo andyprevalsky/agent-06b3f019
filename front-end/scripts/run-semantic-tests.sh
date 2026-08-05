@@ -132,9 +132,23 @@ fi
 # workspace, `npx playwright` can select the backend's Playwright CLI while the
 # specs import the frontend's @playwright/test singleton, making every suite
 # fail during discovery with a misleading duplicate-version error.
+# npm workspaces hoist shared deps to the REPO ROOT, so front-end/node_modules
+# may legitimately have no local copy. Resolving from $FRONTEND_DIR keeps the
+# guarantee above intact: Node resolution walks up from the frontend, so it
+# finds the very @playwright/test the specs import, never another workspace's.
 PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
 if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
-  echo "FAIL: Frontend Playwright is not installed at $PLAYWRIGHT_BIN" >&2
+  PLAYWRIGHT_BIN="$(cd "$FRONTEND_DIR" && node -e '
+    const path = require("path");
+    try {
+      const pkg = require.resolve("@playwright/test/package.json");
+      const bin = path.join(path.dirname(path.dirname(path.dirname(pkg))), ".bin", "playwright");
+      process.stdout.write(require("fs").existsSync(bin) ? bin : "");
+    } catch { process.stdout.write(""); }
+  ' 2>/dev/null)"
+fi
+if [[ -z "$PLAYWRIGHT_BIN" || ! -x "$PLAYWRIGHT_BIN" ]]; then
+  echo "FAIL: Frontend Playwright is not installed (checked $FRONTEND_DIR/node_modules and the hoisted root)" >&2
   exit 1
 fi
 
