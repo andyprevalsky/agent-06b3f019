@@ -222,6 +222,7 @@ function testChallengeDetection(): void {
       html: '',
     })
   );
+  // Sparse body + challenge-platform script still counts as a wall.
   assert.ok(
     pageLooksChallenged({
       status: 200,
@@ -244,6 +245,28 @@ function testChallengeDetection(): void {
       title: '',
       bodyText: '',
       html: '<html><head></head><body></body></html>',
+    })
+  );
+  // Eventim cleared ticket HTML embeds Turnstile + challenge-platform beside
+  // real inventory — must not false-positive once body text is substantive.
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Buy tickets to LYNY in San Francisco on August 14, 2026',
+      bodyText:
+        'General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout.',
+      html:
+        '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>' +
+        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>' +
+        '<main>General Admission</main>',
+    })
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Access Denied',
+      bodyText: 'You have been blocked. Access Denied. Ray ID a2685f1cff22d940.',
+      html: '<script src="/cdn-cgi/challenge-platform/x.js"></script>',
     })
   );
 }

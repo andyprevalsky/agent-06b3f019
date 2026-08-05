@@ -150,8 +150,16 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
    clean winner, so live nav verify failed
    (`Promoted kernel_residential_city … live tab is still challenged`) despite
    two clean candidate probes.
+8. Challenge classifier must not treat bare `/cdn-cgi/challenge-platform` or
+   Turnstile script URLs as a wall when the page already has substantive body
+   text. Cleared Eventim ticket HTML embeds both next to "General Admission"
+   inventory; that false-positive made candidate probes report `stablePasses=0`
+   and live verify reject a clean tab (`d0e8ddca-…`: promote `kernel_mobile`
+   1/2 then "live tab is still challenged" while network captures showed the
+   ticket document). Log each probe attempt's detection `reason` + `title`.
 
-Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests.
+Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
+unit `browser-challenge-recovery` Eventim-shaped classifier cases.
 Exact-bench outcome still required before status=`fixed`.
 
 ## Human feedback

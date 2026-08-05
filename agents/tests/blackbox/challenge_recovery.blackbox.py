@@ -300,6 +300,33 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
         body_text="Order drinks and pastries",
         html="<main>Menu</main>",
     )
+    # Cleared Eventim ticket pages embed Turnstile/challenge-platform scripts
+    # next to real inventory copy — those HTML markers alone must not fail.
+    assert not page_looks_challenged(
+        status=200,
+        title="Buy tickets to LYNY in San Francisco on August 14, 2026",
+        body_text=(
+            "General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout."
+        ),
+        html=(
+            '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>'
+            '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+            "<main>General Admission</main>"
+        ),
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Access Denied",
+        body_text="You have been blocked. Access Denied. Ray ID a2685f1cff22d940.",
+        html='<script src="/cdn-cgi/challenge-platform/x.js"></script>',
+    )
+    # Sparse interstitial body + challenge script still counts as a wall.
+    assert page_looks_challenged(
+        status=200,
+        title="Store",
+        body_text="Coffee",
+        html='<script src="/cdn-cgi/challenge-platform/x.js"></script>',
+    )
 
 
 async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():

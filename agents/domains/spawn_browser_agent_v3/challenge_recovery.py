@@ -66,6 +66,15 @@ _CHALLENGE_TEXT_MARKERS = (
     "unusual traffic from your computer network",
     "verify you are human",
 )
+# Script URLs that appear on hard CF interstitials *and* on cleared pages that
+# embed Bot Management / Turnstile widgets (Eventim ticket HTML). Only treat
+# these as a wall when the visible body is still sparse.
+_HTML_CHALLENGE_MARKERS = (
+    "/cdn-cgi/challenge-platform",
+    "cf-chl-",
+    "challenges.cloudflare.com/turnstile",
+)
+_SUBSTANTIVE_BODY_CHARS = 80
 
 
 @dataclass(frozen=True)
@@ -126,23 +135,37 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
     return candidate
 
 
-def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
+def challenge_detection_reason(
+    *, status: int | None, title: str, body_text: str, html: str
+) -> str | None:
+    """Return a short reason when the page still looks like an anti-bot wall.
+
+    Cleared Eventim ticket pages embed ``/cdn-cgi/challenge-platform`` and
+    Turnstile while showing real inventory ("General Admission"). Bare HTML
+    script markers must not fail probes/live-verify once substantive body text
+    is present; title/body challenge copy and sparse/empty pages still count.
+    """
     if status in {403, 429}:
-        return True
+        return f"status_{status}"
     content = f"{title}\n{body_text}".lower()
-    if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
-        return True
+    for marker in _CHALLENGE_TEXT_MARKERS:
+        if marker in content:
+            return f"text:{marker}"
     normalized_html = html.lower()
     visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
-        return True
-    return any(
-        marker in normalized_html
-        for marker in (
-            "/cdn-cgi/challenge-platform",
-            "cf-chl-",
-            "challenges.cloudflare.com/turnstile",
-        )
+        return "empty_page"
+    if len(body_text.strip()) < _SUBSTANTIVE_BODY_CHARS:
+        for marker in _HTML_CHALLENGE_MARKERS:
+            if marker in normalized_html:
+                return f"html:{marker}"
+    return None
+
+
+def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
+    return (
+        challenge_detection_reason(status=status, title=title, body_text=body_text, html=html)
+        is not None
     )
 
 
