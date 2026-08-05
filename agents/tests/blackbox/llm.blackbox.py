@@ -190,6 +190,87 @@ def test_tool_result_name_pairs_with_the_declared_call_not_the_display_name():
     assert tool_msg["name"] == "spawn_agent"
 
 
+def test_generated_tool_call_id_is_shared_by_bookkeeping_and_emitted_call():
+    """A tool call with no id must get ONE generated id, used in both passes.
+
+    Generating it twice made the declaration bookkeeping disagree with the id
+    actually sent to the model, so the paired result matched neither: it lost
+    its name or was downgraded to a system message.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "calling without an id",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {"tool_calls": [{"tool": "web_search"}]},
+        },
+    ]
+
+    # The generated id is random, so pin uuid4 to a counting sequence: calling it
+    # twice for one tool call is exactly the defect, and yields two distinct ids.
+    import helpers.llm as llm_module
+
+    generated: List[str] = []
+
+    class _SequencedUuid:
+        def __init__(self, index: int) -> None:
+            self._value = f"generated-{index}"
+
+        def __str__(self) -> str:
+            return self._value
+
+    def _fake_uuid4() -> _SequencedUuid:
+        token = _SequencedUuid(len(generated))
+        generated.append(str(token))
+        return token
+
+    original_uuid4 = llm_module.uuid.uuid4
+    llm_module.uuid.uuid4 = _fake_uuid4
+    try:
+        messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    finally:
+        llm_module.uuid.uuid4 = original_uuid4
+
+    assistant_msg = next(m for m in messages if m["role"] == "assistant")
+    emitted_id = assistant_msg["tool_calls"][0]["id"]
+    assert len(generated) == 1, f"one id-less tool call must generate exactly ONE id, generated {generated}"
+    assert emitted_id == generated[0], (
+        f"the emitted assistant call id {emitted_id!r} must be the same id the declaration "
+        f"bookkeeping recorded ({generated[0]!r})"
+    )
+
+
+def test_null_tool_call_ids_do_not_collide_on_the_string_none():
+    """A present-but-null id must generate a UNIQUE id, not the literal "None".
+
+    `dict.get(key, default)` returns None when the key EXISTS and is null, so
+    the default never fires: every such call became the string "None" and they
+    all collided onto one another.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "two null-id calls",
+            "timestamp": "2024-01-01T00:00:01Z",
+            "metadata": {
+                "tool_calls": [
+                    {"tool": "web_search", "tool_call_id": None},
+                    {"tool": "grep", "tool_call_id": None},
+                ]
+            },
+        },
+    ]
+
+    messages = convert_context_to_messages(context, include_system=False, include_assistant=True)
+    ids = [tc["id"] for tc in next(m for m in messages if m["role"] == "assistant")["tool_calls"]]
+    assert "None" not in ids, f'null ids must not collapse onto the literal "None": {ids}'
+    assert len(set(ids)) == 2, f"each null-id call needs its own unique id, got {ids}"
+
+
 def test_tool_result_omits_name_when_no_declaration_is_known():
     """An unknown declaration must omit `name` rather than guess the display name.
 
@@ -6091,6 +6172,14 @@ async def run_all_tests():
     r.record(
         "tool_result_omits_name_when_no_declaration_known",
         test_tool_result_omits_name_when_no_declaration_is_known,
+    )
+    r.record(
+        "generated_tool_call_id_shared_across_passes",
+        test_generated_tool_call_id_is_shared_by_bookkeeping_and_emitted_call,
+    )
+    r.record(
+        "null_tool_call_ids_do_not_collide",
+        test_null_tool_call_ids_do_not_collide_on_the_string_none,
     )
     r.record(
         "convert_context_to_messages_includes_structured_values_not_schema",

@@ -1311,22 +1311,30 @@ def convert_context_to_messages(
             if not include_assistant:
                 continue
 
-            if metadata.get("tool_calls"):
-                for tc in metadata["tool_calls"]:
-                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
-                    declared_tool_ids.add(tc_id)
-                    declared_name = tc.get("tool")
-                    if declared_name:
-                        declared_tool_names[tc_id] = str(declared_name)
+            # Normalize each tool call's id ONCE. Two independent uuid4() calls
+            # for the same call would make the declaration bookkeeping disagree
+            # with the id actually emitted to the model: the paired result then
+            # matches neither, so it loses its name or gets downgraded to a
+            # system message. `.get(k, default)` also returns None when the key
+            # is PRESENT and null, which would collapse every such call onto the
+            # literal "None" and collide them, so treat null as missing too.
+            normalized_tool_calls: List[Tuple[Dict[str, Any], str]] = []
+            for tc in metadata.get("tool_calls") or []:
+                raw_id = tc.get("tool_call_id")
+                normalized_tool_calls.append((tc, str(raw_id) if raw_id else str(uuid.uuid4())))
+
+            for tc, tc_id in normalized_tool_calls:
+                declared_tool_ids.add(tc_id)
+                declared_name = tc.get("tool")
+                if declared_name:
+                    declared_tool_names[tc_id] = str(declared_name)
 
             # Include tool_calls if present in metadata
             assistant_msg = {"role": "assistant", "content": content}
-            if metadata.get("tool_calls"):
+            if normalized_tool_calls:
                 # Convert our tool call format to OpenAI format
                 tool_calls = []
-                for tc in metadata["tool_calls"]:
-                    # Get or generate tool_call_id
-                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
+                for tc, tc_id in normalized_tool_calls:
                     tool_calls.append(
                         {
                             "id": tc_id,
