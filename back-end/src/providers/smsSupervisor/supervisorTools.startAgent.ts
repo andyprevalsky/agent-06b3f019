@@ -5,7 +5,6 @@
 
 import { prisma } from '../database';
 import { startAgentWorkflow } from '../temporal';
-import { executeWebSearch } from '../chat/chatTools';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 
@@ -150,28 +149,5 @@ export async function commitStartNewAgent(
     tool: 'start_new_agent',
     success: true,
     result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
-  };
-}
-
-export async function executeWebSearchTool(args: WebSearchArgs): Promise<ToolResult> {
-  const { query } = args;
-
-  log.info('Executing web search', { phase: 'search', query });
-  const startTime = Date.now();
-
-  const searchResult = await executeWebSearch(query);
-
-  log.info('Search complete', {
-    phase: 'search',
-    query,
-    answerLength: searchResult.answer.length,
-    sourceCount: searchResult.sources.length,
-    durationMs: Date.now() - startTime,
-  });
-
-  return {
-    tool: 'web_search',
-    success: true,
-    result: searchResult.answer,
   };
 }
