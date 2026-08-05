@@ -213,14 +213,23 @@ if ! $STACK_DB_EXPECTED && docker_info_quick; then
   fi
 fi
 
-# Fall back to system Postgres
+# Fall back to system Postgres. Prefer the Conductor-derived local DB port
+# (CONDUCTOR_PORT+5) so cloud/native Postgres installs that follow run.sh's
+# port layout are found before the generic 5432 default.
 if ! $STACK_DB_EXPECTED && ! $DB_FOUND; then
-  SYSTEM_PG_PORT=5432
-  if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
-    LOCAL_DB_PORT="$SYSTEM_PG_PORT"
-    DB_FOUND=true
-    echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+  SYSTEM_PG_CANDIDATES=()
+  if [[ -n "${CONDUCTOR_PORT:-}" ]]; then
+    SYSTEM_PG_CANDIDATES+=("$((CONDUCTOR_PORT + 5))")
   fi
+  SYSTEM_PG_CANDIDATES+=(5432)
+  for SYSTEM_PG_PORT in "${SYSTEM_PG_CANDIDATES[@]}"; do
+    if pg_isready -h localhost -p "$SYSTEM_PG_PORT" -U postgres -q 2>/dev/null; then
+      LOCAL_DB_PORT="$SYSTEM_PG_PORT"
+      DB_FOUND=true
+      echo "Using local Postgres (system) at localhost:$SYSTEM_PG_PORT"
+      break
+    fi
+  done
 fi
 
 if $STACK_DB_EXPECTED && ! $DB_FOUND; then
