@@ -1006,18 +1006,40 @@ ensure_ngrok_domain_reserved() {
         return 0
     fi
     echo "🌐 Checking ngrok reserved domain $domain"
-    local domains_json
-    # ngrok API caps page size at 100 (ERR_NGROK_233 for anything larger).
-    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 2>&1) || {
-        echo "$domains_json"
-        echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
-        [ "$failure_mode" = "soft" ] && return 1
-        exit 1
-    }
-    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
-        echo "🌐 Reserved domain already exists: $domain"
-        return 0
-    fi
+    local page_body before_id last_id
+    # ngrok API caps page size at 100 (ERR_NGROK_233 for anything larger) and
+    # paginates newest→oldest via before_id / next_page_uri. Walk every page
+    # before deciding to create, or an existing domain on a later page is missed.
+    before_id=""
+    while true; do
+        if [ -n "$before_id" ]; then
+            page_body=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 --before-id "$before_id" 2>&1) || {
+                echo "$page_body"
+                echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
+                [ "$failure_mode" = "soft" ] && return 1
+                exit 1
+            }
+        else
+            page_body=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 100 2>&1) || {
+                echo "$page_body"
+                echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
+                [ "$failure_mode" = "soft" ] && return 1
+                exit 1
+            }
+        fi
+        if printf '%s\n' "$page_body" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
+            echo "🌐 Reserved domain already exists: $domain"
+            return 0
+        fi
+        last_id=$(printf '%s\n' "$page_body" | python3 -c '
+import json, sys
+data = json.load(sys.stdin)
+domains = data.get("reserved_domains") or []
+print(domains[-1]["id"] if domains and data.get("next_page_uri") else "")
+' 2>/dev/null || true)
+        [ -n "$last_id" ] || break
+        before_id="$last_id"
+    done
     echo "🌐 Reserving ngrok domain $domain"
     local create_output
     create_output=$(ngrok api reserved-domains create \

@@ -185,6 +185,7 @@ class WaitForManager(ToolManager):
         routing explore events as spawn_agent messages so the FE groups them
         correctly. wait_for events reference the explore via exploreTaskId.
         """
+        from domains.spawn_agent.handler import _raise_source_connect_gates
         from tools.spawn_agent import SpawnAgentManager
 
         # Validate
@@ -273,6 +274,7 @@ class WaitForManager(ToolManager):
             # persisted into ToolEvent.data / shipped across activity boundaries.
             explore_tool_call_results: list[str] = []
             explore_usage: dict[str, list[Any]] = {}
+            explore_unavailable_sources: list[dict] = []
 
             async for event in spawn_mgr._spawn_explore(
                 workflow_instance,
@@ -288,6 +290,12 @@ class WaitForManager(ToolManager):
                 # Capture usage from the FINISHED event (raw tool results come via the collector)
                 if event.status == MessageStatus.FINISHED and event.data:
                     explore_usage = event.data.get("usage", {})
+                    explore_unavailable_sources = event.data.get("unavailable_sources") or []
+
+            # Direct _spawn_explore callers must raise source_connect gates the
+            # same way execute_tool does; wait_for previously dropped them.
+            if explore_unavailable_sources:
+                await _raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
 
             # Check if explore was cancelled (paused during explore)
             if workflow_instance.is_paused:

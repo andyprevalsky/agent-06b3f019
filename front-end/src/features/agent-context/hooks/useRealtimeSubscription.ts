@@ -129,7 +129,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     }
 
     const scheduleReconnect = () => {
-      if (!selectedAgentId || !canSubscribe) return;
+      if (cancelled || !selectedAgentId || !canSubscribe) return;
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -150,13 +150,17 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
 
       // Use globalThis so a pending Node timer cannot throw if jsdom already
       // tore down `window` between schedule and fire (vitest file teardown).
-      reconnectTimeoutRef.current = globalThis.setTimeout(() => {
+      // Keep the timer ID local so a stale callback from a previous effect
+      // cannot clear a newer effect's reconnectTimeoutRef.
+      const timeoutId = globalThis.setTimeout(() => {
+        if (reconnectTimeoutRef.current !== timeoutId) return;
         reconnectTimeoutRef.current = null;
         // Effect cleanup sets cancelled and clears this timer; still guard in
         // case the callback is already queued when the environment is destroyed.
         if (cancelled || typeof globalThis.window === 'undefined') return;
         setForceResubscribeCounter((prev) => prev + 1);
       }, delay) as unknown as number;
+      reconnectTimeoutRef.current = timeoutId;
     };
 
     const setupRealtime = async () => {
@@ -251,6 +255,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         });
       } catch (error) {
         console.error('Failed to subscribe:', error);
+        if (cancelled) return;
         isReconnectingRef.current = false;
         scheduleReconnect();
       }

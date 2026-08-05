@@ -117,9 +117,12 @@ class ReviewWaitTest(unittest.TestCase):
     def test_commit_status_rollup_maps_rest_payload(self) -> None:
         calls: list[list[str]] = []
 
-        def fake_gh_json(command: list[str]) -> object:
+        def fake_gh_json(command: list[str], timeout=None) -> object:
+            del timeout
             calls.append(command)
-            if command[:3] == ["gh", "api", "repos/acme/rose/commits/abc/status"]:
+            if command[:2] == ["gh", "api"] and any(
+                part.startswith("repos/acme/rose/commits/abc/status") for part in command
+            ):
                 return {
                     "statuses": [
                         {"context": "CodeRabbit", "state": "success"},
@@ -157,8 +160,8 @@ class ReviewWaitTest(unittest.TestCase):
         head = "c" * 40
         calls: list[list[str]] = []
 
-        def fake_run(command, check=False, capture_output=True, text=True):
-            del check, capture_output, text
+        def fake_run(command, check=False, capture_output=True, text=True, timeout=None):
+            del check, capture_output, text, timeout
             calls.append(list(command))
             if command[-1] == "headRefOid,statusCheckRollup":
                 return MODULE.subprocess.CompletedProcess(
@@ -182,8 +185,8 @@ class ReviewWaitTest(unittest.TestCase):
         original_run = MODULE.subprocess.run
         original_rollup = MODULE.gh_commit_status_rollup
 
-        def fake_rollup(_head, repo=None):
-            del _head, repo
+        def fake_rollup(_head, repo=None, timeout=None):
+            del _head, repo, timeout
             return [
                 {
                     "__typename": "StatusContext",

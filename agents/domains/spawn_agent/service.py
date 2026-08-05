@@ -626,9 +626,10 @@ async def spawn_explore_agent_activity(
     # not clobbered by "required data source(s) not connected".
     has_unavailable = bool(unavailable_sources_collected)
     unavailable_names = ", ".join(str(u.get("source")) for u in unavailable_sources_collected)
-    if has_unavailable and "not connected" not in (final_response or "").lower():
+    notice_marker = "⚠️ Source(s) not connected:"
+    if has_unavailable and notice_marker not in (final_response or ""):
         notice = (
-            f"\n\n⚠️ Source(s) not connected: {unavailable_names}. These were skipped — "
+            f"\n\n{notice_marker} {unavailable_names}. These were skipped — "
             "do NOT retry them. A one-time connect request will be sent to the user "
             "after this exploration finishes when connect gates are enabled."
         )
