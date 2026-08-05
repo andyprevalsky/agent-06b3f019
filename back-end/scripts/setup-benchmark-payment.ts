@@ -1,10 +1,20 @@
-import 'dotenv/config';
+import dotenv from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
-import { ensureAgentCardSandboxFloat, ensureBenchmarkOrgCardholder } from '../src/providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  ensureBenchmarkOrgCardholder,
+} from '../src/providers/agentcard/benchmark-float';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
+import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { isAdminUser } from '../src/utils/adminAccess';
+
+// Cursor Cloud injects per-key secrets into the process env. A truncated
+// BENCHMARK_AGENTCARD_ORG_ID (seen as 7 chars) would otherwise beat the full
+// value in back-end/.env because dotenv defaults to non-override mode.
+dotenv.config({ override: true });
+applyResolvedBenchmarkAgentCardIds();
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
 // Keep payment settlement on the normal Stripe-backed path. The dedicated lifecycle identity is
