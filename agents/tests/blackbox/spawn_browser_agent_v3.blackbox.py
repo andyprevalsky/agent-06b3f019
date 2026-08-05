@@ -7697,6 +7697,59 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
     }
 
 
+def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
+    """js.stripe.com ERR_TUNNEL must rotate the provider exit (Eventim card fields)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _is_payment_cdn_tunnel_failure,
+    )
+
+    assert _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://wl.eventim.us/asset.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_NAME_NOT_RESOLVED",
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "3:r1": {
+            "browser_generation": 3,
+            "url": "https://js.stripe.com/v3/",
+        }
+    }
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "payment CDN blocked by proxy tunnel",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+    }
+    # One signal per browser generation — no recovery loop on repeated stripe fails.
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() is None
+
+
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
     import tempfile
@@ -14013,6 +14066,10 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_accepted_fingerprint_warning",
         test_network_recorder_does_not_reject_successful_fingerprint_warning,
+    )
+    r.record(
+        "payment_cdn_tunnel_failure_provider_exit",
+        test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",

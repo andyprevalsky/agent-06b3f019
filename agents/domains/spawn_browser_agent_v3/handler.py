@@ -6070,11 +6070,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 await browser_stream.finish_tools(status="ERROR")
                 rejected_action = unified_action.get("action", "")
                 recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
+                rejection_reason = str(
+                    (provider_exit_rejection or {}).get("reason")
+                    or "The current provider IP was explicitly rejected."
+                )
                 unified_action = {
                     "action": "recover_from_challenge",
                     "thinking": "",
                     "params": {
-                        "reason": "The current provider IP was explicitly rejected for fingerprint reuse.",
+                        "reason": rejection_reason,
                         "provider_exit_rejected": True,
                     },
                 }
