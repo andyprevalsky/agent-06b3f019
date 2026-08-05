@@ -206,14 +206,19 @@ export async function runParallelBrowserConfigSearch(
   const successful = attempts.flatMap((attempt) =>
     attempt.status === 'fulfilled' ? [attempt.value] : []
   );
-  const stable = successful
-    .filter((candidate) => candidate.probe.stablePasses === candidate.probe.attempts)
+  const ranked = successful
+    .filter((candidate) => candidate.probe.stablePasses > 0)
     .sort((left, right) => {
       const [leftPasses, leftLatency] = candidateScore(left);
       const [rightPasses, rightLatency] = candidateScore(right);
       return leftPasses - rightPasses || leftLatency - rightLatency;
     });
-  const winner = stable[0];
+  // Prefer fully-stable (passes === attempts). If Cloudflare only clears one of
+  // two probe loads, still promote the best partial winner — the agent live
+  // navigation verify remains the hard gate before recovery success.
+  const winner =
+    ranked.find((candidate) => candidate.probe.stablePasses === candidate.probe.attempts) ??
+    ranked[0];
   if (winner === undefined) {
     log.error('Challenge recovery found no stable browser configuration', {
       candidateCount: configs.length,
@@ -231,6 +236,8 @@ export async function runParallelBrowserConfigSearch(
     provider: winner.config.provider,
     proxyMode: winner.config.proxyMode,
     stablePasses: winner.probe.stablePasses,
+    attempts: winner.probe.attempts,
+    partial: winner.probe.stablePasses < winner.probe.attempts,
     latencyMs: winner.probe.latencyMs,
   });
   try {

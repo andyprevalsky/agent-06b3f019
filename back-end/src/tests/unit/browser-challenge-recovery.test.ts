@@ -177,8 +177,8 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   await assert.rejects(
     runParallelBrowserConfigSearch(configs, {
       create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 1, attempts: 2, latencyMs: 1 }),
-      promote: async () => assert.fail('unstable candidate must never be promoted'),
+      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1 }),
+      promote: async () => assert.fail('zero-pass candidate must never be promoted'),
       release: async (config) => {
         released.push(config.key);
       },
@@ -186,6 +186,30 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
     /No stable browser configuration/
   );
   assert.strictEqual(released.length, configs.length);
+}
+
+async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const released: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(configs, {
+    create: async (config) => fakeSession(config),
+    probe: async (config) => ({
+      stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
+      attempts: 2,
+      latencyMs: config.key === 'kernel_mobile' ? 5 : 1,
+    }),
+    promote: async (candidate) => {
+      promoted.push(candidate.config.key);
+    },
+    release: async (config) => {
+      released.push(config.key);
+    },
+  });
+  assert.strictEqual(winner.config.key, 'kernel_mobile');
+  assert.deepStrictEqual(promoted, ['kernel_mobile']);
+  assert.strictEqual(released.length, configs.length - 1);
+  assert.ok(!released.includes('kernel_mobile'));
 }
 
 function testChallengeDetection(): void {
@@ -583,6 +607,7 @@ async function main(): Promise<void> {
   testConfigSearchUsesHiddenRemoteSessionsOnly();
   await testParallelSearchPromotesStableFastestAndReleasesLosers();
   await testNoStableCandidateCleansEverything();
+  await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
   testChallengeDetection();
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPreferredConfigCompatibility();
