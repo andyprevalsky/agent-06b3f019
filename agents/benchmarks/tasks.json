@@ -4612,6 +4612,9 @@
     "min_tool_counts": {
       "spawn_agent": 1
     },
+    "min_steps": {
+      "browser": 1
+    },
     "tool_count_scope": "root",
     "start_phase": "execute",
     "status": "ready",
@@ -4638,7 +4641,7 @@
         "https://wl.eventim.us/",
         "https://eventim.us/"
       ],
-      "context_notes": "Reproduces prod agent ec03b6f2-744f-433a-87d0-e4cf7758818a (Yousuke Yukimatsu / 1015 Folsom), which reached Eventim then burned the $2 cap on Cloudflare/AXS antibot. The benchmark fixes venue + official Eventim US primary checkout, keeps artist/date flexible across upcoming 1015 Folsom shows with live inventory, and treats a single unresolved payment-card request as success. Never approve the charge or complete purchase. Secondary/resale marketplaces are forbidden.",
+      "context_notes": "Reproduces prod agent ec03b6f2-744f-433a-87d0-e4cf7758818a (Yousuke Yukimatsu / 1015 Folsom), which reached Eventim then burned the $2 cap on Cloudflare/AXS antibot. The benchmark fixes venue + official Eventim US primary checkout, keeps artist/date flexible across upcoming 1015 Folsom shows with live inventory, and treats a single unresolved payment-card request as success. Never approve the charge or complete purchase. Secondary/resale marketplaces are forbidden. Local baseline 2026-08-05: FAIL — Cloudflare Access Denied hard-block on eventim.us/wl.eventim.us through challenge recovery; timed out at 1200s / ~15c without a payment-card request.",
       "live_cookie_domains": [
         "eventim.us",
         "1015.com"
