@@ -60,8 +60,10 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
+    page_looks_challenged,
     probe_storage_state,
     recover_from_challenge,
+    verify_live_page_cleared_challenge,
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
@@ -1106,7 +1108,13 @@ async def _restore_rotation_storage_state(
     current_url: str,
     restore_cookies: bool = True,
 ) -> None:
-    """Restore captured auth/storage into a replacement provider session."""
+    """Restore captured auth/storage into a replacement provider session.
+
+    When ``restore_cookies`` is False (challenge-recovery preloaded winner), the
+    remote default context already holds probe/solver cookies. Skip a same-host
+    re-navigation that would re-trigger Cloudflare WAF on a clean candidate, and
+    use the probe's 45s navigation budget when a goto is still required.
+    """
     if page is None or not storage_state or getattr(page, "context", None) is None:
         return
 
@@ -1119,8 +1127,20 @@ async def _restore_rotation_storage_state(
     if origins:
         await context.add_init_script(script=_rotation_storage_restore_script(storage_state))
 
-    if current_url:
-        await page.goto(current_url, wait_until="domcontentloaded", timeout=15_000)
+    should_navigate = bool(current_url)
+    if should_navigate and not restore_cookies:
+        try:
+            from urllib.parse import urlparse
+
+            live_host = (urlparse(str(getattr(page, "url", "") or "")).hostname or "").lower()
+            target_host = (urlparse(current_url).hostname or "").lower()
+            if live_host and target_host and live_host == target_host:
+                should_navigate = False
+        except Exception:
+            should_navigate = True
+    if should_navigate:
+        navigation_timeout_ms = 45_000 if not restore_cookies else 15_000
+        await page.goto(current_url, wait_until="domcontentloaded", timeout=navigation_timeout_ms)
 
     if origins:
         await page.evaluate(
@@ -1351,29 +1371,66 @@ def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
 
 
-async def _wait_for_provider_captcha_solver(config: Any, task_id: str) -> None:
-    """Give provider-native auto-solving the first chance before recovery probes."""
+async def _wait_for_provider_captcha_solver(
+    config: Any,
+    task_id: str,
+    *,
+    page: Optional[Any] = None,
+) -> None:
+    """Give provider-native auto-solving the first chance before recovery probes.
+
+    Kernel telemetry sets ``isSolving`` to null (terminal outcomes only). When the
+    live tab still looks challenged, keep waiting up to the 45s ceiling instead of
+    treating three null polls as "solver done".
+    """
     deadline = asyncio.get_running_loop().time() + 45
     saw_active_solver = False
     inactive_polls = 0
     while asyncio.get_running_loop().time() < deadline:
         activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
+        page_still_challenged = False
+        if page is not None:
+            try:
+                snapshot = await asyncio.gather(
+                    page.title(),
+                    page.locator("body").inner_text(timeout=2_000),
+                    page.content(),
+                    return_exceptions=True,
+                )
+                title = snapshot[0] if isinstance(snapshot[0], str) else ""
+                body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+                html = snapshot[2] if isinstance(snapshot[2], str) else ""
+                page_still_challenged = page_looks_challenged(
+                    status=None,
+                    title=title[:1_000],
+                    body_text=body_text[:20_000],
+                    html=html[:100_000],
+                )
+            except Exception:
+                page_still_challenged = False
         try:
             telemetry = await fetch_browser_captcha_telemetry(config, task_id)
         except Exception as exc:
             logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
+            if page_still_challenged:
+                await asyncio.sleep(2)
+                continue
             await asyncio.sleep(2)
             return
         is_solving = telemetry.get("isSolving")
         if is_solving is True:
             saw_active_solver = True
             inactive_polls = 0
-        elif saw_active_solver:
+        elif saw_active_solver and not page_still_challenged:
             return
+        elif page_still_challenged:
+            # Hard WAF / Kernel-null telemetry: wait out the solver window on the
+            # live challenged page instead of exiting after three idle polls.
+            inactive_polls = 0
         else:
             inactive_polls += 1
-            # Steel can take a moment to register a new task. Kernel only emits
-            # terminal outcomes, so three grace polls are its solver-first wait.
+            # Steel can take a moment to register a new task. When the page is not
+            # challenged, three grace polls are enough for the solver-first wait.
             if inactive_polls >= 3:
                 return
         await asyncio.sleep(2)
@@ -6276,6 +6333,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cookie_isolation": "Isolating poisoned cookie state",
                     "apply_cookie_fix": "Applying safe cookie recovery",
                     "browser_config_search": "Searching browser configurations",
+                    "live_verify": "Verifying live tab cleared challenge",
                 }
 
                 async def emit_recovery_progress(stage: str, message: str) -> None:
@@ -6316,7 +6374,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
-                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(config, task_id),
+                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(
+                            config, task_id, page=input_page
+                        ),
                         probe=lambda candidate: probe_storage_state(
                             playwright_browser,
                             candidate,
@@ -6418,13 +6478,33 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             humanizer_factory=BrowserHumanizer,
                         )
 
+                        await emit_recovery_progress(
+                            "live_verify",
+                            "Verifying the promoted browser cleared the challenge on the live tab.",
+                        )
+                        if not await verify_live_page_cleared_challenge(input_page, current_url):
+                            provider = config_result.get("provider")
+                            proxy_tier = config_result.get("proxy_tier")
+                            config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                            raise RuntimeError(
+                                f"Promoted {config_key} passed candidate probes but the live tab "
+                                "is still challenged"
+                            )
+
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)
-                    recovery_message = (
-                        "Recovered by selecting a stable browser configuration; signed-in state was preserved."
-                        if config_result is not None
-                        else "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
-                    )
+                    if config_result is not None:
+                        provider = config_result.get("provider")
+                        proxy_tier = config_result.get("proxy_tier")
+                        config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                        recovery_message = (
+                            f"Recovered by selecting {config_key}; live tab verified clean; "
+                            "signed-in state was preserved."
+                        )
+                    else:
+                        recovery_message = (
+                            "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
+                        )
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",
@@ -6434,7 +6514,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         browser_url=browser_url,
                         action_type="browser_challenge_recovery",
                         tool_call_id=recovery_call_id,
-                        extra_metadata={"recoveryStage": "complete"},
+                        extra_metadata={
+                            "recoveryStage": "complete",
+                            "provider": config_result.get("provider") if config_result else None,
+                            "proxyTier": config_result.get("proxy_tier") if config_result else None,
+                            "configKey": config_result.get("config_key") if config_result else None,
+                        },
                     )
                     action_result = {
                         "success": True,
@@ -6442,6 +6527,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         "recovery_action": recovery.recovery,
                         "provider": config_result.get("provider") if config_result else None,
                         "proxy_tier": config_result.get("proxy_tier") if config_result else None,
+                        "config_key": config_result.get("config_key") if config_result else None,
                         "removed_cookie_count": len(recovery.removed_cookie_keys),
                     }
                 except Exception as exc:

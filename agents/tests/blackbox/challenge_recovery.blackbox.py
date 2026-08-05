@@ -16,6 +16,7 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     is_auth_cookie,
     page_looks_challenged,
     recover_from_challenge,
+    verify_live_page_cleared_challenge,
 )
 
 
@@ -277,6 +278,52 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
     )
 
 
+async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
+    class FakeBody:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self, timeout):
+            assert timeout == 2_000
+            return self.page.body_text
+
+    class FakePage:
+        def __init__(self, title, body_text, html):
+            self._title = title
+            self.body_text = body_text
+            self._html = html
+            self.goto_count = 0
+
+        async def title(self):
+            return self._title
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody(self)
+
+        async def content(self):
+            return self._html
+
+        async def goto(self, *_args, **_kwargs):
+            self.goto_count += 1
+            return None
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+    clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
+    assert await verify_live_page_cleared_challenge(
+        clean, "https://wl.eventim.us/event/lyny/1", solver_timeout_seconds=0
+    )
+    assert clean.goto_count == 0
+
+    denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
+    assert not await verify_live_page_cleared_challenge(
+        denied, "https://wl.eventim.us/event/lyny/1", solver_timeout_seconds=0
+    )
+    assert denied.goto_count == 1
+
+
 async def test_live_cookie_commit_requires_two_clean_loads():
     class FakeContext:
         def __init__(self):
@@ -368,6 +415,10 @@ async def run_all_tests():
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    await result.record_async(
+        "live_tab_verify_access_denied",
+        test_live_tab_verify_accepts_clean_and_rejects_access_denied,
+    )
     await result.record_async(
         "live_cookie_commit_two_passes",
         test_live_cookie_commit_requires_two_clean_loads,

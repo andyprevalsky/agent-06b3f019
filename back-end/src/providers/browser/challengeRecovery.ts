@@ -2,6 +2,7 @@ import type { Prisma } from '@prisma/client';
 import type { Browser, Cookie, Page, Response } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
+import { createLogger } from '../logger';
 import { createSteelRecoverySession, releaseSteelRemoteSession } from '../steel/session';
 import {
   createKernelRecoverySession,
@@ -10,6 +11,8 @@ import {
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
 import type { BrowserProviderName } from './types';
+
+const log = createLogger('BrowserChallengeRecovery');
 
 export interface BrowserRecoveryConfig {
   key: string;
@@ -166,12 +169,36 @@ export async function runParallelBrowserConfigSearch(
 ): Promise<SuccessfulRecoveryCandidate> {
   const attempts = await Promise.allSettled(
     configs.map(async (config) => {
-      const session = await dependencies.create(config);
       try {
-        const probe = await dependencies.probe(config, session);
-        return { config, session, probe };
+        const session = await dependencies.create(config);
+        try {
+          const probe = await dependencies.probe(config, session);
+          log.info('Challenge recovery candidate probed', {
+            configKey: config.key,
+            provider: config.provider,
+            proxyMode: config.proxyMode,
+            stablePasses: probe.stablePasses,
+            attempts: probe.attempts,
+            latencyMs: probe.latencyMs,
+          });
+          return { config, session, probe };
+        } catch (error) {
+          log.warn('Challenge recovery candidate probe failed', {
+            configKey: config.key,
+            provider: config.provider,
+            proxyMode: config.proxyMode,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await dependencies.release(config, session).catch(() => {});
+          throw error;
+        }
       } catch (error) {
-        await dependencies.release(config, session).catch(() => {});
+        log.warn('Challenge recovery candidate create/probe failed', {
+          configKey: config.key,
+          provider: config.provider,
+          proxyMode: config.proxyMode,
+          error: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       }
     })
@@ -188,12 +215,24 @@ export async function runParallelBrowserConfigSearch(
     });
   const winner = stable[0];
   if (winner === undefined) {
+    log.error('Challenge recovery found no stable browser configuration', {
+      candidateCount: configs.length,
+      successfulProbeCount: successful.length,
+      configKeys: configs.map((config) => config.key),
+    });
     await Promise.allSettled(
       successful.map((candidate) => dependencies.release(candidate.config, candidate.session))
     );
     throw new Error('No stable browser configuration cleared the challenge');
   }
 
+  log.info('Challenge recovery promoting stable winner', {
+    configKey: winner.config.key,
+    provider: winner.config.provider,
+    proxyMode: winner.config.proxyMode,
+    stablePasses: winner.probe.stablePasses,
+    latencyMs: winner.probe.latencyMs,
+  });
   try {
     await dependencies.promote(winner);
   } catch (error) {
@@ -508,6 +547,7 @@ export async function searchAndPromoteBrowserConfig(
     saved_url: input.targetUrl,
     provider: winner.config.provider,
     proxy_tier: winner.config.proxyMode,
+    config_key: winner.config.key,
     storage_state_preloaded: true,
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
@@ -516,6 +556,8 @@ export async function searchAndPromoteBrowserConfig(
       provider: winner.config.provider,
       proxy_source: winner.session.proxySource,
       proxy_location: winner.session.proxyLocation,
+      proxy_tier: winner.config.proxyMode,
+      config_key: winner.config.key,
       profile_id: null,
       profile_source: winner.session.profileSource,
     },

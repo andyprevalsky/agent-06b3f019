@@ -5385,7 +5385,13 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
         ],
     }
     context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
-    page = SimpleNamespace(context=context, evaluate=AsyncMock(), goto=AsyncMock())
+    # Same-host live URL: preloaded restore must not re-navigate (WAF re-trigger).
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="https://order.online/store/blue-bottle",
+    )
 
     await _restore_rotation_storage_state(
         page,
@@ -5396,8 +5402,51 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
 
     context.add_cookies.assert_not_awaited()
     context.add_init_script.assert_awaited_once()
-    page.goto.assert_awaited_once()
+    page.goto.assert_not_awaited()
     page.evaluate.assert_awaited_once()
+
+
+async def test_preloaded_recovery_navigates_with_probe_timeout_when_host_differs():
+    from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
+
+    context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="about:blank",
+    )
+    await _restore_rotation_storage_state(
+        page,
+        {"cookies": [], "origins": []},
+        current_url="https://order.online/store/blue-bottle",
+        restore_cookies=False,
+    )
+    page.goto.assert_awaited_once_with(
+        "https://order.online/store/blue-bottle",
+        wait_until="domcontentloaded",
+        timeout=45_000,
+    )
+
+
+def test_recovery_requires_live_tab_verify_before_success():
+    """Promoted configs must re-verify the live tab before claiming recovery success."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    restore_offset = recovery_block.index("await _restore_rotation_storage_state(")
+    verify_offset = recovery_block.index("await verify_live_page_cleared_challenge(")
+    success_offset = recovery_block.index('title="Browser challenge recovered"')
+    assert restore_offset < verify_offset < success_offset
+    assert "passed candidate probes but the live tab" in recovery_block
+    assert "is still challenged" in recovery_block
+    assert "configKey" in recovery_block
 
 
 def test_recovery_restore_failure_is_not_suppressed():
@@ -13755,6 +13804,14 @@ async def run_all_tests():
     await r.record_async(
         "recovery_preloaded_solver_cookies",
         test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
+    )
+    await r.record_async(
+        "recovery_preloaded_navigates_when_host_differs",
+        test_preloaded_recovery_navigates_with_probe_timeout_when_host_differs,
+    )
+    r.record(
+        "recovery_requires_live_tab_verify_before_success",
+        test_recovery_requires_live_tab_verify_before_success,
     )
     r.record(
         "recovery_restore_failure_is_not_suppressed",

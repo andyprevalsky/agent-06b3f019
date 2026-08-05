@@ -213,6 +213,43 @@ async def probe_storage_state(
         await context.close()
 
 
+async def verify_live_page_cleared_challenge(
+    page: Any,
+    target_url: str,
+    *,
+    attempts: int = 2,
+    solver_timeout_seconds: float = 45.0,
+) -> bool:
+    """Require the canonical live tab to clear challenge markers after promote/restore.
+
+    Candidate probes can false-stable: a remote session looks clean, then the live
+    reconnect + restore navigation lands on Access Denied again. Success may only
+    be claimed after this live check.
+    """
+    snapshot = await asyncio.gather(
+        page.title(),
+        page.locator("body").inner_text(timeout=2_000),
+        page.content(),
+        return_exceptions=True,
+    )
+    title = snapshot[0] if isinstance(snapshot[0], str) else ""
+    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+    html = snapshot[2] if isinstance(snapshot[2], str) else ""
+    if not page_looks_challenged(
+        status=None,
+        title=title[:1_000],
+        body_text=body_text[:20_000],
+        html=html[:100_000],
+    ):
+        return True
+    return await _probe_page(
+        page,
+        target_url,
+        attempts=attempts,
+        solver_timeout_seconds=solver_timeout_seconds,
+    )
+
+
 async def commit_cookie_removals(
     page: Any,
     removed_cookie_keys: Sequence[CookieKey],

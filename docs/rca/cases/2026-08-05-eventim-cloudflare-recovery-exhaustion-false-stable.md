@@ -4,9 +4,9 @@ date: 2026-08-05
 title: Eventim Cloudflare Access Denied exhausted recover_from_challenge after short CAPTCHA waits and false-stable Steel promotions
 surface: cross
 component: browser-challenge-recovery
-classification: third-party-failure
-problem_class: other
-first_bad_boundary: wl.eventim.us Cloudflare WAF hard "Access Denied" (not an interactive captcha) — live page stayed blocked after Kernel start and after Steel promotions from recover_from_challenge
+classification: our-bug
+problem_class: logical-inconsistency-in-harness-contracts
+first_bad_boundary: agents/domains/spawn_browser_agent_v3/handler.py recover_from_challenge — claimed success after promote without live-tab re-verify; same-host restore goto re-triggered WAF
 symptoms:
   - 'No stable browser configuration cleared the challenge'
   - 'Waiting for the browser provider''s automatic CAPTCHA solver before changing state.'
@@ -26,7 +26,7 @@ sources:
   - agent ee191cc8-cecf-4ad2-bebf-08e960be0ae7
   - commit d0fd1b5bc5ef50d4aa63fe3724ee0b04c1b5cd7d
 repro: none-recorded
-status: open
+status: mitigated
 ---
 
 ## Problem
@@ -114,15 +114,26 @@ payment-card gate within 1200s.
 
 ## Solution
 
-Not implemented. Diagnosis-only RCA. Candidate follow-ups (need local owning-
-boundary repro + exact-bench outcome proof before claiming fixed):
+Deduced live winner from browser-agent observations: **Steel `managed`**
+(`proxy_tier: managed`, sessions `bd99b7cd` / `a34c8721` / `52e5a680`). The late
+clear was on that Steel managed session, not a logged Kernel residential/mobile
+winner.
 
-- Log per-candidate create/probe/promote results for Kernel/Steel configs.
-- After promoting a "stable" config, re-verify the live canonical tab before
-  emitting recovery success.
-- Align Kernel captcha-solver wait with terminal outcomes / challenged-page
-  polling instead of three null-`isSolving` grace polls.
-- Do not weaken the benchmark timeout or pass criteria to greenwash the miss.
+Generalizable harness fixes (no timeout / evaluator relaxation):
+
+1. Live re-verify via `verify_live_page_cleared_challenge` after promote+restore
+   before emitting recovery success; false-stable promotions now fail with
+   `passed candidate probes but the live tab is still challenged`.
+2. Preloaded restore skips same-host re-navigation (WAF re-trigger) and uses the
+   45s probe navigation budget when a goto is required.
+3. CAPTCHA solver wait keeps polling while the live page looks challenged even
+   when Kernel `isSolving` is null.
+4. Backend `BrowserChallengeRecovery` logs every candidate
+   create/probe/promote with `configKey` / `proxyMode` / `stablePasses`, and
+   returns `config_key` on the promote payload.
+
+Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests.
+Exact-bench outcome still required before status=`fixed`.
 
 ## Human feedback
 
