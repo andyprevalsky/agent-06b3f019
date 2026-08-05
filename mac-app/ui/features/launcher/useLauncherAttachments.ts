@@ -118,7 +118,7 @@ function useFileDragHandlers(
       // transparent always-on-top window onto apps behind.
       e.preventDefault();
       e.stopPropagation();
-      if (e.dataTransfer != null) {
+      if (e.dataTransfer !== null && e.dataTransfer !== undefined) {
         e.dataTransfer.dropEffect = 'copy';
       }
       if (!looksLikeFileDrag(e.dataTransfer)) return;
@@ -133,7 +133,7 @@ function useFileDragHandlers(
       e.preventDefault();
       e.stopPropagation();
       const next = e.relatedTarget as Node | null;
-      if (next != null && e.currentTarget.contains(next)) return;
+      if (next !== null && next !== undefined && e.currentTarget.contains(next)) return;
       setIsDragOver(false);
       void setQuickQueryFileDrag(false);
     },

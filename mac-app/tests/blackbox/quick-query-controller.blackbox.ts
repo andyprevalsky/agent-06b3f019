@@ -9,10 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { makeBrowserWindowStub, stubElectron } from './electron-stubs';
-import {
-  QUICK_QUERY_BLUR_HIDE_DELAY_MS,
-  QuickQueryController,
-} from '../../main/app/quickQuery';
+import { QUICK_QUERY_BLUR_HIDE_DELAY_MS, QuickQueryController } from '../../main/app/quickQuery';
 
 stubElectron();
 
@@ -55,7 +52,7 @@ async function altSpaceToggle(): Promise<() => void> {
   const match = vi
     .mocked(electron.globalShortcut.register)
     .mock.calls.find((call) => call[0] === 'Alt+Space');
-  if (match?.[1] == null) {
+  if (match?.[1] === null || match?.[1] === undefined) {
     throw new Error('Alt+Space shortcut was not registered');
   }
   return match[1] as () => void;

@@ -17,14 +17,14 @@ const FILE_DRAG_TYPES = new Set([
 ]);
 
 export function looksLikeFileDrag(dataTransfer: DataTransfer | null | undefined): boolean {
-  if (dataTransfer == null) return false;
+  if (dataTransfer === null || dataTransfer === undefined) return false;
 
   const types = Array.from(dataTransfer.types ?? []);
   if (types.some((type) => FILE_DRAG_TYPES.has(type))) return true;
   if (types.some((type) => type.toLowerCase().includes('file'))) return true;
 
   const items = dataTransfer.items;
-  if (items != null) {
+  if (items !== null && items !== undefined) {
     for (let i = 0; i < items.length; i += 1) {
       if (items[i]?.kind === 'file') return true;
     }

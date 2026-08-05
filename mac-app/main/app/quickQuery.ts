@@ -1,13 +1,19 @@
-import { app, BrowserWindow, globalShortcut, ipcMain, screen } from 'electron';
+import { app, BrowserWindow, globalShortcut, ipcMain } from 'electron';
 import path from 'path';
 import { config } from '../base/config';
 import { getPackagedRendererPath } from './packagedPaths';
 import { normalizeQuickQueryPayload } from './quickQueryPayload';
-import type { QuickQueryResizePayload } from '../../shared/types/ipc';
-
-const LAUNCHER_WINDOW_WIDTH = 500;
-const LAUNCHER_WINDOW_HEIGHT = 100;
-const LAUNCHER_WINDOW_MAX_HEIGHT = 480;
+import { scheduleQuickQueryFocusAttempts } from './quickQueryFocus';
+import {
+  LAUNCHER_WINDOW_HEIGHT,
+  LAUNCHER_WINDOW_MAX_HEIGHT,
+  LAUNCHER_WINDOW_WIDTH,
+  applyQuickQueryWindowHeight,
+  getDevLauncherUrl,
+  parseFileDragActive,
+  positionQuickQueryWindow,
+  resizeQuickQueryWindow,
+} from './quickQueryGeometry';
 
 /** Delay blur→hide so Finder/screenshot file-drags can re-enter the window. */
 export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 500;
@@ -94,7 +100,7 @@ export class QuickQueryController {
     });
 
     ipcMain.handle('quick-query:resize', (_event, payload: unknown) => {
-      return this.resizeWindow(payload);
+      return resizeQuickQueryWindow(this.quickQueryWindow, payload);
     });
 
     ipcMain.handle('quick-query:file-drag', (_event, payload: unknown) => {
@@ -154,7 +160,7 @@ export class QuickQueryController {
   }
 
   private configureWindow(quickWindow: BrowserWindow): void {
-    this.applyWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
+    applyQuickQueryWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
     quickWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     quickWindow.setAlwaysOnTop(true, 'screen-saver');
     if (process.platform === 'darwin') {
@@ -162,7 +168,7 @@ export class QuickQueryController {
     }
 
     if (config.isDev) {
-      void quickWindow.loadURL(this.getDevLauncherUrl());
+      void quickWindow.loadURL(getDevLauncherUrl());
     } else {
       void quickWindow.loadFile(getPackagedRendererPath('launcher.html'));
     }
@@ -242,14 +248,14 @@ export class QuickQueryController {
     this.fileDragActive = false;
     this.blurEnabled = false;
     this.shownAt = Date.now();
-    this.applyWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
-    this.positionWindow(quickWindow);
+    applyQuickQueryWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
+    positionQuickQueryWindow(quickWindow);
     app.focus({ steal: true });
     quickWindow.show();
     quickWindow.focus();
     quickWindow.focusOnWebView();
     this.clearFocusTimeouts();
-    this.scheduleFocusAttempts(quickWindow);
+    scheduleQuickQueryFocusAttempts(quickWindow, this.focusTimeouts);
     this.emitToggle(true);
 
     setTimeout(() => {
@@ -294,104 +300,8 @@ export class QuickQueryController {
     }
   }
 
-  private positionWindow(quickWindow: BrowserWindow): void {
-    const cursorPoint = screen.getCursorScreenPoint();
-    const targetDisplay = screen.getDisplayNearestPoint(cursorPoint);
-    const [width] = quickWindow.getSize();
-    const workArea = targetDisplay.workArea ?? targetDisplay.bounds;
-    const x = Math.round(workArea.x + (workArea.width - width) / 2);
-    const y = Math.round(workArea.y + workArea.height * 0.8);
-    quickWindow.setPosition(x, y, false);
-  }
-
-  private scheduleFocusAttempts(quickWindow: BrowserWindow): void {
-    for (const delay of [10, 50, 100, 150, 300, 500, 1000]) {
-      const timeout = setTimeout(() => {
-        if (quickWindow.isDestroyed()) return;
-        app.focus({ steal: true });
-        quickWindow.moveTop();
-        quickWindow.focus();
-        quickWindow.focusOnWebView();
-        quickWindow.webContents.focus();
-        this.clickWindowCenter(quickWindow);
-        void quickWindow.webContents
-          .executeJavaScript(
-            `
-          const input = document.querySelector('textarea, input');
-          if (input) {
-            input.click();
-            input.focus();
-          }
-        `
-          )
-          .catch(() => undefined);
-      }, delay);
-      this.focusTimeouts.push(timeout);
-    }
-  }
-
-  private clickWindowCenter(quickWindow: BrowserWindow): void {
-    const bounds = quickWindow.getBounds();
-    const x = Math.round(bounds.width / 2);
-    const y = Math.round(bounds.height / 2);
-    quickWindow.webContents.sendInputEvent({
-      type: 'mouseDown',
-      x,
-      y,
-      button: 'left',
-      clickCount: 1,
-    });
-    quickWindow.webContents.sendInputEvent({
-      type: 'mouseUp',
-      x,
-      y,
-      button: 'left',
-      clickCount: 1,
-    });
-  }
-
   private clearFocusTimeouts(): void {
     this.focusTimeouts.forEach((timeout) => clearTimeout(timeout));
     this.focusTimeouts = [];
   }
-
-  private resizeWindow(payload: unknown): { success: boolean } {
-    const quickWindow = this.quickQueryWindow;
-    if (quickWindow === null || quickWindow.isDestroyed()) {
-      return { success: false };
-    }
-
-    const height =
-      payload !== null &&
-      typeof payload === 'object' &&
-      typeof (payload as QuickQueryResizePayload).height === 'number'
-        ? (payload as QuickQueryResizePayload).height
-        : LAUNCHER_WINDOW_HEIGHT;
-
-    this.applyWindowHeight(quickWindow, height);
-    return { success: true };
-  }
-
-  private applyWindowHeight(quickWindow: BrowserWindow, height: number): void {
-    const clamped = Math.max(
-      LAUNCHER_WINDOW_HEIGHT,
-      Math.min(LAUNCHER_WINDOW_MAX_HEIGHT, Math.round(height))
-    );
-    quickWindow.setMinimumSize(LAUNCHER_WINDOW_WIDTH, LAUNCHER_WINDOW_HEIGHT);
-    quickWindow.setMaximumSize(LAUNCHER_WINDOW_WIDTH, LAUNCHER_WINDOW_MAX_HEIGHT);
-    quickWindow.setContentSize(LAUNCHER_WINDOW_WIDTH, clamped);
-  }
-
-  private getDevLauncherUrl(): string {
-    const port = process.env.MAC_APP_PORT ?? '5174';
-    return `http://localhost:${port}/launcher.html`;
-  }
-}
-
-function parseFileDragActive(payload: unknown): boolean {
-  return (
-    payload !== null &&
-    typeof payload === 'object' &&
-    (payload as { active?: unknown }).active === true
-  );
 }
