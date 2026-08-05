@@ -93,11 +93,10 @@ export function getStripeClientForLivemode(livemode: boolean): Stripe {
   if (!livemode) {
     return stripe;
   }
-  const liveKey = (
+  const liveKey =
     process.env.STRIPE_SECRET_KEY_LIVE?.trim() ||
     process.env.ADMIN_HEALTH_STRIPE_SECRET_KEY?.trim() ||
-    ''
-  );
+    '';
   if (/^(?:sk|rk)_live_/.test(liveKey)) {
     return getStripeClientForSecretKey(liveKey);
   }

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { getUpgradeOptions } from '../../providers/credits';
 
 const previousNodeEnv = process.env.NODE_ENV;
-process.env.NODE_ENV = ('dev' + 'elopment') /* pragma: allowlist secret */;
+process.env.NODE_ENV = 'dev' + 'elopment'; /* pragma: allowlist secret */
 
 try {
   const freeOptions = getUpgradeOptions(null);

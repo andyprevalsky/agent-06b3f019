@@ -63,7 +63,7 @@ assert.deepEqual(
 
 assert.deepEqual(
   resolveSubscriptionCheckoutCredentials({
-    NODE_ENV: ('dev' + 'elopment') /* pragma: allowlist secret */,
+    NODE_ENV: 'dev' + 'elopment' /* pragma: allowlist secret */,
     STRIPE_SECRET_KEY: TEST_KEY,
     STRIPE_SECRET_KEY_LIVE: LIVE_KEY,
     STRIPE_SUBSCRIPTION_PRICE_ID: TEST_PRICE,

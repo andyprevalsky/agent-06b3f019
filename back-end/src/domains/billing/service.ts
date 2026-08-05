@@ -4,7 +4,8 @@ import {
   IS_PRODUCTION,
   RETURN_URL_PRODUCTION,
   RETURN_URL_DEVELOPMENT,
-  STRIPE_SUBSCRIPTION_PRICE_ID,
+  STRIPE_SECRET_KEY,
+  getSubscriptionCheckoutEnv,
 } from './config';
 import { resolveSubscriptionCheckoutCredentials } from './checkoutMode';
 
@@ -37,7 +38,7 @@ export async function createPortalSession(userId: string): Promise<{ url: string
 function checkoutStripeClient(secretKey: string): Stripe {
   // Reuse the billing singleton when the resolved key is the same, so tests and
   // non-prod paths stay on one client. Live production checkouts get a live client.
-  if (secretKey === (process.env.STRIPE_SECRET_KEY ?? '')) {
+  if (secretKey === STRIPE_SECRET_KEY) {
     return stripe;
   }
   return getStripeClientForSecretKey(secretKey);
@@ -45,15 +46,8 @@ function checkoutStripeClient(secretKey: string): Stripe {
 
 export async function createSubscriptionCheckoutSession(userId: string): Promise<{ url: string }> {
   const returnUrl = IS_PRODUCTION ? RETURN_URL_PRODUCTION : RETURN_URL_DEVELOPMENT;
-
-  const credentials = resolveSubscriptionCheckoutCredentials({
-    NODE_ENV: process.env.NODE_ENV,
-    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
-    STRIPE_SECRET_KEY_LIVE: process.env.STRIPE_SECRET_KEY_LIVE,
-    ADMIN_HEALTH_STRIPE_SECRET_KEY: process.env.ADMIN_HEALTH_STRIPE_SECRET_KEY,
-    STRIPE_SUBSCRIPTION_PRICE_ID: STRIPE_SUBSCRIPTION_PRICE_ID,
-    STRIPE_SUBSCRIPTION_PRICE_ID_LIVE: process.env.STRIPE_SUBSCRIPTION_PRICE_ID_LIVE,
-  });
+  // Credentials are resolved at call time so NODE_ENV flips in tests still mint live.
+  const credentials = resolveSubscriptionCheckoutCredentials(getSubscriptionCheckoutEnv());
 
   if (credentials.priceId === '') {
     throw new Error('STRIPE_SUBSCRIPTION_PRICE_ID is required');

@@ -11,16 +11,13 @@ import { config } from 'dotenv';
 config();
 
 async function main(): Promise<void> {
-  const liveKey = (
+  const liveKey =
     process.env.STRIPE_SECRET_KEY_LIVE?.trim() ||
     process.env.ADMIN_HEALTH_STRIPE_SECRET_KEY?.trim() ||
-    ''
-  );
+    '';
 
   if (!/^(?:sk|rk)_live_/.test(liveKey)) {
-    process.stdout.write(
-      'subscription-checkout-live-mint skipped (no live Stripe key in env)\n'
-    );
+    process.stdout.write('subscription-checkout-live-mint skipped (no live Stripe key in env)\n');
     return;
   }
 
@@ -29,9 +26,7 @@ async function main(): Promise<void> {
 
   try {
     const { createSubscriptionCheckoutSession } = await import('../../domains/billing/service');
-    const result = await createSubscriptionCheckoutSession(
-      `checkout-mode-repro-${Date.now()}`
-    );
+    const result = await createSubscriptionCheckoutSession(`checkout-mode-repro-${Date.now()}`);
     assert.match(
       result.url,
       /^https:\/\/checkout\.stripe\.com\//,
@@ -58,6 +53,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error);
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  process.stderr.write(`${message}\n`);
   process.exit(1);
 });
