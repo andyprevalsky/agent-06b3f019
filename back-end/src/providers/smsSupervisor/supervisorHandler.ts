@@ -26,6 +26,7 @@ import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
 import {
   absorbPendingOpKind,
   emptySmsRunSideEffectEvidence,
+  purchaseIntentCompletionError,
   resolveSendUserMessage,
 } from './messageGrounding';
 import { callSupervisorLlm, type SupervisorResponse } from './supervisorLlm';
@@ -434,15 +435,20 @@ export async function handleSmsSupervisorMessage(config: {
         completionAccepted = true;
         break;
       }
-      if (sentMessages.length === 0 || failedToolResults.length > 0) {
+      const purchaseCompletionError = purchaseIntentCompletionError(
+        inboundText,
+        sideEffectEvidence
+      );
+      if (sentMessages.length === 0 || failedToolResults.length > 0 || purchaseCompletionError) {
         const completionFailure: ToolResult = {
           tool: 'attempt_completion',
           success: false,
           result: '',
           error:
-            sentMessages.length === 0
+            purchaseCompletionError ??
+            (sentMessages.length === 0
               ? 'Rejected: this run has not successfully called send_user_message'
-              : 'Rejected: at least one tool failed',
+              : 'Rejected: at least one tool failed'),
         };
         toolResults.push(completionFailure);
         log.warn('[SmsSupervisor] attempt_completion rejected', {

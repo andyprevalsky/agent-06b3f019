@@ -11,6 +11,8 @@ import assert from 'node:assert/strict';
 import {
   absorbPendingOpKind,
   emptySmsRunSideEffectEvidence,
+  isClearPurchaseIntent,
+  purchaseIntentCompletionError,
   ungroundedSendUserMessageError,
 } from '../../providers/smsSupervisor/messageGrounding';
 
@@ -84,6 +86,27 @@ function testSignInBlockerAllowedWithoutTools(): void {
   assert.equal(error, null);
 }
 
+function testClearPurchaseIntentDetection(): void {
+  assert.equal(isClearPurchaseIntent('get me the best lip balm from amazon'), true);
+  assert.equal(isClearPurchaseIntent('buy me oat milk on amazon'), true);
+  assert.equal(isClearPurchaseIntent('what is the best lip balm on amazon?'), false);
+  assert.equal(isClearPurchaseIntent('get me a coffee tomorrow morning'), false);
+}
+
+function testPurchaseCompletionRequiresStartNewAgent(): void {
+  const evidence = emptySmsRunSideEffectEvidence();
+  const error = purchaseIntentCompletionError(
+    'get me the best lip balm from amazon',
+    evidence
+  );
+  assert.ok(error, 'attempt_completion must reject purchase intent without start_new_agent');
+  const afterSpawn = purchaseIntentCompletionError(
+    'get me the best lip balm from amazon',
+    absorbPendingOpKind(evidence, 'start_new_agent')
+  );
+  assert.equal(afterSpawn, null);
+}
+
 const cases: Array<{ name: string; fn: () => void }> = [
   {
     name: 'incident SMS rejected without side effects',
@@ -108,6 +131,14 @@ const cases: Array<{ name: string; fn: () => void }> = [
   {
     name: 'sign-in blocker text allowed without tools',
     fn: testSignInBlockerAllowedWithoutTools,
+  },
+  {
+    name: 'clear purchase intent detection',
+    fn: testClearPurchaseIntentDetection,
+  },
+  {
+    name: 'purchase completion requires start_new_agent',
+    fn: testPurchaseCompletionRequiresStartNewAgent,
   },
 ];
 

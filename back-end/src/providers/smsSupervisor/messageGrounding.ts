@@ -97,3 +97,45 @@ export function ungroundedSendUserMessageError(
 
   return null;
 }
+
+/** Acquisition verbs that mean "do the buy", not "tell me what to buy". */
+const PURCHASE_ACTION =
+  /\b(?:get\s+me|buy(?:\s+me)?|purchase(?:\s+me)?|order(?:\s+me)?|grab\s+me)\b/i;
+
+/** Merchant / commerce venue signals paired with a purchase action. */
+const PURCHASE_VENUE =
+  /\b(?:amazon|from\s+amazon|on\s+amazon|walmart|target|instacart|doordash|uber\s*eats|blue\s*bottle)\b/i;
+
+/**
+ * True when the inbound SMS is a clear "obtain this for me" request (bias-to-
+ * action purchase), not a pure research question.
+ */
+export function isClearPurchaseIntent(userText: string): boolean {
+  const text = userText.trim();
+  if (text === '') {
+    return false;
+  }
+  return PURCHASE_ACTION.test(text) && PURCHASE_VENUE.test(text);
+}
+
+/**
+ * Reject attempt_completion when the user asked for a purchase/get-me and this
+ * run never called start_new_agent. Prevents finishing after a web_search
+ * recommendation alone (observed with cerebras glm on "get me … from amazon").
+ */
+export function purchaseIntentCompletionError(
+  userText: string,
+  evidence: SmsRunSideEffectEvidence
+): string | null {
+  if (!isClearPurchaseIntent(userText)) {
+    return null;
+  }
+  if (evidence.startedAgent) {
+    return null;
+  }
+  return (
+    'Rejected: the user asked you to obtain/purchase this, not just recommend. ' +
+    'Call start_new_agent with a purchase goal before attempt_completion. A ' +
+    'web_search recommendation alone does not complete a purchase request.'
+  );
+}
