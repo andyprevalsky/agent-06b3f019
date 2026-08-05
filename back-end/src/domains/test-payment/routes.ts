@@ -1,5 +1,6 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
+import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
 import {
@@ -16,6 +17,24 @@ import {
 } from './service';
 
 const router = Router();
+const log = createLogger('TestPayment');
+
+/**
+ * Report an unexpected route failure before collapsing it to a generic 500.
+ *
+ * These handlers used to discard every non-`TestPaymentError`, which made the
+ * resulting 500 undiagnosable by construction: a benchmark could fail with
+ * "Failed to abandon test payment lifecycle" and leave nothing in the backend
+ * log to explain it. Recorded occurrences on 2026-07-11 and 2026-07-14 were
+ * never root-caused for exactly this reason.
+ */
+function logUnexpectedRouteFailure(operation: string, error: unknown, agentId?: string): void {
+  log.error(`${operation} failed`, {
+    agentId,
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined,
+  });
+}
 
 /**
  * Caller authorization scope for the benchmark lifecycle routes.
@@ -167,6 +186,7 @@ router.post(
         res.status(error.statusCode).json({ error: error.message });
         return;
       }
+      logUnexpectedRouteFailure('configure benchmark AgentCard setup', error);
       res.status(500).json({ error: 'Failed to configure benchmark AgentCard setup' });
     }
   })
@@ -177,9 +197,10 @@ router.post(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    // Declared outside the try so the failure log can name the agent.
+    const body = req.body as Record<string, unknown>;
+    const agentId = typeof body.agentId === 'string' ? body.agentId : '';
     try {
-      const body = req.body as Record<string, unknown>;
-      const agentId = typeof body.agentId === 'string' ? body.agentId : '';
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
       const result = await abandonTestPayment(agentId);
       res.json(result);
@@ -188,6 +209,7 @@ router.post(
         res.status(error.statusCode).json({ error: error.message });
         return;
       }
+      logUnexpectedRouteFailure('abandon test payment lifecycle', error, agentId);
       res.status(500).json({ error: 'Failed to abandon test payment lifecycle' });
     }
   })
@@ -218,6 +240,7 @@ router.get(
         res.status(error.statusCode).json({ error: error.message });
         return;
       }
+      logUnexpectedRouteFailure('read test payment lifecycle', error);
       res.status(500).json({ error: 'Failed to read test payment lifecycle' });
     }
   })
@@ -235,6 +258,7 @@ router.post(
         res.status(error.statusCode).json({ error: error.message });
         return;
       }
+      logUnexpectedRouteFailure('confirm test payment', error);
       res.status(500).json({ error: 'Failed to confirm test payment' });
     }
   })

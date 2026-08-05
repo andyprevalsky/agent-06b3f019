@@ -5,10 +5,24 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TMP_ROOT="$(mktemp -d)"
 PIDS=()
 
+# Each fixture is spawned as `( cd ...; python3 ... ) &`, so $! is the SUBSHELL,
+# not the python process it forks. Signalling only the recorded PID orphaned every
+# surviving fixture to init, where it kept this test's inherited stdout open: a
+# `bash this-test.sh | tail` pipeline never saw EOF and hung indefinitely, and the
+# stubs accumulated across runs (observed: pairs still alive 13h later). Always
+# reap descendants before the recorded PID.
+kill_pid_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_pid_tree "$child"
+  done
+  kill "$pid" 2>/dev/null || true
+}
+
 cleanup() {
   local pid
   for pid in "${PIDS[@]:-}"; do
-    run_kill_tree "$pid"
+    kill_pid_tree "$pid"
   done
   for pid in "${PIDS[@]:-}"; do
     wait "$pid" 2>/dev/null || true
@@ -114,9 +128,7 @@ stale_backend="http://localhost:55010"
 
 (
   cd "$workspace/agents"
-  # Keep fixtures alive well beyond the worst-case process-table scan under the
-  # fully parallel deploy gate. Cleanup below still terminates them immediately.
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(300)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 stale_pid="$!"
 PIDS+=("$stale_pid")
@@ -124,7 +136,7 @@ wait_for_process "$stale_pid"
 
 (
   cd "$workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import time; time.sleep(300)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$expected_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 current_pid="$!"
 PIDS+=("$current_pid")
@@ -132,7 +144,7 @@ wait_for_process "$current_pid"
 
 (
   cd "$other_workspace/agents"
-  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import time; time.sleep(300)' worker.py
+  TEMPORAL_TASK_QUEUE="$queue" BACKEND_API_URL="$stale_backend" python3 -c 'import signal; signal.pause()' worker.py
 ) &
 other_pid="$!"
 PIDS+=("$other_pid")

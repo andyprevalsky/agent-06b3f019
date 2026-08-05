@@ -9,6 +9,8 @@
 
 import { checkSync } from 'recheck';
 
+import { isClearlyAtMostQuadraticPattern } from './regexSafetyProof';
+
 // Hard cap so a giant pattern can't itself be a DoS.
 const MAX_PATTERN_LENGTH = 1000;
 // Quadratic (degree 2) regex is harmless over a single bounded DB row; degree ≥ 3
@@ -82,7 +84,7 @@ export function checkPatternSafety(
   if (
     typeof control !== 'function' &&
     typeof flags === 'string' &&
-    isClearlyLinearPattern(source)
+    (isClearlyLinearPattern(source) || isClearlyAtMostQuadraticPattern(source, flags))
   ) {
     return { ok: true };
   }

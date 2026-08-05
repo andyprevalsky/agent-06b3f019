@@ -7167,7 +7167,13 @@ def test_local_start_services_reaps_only_its_real_process_group():
                     (
                         "import pathlib, subprocess, sys, time; "
                         "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-                        "pathlib.Path(sys.argv[1]).write_text(str(child.pid)); "
+                        "pid_path = pathlib.Path(sys.argv[1]); "
+                        "pending_path = pid_path.with_suffix('.tmp'); "
+                        "pid_file = pending_path.open('w'); "
+                        "time.sleep(0.2); "
+                        "pid_file.write(str(child.pid)); "
+                        "pid_file.close(); "
+                        "pending_path.replace(pid_path); "
                         "time.sleep(60)"
                     ),
                     str(child_pid_path),

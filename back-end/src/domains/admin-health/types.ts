@@ -9,6 +9,40 @@ export interface AdminHealthPeriod {
   end: string;
 }
 
+export interface AdminHealthTaskCostPerTask {
+  /** Non-LLM service spend only; compute-token LLM inference is treated as free. */
+  zeroLlmCostDollars: number | null;
+  /** Service spend plus LLM tokens repriced at current cache-aware public API rates. */
+  apiRateDollars: number | null;
+  /** Service spend plus the API-equivalent LLM portion divided by twenty. */
+  computeTokenRateDollars: number | null;
+  /** Real root agent runs included in this period's cost average. */
+  sampleSize: number;
+  /**
+   * LLM tokens from models with no known API rate and no recorded cost. They
+   * contribute $0 to apiRateDollars, so a non-zero value means the repriced
+   * figures understate real usage.
+   */
+  unpricedUsageTokens: number;
+}
+
+export interface RootAgentRunRecord {
+  taskId: string;
+  createdAt: Date;
+}
+
+export interface RootAgentRunUsageRecord {
+  taskId: string;
+  kind: string;
+  model: string;
+  fromFastCache: boolean;
+  tokensIn: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  tokensOut: number;
+  costCents: number;
+}
+
 export interface AdminHealthSeriesPoint extends AdminHealthPeriod {
   revenueCents: number | null;
   waitlistSignups: number;
@@ -18,6 +52,7 @@ export interface AdminHealthSeriesPoint extends AdminHealthPeriod {
   tasksIssuedPerUser: number;
   outputTokensPerTask: number;
   taskCompletionRate: number;
+  costPerTask: AdminHealthTaskCostPerTask;
   andyLinearPoints: number | null;
   githubCommits: number | null;
   tamaraLinearPoints: number | null;
@@ -187,6 +222,7 @@ export interface AdminHealthResponse {
     tasksIssuedPerUser: number;
     outputTokensPerTask: number;
     taskCompletionRate: number;
+    costPerTask: AdminHealthTaskCostPerTask;
   };
   series: AdminHealthSeriesPoint[];
   retentionCohorts: AdminHealthRetentionCohort[];

@@ -37,3 +37,21 @@ export async function lockAgentWorkflowGeneration(
     SELECT 1 AS locked FROM acquired
   `;
 }
+
+/**
+ * Let independent writes in one generation proceed together while still
+ * blocking behind an exclusive deployment cutover.
+ */
+export async function lockAgentWorkflowGenerationShared(
+  tx: Prisma.TransactionClient,
+  agentId: string
+): Promise<void> {
+  await tx.$queryRaw`
+    WITH acquired AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock_shared(
+        hashtextextended(${`${agentId}:workflow-generation`}, ${WORKFLOW_GENERATION_LOCK_SEED})
+      )
+    )
+    SELECT 1 AS locked FROM acquired
+  `;
+}

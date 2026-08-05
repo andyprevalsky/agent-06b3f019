@@ -26,7 +26,7 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-terra',
-    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k2.7-code'],
+    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k3'],
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',

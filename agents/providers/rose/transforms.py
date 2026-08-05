@@ -989,5 +989,49 @@ def transform_messages_for_openai(
                 first_system_seen = True
             else:
                 _strip_system_prompt_boundary(m)
+        elif m.get("role") == "assistant":
+            _normalize_openai_tool_calls(m)
 
     return out
+
+
+def _normalize_openai_tool_calls(message: Dict[str, Any]) -> None:
+    """Stamp OpenAI's ``type: "function"`` discriminator on assistant tool_calls.
+
+    Google (via OpenRouter) rejects an assistant turn whose tool_calls lack it
+    with 400 "Tool-call assistant message produced no valid function calls but
+    is followed by tool result messages. The conversation transcript is
+    malformed.", which silently demotes the pool to its weakest leg. Producers
+    currently hand-write the field; normalizing here makes the invariant
+    enforced instead of conventional. Mirrors normalizeOpenAiToolCalls in
+    back-end/src/providers/rose/transforms.ts.
+    """
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list) or not tool_calls:
+        return
+
+    normalized: List[Dict[str, Any]] = []
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            normalized.append(tc)
+            continue
+        function = tc.get("function") if isinstance(tc.get("function"), dict) else {}
+        name = function.get("name") or tc.get("name")
+        if not isinstance(name, str) or not name:
+            normalized.append(tc)
+            continue
+        arguments = function.get("arguments", tc.get("arguments"))
+        if not isinstance(arguments, str):
+            arguments = json.dumps(arguments if arguments is not None else {})
+        # The Responses dialect names this `call_id`; OpenAI's chat dialect
+        # requires `id` to match a tool result back to its call.
+        call_id = tc.get("id") or tc.get("call_id")
+        normalized.append(
+            {
+                **tc,
+                **({} if call_id is None else {"id": call_id}),
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        )
+    message["tool_calls"] = normalized
