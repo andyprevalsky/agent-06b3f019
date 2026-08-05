@@ -325,8 +325,10 @@ async def recover_from_challenge(
 ) -> ChallengeRecoveryResult:
     """Run solver -> cookie isolation -> parallel provider/config recovery.
 
-    The config search always receives the full auth-bearing state unless the only
-    removals are from the explicit anti-bot-cookie allowlist. Auth-like and opaque
+    Config search preserves auth-like and opaque cookies, but always strips known
+    anti-bot clearance cookies (`cf_clearance`, etc.). Those tokens are bound to
+    the blocked exit/fingerprint; transplanting them onto a fresh Kernel/Steel
+    session poisons candidate probes (Eventim Cloudflare). Auth-like and opaque
     cookies are never removed from the canonical context or named in progress.
     """
     original_digest = _state_digest(source_state)
@@ -352,7 +354,18 @@ async def recover_from_challenge(
             "browser_config_search",
             "Searching permission-compatible Kernel and Steel browser/IP configurations in parallel.",
         )
-        config_state = storage_without_cookies(source_state, proven_safe_removals)
+        # Never transplant IP-bound clearance cookies onto a new provider/proxy.
+        # Keep auth + opaque cookies; strip every known challenge cookie even when
+        # cookie-stage probes did not prove a live commit.
+        challenge_keys = tuple(
+            key
+            for key, cookie in cookies_by_key.items()
+            if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
+        )
+        config_state = storage_without_cookies(
+            source_state,
+            tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys))),
+        )
         config_result = await search_configs(config_state)
         return ChallengeRecoveryResult(
             "config_selected",

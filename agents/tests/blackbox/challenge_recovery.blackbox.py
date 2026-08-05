@@ -130,7 +130,9 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
 
     assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
     assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert config_inputs == [before], "auth, cookies, and origin storage must all survive"
+    assert config_inputs == [
+        _state(_cookie("authState"), _cookie("opaque_state"))
+    ], "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
     assert source == before
     assert result.recovery == "config_selected"
     assert result.removed_cookie_keys == ()
@@ -212,6 +214,28 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     assert config_inputs == [source]
     stages = [event[1] for event in events]
     assert stages == ["captcha_solver", "all_target_cookies", "browser_config_search"]
+
+
+async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail():
+    """Fresh provider/IP probes must not inherit blocked-exit clearance cookies."""
+    source = _state(
+        _cookie("cf_clearance"),
+        _cookie("__cf_bm"),
+        _cookie("authState"),
+        _cookie("cart"),
+    )
+
+    async def probe(_candidate):
+        return False
+
+    result, events, committed, config_inputs = await _run(source, probe)
+    assert result.recovery == "config_selected"
+    assert committed == []
+    assert result.removed_cookie_keys == ()
+    assert config_inputs == [_state(_cookie("authState"), _cookie("cart"))]
+    assert "cf_clearance" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert "__cf_bm" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert [event[1] for event in events][-1] == "browser_config_search"
 
 
 async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
@@ -428,6 +452,10 @@ async def run_all_tests():
     await result.record_async("auth_poison_preserved", test_auth_smelling_poison_is_preserved_and_silently_escalated)
     await result.record_async(
         "cookie_independent_config_search", test_cookie_independent_challenge_goes_directly_to_config_search
+    )
+    await result.record_async(
+        "config_search_strips_challenge_cookies",
+        test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail,
     )
     await result.record_async(
         "live_cookie_fix_stability",
