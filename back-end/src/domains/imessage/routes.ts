@@ -1,6 +1,6 @@
 import { type Response, Router } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticate, rejectImpersonatedUpload } from '../../providers/auth';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { createLogger } from '../../providers/logger';
 import {
@@ -83,6 +83,7 @@ router.post(
 router.get(
   '/queue/pop',
   auth,
+  rejectImpersonatedUpload,
   asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     if (req.isInternal === true && req.get('X-CloudBench-iMessage-Relay') !== 'v1') {
       res.status(403).json({ error: 'Internal iMessage relay scope required' });
@@ -186,6 +187,7 @@ router.get(
 router.post(
   '/queue/:id/result',
   auth,
+  rejectImpersonatedUpload,
   asyncHandler<HybridAuthRequest>(async (req, res: Response) => {
     if (req.isInternal === true && req.get('X-CloudBench-iMessage-Relay') !== 'v1') {
       res.status(403).json({ error: 'Internal iMessage relay scope required' });

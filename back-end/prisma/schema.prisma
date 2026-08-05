@@ -77,6 +77,7 @@ model Agent {
   @@index([temporalCleanupPending, id])
   @@index([parentAgentId])
   @@index([parentAgentId, createdAt])
+  @@index([parentAgentId, worldModelMode, createdAt])
   @@index([busId])
 }
 
@@ -979,11 +980,16 @@ model GoalHistory {
   agentDeletedAt  DateTime?
   archivedAt      DateTime    @default(now())
   isBenchmark     Boolean     @default(false)
+  worldModelMode  String      @default("real")
+  wasAgentRun     Boolean     @default(false)
+  costTelemetry   Json?
+  costCapturedAt  DateTime?
 
   @@index([userId])
   @@index([archivedAt])
   @@index([originalAgentId])
   @@index([depth, agentCreatedAt])
+  @@index([wasAgentRun, worldModelMode, agentCreatedAt])
 }
 
 model ImessageQueue {

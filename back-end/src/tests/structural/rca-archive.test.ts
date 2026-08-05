@@ -23,8 +23,9 @@
  * What this test does NOT catch: whether a case's diagnosis is correct, or
  * whether an agent actually ran the search. Only that the mechanism is intact.
  */
-import { execFileSync, spawnSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 
 const REPO_ROOT = path.resolve(__dirname, '../../../..');
@@ -110,24 +111,38 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. `new` must dispatch to the scaffold implementation. Point it at a known
-// existing case so the check is side-effect free while still distinguishing a
-// working dispatch ("already exists") from the old silent exit-code-2 bug.
+// 4. The documented `new` command must actually dispatch. Exercise a copied
+//    validator in a temporary archive so this structural test never mutates the
+//    checked-in cases.
 if (fs.existsSync(VALIDATOR)) {
-  const result = spawnSync(
-    'python3',
-    [VALIDATOR, 'new', 'network-capture-bodies-written-to-dev-only-file'],
-    {
-      cwd: REPO_ROOT,
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  const probeValidator = path.join(probeRoot, 'scripts/rca_archive.py');
+  const probeCase = path.join(probeRoot, 'docs/rca/cases/2099-01-02-dispatch-probe.md');
+
+  try {
+    fs.mkdirSync(path.dirname(probeValidator), { recursive: true });
+    fs.mkdirSync(path.dirname(probeCase), { recursive: true });
+    fs.copyFileSync(VALIDATOR, probeValidator);
+
+    const result = execFileSync('python3', [probeValidator, 'new', 'dispatch-probe'], {
+      cwd: probeRoot,
       encoding: 'utf8',
-      env: { ...process.env, RCA_ARCHIVE_DATE: '2026-07-28' },
+      env: { ...process.env, RCA_ARCHIVE_DATE: '2099-01-02' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (!fs.existsSync(probeCase) || !result.includes('2099-01-02-dispatch-probe.md')) {
+      failures.push(
+        `rca_archive.py new did not scaffold the requested case.\n` +
+          `    Command output:\n${result.trim()}`
+      );
     }
-  );
-  if (result.status !== 1 || !result.stderr.includes('already exists')) {
+  } catch (error) {
+    const err = error as { stdout?: string; stderr?: string };
     failures.push(
-      `rca_archive.py new did not reach the scaffold implementation.\n` +
-        `    status=${String(result.status)} stderr=${result.stderr.trim()}`
+      `rca_archive.py new failed:\n${(err.stderr ?? '').trim()}\n${(err.stdout ?? '').trim()}`
     );
+  } finally {
+    fs.rmSync(probeRoot, { recursive: true, force: true });
   }
 }
 

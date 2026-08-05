@@ -327,16 +327,17 @@ def run_fake_driver(mdir):
                 break
             time.sleep(0.1)
     # Prove that capacity counts alone cannot substitute for the autoscaler's
-    # causal terminal marker. Finish only after worker-ready.ids is populated;
-    # the autoscaler is then in its normal poll sleep when the child exits.
+    # causal terminal marker. Finish only after the fake-only hold proves the
+    # autoscaler has observed ready capacity but cannot yet observe child
+    # completion. This is an owned barrier, not a scheduler-window assumption.
     if exit_code == 0 and os.path.exists(
         os.path.join(FAKE_DIR, "worker-ready-before-child-no-terminal")
     ):
         controller_ws = os.environ["CLOUDBENCH_FAKE_CONTROLLER_WS"]
         deadline = time.time() + 30
-        ready = False
+        held = False
         while time.time() < deadline:
-            ready_files = glob.glob(
+            hold_files = glob.glob(
                 os.path.join(
                     controller_ws,
                     ".context",
@@ -344,15 +345,15 @@ def run_fake_driver(mdir):
                     "runs",
                     "*",
                     bench,
-                    "worker-ready.ids",
+                    "autoscaler.test-held-after-ready",
                 )
             )
-            ready = any(os.path.getsize(path) > 0 for path in ready_files)
-            if ready:
+            held = any(os.path.exists(path) for path in hold_files)
+            if held:
                 break
             time.sleep(0.1)
-        if not ready:
-            log("FATAL: worker capacity never became ready before child completion")
+        if not held:
+            log("FATAL: autoscaler never reached the ready-capacity hold boundary")
             exit_code = 1
     if exit_code == 0:
         context = os.path.join(mdir, "data", "repo", ".context", "cloudbench")
@@ -903,6 +904,7 @@ run_controller() {  # run_controller <worktree> <conductor_port> <log> <fleet-ar
         CLOUDBENCH_FAKE_FAIL_METRICS_PROXY="${CLOUDBENCH_FAKE_FAIL_METRICS_PROXY:-0}" \
         CLOUDBENCH_FAKE_INVALID_METRICS="${CLOUDBENCH_FAKE_INVALID_METRICS:-0}" \
         CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM="${CLOUDBENCH_TEST_IGNORE_CONTROLLER_TERM:-0}" \
+        CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY="${CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY:-0}" \
         CLOUDBENCH_DETACHED_RECOVERY_SECONDS="${CLOUDBENCH_DETACHED_RECOVERY_SECONDS:-120}" \
         CLOUDBENCH_CAPACITY_RESERVATION_ROOT="$TMP_ROOT/capacity-reservations" \
         CLOUDBENCH_CLONE_LOOKUP_SECONDS="${CLOUDBENCH_CLONE_LOOKUP_SECONDS:-20}" \
@@ -1849,6 +1851,7 @@ reset_fake_state
 : > "$FAKE_DIR/worker-ready-before-child-no-terminal"
 missing_terminal_status=0
 CLOUDBENCH_TEST_BARRIER_MIN=1 CLOUDBENCH_AUTOSCALER_FINALIZATION_WAIT_SECONDS=0 \
+    CLOUDBENCH_TEST_HOLD_AUTOSCALER_AFTER_READY=1 \
     run_controller "$WS_A" "$CONDUCTOR_PORT_A" "$TMP_ROOT/controller-autoscaler-missing-terminal.log" \
     autoscaler-missing-terminal --timeout 240 || missing_terminal_status=$?
 [ "$missing_terminal_status" -ne 0 ] ||
