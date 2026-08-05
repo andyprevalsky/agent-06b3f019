@@ -26,8 +26,11 @@ export interface CompletionMessage {
   tool_calls?: Array<{
     id?: string;
     call_id?: string;
-    /** OpenAI's discriminator. Strict validators (Google via OpenRouter) reject
-     *  an assistant tool_call without it and fail the entire transcript. */
+    /**
+     * OpenAI's discriminator. Cerebras and strict OpenRouter validators (e.g.
+     * Google) reject assistant tool_calls that omit it; Anthropic tolerated
+     * absence, so the bug only surfaces off the Anthropic path.
+     */
     type?: 'function';
     name?: string;
     arguments?: unknown;

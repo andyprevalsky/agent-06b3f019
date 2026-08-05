@@ -1894,6 +1894,10 @@ async def test_build_llm_messages_skips_empty_file_output_assistant():
     # Both tool messages should immediately follow (no empty assistant in between).
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert len(tool_msgs) == 2, f"Expected 2 tool messages, got {len(tool_msgs)}"
+    assert {m["tool_call_id"]: m.get("name") for m in tool_msgs} == {
+        tc_a: "spawn_agent",
+        tc_b: "spawn_agent",
+    }
 
     # Verify NO empty assistant message ended up in the final list — file-output
     # rows should be filtered out entirely.
@@ -2109,6 +2113,7 @@ def _anthropic_sse_body(
 
 async def test_call_llm_structured_streaming_happy_path():
     """Structured streaming parses accumulated content into a Pydantic response."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2167,7 +2172,7 @@ async def test_call_llm_structured_streaming_happy_path():
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 3
     # Waterfall path uses the first model in rose-1-lite's fallback list.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["pool_name"] == "rose-1-lite"
     assert usage["cancelled"] is False
     assert detected == []
@@ -2225,6 +2230,7 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
 
 async def test_call_llm_structured_streaming_model_detected_callback():
     """on_model_detected fires with the actual_model from the first chunk."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2267,11 +2273,12 @@ async def test_call_llm_structured_streaming_model_detected_callback():
     )
 
     # No claude_token → routes through waterfall → first model from rose-1-lite.
-    assert seen_models == ["google/gemini-3.5-flash"]
+    assert seen_models == [get_pool("rose-1-lite").waterfall[0]]
 
 
 async def test_call_llm_verifier_streaming_parses_score():
     """_call_llm_verifier parses JSON score from SSE stream."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import _call_llm_verifier
@@ -2301,7 +2308,7 @@ async def test_call_llm_verifier_streaming_parses_score():
     assert result["reasoning"] == "looks good"
     assert usage["prompt_tokens"] == 100
     # Waterfall path → first model from rose-1-lite.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["pool_name"] == "rose-1-lite"
 
 
@@ -5797,6 +5804,7 @@ async def test_call_llm_structured_streaming_attention_stream_without_question_f
 
 async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
     """Verifier surfaces partial JSON parse when stream terminates early with accumulated content."""
+    from providers.rose.pools import get_pool
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import _call_llm_verifier
@@ -5838,7 +5846,7 @@ async def test_call_llm_verifier_stream_interrupted_still_parses_partial():
         )
     assert parsed["score"] == 0.9
     # Waterfall path → first model from rose-1-lite pool.
-    assert usage["actual_model"] == "google/gemini-3.5-flash"
+    assert usage["actual_model"] == get_pool("rose-1-lite").waterfall[0]
     assert usage["cache_read_input_tokens"] == 2
     assert usage["cache_creation_input_tokens"] == 1
 

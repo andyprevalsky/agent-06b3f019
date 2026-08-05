@@ -970,11 +970,20 @@ The four payment tasks stay sequential inside this lane because they mutate one
 payment fixture; top-level parallelism comes from running the lane alongside its
 Group 4 siblings.
 
+This lane deliberately does NOT pin a compute lane. It previously set
+`ROSE_EXCLUDE_ANTHROPIC_FAMILY=1` + `SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt`, which
+forced every payment task onto GPT. Nothing in the payment path needs GPT, and
+that pin coupled the gate to two unrelated failure modes: it required a
+machine-local `~/.codex/auth.json` (so the gate was unrunnable on any machine
+without `codex login`), and it made the gate fail outright whenever the
+pay-as-you-go OpenAI key was out of credits — even with a perfectly healthy
+claudeAuth subscription token available. Let normal pool selection choose the
+compute lane so the gate tests the payment lifecycle rather than one provider's
+billing state.
+
 ```bash
 cd "$(git rev-parse --show-toplevel)"
 CONDUCTOR_WORKSPACE_NAME="$CONDUCTOR_WORKSPACE_NAME" \
-  ROSE_EXCLUDE_ANTHROPIC_FAMILY=1 \
-  SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt \
   BENCHMARK_SKIP_WMH_BUILD=1 \
   bash scripts/run-deploy-stage agentcard-lifecycle -- \
   bash scripts/run-bench --local agent-payment-test-shop agent-payment-setup-resume agent-payment-idempotent-abandonment agent-payment-abandonment --bootstrap --max-concurrency 1 --no-dashboard

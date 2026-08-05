@@ -4743,6 +4743,11 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
     return True
 
 
+def _local_codex_auth_path() -> Path:
+    """Where this machine's Codex/ChatGPT auth envelope lives, if it has one."""
+    return Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+
+
 def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
 
@@ -4754,7 +4759,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """
     if sys.platform != "darwin":
         return False
-    auth_path = Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+    auth_path = _local_codex_auth_path()
     if not auth_path.is_file():
         print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
         return False
@@ -4965,7 +4970,19 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
-        if not database_url or not _refresh_local_gpt_token_from_codex_auth(database_url):
+        if not database_url:
+            raise RuntimeError("Benchmark run could not resolve the isolated benchmark database")
+        # Overlaying this machine's Codex auth is an OPTIONAL freshness upgrade,
+        # not a precondition. `_sync_compute_tokens` above already required and
+        # obtained a gpt token from the verified shared workspace, so a machine
+        # with no Codex login at all is a local-setup absence, not evidence that
+        # the synced token is stale. Hard-failing there made an unrelated gate
+        # (e.g. the AgentCard payment lifecycle, which needs no Codex at all)
+        # unrunnable on any machine without `codex login`.
+        #
+        # A codex auth file that EXISTS but cannot be overlaid is still fatal:
+        # that is the stale/rotated-token signal this overlay was built to catch.
+        if _local_codex_auth_path().is_file() and not _refresh_local_gpt_token_from_codex_auth(database_url):
             raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked

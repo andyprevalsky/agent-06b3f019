@@ -10,12 +10,15 @@ import structlog
 from temporalio import activity
 
 from config import load_config
+from helpers.user_profile import build_user_profile_sections
 
 logger = structlog.get_logger()
 
-# Module-level cache: { user_id: { "context": str, "fetched_at": datetime } }
+# Cache stable, non-profile context only. Personal data is intentionally fetched
+# for every agent start so a saved identity correction is visible immediately.
 _user_context_cache: Dict[str, Dict[str, Any]] = {}
 CACHE_TTL_MINUTES = 5
+PROFILE_REFRESH_TIMEOUT_SECONDS = 2.0
 
 # ============================================================================
 # Cookie Auth Detection Constants
@@ -340,6 +343,12 @@ async def _fetch_integrations_and_auth_domains(
 
 async def _fetch_user_settings(client: httpx.AsyncClient, config, user_id: str) -> dict:
     """Fetch user profile settings from backend."""
+    user_settings, _ = await _fetch_user_settings_with_status(client, config, user_id)
+    return user_settings
+
+
+async def _fetch_user_settings_with_status(client: httpx.AsyncClient, config, user_id: str) -> tuple[dict, bool]:
+    """Fetch user profile settings and report whether the read succeeded."""
     try:
         response = await client.get(
             f"{config.backend.api_url}/api/user-settings",
@@ -350,10 +359,10 @@ async def _fetch_user_settings(client: httpx.AsyncClient, config, user_id: str) 
             timeout=30.0,
         )
         response.raise_for_status()
-        return response.json()
+        return response.json(), True
     except Exception as e:
         logger.warning("Failed to fetch user settings", user_id=user_id, error=str(e))
-        return {}
+        return {}, False
 
 
 RECENT_MESSAGES_CONTEXT_LIMIT = 20
@@ -464,7 +473,7 @@ async def _fetch_messages_for_simulation(client: httpx.AsyncClient, config, user
 # ============================================================================
 
 
-def _format_user_context(  # noqa: C901
+def _format_user_context(
     authenticated_sites: List[str],
     user_settings: dict,
     recent_messages: List[dict],
@@ -492,8 +501,7 @@ def _format_user_context(  # noqa: C901
         if integration_lines:
             sections.append(
                 "## Connected Integrations\n"
-                "These integrations are connected and available.\n"
-                + "\n".join(integration_lines)
+                "These integrations are connected and available.\n" + "\n".join(integration_lines)
             )
 
     # Section: Authenticated Browser Sessions
@@ -508,32 +516,7 @@ def _format_user_context(  # noqa: C901
             f"{sites_str}"
         )
 
-    # Section: User Profile
-    profile_parts = []
-    if user_settings.get("name"):
-        profile_parts.append(f"Name: {user_settings['name']}")
-
-    # Include user's phone number (for SMS communication)
-    if user_settings.get("phone"):
-        profile_parts.append(f"Phone: {user_settings['phone']}")
-
-    addr_lines = [
-        user_settings.get("addressLine1", ""),
-        user_settings.get("addressLine2", ""),
-        ", ".join(
-            filter(
-                None,
-                [user_settings.get("city", ""), user_settings.get("state", ""), user_settings.get("postalCode", "")],
-            )
-        ),
-        user_settings.get("country", ""),
-    ]
-    delivery_address = "\n".join(line for line in addr_lines if line.strip())
-    if delivery_address:
-        profile_parts.append(f"Delivery Address:\n{delivery_address}")
-
-    if profile_parts:
-        sections.append("## User Profile\n" + "\n".join(profile_parts))
+    sections.extend(build_user_profile_sections(user_settings))
 
     # Section: Distilled User Snapshot
     snapshot_content = user_snapshot.get("content") if user_snapshot else None
@@ -590,7 +573,7 @@ def _format_user_context(  # noqa: C901
             messages_body = "\n\n".join(message_lines)
             if len(recent_messages) >= RECENT_MESSAGES_CONTEXT_LIMIT:
                 messages_body += (
-                    f'\n\n… (showing {RECENT_MESSAGES_CONTEXT_LIMIT} most recent — '
+                    f"\n\n… (showing {RECENT_MESSAGES_CONTEXT_LIMIT} most recent — "
                     'use grep with source="messages" to search by keyword, person_id, or time range)'
                 )
             sections.append("## Recent Communications\n" + messages_body)
@@ -642,7 +625,7 @@ def _format_user_context(  # noqa: C901
             network_body = "\n".join(contact_lines)
             if len(frequent_contacts) >= NETWORK_CONTEXT_LIMIT:
                 network_body += (
-                    f'\n… (showing top {NETWORK_CONTEXT_LIMIT} by message volume — '
+                    f"\n… (showing top {NETWORK_CONTEXT_LIMIT} by message volume — "
                     'use grep with source="network" to search all contacts)'
                 )
             sections.append("## User Network\n" + network_body)
@@ -652,7 +635,8 @@ def _format_user_context(  # noqa: C901
         return ""
 
     section_order = [
-        "## User Profile",
+        "## Personal Information",
+        "## Delivery Address",
         "## Distilled User Snapshot",
         "## Connected Integrations",
         "## Authenticated Browser Sessions",
@@ -660,6 +644,19 @@ def _format_user_context(  # noqa: C901
         "## User Network",
     ]
     sections.sort(key=lambda section: section_order.index(section.split("\n", 1)[0]))
+    return "\n\n".join(sections)
+
+
+def _render_profile_context(user_settings: dict) -> str:
+    """Render canonical personal-information and delivery-address sections."""
+    return "\n\n".join(build_user_profile_sections(user_settings))
+
+
+def _combine_profile_and_context(profile_context: str, base_context: str) -> str:
+    """Prepend fresh profile sections to independently cached context."""
+    sections = [profile_context] if profile_context else []
+    if base_context:
+        sections.append(base_context)
     return "\n\n".join(sections)
 
 
@@ -672,7 +669,8 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
     """
     Fetch and format user context for the agent system prompt.
 
-    Uses a 5-minute TTL cache to avoid excessive backend calls.
+    Uses a 5-minute TTL cache for stable context. The small user-settings read
+    stays fresh so name and delivery changes reach every newly started agent.
     When context_gates are provided, only fetches/includes gated-on sections.
 
     Args:
@@ -712,10 +710,35 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
             cached = _user_context_cache[user_id]
             fetched_at = cached.get("fetched_at")
             if fetched_at and (now - fetched_at) < timedelta(minutes=CACHE_TTL_MINUTES):
+                refresh_generation = cached.get("profile_refresh_generation", 0) + 1
+                cached["profile_refresh_generation"] = refresh_generation
+                config = load_config()
+                try:
+                    async with httpx.AsyncClient() as client:
+                        user_settings, settings_read_succeeded = await asyncio.wait_for(
+                            _fetch_user_settings_with_status(client, config, user_id),
+                            timeout=PROFILE_REFRESH_TIMEOUT_SECONDS,
+                        )
+                except TimeoutError:
+                    logger.warning(
+                        "User settings refresh timed out; using cached profile",
+                        user_id=user_id[:8],
+                        timeout_seconds=PROFILE_REFRESH_TIMEOUT_SECONDS,
+                    )
+                    user_settings, settings_read_succeeded = {}, False
+                if settings_read_succeeded:
+                    profile_context = _render_profile_context(user_settings)
+                    if cached.get("profile_refresh_generation") == refresh_generation:
+                        cached["profile_context"] = profile_context
+                else:
+                    profile_context = cached.get("profile_context", "")
                 logger.info(
                     "User context cache hit", user_id=user_id[:8], age_seconds=(now - fetched_at).total_seconds()
                 )
-                return cached.get("context", "")
+                return _combine_profile_and_context(
+                    profile_context,
+                    cached.get("base_context", ""),
+                )
 
         # Cache miss or gated request - fetch data selectively
         skipped = [g for g in relevant_gates if not _gate_open(g)]
@@ -770,19 +793,27 @@ async def fetch_user_context(user_id: str, context_gates: Optional[Dict[str, boo
                 snapshot_future,
             )
 
-        # Apply gate filtering at format level too (belt + suspenders)
-        context = _format_user_context(
+        # Profile data must never be folded into the five-minute cache. Delivery
+        # and identity edits should be reflected on the next agent invocation.
+        base_context = _format_user_context(
             authenticated_sites=authenticated_sites if _gate_open("authenticated_sessions") else [],
-            user_settings=user_settings if _gate_open("user_profile") else {},
+            user_settings={},
             recent_messages=recent_messages if _gate_open("recent_communications") else [],
             frequent_contacts=frequent_contacts if _gate_open("network") else [],
             integrations=integrations if _gate_open("integrations") else None,
             user_snapshot=user_snapshot if _gate_open("user_snapshot") else None,
         )
+        profile_context = _render_profile_context(user_settings) if _gate_open("user_profile") else ""
+        context = _combine_profile_and_context(profile_context, base_context)
 
         # Only cache full (ungated) context
         if not gates:
-            _user_context_cache[user_id] = {"context": context, "fetched_at": now}
+            _user_context_cache[user_id] = {
+                "base_context": base_context,
+                "profile_context": profile_context,
+                "profile_refresh_generation": 0,
+                "fetched_at": now,
+            }
 
         logger.info(
             "User context fetched",
