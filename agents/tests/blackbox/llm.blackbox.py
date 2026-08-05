@@ -96,6 +96,87 @@ def test_convert_context_to_messages():
     assert "Search result" in result[1]["content"]
 
 
+def test_convert_context_to_messages_mixed_timestamp_awareness():
+    """Duplicate terminal rows compare cleanly when one has no timestamp.
+
+    parse_timestamp returns an aware datetime for a "Z" value, so a naive epoch
+    fallback made the terminal-row dedup raise "can't compare offset-naive and
+    offset-aware datetimes" and fail the entire summary conversion whenever one
+    duplicate row lacked a timestamp.
+    """
+    from helpers.llm import convert_context_to_messages
+
+    context = [
+        {
+            "role": "ASSISTANT",
+            "text": "calling",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "metadata": {"tool_calls": [{"tool": "web_search", "tool_call_id": "call-1"}]},
+        },
+        {
+            "role": "TOOL",
+            "text": "older result",
+            "timestamp": "",
+            "metadata": {
+                "toolCallId": "call-1",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+        {
+            "role": "TOOL",
+            "text": "newer result",
+            "timestamp": "2026-01-01T00:00:05Z",
+            "metadata": {
+                "toolCallId": "call-1",
+                "toolName": "web_search",
+                "toolStatus": "FINISHED",
+            },
+        },
+    ]
+
+    result = convert_context_to_messages(context, include_system=False, include_assistant=True)
+
+    tool_messages = [m for m in result if m.get("role") == "tool"]
+    assert len(tool_messages) == 1, tool_messages
+    assert "newer result" in tool_messages[0]["content"], tool_messages
+
+
+def test_tool_call_declaration_dedup_ignores_argument_key_order():
+    """A dual-write duplicate dedupes even when its argument keys are ordered differently.
+
+    The duplicate check compares serialized arguments, and json.dumps preserves
+    insertion order — so without sort_keys, two semantically identical
+    declarations serialized in different key orders would be treated as
+    conflicting and raise, failing the whole conversion.
+    """
+    import json
+
+    import pytest
+
+    from helpers.llm import register_tool_call_declaration
+
+    declared: dict = {}
+    forward = json.dumps({"query": "rose", "limit": 5}, sort_keys=True)
+    reordered = json.dumps({"limit": 5, "query": "rose"}, sort_keys=True)
+
+    call_id, emit_first = register_tool_call_declaration(declared, "call-1", "web_search", forward, "ASSISTANT")
+    assert call_id == "call-1"
+    assert emit_first is True
+
+    _, emit_second = register_tool_call_declaration(declared, "call-1", "web_search", reordered, "ASSISTANT")
+    assert emit_second is False, "same declaration in a different key order must dedupe"
+
+    with pytest.raises(ValueError):
+        register_tool_call_declaration(
+            declared,
+            "call-1",
+            "web_search",
+            json.dumps({"query": "other", "limit": 5}, sort_keys=True),
+            "ASSISTANT",
+        )
+
+
 def test_tool_result_uses_declared_not_executed_tool_name():
     """A tool result must be labelled with the DECLARED tool name.
 
@@ -7077,6 +7158,18 @@ async def run_all_tests():
         test_ensure_tool_result_pairing_preserves_well_formed_messages,
     )
     teardown_mock()
+    r.record(
+        "convert_context_to_messages_mixed_timestamp_awareness",
+        test_convert_context_to_messages_mixed_timestamp_awareness,
+    )
+    r.record(
+        "tool_call_declaration_dedup_ignores_argument_key_order",
+        test_tool_call_declaration_dedup_ignores_argument_key_order,
+    )
+    await r.record_async(
+        "heartbeat_compute_token_lineage_activity_posts_lineage_key",
+        test_heartbeat_compute_token_lineage_activity_posts_lineage_key,
+    )
     return r.summary()
 
 

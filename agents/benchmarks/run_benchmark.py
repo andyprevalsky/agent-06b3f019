@@ -1341,10 +1341,7 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
             return None
         # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
         # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
-        return (
-            os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
-            or AGENT_PAYMENT_BENCHMARK_USER_ID
-        )
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
 
@@ -1492,9 +1489,7 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     user_id = AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=15) as client:
-        response = await client.get(
-            f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers
-        )
+        response = await client.get(f"{base_url}/api/credits/usage", params={"userId": user_id}, headers=headers)
     if response.status_code != 200:
         print(
             f"    ⚠ Could not verify production payment identity {user_id} "
@@ -1505,8 +1500,7 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     if gap is None:
         return
     raise RuntimeError(
-        f"Production payment identity {user_id} is not provisioned: {gap}. "
-        f"{PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
+        f"Production payment identity {user_id} is not provisioned: {gap}. {PRODUCTION_PAYMENT_IDENTITY_PROVISION_HINT}"
     )
 
 
@@ -1943,6 +1937,27 @@ def _payment_abandonment_has_started(lifecycle: dict) -> bool:
     }
 
 
+# The AgentCard Organization MCP cap is org-wide (shared across every workspace
+# using these credentials) and its retryAfter points at the top of the next
+# window, so a refusal must wait that window out rather than burn its remaining
+# attempts inside the same closed minute.
+ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS = 90.0
+
+
+def _rate_limit_retry_delay(message: str) -> Optional[float]:
+    """Seconds to wait for an upstream rate-limit refusal, or None if not rate-limited."""
+    if "rate limit" not in message.lower() and "429" not in message:
+        return None
+    match = re.search(r'"retryAfterSeconds"\s*:\s*(\d+)', message)
+    if match:
+        return min(float(match.group(1)), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    match = re.search(r'"retryAfter"\s*:\s*(\d+)', message)
+    if match:
+        remaining = float(match.group(1)) / 1000.0 - time.time()
+        return min(max(remaining, 1.0), ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS)
+    return ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS / 3
+
+
 async def _start_payment_abandonment_with_recovery(
     base_url: str,
     agent_id: str,
@@ -1966,7 +1981,16 @@ async def _start_payment_abandonment_with_recovery(
         try:
             return await abandon_payment(base_url, agent_id)
         except Exception as error:
-            if not isinstance(error, httpx.TransportError) and "Failed to abandon test payment: 5" not in str(error):
+            # A 429 from the org-wide MCP cap is retryable too: it means the
+            # request never ran, not that the lifecycle is broken. Without this
+            # the gate reported "cleanup did not complete" for a lifecycle that
+            # was already terminal-clean.
+            rate_limit_delay = _rate_limit_retry_delay(str(error))
+            if (
+                not isinstance(error, httpx.TransportError)
+                and "Failed to abandon test payment: 5" not in str(error)
+                and rate_limit_delay is None
+            ):
                 raise
             last_error = error
             try:
@@ -1978,11 +2002,13 @@ async def _start_payment_abandonment_with_recovery(
                 last_error = read_error
             if attempt >= max_attempts:
                 break
+            wait_seconds = rate_limit_delay if rate_limit_delay is not None else retry_delay_seconds
+            reason = "was rate limited" if rate_limit_delay is not None else "was indeterminate"
             print(
-                "    ⚠ Payment abandonment response was indeterminate; "
-                f"retrying ({attempt}/{max_attempts}): {error}"
+                f"    ⚠ Payment abandonment response {reason}; "
+                f"retrying ({attempt}/{max_attempts}) in {wait_seconds:.0f}s: {error}"
             )
-            await asyncio.sleep(retry_delay_seconds)
+            await asyncio.sleep(wait_seconds)
     raise RuntimeError(
         f"Payment abandonment remained unavailable after {max_attempts} attempts: {last_error}"
     ) from last_error
@@ -2708,9 +2734,7 @@ async def upload_attachment(base_url: str, agent_id: str, filepath: str) -> dict
             if isinstance(pointer, dict):
                 return pointer
             raise RuntimeError(f"Attachment upload for {filename} returned no FilePointer")
-        raise RuntimeError(
-            f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}"
-        )
+        raise RuntimeError(f"Attachment upload failed for {filename}: HTTP {resp.status_code}: {resp.text[:500]}")
 
 
 # ============================================================
@@ -4829,10 +4853,7 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Claude keychain refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Claude keychain refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Claude keychain refresh error: {exc}")
@@ -4883,10 +4904,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
             timeout=30,
         )
     except subprocess.TimeoutExpired as exc:
-        print(
-            "    ⚠ Local Codex refresh timed out "
-            f"after {exc.timeout}s: {_seed_sync_error_detail(exc)}"
-        )
+        print(f"    ⚠ Local Codex refresh timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
         return False
     except Exception as exc:
         print(f"    ⚠ Local Codex refresh error: {exc}")
@@ -8078,9 +8096,7 @@ async def run_single_task(
 
         if task.name == AGENT_PAYMENT_TEST_SHOP_TASK_NAME and passed:
             try:
-                payment_confirmation_error = await validate_agent_payment_confirmation_contract(
-                    data, agent_id
-                )
+                payment_confirmation_error = await validate_agent_payment_confirmation_contract(data, agent_id)
                 if payment_confirmation_error:
                     passed = False
                     failure_reason = payment_confirmation_error
@@ -9223,9 +9239,7 @@ def _parallel_task_phases(
     exclusive_names = set(EXCLUSIVE_SHARED_DB_TASK_NAMES)
     if isolated_browser_profiles and any(task.name == BIOMETRICS_WEBDECOY_TASK_NAME for task in tasks):
         auth_reading_siblings = [
-            task
-            for task in tasks
-            if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
+            task for task in tasks if task.name != BIOMETRICS_WEBDECOY_TASK_NAME and uses_shared_browser_auth(task)
         ]
         if not auth_reading_siblings:
             exclusive_names.discard(BIOMETRICS_WEBDECOY_TASK_NAME)

@@ -155,6 +155,8 @@ this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
+**Run every Phase 1 block that expands a file list — `$CHANGED_TS`, `$LINT_TS` — under `bash`, e.g. `bash -c '<block>'`.** These lists are newline-separated and rely on shell word splitting to become separate argv entries. The agent harness shell is zsh, which does NOT word-split unquoted parameter expansions, so running them directly passes the whole list as one filename and the stage fails with `No files matching the pattern were found`. Persist the computed lists to files (`/tmp/deploy-changed-ts.txt`, `/tmp/deploy-lint-ts.txt`) so each `bash -c` block can re-read them instead of relying on exported shell state, which does not persist between tool calls.
+
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
 SYNC_MERGES=$(

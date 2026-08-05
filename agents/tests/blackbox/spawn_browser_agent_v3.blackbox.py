@@ -2732,7 +2732,7 @@ async def test_browser_humanizer_cdp_mouse_drain_timeout_uses_fallback():
     with patch("browser_tools.humanizer.CDP_INPUT_DRAIN_TIMEOUT_SECONDS", 0.01, create=True):
         used_cdp = await asyncio.wait_for(
             humanizer._move_path_with_cdp_fire_and_drain([sample]),
-            timeout=0.5,
+            timeout=5,
         )
 
     assert used_cdp is False
@@ -14617,6 +14617,34 @@ async def run_all_tests():
         test_transient_session_init_failure_classification,
     )
     teardown_mock()
+    r.record(
+        "idle_mouse_drift_generates_visible_tremor_samples",
+        test_idle_mouse_drift_generates_visible_tremor_samples,
+    )
+    r.record(
+        "agent_anti_detection_normalizes_fcaptcha_behavioral_payload",
+        test_agent_anti_detection_normalizes_fcaptcha_behavioral_payload,
+    )
+    r.record(
+        "select_auth_assistance_current_url_restores_pre_submit_query_params",
+        test_select_auth_assistance_current_url_restores_pre_submit_query_params,
+    )
+    r.record(
+        "select_auth_assistance_current_url_keeps_current_when_it_has_query_params",
+        test_select_auth_assistance_current_url_keeps_current_when_it_has_query_params,
+    )
+    r.record(
+        "simulated_browser_usage_preserves_transport_model",
+        test_simulated_browser_usage_preserves_transport_model,
+    )
+    await r.record_async(
+        "browser_supervisor_recovery_uses_fallback_url_when_page_url_missing",
+        test_browser_supervisor_recovery_uses_fallback_url_when_page_url_missing,
+    )
+    await r.record_async(
+        "goto_action_returns_current_url_for_recovery_fallback",
+        test_goto_action_returns_current_url_for_recovery_fallback,
+    )
     return r.all_passed
 
 

@@ -7,6 +7,7 @@
 import type { Response } from 'express';
 import { isProductionEnv, TEST_PAYMENT_ENABLED } from './config';
 import { TestPaymentError } from './errors';
+import { classifyLifecycleError } from './lifecycle-errors';
 import { createLogger } from '../../providers/logger';
 
 const log = createLogger('TestPayment');
@@ -62,5 +63,19 @@ export function respondTestPaymentError(
     upstream_code: upstreamCode(error),
     stack: error instanceof Error ? error.stack : undefined,
   });
+
+  // An upstream refusal is not our 500. The AgentCard Organization MCP enforces
+  // an org-wide request cap and answers with an absolute retryAfter; reporting
+  // that as a generic 500 made every caller retry straight back into the same
+  // closed window, which is how a terminal-clean lifecycle got reported as
+  // "cleanup did not complete". An outage likewise keeps its own 502/504.
+  const classified = classifyLifecycleError(error, fallbackMessage);
+  if (classified.status !== 500) {
+    if (classified.retryAfterSeconds !== null) {
+      res.setHeader('Retry-After', String(classified.retryAfterSeconds));
+    }
+    res.status(classified.status).json(classified.body);
+    return;
+  }
   res.status(500).json({ error: fallbackMessage });
 }

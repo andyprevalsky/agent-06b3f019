@@ -1,6 +1,8 @@
 import type { MessageChannel } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
+
+const IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS = 15_000;
 
 /**
  * Fetch recent INBOUND messages (`to = 'me'`) for a user, newest first.
@@ -80,27 +82,28 @@ export async function createQueueEntry(
  * receipt survives. Uses FOR UPDATE SKIP LOCKED to prevent concurrent claims.
  */
 export async function popOldestForUser(userId: string, supportsAcknowledgements: boolean) {
-  return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRawUnsafe<
-      Array<{
-        id: string;
-        userId: string;
-        agentId: string;
-        phoneNumber: string;
-        message: string;
-        createdAt: Date;
-        expiresAt: Date | null;
-        claimedAt: Date | null;
-        claimToken: string | null;
-        dispatchedAt: Date | null;
-        sentAt: Date | null;
-        failedAt: Date | null;
-        lastError: string | null;
-        attempts: number;
-        failures: number;
-      }>
-    >(
-      `SELECT * FROM "ImessageQueue"
+  return runTransactionWithRetry(
+    async (tx) => {
+      const rows = await tx.$queryRawUnsafe<
+        Array<{
+          id: string;
+          userId: string;
+          agentId: string;
+          phoneNumber: string;
+          message: string;
+          createdAt: Date;
+          expiresAt: Date | null;
+          claimedAt: Date | null;
+          claimToken: string | null;
+          dispatchedAt: Date | null;
+          sentAt: Date | null;
+          failedAt: Date | null;
+          lastError: string | null;
+          attempts: number;
+          failures: number;
+        }>
+      >(
+        `SELECT * FROM "ImessageQueue"
        WHERE "userId" = $1
          AND "sentAt" IS NULL
          AND "failedAt" IS NULL
@@ -110,33 +113,38 @@ export async function popOldestForUser(userId: string, supportsAcknowledgements:
        ORDER BY "createdAt" ASC
        LIMIT 1
        FOR UPDATE SKIP LOCKED`,
-      userId
-    );
+        userId
+      );
 
-    if (rows.length === 0) {
-      return null;
+      if (rows.length === 0) {
+        return null;
+      }
+
+      const oldest = rows[0];
+      const claimToken = supportsAcknowledgements ? randomUUID() : null;
+      await tx.imessageQueue.update({
+        where: { id: oldest.id },
+        data: supportsAcknowledgements
+          ? {
+              claimedAt: new Date(),
+              claimToken,
+              attempts: { increment: 1 },
+            }
+          : {
+              dispatchedAt: new Date(),
+              claimedAt: null,
+              claimToken: null,
+              attempts: { increment: 1 },
+            },
+      });
+
+      return { ...oldest, claimToken };
+    },
+    {
+      maxWait: IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS,
+      timeout: IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS,
     }
-
-    const oldest = rows[0];
-    const claimToken = supportsAcknowledgements ? randomUUID() : null;
-    await tx.imessageQueue.update({
-      where: { id: oldest.id },
-      data: supportsAcknowledgements
-        ? {
-            claimedAt: new Date(),
-            claimToken,
-            attempts: { increment: 1 },
-          }
-        : {
-            dispatchedAt: new Date(),
-            claimedAt: null,
-            claimToken: null,
-            attempts: { increment: 1 },
-          },
-    });
-
-    return { ...oldest, claimToken };
-  });
+  );
 }
 
 /** Record a result for the current lease only. Failed sends are released for
@@ -148,45 +156,51 @@ export async function recordQueueDeliveryResult(params: {
   success: boolean;
   error?: string;
 }) {
-  return prisma.$transaction(async (tx) => {
-    const rows = await tx.$queryRawUnsafe<Array<{ claimToken: string | null; failures: number }>>(
-      `SELECT "claimToken", "failures" FROM "ImessageQueue"
+  return runTransactionWithRetry(
+    async (tx) => {
+      const rows = await tx.$queryRawUnsafe<Array<{ claimToken: string | null; failures: number }>>(
+        `SELECT "claimToken", "failures" FROM "ImessageQueue"
        WHERE "id" = $1 AND "userId" = $2
        FOR UPDATE`,
-      params.id,
-      params.userId
-    );
-    const row = rows[0];
-    if (row === undefined) return { kind: 'not_found' as const };
-    if (row.claimToken !== params.claimToken) return { kind: 'stale_claim' as const };
+        params.id,
+        params.userId
+      );
+      const row = rows[0];
+      if (row === undefined) return { kind: 'not_found' as const };
+      if (row.claimToken !== params.claimToken) return { kind: 'stale_claim' as const };
 
-    if (params.success) {
+      if (params.success) {
+        const entry = await tx.imessageQueue.update({
+          where: { id: params.id },
+          data: {
+            sentAt: new Date(),
+            claimedAt: null,
+            claimToken: null,
+            lastError: null,
+          },
+        });
+        return { kind: 'recorded' as const, entry };
+      }
+
+      const failures = row.failures + 1;
+      const terminal = failures >= 3;
       const entry = await tx.imessageQueue.update({
         where: { id: params.id },
         data: {
-          sentAt: new Date(),
           claimedAt: null,
           claimToken: null,
-          lastError: null,
+          failures,
+          failedAt: terminal ? new Date() : null,
+          lastError: params.error ?? 'Mac sender failed',
         },
       });
       return { kind: 'recorded' as const, entry };
+    },
+    {
+      maxWait: IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS,
+      timeout: IMESSAGE_QUEUE_TRANSACTION_BUDGET_MS,
     }
-
-    const failures = row.failures + 1;
-    const terminal = failures >= 3;
-    const entry = await tx.imessageQueue.update({
-      where: { id: params.id },
-      data: {
-        claimedAt: null,
-        claimToken: null,
-        failures,
-        failedAt: terminal ? new Date() : null,
-        lastError: params.error ?? 'Mac sender failed',
-      },
-    });
-    return { kind: 'recorded' as const, entry };
-  });
+  );
 }
 
 export async function findQueueEntryForUser(userId: string, id: string) {

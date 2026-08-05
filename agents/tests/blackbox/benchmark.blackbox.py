@@ -5,6 +5,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import pathlib
 import importlib.util
 import os
 import threading
@@ -981,10 +982,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["ALLOW_TEMPORAL_CLEANUP"] == "true"
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
-        assert (
-            os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"]
-            == local.AGENT_PAYMENT_BENCHMARK_USER_ID
-        )
+        assert os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
         assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
@@ -1163,25 +1161,18 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
     assert "export FAST_MODE_CACHE_USE_LOCAL=1" in helper
 
-    fixture = (
-        Path(__file__).resolve().parents[3]
-        / "back-end"
-        / "scripts"
-        / "setup-benchmark-payment.ts"
-    ).read_text()
+    fixture = (Path(__file__).resolve().parents[3] / "back-end" / "scripts" / "setup-benchmark-payment.ts").read_text()
     purchase_config = (
-        Path(__file__).resolve().parents[3]
-        / "back-end"
-        / "src"
-        / "domains"
-        / "purchases"
-        / "config.ts"
+        Path(__file__).resolve().parents[3] / "back-end" / "src" / "domains" / "purchases" / "config.ts"
     ).read_text()
-    assert (
-        "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106'"
-        in purchase_config
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106'" in purchase_config
+    # Match the symbol inside the import block rather than a single-line import:
+    # the constant is imported alongside others, so prettier wraps the specifier
+    # list and a substring check on the one-line form silently drifts.
+    import_block = fixture.split("\n\n", 1)[0]
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in import_block, (
+        "setup-benchmark-payment.ts must import BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
     )
-    assert "import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID }" in fixture
     assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
     assert "assertDedicatedBenchmarkUser(userId)" in fixture
     assert "pg_advisory_xact_lock" in fixture
@@ -1191,7 +1182,9 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "tx.$executeRaw" not in fixture
     assert "tx.credit.aggregate" in fixture
     assert "tx.toolUsage.aggregate" in fixture
-    assert "if (deficitCents > 0)" in fixture
+    # The top-up is guarded on a deficit. Accept either the positive branch or
+    # the equivalent early return the fixture was refactored to use.
+    assert "if (deficitCents > 0)" in fixture or "if (deficitCents <= 0)" in fixture
     assert "tx.credit.create" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
@@ -7385,6 +7378,7 @@ def test_local_cold_seed_bootstrap_extends_service_start_timeout():
     assert captured["timeout_seconds"] >= 1200
     assert captured["timeout_seconds"] > local_bench.SERVICE_START_TIMEOUT_SECONDS
 
+
 def _run_ngrok_reservation(stub_body: str, **env: str) -> subprocess.CompletedProcess:
     """Drive ensure_ngrok_domain_reserved against a stubbed `ngrok` binary."""
     helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
@@ -7453,9 +7447,7 @@ def _ngrok_key_defect(key: str) -> str:
     """Return the defect ngrok_api_key_defect reports for a key ('' if clean)."""
     helper = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "ngrok-tunnel.sh"
     command = f'source {helper!s}\nngrok_api_key_defect "$1" || true\n'
-    result = subprocess.run(
-        ["bash", "-c", command, "_", key], capture_output=True, text=True, check=True
-    )
+    result = subprocess.run(["bash", "-c", command, "_", key], capture_output=True, text=True, check=True)
     return result.stdout.strip()
 
 
@@ -9159,7 +9151,7 @@ def test_user_data_prod_grep_requires_all_provider_filters():
     assert no_final_pass is None
 
 
-def test_user_data_prod_grep_final_answer_semantic_judge():
+async def test_user_data_prod_grep_final_answer_semantic_judge():
     """H-01: the final answer is judged by a REUSABLE, key-name-agnostic semantic output judge over
     the agent's POPULATED output schema (completion-summary outputs + generated response_schema), not
     a rigid structured parse and not free-text assistant prose.
@@ -9216,7 +9208,7 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
         return {"score": 1.0, "reasoning": "all four recoverable", "output": {"chatgpt_evidence": "no data"}}
 
     with patch("helpers.llm.check_progress", new=AsyncMock(side_effect=_assert_populate_then_score)):
-        result = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
+        result = await _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
     assert result is None
 
     # Judge FAILS (score < 1.0) → failure carries the populated output + reason.
@@ -9230,11 +9222,11 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
             }
         ),
     ):
-        failure = asyncio.run(_judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep"))
+        failure = await _judge_output_recovers_expected_fields("agent-1", blob, schema, "user-data-prod-grep")
     assert failure is not None and "obsidian_evidence" in failure and "need 1.0" in failure
 
     # No populated output → judged as missing without an LLM call.
-    empty = asyncio.run(_judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep"))
+    empty = await _judge_output_recovers_expected_fields("agent-1", "{}", schema, "user-data-prod-grep")
     assert empty is not None and "no populated output schema" in empty
 
     # REUSABLE / not overfitted: the same judge works for a totally different task's schema
@@ -9261,9 +9253,7 @@ def test_user_data_prod_grep_final_answer_semantic_judge():
             return_value={"score": 1.0, "reasoning": "both present", "output": {"receipt_id": "tp_c505", "cost": 43.96}}
         ),
     ):
-        receipt_ok = asyncio.run(
-            _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_schema, "receipt-task")
-        )
+        receipt_ok = await _judge_output_recovers_expected_fields("a2", receipt_blob, receipt_schema, "receipt-task")
     assert receipt_ok is None
 
 
@@ -11167,6 +11157,63 @@ async def test_required_attachment_upload_failure_is_fatal():
         server.server_close()
 
 
+def test_abandon_retry_waits_out_upstream_rate_limit_window():
+    """A rate-limited abandon waits for the server's retryAfter, not a fixed short delay.
+
+    The AgentCard Organization MCP cap is org-wide (shared across every workspace
+    using these credentials) and its retryAfter points at the top of the next
+    window. Burning every attempt inside that same closed minute reported a false
+    "payment lifecycle cleanup did not complete" for a lifecycle that was already
+    terminal-clean.
+    """
+    import time as time_module
+
+    from benchmarks.run_benchmark import (
+        ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS,
+        _rate_limit_retry_delay,
+    )
+
+    assert _rate_limit_retry_delay("connection reset by peer") is None
+    assert _rate_limit_retry_delay("500 internal error") is None
+
+    retry_after_ms = int((time_module.time() + 20) * 1000)
+    body = (
+        'Failed to abandon test payment: 429 {"error":"AgentCard Organization MCP rate limit '
+        f'exceeded","code":"agentcard_org_mcp_rate_limited","retryAfter":{retry_after_ms}}}'
+    )
+    delay = _rate_limit_retry_delay(body)
+    assert delay is not None and 15 <= delay <= 21, delay
+
+    seconds_body = (
+        'Failed to abandon test payment: 429 {"code":"agentcard_org_mcp_rate_limited","retryAfterSeconds":42}'
+    )
+    assert _rate_limit_retry_delay(seconds_body) == 42
+
+    far_future = int((time_module.time() + 10_000) * 1000)
+    assert (
+        _rate_limit_retry_delay(f'429 {{"retryAfter":{far_future}}} rate limit exceeded')
+        == ABANDON_RATE_LIMIT_MAX_WAIT_SECONDS
+    )
+
+    stale = int((time_module.time() - 500) * 1000)
+    assert _rate_limit_retry_delay(f'rate limit exceeded {{"retryAfter":{stale}}}') == 1.0
+
+
+def _with_tmp_path(test_fn):
+    """Run a pytest-fixture test under the blackbox runner.
+
+    These three take `tmp_path`, so the runner could not call them bare and they
+    silently never ran. Supplying a real temporary directory keeps them in the
+    consistently-run suite instead of only under a direct pytest invocation.
+    """
+
+    def run() -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            test_fn(pathlib.Path(tmp))
+
+    return run
+
+
 async def run_all_tests():
     print("benchmark blackbox tests:")
     r = BlackboxResult()
@@ -12055,4 +12102,48 @@ async def run_all_tests():
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)
     r.record("agent_latency_reads_isolated_stack_logs", test_agent_latency_reads_isolated_benchmark_stack_logs)
+    r.record(
+        "payment_receipt_validation_allows_partial_live_receipts",
+        test_payment_receipt_validation_allows_partial_live_receipts,
+    )
+    r.record(
+        "benchmark_agent_source_override_validates_known_sources",
+        test_benchmark_agent_source_override_validates_known_sources,
+    )
+    r.record(
+        "catalog_world_model_mode_is_optional_and_validated", test_catalog_world_model_mode_is_optional_and_validated
+    )
+    r.record(
+        "benchmark_sms_source_override_updates_local_agent_source",
+        test_benchmark_sms_source_override_updates_local_agent_source,
+    )
+    r.record("x_post_prompt_keeps_goal_and_prefers_email_auth", test_x_post_prompt_keeps_goal_and_prefers_email_auth)
+    r.record("prompt_user_denial_uses_rejection_sentinel", test_prompt_user_denial_uses_rejection_sentinel)
+    r.record("keep_agents_env_preserves_successes_and_failures", test_keep_agents_env_preserves_successes_and_failures)
+    r.record("local_services_manifest_reports_anon_capability", test_local_services_manifest_reports_anon_capability)
+    r.record("cache_coverage_uses_root_scoped_tool_counts", test_cache_coverage_uses_root_scoped_tool_counts)
+    await r.record_async(
+        "user_data_prod_grep_final_answer_semantic_judge",
+        test_user_data_prod_grep_final_answer_semantic_judge,
+    )
+    r.record("admin_bypass_card_mint_variant_wiring", test_admin_bypass_card_mint_variant_wiring)
+    r.record(
+        "browser_search_single_result_tasks_use_browser_only", test_browser_search_single_result_tasks_use_browser_only
+    )
+    r.record("indeed_account_creation_benchmark_contract", test_indeed_account_creation_benchmark_contract)
+    r.record(
+        "abandon_retry_waits_out_upstream_rate_limit_window", test_abandon_retry_waits_out_upstream_rate_limit_window
+    )
+    r.record(
+        "payment_benchmark_rejects_retired_agentcard_api_key",
+        _with_tmp_path(test_payment_benchmark_rejects_retired_agentcard_api_key),
+    )
+    r.record(
+        "payment_benchmark_rejects_retired_direct_or_user_credentials",
+        _with_tmp_path(test_payment_benchmark_rejects_retired_direct_or_user_credentials),
+    )
+    r.record(
+        "payment_benchmark_accepts_org_client_credentials_from_dotenv",
+        _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+    )
     return r.all_passed

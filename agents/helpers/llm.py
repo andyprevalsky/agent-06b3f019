@@ -1207,6 +1207,41 @@ def _verifier_context_has_successful_browser_result(context: List[Dict[str, Any]
     return any(_is_successful_browser_tool_result(msg) for msg in context)
 
 
+def register_tool_call_declaration(
+    declared: Dict[str, Tuple[str, str]],
+    tool_call_id: Any,
+    tool_name: str,
+    arguments: str,
+    source: str,
+) -> Tuple[str, bool]:
+    """Canonicalize a declared tool_call_id and reject conflicting reuse.
+
+    Returns ``(canonical_id, should_emit)``. ``should_emit`` is False for an exact
+    re-declaration — dual-write corruption can persist the same tool_call on two
+    ASSISTANT rows, and emitting both would send duplicate tool_use ids (Anthropic
+    400). Reuse with a different tool name *or* different arguments raises instead:
+    `_ensure_tool_result_pairing` keeps only the first declaration per id, so the
+    second call would silently lose its declaration and bind its result to the
+    wrong arguments.
+
+    IDs are normalized with ``str()`` because producers are inconsistent —
+    ``save_blueprint`` passes ``workflow.uuid4()`` (a ``uuid.UUID``) while every
+    other path passes a string.
+    """
+    canonical_id = str(tool_call_id)
+    existing = declared.get(canonical_id)
+    if existing is not None:
+        if existing == (tool_name, arguments):
+            return canonical_id, False
+        existing_name, existing_arguments = existing
+        raise ValueError(
+            f"{source} reuses tool_call_id '{canonical_id}' for conflicting declarations: "
+            f"'{existing_name}' with {existing_arguments} then '{tool_name}' with {arguments}"
+        )
+    declared[canonical_id] = (tool_name, arguments)
+    return canonical_id, True
+
+
 def _terminal_tool_call_id(msg: Dict[str, Any]) -> Optional[str]:
     """toolCallId of a TOOL row that carries a terminal result, else None."""
     if str(msg.get("role", "")).upper() != "TOOL":
@@ -1317,16 +1352,58 @@ def convert_context_to_messages(
     # Sort context by timestamp to ensure chronological order
     # This is critical after polling for new user messages or continue-as-new
     def parse_timestamp(ts: str) -> datetime:
-        """Parse ISO timestamp, defaulting to epoch if missing/invalid."""
+        """Parse ISO timestamp, defaulting to a UTC-aware epoch if missing/invalid.
+
+        The epoch must carry a timezone: a "Z" timestamp parses to an aware
+        datetime, so a naive fallback makes the terminal-row comparison below
+        raise "can't compare offset-naive and offset-aware datetimes" whenever one
+        duplicate row lacks a timestamp — which would fail the whole conversion.
+        Matches build_llm_messages.parse_timestamp.
+        """
+        epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
         if not ts:
-            return datetime(1970, 1, 1)
+            return epoch
         try:
             # Handle both with and without timezone
             if ts.endswith("Z"):
                 ts = ts[:-1] + "+00:00"
-            return datetime.fromisoformat(ts)
+            parsed = datetime.fromisoformat(ts)
         except (ValueError, AttributeError):
-            return datetime(1970, 1, 1)
+            return epoch
+        # A timestamp without an offset is still naive; pin it to UTC so every
+        # value this helper returns is comparable with every other.
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+    # Keep only the latest terminal row per canonical toolCallId, exactly as
+    # build_llm_messages does. Duplicate FINISHED rows both resolve to the same
+    # IN_PROGRESS sort timestamp below, so without this the older row would sort
+    # first and _ensure_tool_result_pairing — which keeps the first result per id
+    # — would drop the newer one.
+    latest_terminal_tool_rows: Dict[str, Dict[str, Any]] = {}
+    for msg in context:
+        meta = msg.get("metadata", {}) or {}
+        if msg.get("role") != "TOOL" or meta.get("toolStatus") not in ("FINISHED", "ERROR"):
+            continue
+        tool_call_id = meta.get("toolCallId")
+        if not tool_call_id:
+            continue
+        dedup_key = str(tool_call_id)
+        existing = latest_terminal_tool_rows.get(dedup_key)
+        if existing is None or parse_timestamp(msg.get("timestamp", "")) > parse_timestamp(
+            existing.get("timestamp", "")
+        ):
+            latest_terminal_tool_rows[dedup_key] = msg
+
+    def _is_superseded_terminal_row(msg: Dict[str, Any]) -> bool:
+        meta = msg.get("metadata", {}) or {}
+        if msg.get("role") != "TOOL" or meta.get("toolStatus") not in ("FINISHED", "ERROR"):
+            return False
+        tool_call_id = meta.get("toolCallId")
+        if not tool_call_id:
+            return False
+        return latest_terminal_tool_rows[str(tool_call_id)] is not msg
+
+    context = [msg for msg in context if not _is_superseded_terminal_row(msg)]
 
     # Build map of tool_call_id -> IN_PROGRESS timestamp
     # This allows FINISHED messages to use the IN_PROGRESS timestamp for sorting,
@@ -1338,7 +1415,7 @@ def convert_context_to_messages(
         if msg.get("role") == "TOOL" and meta.get("toolStatus") == "IN_PROGRESS":
             tool_call_id = meta.get("toolCallId")
             if tool_call_id:
-                tool_start_times[tool_call_id] = msg.get("timestamp", "")
+                tool_start_times[str(tool_call_id)] = msg.get("timestamp", "")
 
     def get_timestamp(msg: Dict[str, Any]) -> datetime:
         """Get timestamp for sorting. Terminal tool messages use their IN_PROGRESS timestamp."""
@@ -1365,14 +1442,8 @@ def convert_context_to_messages(
 
     sorted_context = sorted(context, key=sort_key)
 
-    # Track which tool_call_ids have been declared by ASSISTANT messages, and the
-    # name each was DECLARED under. A tool result must carry the declared name,
-    # never the executed one: spawn_agent can execute as spawn_browser_agent, and
-    # Google validates functionResponse.name against the declared functions and
-    # rejects the entire request with 400 INVALID_ARGUMENT. OpenAI and Anthropic
-    # ignore the mismatch, so this stays latent until a Google model is reached.
-    declared_tool_ids = set()
-    declared_tool_names: Dict[str, str] = {}
+    # canonical tool_call_id -> (tool name, JSON arguments) declared by an ASSISTANT message
+    declared_tool_calls: Dict[str, Tuple[str, str]] = {}
 
     # Excluded / sub-agent-internal / cloud-lifecycle rows were already removed by
     # drop_rows_never_sent_to_model above — do not re-filter them here.
@@ -1392,34 +1463,63 @@ def convert_context_to_messages(
             if not include_assistant:
                 continue
 
-            if metadata.get("tool_calls"):
-                for tc in metadata["tool_calls"]:
-                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
-                    declared_tool_ids.add(tc_id)
-                    if tc.get("tool"):
-                        declared_tool_names[tc_id] = str(tc["tool"])
-
-            # Include tool_calls if present in metadata
-            assistant_msg = {"role": "assistant", "content": content}
-            if metadata.get("tool_calls"):
-                # Convert our tool call format to OpenAI format
+            assistant_msg: Dict[str, Any] = {"role": "assistant", "content": content}
+            raw_tool_calls = metadata.get("tool_calls")
+            if raw_tool_calls:
+                # Convert our tool call format to OpenAI format under exactly the
+                # declaration contract build_llm_messages enforces. Callers
+                # (generate_completion_summary) hand this output straight to
+                # call_llm, so a malformed row must raise an explicit ValueError
+                # here rather than surfacing as a TypeError mid-conversion or as
+                # duplicate/unpairable tool_use ids at the provider.
+                if not isinstance(raw_tool_calls, list):
+                    raise ValueError(
+                        f"ASSISTANT metadata.tool_calls must be a list (got {type(raw_tool_calls).__name__})"
+                    )
                 tool_calls = []
-                for tc in metadata["tool_calls"]:
-                    # Get or generate tool_call_id
-                    tc_id = str(tc.get("tool_call_id", uuid.uuid4()))
+                for idx, tc in enumerate(raw_tool_calls):
+                    if not isinstance(tc, dict):
+                        raise ValueError(
+                            f"ASSISTANT metadata.tool_calls[{idx}] must be an object (got {type(tc).__name__})"
+                        )
+                    tool_name = tc.get("tool")
+                    if not tool_name:
+                        raise ValueError(f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool'")
+                    tool_call_id = tc.get("tool_call_id")
+                    if not tool_call_id:
+                        # Never synthesize one: a fresh uuid4 per conversion means
+                        # the persisted terminal result can never pair with this
+                        # declaration, so the real result is silently replaced by a
+                        # synthetic placeholder.
+                        raise ValueError(
+                            f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
+                        )
+                    # sort_keys so an exact-duplicate declaration is detected by
+                    # value, not by dict insertion order: a dual-write that
+                    # persists the same call twice with the same keys in a
+                    # different order must dedupe, not raise.
+                    arguments = json.dumps(
+                        {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")},
+                        sort_keys=True,
+                    )
+                    tc_id, should_emit = register_tool_call_declaration(
+                        declared_tool_calls,
+                        tool_call_id,
+                        str(tool_name),
+                        arguments,
+                        "ASSISTANT metadata.tool_calls",
+                    )
+                    if not should_emit:
+                        continue
                     tool_calls.append(
                         {
                             "id": tc_id,
                             "type": "function",
-                            "function": {
-                                "name": tc.get("tool"),
-                                "arguments": json.dumps(
-                                    {k: v for k, v in tc.items() if k not in ["tool", "tool_call_id"]}
-                                ),
-                            },
+                            "function": {"name": str(tool_name), "arguments": arguments},
                         }
                     )
-                assistant_msg["tool_calls"] = tool_calls
+                if tool_calls:
+                    assistant_msg["tool_calls"] = tool_calls
 
             messages.append(assistant_msg)
 
@@ -1439,10 +1539,10 @@ def convert_context_to_messages(
                 messages.append({"role": "assistant", "content": assistant_content})
                 continue
 
-            tool_call_id = str(metadata.get("toolCallId", ""))
+            tool_call_id = str(metadata.get("toolCallId") or "")
 
             # Only use tool role if this tool_call_id was declared by a preceding ASSISTANT message
-            if tool_call_id and tool_call_id in declared_tool_ids:
+            if tool_call_id and tool_call_id in declared_tool_calls:
                 # Use proper tool role with tool_call_id and name
                 # Prefix content with title (what user sees in UI) for context
                 tool_content = content
@@ -1454,13 +1554,9 @@ def convert_context_to_messages(
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                 tool_msg = {"role": "tool", "content": tool_content}
                 tool_msg["tool_call_id"] = tool_call_id
-                # Label with the DECLARED name (see declared_tool_names above), not
-                # metadata["toolName"], which records what actually executed. Omit
-                # the label entirely when the declaration is unknown — an absent
-                # name is accepted by every provider, a wrong one is not.
-                declared_name = declared_tool_names.get(tool_call_id)
-                if declared_name:
-                    tool_msg["name"] = declared_name
+                # Name the result after the declaration, not metadata.toolName —
+                # the provider pairs tool_use/tool_result on the declared name.
+                tool_msg["name"] = declared_tool_calls[tool_call_id][0]
                 messages.append(tool_msg)
             else:
                 # No matching ASSISTANT tool_call - convert to SYSTEM message
@@ -1593,11 +1689,8 @@ async def build_llm_messages(
         return f"[{dt.isoformat(timespec='minutes')}] "
 
     messages = [{"role": "system", "content": system_prompt}]
-    declared_tool_call_ids: set[str] = set()
-    # Name each tool_call_id was DECLARED under. Google validates
-    # functionResponse.name against the declared functions and 400s on a
-    # mismatch; the executed name (metadata["toolName"]) can legitimately differ.
-    declared_tool_call_names: Dict[str, str] = {}
+    # canonical tool_call_id -> (tool name, JSON arguments) declared by an ASSISTANT row
+    declared_tool_calls: Dict[str, Tuple[str, str]] = {}
 
     for msg in context:
         role = msg.get("role", "").upper()
@@ -1752,20 +1845,36 @@ async def build_llm_messages(
                         raise ValueError(
                             f"ASSISTANT metadata.tool_calls[{idx}] missing 'tool_call_id' for tool '{tool_name}'"
                         )
-                    declared_tool_call_ids.add(str(tool_call_id))
-                    declared_tool_call_names[str(tool_call_id)] = str(tool_name)
-                    args = {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")}
+                    canonical_tool_name = str(tool_name)
+                    # sort_keys so an exact-duplicate declaration is detected by
+                    # value, not by dict insertion order: a dual-write that
+                    # persists the same call twice with the same keys in a
+                    # different order must dedupe, not raise.
+                    arguments = json.dumps(
+                        {k: v for k, v in tc.items() if k not in ("tool", "tool_call_id")},
+                        sort_keys=True,
+                    )
+                    canonical_tool_call_id, should_emit = register_tool_call_declaration(
+                        declared_tool_calls,
+                        tool_call_id,
+                        canonical_tool_name,
+                        arguments,
+                        "ASSISTANT metadata.tool_calls",
+                    )
+                    if not should_emit:
+                        continue
                     parsed_tool_calls.append(
                         {
-                            "id": str(tool_call_id),
+                            "id": canonical_tool_call_id,
                             "type": "function",
                             "function": {
-                                "name": str(tool_name),
-                                "arguments": json.dumps(args),
+                                "name": canonical_tool_name,
+                                "arguments": arguments,
                             },
                         }
                     )
-                assistant_msg["tool_calls"] = parsed_tool_calls
+                if parsed_tool_calls:
+                    assistant_msg["tool_calls"] = parsed_tool_calls
 
             messages.append(assistant_msg)
             continue
@@ -1790,7 +1899,8 @@ async def build_llm_messages(
                     raise ValueError(
                         f"Terminal TOOL message missing toolCallId (toolName={tool_name}, message_id={msg.get('message_id')})"
                     )
-                if str(tool_call_id) not in declared_tool_call_ids:
+                canonical_tool_call_id = str(tool_call_id)
+                if canonical_tool_call_id not in declared_tool_calls:
                     # DAG-created tool result — include as user message for context
                     tool_content = text
                     if metadata.get("title"):
@@ -1832,15 +1942,9 @@ async def build_llm_messages(
                 tool_msg: Dict[str, Any] = {
                     "role": "tool",
                     "content": tool_content,
-                    "tool_call_id": str(tool_call_id),
+                    "tool_call_id": canonical_tool_call_id,
+                    "name": declared_tool_calls[canonical_tool_call_id][0],
                 }
-                # Label with the DECLARED name, not tool_name (which is
-                # metadata["toolName"] — what actually executed). Omit when the
-                # declaration is unknown: an absent name is accepted everywhere,
-                # a mismatched one is rejected by Google.
-                declared_name = declared_tool_call_names.get(str(tool_call_id))
-                if declared_name:
-                    tool_msg["name"] = declared_name
                 messages.append(tool_msg)
                 continue
 
@@ -1973,6 +2077,15 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
     # Pass 2: walk the list, fill in missing tool messages, drop orphan tool
     # messages. We rebuild a fresh list to keep insertion logic simple.
+    #
+    # `emitted_results` is global, not per-assistant: a real result can land after
+    # a *later* assistant (dual-write corruption re-declares a tool_call on a
+    # second row), and emitting it there too would be a second tool_result for one
+    # tool_use — exactly the 400 this pass exists to avoid. Such a straggler is
+    # pulled forward to its declaring assistant rather than dropped, so the real
+    # result survives instead of being replaced by a synthetic placeholder.
+    emitted_results: set[str] = set()
+    pulled_forward: set[int] = set()
     result: List[Dict[str, Any]] = []
     declared_at_or_before: set[str] = set()
     i = 0
@@ -1990,20 +2103,22 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
 
             # Collect every tool message that follows this assistant up to the
             # next assistant, and check coverage.
-            covered: set[str] = set()
             j = i + 1
             tool_run: List[Dict[str, Any]] = []
             non_tool_run: List[Dict[str, Any]] = []
             while j < len(messages) and messages[j].get("role") != "assistant":
                 m2 = messages[j]
-                if m2.get("role") == "tool":
+                if id(m2) in pulled_forward:
+                    # Already emitted under the assistant that declared it.
+                    pass
+                elif m2.get("role") == "tool":
                     tcid = m2.get("tool_call_id")
                     if tcid and tcid in declared_at_or_before:
-                        if tcid in covered:
+                        if tcid in emitted_results:
                             # Duplicate tool result for the same id — drop second.
                             repaired = True
                         else:
-                            covered.add(tcid)
+                            emitted_results.add(tcid)
                             tool_run.append(m2)
                     else:
                         # Orphaned tool message — drop.
@@ -2016,17 +2131,37 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             tc_ids = [tc.get("id") for tc in tcs if tc.get("id")]
             tc_names = {tc.get("id"): tc.get("function", {}).get("name") for tc in tcs}
             for tc_id in tc_ids:
-                if tc_id not in covered:
-                    repaired = True
-                    synthetic: Dict[str, Any] = {
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
-                    }
-                    name = tc_names.get(tc_id)
-                    if name:
-                        synthetic["name"] = name
-                    tool_run.append(synthetic)
+                if tc_id in emitted_results:
+                    continue
+                repaired = True
+                emitted_results.add(tc_id)
+                # A real result for this id may exist further down the list, past
+                # an intervening assistant. Pull it forward so the tool_result
+                # still directly follows the tool_use that declared it; only fall
+                # back to a placeholder when there is no real result at all.
+                straggler = next(
+                    (
+                        later
+                        for later in messages[j:]
+                        if later.get("role") == "tool"
+                        and later.get("tool_call_id") == tc_id
+                        and id(later) not in pulled_forward
+                    ),
+                    None,
+                )
+                if straggler is not None:
+                    pulled_forward.add(id(straggler))
+                    tool_run.append(straggler)
+                    continue
+                synthetic: Dict[str, Any] = {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": SYNTHETIC_TOOL_RESULT_PLACEHOLDER,
+                }
+                name = tc_names.get(tc_id)
+                if name:
+                    synthetic["name"] = name
+                tool_run.append(synthetic)
 
             # Tool messages first (so tool_use→tool_result pairing is contiguous),
             # then any non-tool messages (user text, etc.) that lived in this gap.
@@ -2039,9 +2174,13 @@ def _ensure_tool_result_pairing(messages: List[Dict[str, Any]]) -> List[Dict[str
             # Tool message at the head of the list (no preceding assistant) or
             # following a non-assistant — both are orphans.
             tcid = msg.get("tool_call_id")
-            if tcid and tcid in declared_at_or_before:
+            if id(msg) in pulled_forward:
+                # Already emitted under the assistant that declared it.
+                repaired = True
+            elif tcid and tcid in declared_at_or_before and tcid not in emitted_results:
                 # Belongs to a prior assistant we already emitted (rare — would
                 # mean an assistant→tool→user→tool sequence). Keep it.
+                emitted_results.add(tcid)
                 result.append(msg)
             else:
                 repaired = True

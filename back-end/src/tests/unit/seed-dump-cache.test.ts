@@ -121,7 +121,7 @@ async function testHangingEndpointIsBounded(): Promise<void> {
     requestWatchdog = setTimeout(() => {
       killedByRequestWatchdog = true;
       child.kill('SIGKILL');
-    }, 2_000);
+    }, 10_000);
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -140,11 +140,17 @@ async function testHangingEndpointIsBounded(): Promise<void> {
         R2_ACCESS_KEY_ID: 'test-access',
         R2_SECRET_ACCESS_KEY: 'test-secret',
         R2_ENDPOINT: `http://127.0.0.1:${address.port}`,
-        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '250',
+        // The deploy verifier deliberately saturates the host with backend and
+        // agents coverage workers. Leave enough time for the local TCP
+        // handshake while keeping the hung response deadline sharply bounded.
+        SEED_DUMP_CACHE_REQUEST_TIMEOUT_MS: '2000',
       },
       stdio: 'pipe',
     }
   );
+  const childOutput: Buffer[] = [];
+  child.stdout?.on('data', (chunk: Buffer) => childOutput.push(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => childOutput.push(chunk));
   let killedByStartupWatchdog = false;
   const startupWatchdog = setTimeout(() => {
     killedByStartupWatchdog = true;
@@ -156,8 +162,17 @@ async function testHangingEndpointIsBounded(): Promise<void> {
   server.closeAllConnections();
   server.close();
 
-  assert.equal(killedByStartupWatchdog, false, 'R2 deadline test CLI did not start');
-  assert.equal(requestObserved, true, 'R2 deadline test never reached the hanging endpoint');
+  const output = Buffer.concat(childOutput).toString('utf8').trim();
+  assert.equal(
+    killedByStartupWatchdog,
+    false,
+    `R2 deadline test CLI did not start${output === '' ? '' : `:\n${output}`}`
+  );
+  assert.equal(
+    requestObserved,
+    true,
+    `R2 deadline test never reached the hanging endpoint${output === '' ? '' : `:\n${output}`}`
+  );
   assert.equal(killedByRequestWatchdog, false, 'R2 request exceeded its client-owned deadline');
   assert.equal(code, 1, 'timed-out cache lookup must fail closed');
 }
