@@ -1594,6 +1594,12 @@ async def create_agent(
     if world_model_mode in {"simulate", "shadow"}:
         body["world_model_mode"] = world_model_mode
 
+    # A task may narrow the user context its agent sees. Used when a real user's
+    # connected data offers a route the scenario is not testing — the gate removes
+    # that shortcut without touching the prompt or the pass criteria.
+    if task.context_gates:
+        body["context_gates"] = task.context_gates
+
     if task.start_phase:
         body["start_phase"] = task.start_phase
     if task.response_schema:

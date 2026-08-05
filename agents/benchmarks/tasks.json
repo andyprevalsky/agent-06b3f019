@@ -2552,6 +2552,10 @@
       ],
       "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
     },
+    "context_gates": {
+      "integrations": false,
+      "recent_communications": false
+    },
     "evaluators": [
       {
         "id": "primary",

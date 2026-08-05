@@ -652,7 +652,13 @@ class SpawnAgentTool(BaseModel):
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
             "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
             "cross-domain multi-step work; 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out."
+            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+            "identity - an email address and phone number it can read delivered messages at, including "
+            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+            "user has connected as an integration; any other address, including one you compose from the "
+            "user's name, is write-only to it."
         )
     )
     goal: str = Field(

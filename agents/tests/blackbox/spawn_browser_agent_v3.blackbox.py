@@ -9024,15 +9024,63 @@ def test_write_lock_purchase_button_detects_order_controls():
 
 
 def test_write_lock_email_send_excludes_resend_controls():
-    """Auth resend controls contain 'send' but are not outbound email sends."""
+    """Code requests and resends never trigger the outbound-send write lock.
+
+    Andy's rule (2026-08-04): a control that asks for a one-time code, or that
+    resends something the site already sent, is not a new outbound write and must
+    never park the agent on an approval nobody is there to answer. The code test
+    is content-based and matches anywhere in the label; the resend test stays
+    positional. Ordinary sends are unaffected by either.
+    """
     from browser_tools.write_lock import is_email_send_button
 
+    # Ordinary outbound sends stay locked.
     assert is_email_send_button("Send")
     assert is_email_send_button("Send email")
     assert is_email_send_button("Send message")
+    assert is_email_send_button("Send mail")
+
+    # Asking the site for a one-time code is never an outbound write, whatever
+    # the verb or the word order. This is a content test, not a prefix test.
+    assert not is_email_send_button("Send new email verification code")
+    assert not is_email_send_button("Get verification code")
+    assert not is_email_send_button("Email me a security code")
+    assert not is_email_send_button("Send verification code")
+    assert not is_email_send_button("Send email verification code again")
+    assert not is_email_send_button("Send verification code to phone")
+    assert not is_email_send_button("Send me a one-time password")
+    assert not is_email_send_button("Send OTP")
+    assert not is_email_send_button("Send login code")
+    assert not is_email_send_button("Send passcode")
+    assert not is_email_send_button("Request confirmation code")
+    assert not is_email_send_button("Send invoice and send another email verification code")
+
+    # Resending is exempt on its own, independently of any code wording.
     assert not is_email_send_button("Resend")
-    assert not is_email_send_button("Resend code via SMS")
-    assert not is_email_send_button("alt-action-resend")
+    assert not is_email_send_button("Resend invitation to team@corp.com")
+
+    # An ordinary send that merely opens with "send new"/"send another" is still a
+    # send — every code case is carried by the content rule above, so the resend
+    # exemption does not need those prefixes and must not swallow these.
+    assert is_email_send_button("Send new message")
+    assert is_email_send_button("Send new email")
+    assert is_email_send_button("Send another message")
+
+    # "otp" is matched as a token; it must not fire inside an unrelated word.
+    assert is_email_send_button("Send hotpot photos")
+    assert is_email_send_button("Send adoption papers")
+
+    # The resend exemption stays positional: retry wording welded into another
+    # token is not a resend action.
+    assert is_email_send_button("alt-action-resend")
+    assert is_email_send_button("Send invoice to billing@corp.com")
+
+    # Each newline-delimited signal is judged on its own, so a resend label can
+    # never unlock a neighbouring send control in the same element.
+    assert is_email_send_button("Send email\nSend new email verification code")
+    assert is_email_send_button("Send message\nSend another OTP to email")
+    assert is_email_send_button("Send new email verification code\nSend message")
+    assert is_email_send_button("Get verification code\nSend message")
 
 
 def test_write_lock_social_domain_excludes_auth_flow_urls():
