@@ -791,25 +791,49 @@ def _captured_toast_payment_approval(
     return request, messages
 
 
+def _static_toast_merchant_receipt_task():
+    """Synthetic static-receipt task — live Toast catalog is semantic-judge-only."""
+    from benchmarks.benchmark_tasks import BenchmarkTask
+
+    return BenchmarkTask(
+        name="static-toast-merchant-receipt",
+        title="Static Toast Merchant Receipt",
+        prompt="",
+        timeout_seconds=1,
+        is_chat_mode=False,
+        expected_tools=[],
+        tags=[],
+        price_limit_cents=100,
+        requires_browser_agent=False,
+        requires_claude_code=False,
+        attachment=None,
+        approval_handling="ignore",
+        start_phase="execute",
+        expected_payment_receipt={
+            "merchant": "Nopa Fish (Toast - order.toasttab.com)",
+            "merchantBusinessAliases": ["Nopa Fish"],
+            "lineItems": [{"name": "The Rocky Sandwich", "quantity": 1}],
+        },
+    )
+
+
 def test_toast_payment_merchant_identity_accepts_grounded_connector_variant():
     """Merchant wording may vary only when its exact identity and runtime host agree."""
-    from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _validate_payment_receipt
 
-    task = get_task_by_name("browser-toast-nopa-write-lock")
+    task = _static_toast_merchant_receipt_task()
     request, messages = _captured_toast_payment_approval()
 
     assert _validate_payment_receipt(task, request, messages=messages) is None
 
 
 def test_toast_payment_merchant_identity_rejects_wrong_or_ungrounded_variants():
-    """Semantic merchant matching must reject a wrong merchant, host, or browser flow."""
+    """Static merchant matching must reject a wrong merchant, host, or browser flow."""
     from copy import deepcopy
 
-    from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _validate_payment_receipt
 
-    task = get_task_by_name("browser-toast-nopa-write-lock")
+    task = _static_toast_merchant_receipt_task()
 
     for merchant in ("Nopa Chips via Toast", "Nopa Fish via DoorDash"):
         request, messages = _captured_toast_payment_approval(merchant=merchant)
@@ -12480,6 +12504,8 @@ async def run_all_tests():
     r.record(
         "payment_benchmark_accepts_org_client_credentials_from_dotenv",
         _with_tmp_path(test_payment_benchmark_accepts_org_client_credentials_from_dotenv),
+    )
+    r.record(
         "agent_latency_time_containment_scales",
         test_agent_latency_time_containment_scales_and_picks_narrowest_parent,
     )
