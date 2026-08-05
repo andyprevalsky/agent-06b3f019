@@ -13,6 +13,11 @@
  *   outer + ShaderTile, 2px inset #f5f5f5
  *   Corner radius locked to the idle pill (height/2), so expanding for
  *   files/paragraph does NOT grow into a giant stadium — same ends as before.
+ *
+ * Window surface:
+ *   Nearly-invisible fill over the full BrowserWindow so macOS hit-tests the
+ *   launcher (not apps behind) during OS file drags. Pill chrome stays the
+ *   only drag-region for moving the frameless window.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -55,7 +60,21 @@ const Launcher = (): React.JSX.Element => {
   }, [pillHeight]);
 
   return (
-    <div className="drag-region" style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div
+      data-testid="launcher-window-surface"
+      className="no-drag"
+      onDragOver={dragHandlers.onDragOver}
+      onDragLeave={dragHandlers.onDragLeave}
+      onDrop={dragHandlers.onDrop}
+      style={{
+        position: 'relative',
+        width: '100%',
+        height: '100%',
+        // Fully transparent pixels pass OS drags through on macOS Electron.
+        // A 1% fill keeps the BrowserWindow in the hit-test path.
+        backgroundColor: 'rgba(255, 255, 255, 0.01)',
+      }}
+    >
       <LauncherShell pillHeight={pillHeight} isDragOver={isDragOver} dragHandlers={dragHandlers}>
         <QueryForm
           query={query}

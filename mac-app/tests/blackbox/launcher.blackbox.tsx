@@ -94,6 +94,7 @@ interface LauncherIpc {
   submitQuickQuery: ReturnType<typeof vi.fn>;
   hideQuickQuery: ReturnType<typeof vi.fn>;
   resizeQuickQuery: ReturnType<typeof vi.fn>;
+  setQuickQueryFileDrag: ReturnType<typeof vi.fn>;
 }
 
 function installLauncherIpc(
@@ -101,6 +102,7 @@ function installLauncherIpc(
     submitQuickQuery?: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
     hideQuickQuery?: () => Promise<{ success: boolean }>;
     resizeQuickQuery?: (payload: { height: number }) => Promise<{ success: boolean }>;
+    setQuickQueryFileDrag?: (payload: { active: boolean }) => Promise<{ success: boolean }>;
   } = {}
 ): LauncherIpc {
   const toggleCallbacks: ToggleCallback[] = [];
@@ -109,6 +111,9 @@ function installLauncherIpc(
   const submitQuickQuery = vi.fn(overrides.submitQuickQuery ?? (async () => ({ success: true })));
   const hideQuickQuery = vi.fn(overrides.hideQuickQuery ?? (async () => ({ success: true })));
   const resizeQuickQuery = vi.fn(overrides.resizeQuickQuery ?? (async () => ({ success: true })));
+  const setQuickQueryFileDrag = vi.fn(
+    overrides.setQuickQueryFileDrag ?? (async () => ({ success: true }))
+  );
 
   const partial: Partial<IPC> = {
     onQuickQueryToggle: (cb) => {
@@ -120,11 +125,19 @@ function installLauncherIpc(
     submitQuickQuery,
     hideQuickQuery,
     resizeQuickQuery,
+    setQuickQueryFileDrag,
   };
 
   installIpcMock(partial);
 
-  return { toggleCallbacks, focusCallbacks, submitQuickQuery, hideQuickQuery, resizeQuickQuery };
+  return {
+    toggleCallbacks,
+    focusCallbacks,
+    submitQuickQuery,
+    hideQuickQuery,
+    resizeQuickQuery,
+    setQuickQueryFileDrag,
+  };
 }
 
 function makeDropFile(name: string, contents: string, type = 'text/plain'): File {
@@ -376,7 +389,7 @@ describe('launcher blackbox', () => {
   });
 
   it('shows a drop overlay while dragging files over the launcher', async () => {
-    installLauncherIpc();
+    const ipc = installLauncherIpc();
     const tree = await loadLauncherTree();
     render(<>{tree}</>);
 
@@ -387,11 +400,52 @@ describe('launcher blackbox', () => {
       dataTransfer: { types: ['Files'], files: [] },
     });
     expect(screen.getByTestId('launcher-drag-overlay')).toHaveTextContent('Drop files here');
+    expect(ipc.setQuickQueryFileDrag).toHaveBeenCalledWith({ active: true });
 
     fireEvent.dragLeave(target, {
       dataTransfer: { types: ['Files'], files: [] },
     });
     expect(screen.queryByTestId('launcher-drag-overlay')).not.toBeInTheDocument();
+    expect(ipc.setQuickQueryFileDrag).toHaveBeenCalledWith({ active: false });
+  });
+
+  it('claims macOS screenshot-style drags that omit the Files type on dragover', async () => {
+    // Repro: screenshot thumbnail / Finder often advertise text/uri-list (or
+    // public.file-url) during dragover and only fill files[] on drop. The old
+    // hasFileDrag gate skipped preventDefault → drop fell through to apps behind.
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const target = screen.getByTestId('launcher-drop-target');
+    fireEvent.dragOver(target, {
+      dataTransfer: { types: ['text/uri-list'], files: [], dropEffect: 'none' },
+    });
+
+    expect(screen.getByTestId('launcher-drag-overlay')).toHaveTextContent('Drop files here');
+    expect(ipc.setQuickQueryFileDrag).toHaveBeenCalledWith({ active: true });
+
+    const shot = makeDropFile('Screen Shot.png', 'png-bytes', 'image/png');
+    fireEvent.drop(target, {
+      dataTransfer: {
+        types: ['Files', 'text/uri-list'],
+        files: [shot],
+        items: [{ kind: 'file', type: shot.type, getAsFile: () => shot }],
+      },
+    });
+    expect(await screen.findByTestId('launcher-attachment-chip')).toHaveTextContent(
+      'Screen Shot.png'
+    );
+  });
+
+  it('keeps a hittable window surface so transparent pixels do not pass OS drags through', async () => {
+    installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const surface = screen.getByTestId('launcher-window-surface');
+    expect(surface).toHaveStyle({ backgroundColor: 'rgba(255, 255, 255, 0.01)' });
+    expect(surface.className).toContain('no-drag');
   });
 
   it('holds dropped files as chips and resizes the window', async () => {
