@@ -419,12 +419,15 @@ async function main(): Promise<void> {
   );
   assert.deepStrictEqual(proseKycCalls, ['create_card']);
 
-  const missingCardholderProvider = new AgentCardOrgMcpProvider('cardholder-missing', async (name) => {
-    if (name === 'create_card') {
-      throw new Error('create_card failed: Cardholder not found');
+  const missingCardholderProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        throw new Error('create_card failed: Cardholder not found');
+      }
+      throw new Error(`unexpected missing-cardholder tool ${name}`);
     }
-    throw new Error(`unexpected missing-cardholder tool ${name}`);
-  });
+  );
   await assert.rejects(
     () =>
       missingCardholderProvider.mintCard({
