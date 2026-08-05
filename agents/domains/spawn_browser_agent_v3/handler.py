@@ -146,7 +146,9 @@ from .service_crypto import (
     extract_rate_limited_until,
     fetch_recent_otps,
     format_otp_user_message,
+    has_payment_card_secret_refs,
     is_usable_email_otp,
+    page_requires_new_card_entry,
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
@@ -6644,6 +6646,69 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 close_reasoning = unified_action.get("params", {}).get("reasoning", "") or unified_action.get(
                     "params", {}
                 ).get("text", "")
+
+                # Hard gate: checkout pages that still show Stripe / Payment Details
+                # must call request_payment_card before attempt_completion. Eventim
+                # can present empty Stripe Element shells (2px accessory iframes);
+                # the verifier previously scored those as done without a
+                # payment_approval attention request (agent d8a66e88-…).
+                already_requested_payment = any(
+                    str(entry).startswith("request_payment_card") for entry in action_summary
+                )
+                payment_card_ready = payment_card_last4 is not None or has_payment_card_secret_refs(
+                    (write_lock_resume_state or {}).get("payment_card_refs")
+                    if isinstance(write_lock_resume_state, dict)
+                    else None
+                )
+                if not already_requested_payment and not payment_card_ready:
+                    completion_state = browser_state if isinstance(browser_state, dict) else {}
+                    with contextlib.suppress(Exception):
+                        completion_state = await dom_service.get_browser_state(include_screenshot=False)
+                    if page_requires_new_card_entry(
+                        current_url=current_url or browser_url or "",
+                        browser_state=completion_state if isinstance(completion_state, dict) else {},
+                    ):
+                        blocked_result = {
+                            "success": False,
+                            "error": (
+                                "Checkout still requires new card details. Extract the full itemized "
+                                "receipt from the page (ticket line items, fees, subtotal, total), call "
+                                "request_payment_card with that receipt, and wait for approval before "
+                                "attempt_completion. Do not treat empty Stripe Element shells as done."
+                            ),
+                        }
+                        blocked_tool_call_id = str(
+                            llm_result.get("tool_call_id") or uuid_module.uuid4()
+                        )
+                        await action_history.record_action(
+                            dom_service=dom_service,
+                            action=action_name,
+                            thinking=thinking,
+                            params=unified_action.get("params") or {},
+                            result=blocked_result,
+                        )
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Blocked completion: request payment card first",
+                            task_id=task_id,
+                            message=blocked_result["error"],
+                            status=MessageStatus.ERROR,
+                            browser_url=browser_url,
+                            action_type=action_name,
+                            tool_call_id=blocked_tool_call_id,
+                        )
+                        _append_browser_turn_messages(
+                            browser_turn_messages,
+                            task=task_prompt,
+                            browser_state=completion_state
+                            if isinstance(completion_state, dict)
+                            else (browser_state if isinstance(browser_state, dict) else {}),
+                            include_screenshot=False,
+                            unified_action=unified_action,
+                            result=blocked_result,
+                            tool_call_id=blocked_tool_call_id,
+                        )
+                        continue
 
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"

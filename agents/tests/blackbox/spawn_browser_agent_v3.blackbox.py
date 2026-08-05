@@ -8047,6 +8047,26 @@ async def test_execute_action_read_network_requests():
     monitor_only.query_requests.assert_called_once()
 
 
+def test_page_requires_new_card_entry_detects_eventim_payment_shells():
+    """Empty Stripe shells on checkout still require request_payment_card before done."""
+    from domains.spawn_browser_agent_v3.service_crypto import page_requires_new_card_entry
+
+    assert page_requires_new_card_entry(
+        current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+        browser_state={
+            "title": "Eventim Checkout",
+            "dom_tree": (
+                "Payment Details Enter your payment details to complete your purchase. "
+                "Secure payment input frame StripeElement"
+            ),
+        },
+    )
+    assert not page_requires_new_card_entry(
+        current_url="https://wl.eventim.us/event/lyny/692405",
+        browser_state={"title": "Buy tickets", "dom_tree": "General Admission Add to cart"},
+    )
+
+
 async def test_execute_action_request_payment_card_requests_workflow_approval():
     from domains.spawn_browser_agent_v3.service_actions import execute_action
 
@@ -14227,6 +14247,10 @@ async def run_all_tests():
         test_provider_exit_monitor_runs_without_production_body_log_persistence,
     )
     await r.record_async("execute_action_read_network_requests", test_execute_action_read_network_requests)
+    r.record(
+        "page_requires_new_card_entry_eventim_shells",
+        test_page_requires_new_card_entry_detects_eventim_payment_shells,
+    )
     await r.record_async(
         "execute_action_request_payment_card",
         test_execute_action_request_payment_card_requests_workflow_approval,

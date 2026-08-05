@@ -490,13 +490,17 @@ async function probePaymentCdnReachable(
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 8_000);
-          const response = await fetch(target.url, {
+          await fetch(target.url, {
             method: 'GET',
             signal: controller.signal,
             credentials: 'omit',
           });
           clearTimeout(timer);
-          hosts[target.host] = response.ok;
+          // Any HTTP response means the proxy tunnel reached the host.
+          // Stripe may return 401/404 on probe paths; treating only
+          // response.ok as success false-negatives reachable tunnels and
+          // leaves Elements empty after a CF-only promote.
+          hosts[target.host] = true;
         } catch {
           hosts[target.host] = false;
         }

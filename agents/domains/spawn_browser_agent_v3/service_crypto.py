@@ -886,6 +886,60 @@ def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:
     return all(bool(refs.get(ref)) for ref in PAYMENT_CARD_SECRET_REFS)
 
 
+_CHECKOUT_URL_MARKERS = (
+    "checkout",
+    "/cart",
+    "/payment",
+    "/pay",
+    "/billing",
+    "purchase",
+)
+_CARD_ENTRY_PAGE_MARKERS = (
+    "payment details",
+    "enter your payment details",
+    "secure payment input frame",
+    "card number",
+    "credit card",
+    "stripeelement",
+    "__privatestripeframe",
+    "js.stripe.com/v3/elements",
+)
+
+
+def page_requires_new_card_entry(
+    *,
+    current_url: str,
+    browser_state: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """True when the live tab looks like a checkout that still needs card entry.
+
+    Used to block ``attempt_completion`` before ``request_payment_card`` when the
+    page already shows Payment Details / Stripe Element shells (Eventim can show
+    those headings with empty 2px accessory iframes — the verifier must not treat
+    that as done).
+    """
+    url = (current_url or "").lower()
+    if not any(marker in url for marker in _CHECKOUT_URL_MARKERS):
+        return False
+    state = browser_state or {}
+    chunks: List[str] = [url, str(state.get("title") or "").lower()]
+    for key in ("dom_tree", "dom_text", "page_text", "body_text", "content"):
+        value = state.get(key)
+        if isinstance(value, str) and value:
+            chunks.append(value.lower())
+    # Interactive / iframe summaries from the browser-use state dump.
+    for key in ("interactive_elements", "elements", "iframe_srcs", "frames"):
+        value = state.get(key)
+        if value is None:
+            continue
+        try:
+            chunks.append(json.dumps(value, default=str).lower())
+        except Exception:
+            chunks.append(str(value).lower())
+    blob = "\n".join(chunks)
+    return any(marker in blob for marker in _CARD_ENTRY_PAGE_MARKERS)
+
+
 def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) -> str:
     """Build resume instructions for an already approved one-time payment card."""
     if not has_payment_card_secret_refs(payment_card_refs):

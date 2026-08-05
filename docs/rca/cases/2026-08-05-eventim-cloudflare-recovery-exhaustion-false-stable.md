@@ -186,6 +186,13 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     Fix: log per-host payment CDN results, deprioritize the current failing
     exit, prefer partial host clears, and when rotating off a failed exit with
     no Stripe clear prefer `steel_managed`.
+15. Payment CDN probe must treat any HTTP response as tunnel-reachable — not
+    only `response.ok` (Stripe probe paths can 401/404 through a working proxy).
+16. `d8a66e88-…` reached Eventim checkout Payment Details with empty Stripe
+    Element shells, verifier scored 100%, and the run ended without
+    `request_payment_card` / `payment_approval`. Block `attempt_completion` when
+    the live checkout still shows card-entry markers and no card has been
+    requested/approved.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +
