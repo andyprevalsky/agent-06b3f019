@@ -414,6 +414,12 @@ SQL
   fi
 fi
 
+if ! $DB_FOUND || [ -z "${LOCAL_DB_URL:-}" ]; then
+  echo "❌ No local Postgres found for coverage (Docker container or system Postgres on :5432)." >&2
+  echo "   Start the workspace DB container or \`sudo service postgresql start\` (Cloud: ROSE_USE_SYSTEM_PG=true)." >&2
+  exit 1
+fi
+
 # Fast Mode cache still requires an explicit URL outside production, but a local
 # coverage run must not write fixtures into (or depend on capacity from) the
 # shared production cache database. The local schema includes FastModeCacheEntry,
