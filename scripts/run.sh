@@ -885,6 +885,17 @@ if $DB_RESTORED; then
     # which runs this same step, rather than a subtly different DB.
     echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
     (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
+    # Restoring a base image resets the schema to exactly what the dump holds, so
+    # anything ensured BEFORE the restore (the Fast Mode cache table above) is
+    # gone unless that dump happened to contain it. Re-ensure idempotently so a
+    # dump published before the table existed cannot leave the cache broken.
+    if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ]; then
+        echo "🧠 Re-ensuring Fast Mode cache schema (post-restore)..."
+        if ! ensure_fast_mode_cache_schema bash -c \
+            'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
+            exit 1
+        fi
+    fi
 else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
