@@ -50,7 +50,7 @@ export interface CandidateProbeResult {
   stablePasses: number;
   attempts: number;
   latencyMs: number;
-  /** True when the candidate's browser can fetch js.stripe.com (payment fields). */
+  /** True when the candidate can fetch js.stripe.com AND api.stripe.com (Elements). */
   paymentCdnOk: boolean;
 }
 
@@ -171,7 +171,7 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
 
 function candidateScore(candidate: SuccessfulRecoveryCandidate): [number, number, number] {
   // Prefer CF-stable, then payment-CDN-reachable (Eventim card fields need
-  // js.stripe.com through the proxy tunnel), then fastest probe.
+  // js.stripe.com + api.stripe.com through the proxy tunnel), then fastest probe.
   return [
     -candidate.probe.stablePasses,
     candidate.probe.paymentCdnOk ? 0 : 1,
@@ -415,22 +415,28 @@ function recoveryOriginStorageScript(storageState: Record<string, unknown>): str
 
 async function probePaymentCdnReachable(page: Page): Promise<boolean> {
   // Run inside the candidate page so the fetch uses the same proxy tunnel the
-  // checkout card fields will need (js.stripe.com ERR_TUNNEL on Eventim).
+  // checkout card fields will need. js.stripe.com alone is insufficient —
+  // Eventim Elements stay empty when api.stripe.com tunnels fail after a
+  // js-only paymentCdnOk promote (agent baf33041-…).
   return page
     .evaluate(async () => {
-      try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 8_000);
-        const response = await fetch('https://js.stripe.com/v3/', {
-          method: 'GET',
-          signal: controller.signal,
-          credentials: 'omit',
-        });
-        clearTimeout(timer);
-        return response.ok;
-      } catch {
-        return false;
+      const urls = ['https://js.stripe.com/v3/', 'https://api.stripe.com/healthcheck'];
+      for (const url of urls) {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8_000);
+          const response = await fetch(url, {
+            method: 'GET',
+            signal: controller.signal,
+            credentials: 'omit',
+          });
+          clearTimeout(timer);
+          if (!response.ok) return false;
+        } catch {
+          return false;
+        }
       }
+      return true;
     })
     .catch(() => false);
 }
@@ -493,7 +499,7 @@ export async function probeCandidateBrowser(
       log.info('Challenge recovery candidate payment CDN probe', {
         ...logContext,
         paymentCdnOk,
-        host: 'js.stripe.com',
+        hosts: ['js.stripe.com', 'api.stripe.com'],
       });
     }
   } finally {

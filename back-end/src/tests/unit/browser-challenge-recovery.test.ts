@@ -223,7 +223,7 @@ async function testPrefersPaymentCdnReachableWinnerWhenStablePassesTie(): Promis
       stablePasses: 2,
       attempts: 2,
       // steel_managed is slower but payment-CDN reachable — must win over a
-      // faster CF-only clear (Eventim card fields need js.stripe.com).
+      // faster CF-only clear (Eventim card fields need js+api.stripe.com).
       latencyMs: config.key === 'steel_managed' ? 500 : 1,
       paymentCdnOk: config.key === 'steel_managed',
     }),
@@ -323,8 +323,12 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     waitForTimeout: async () => undefined,
     evaluate: async (pageFunction: () => Promise<unknown>) => {
       const source = Function.prototype.toString.call(pageFunction);
-      if (source.includes('js.stripe.com')) {
+      // Probe requires both js.stripe.com and api.stripe.com in one evaluate.
+      if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
         return true;
+      }
+      if (source.includes('js.stripe.com') || source.includes('api.stripe.com')) {
+        return false;
       }
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(

@@ -2680,11 +2680,16 @@ async def _install_fast_mode_network_cache(
     read_enabled: bool = True,
     write_enabled: bool = True,
 ) -> None:
-    """Attach a CDP Fetch route that records/replays the browser's HTTPS responses.
+    """Record/replay browser HTTPS responses for Fast Mode.
 
-    HIT → fulfill from cache (no internet). MISS → continue live, capture the body
-    via a response listener. Browser session + actions stay live; only network
-    responses are cached. Failures degrade to live (never break the session).
+    Replay (read_enabled): install a Playwright route that fulfills cache hits.
+    Write-through / record-only: attach a response listener only — do NOT install
+    ``context.route("**/*")``. Routing every request (even with immediate
+    ``continue_()``) breaks Stripe Elements on Eventim checkout: Billing Address
+    and Payment Details stay empty shells while js.stripe.com still returns 200s
+    (bench agent ``baf33041-…``, steel_managed, write-through user).
+
+    Failures degrade to live (never break the session).
     """
     from providers.fast_cache.browser_http import BrowserHttpCache
 
@@ -2742,8 +2747,10 @@ async def _install_fast_mode_network_cache(
         except Exception:  # recording is best-effort, never break the page
             pass
 
-    await context.route("**/*", _route)
-    context.on("response", lambda r: asyncio.ensure_future(_record(r)))
+    if read_enabled:
+        await context.route("**/*", _route)
+    if write_enabled:
+        context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
 async def _finalize_kernel_replay_for_fe(
@@ -5029,10 +5036,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _pw_context = _pw_browser.contexts[0]
                 _pw_page = _pw_context.pages[0]
 
-                # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
-                # On a hit we fulfill from cache (no internet); on a miss we let the request
-                # go live and capture the response body. Write-through mode records without
-                # fulfilling from cache. The browser session + actions stay live.
+                # Fast Mode: replay uses a Playwright route; write-through records via a
+                # response listener only (routing every request breaks Stripe Elements).
                 fast_mode_write_through = write_through_enabled_for_user(user_id)
                 if goal and (fast_mode_cache_enabled or fast_mode_write_through):
                     await _install_fast_mode_network_cache(

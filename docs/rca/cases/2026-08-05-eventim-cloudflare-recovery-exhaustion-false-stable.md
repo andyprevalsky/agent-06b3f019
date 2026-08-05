@@ -162,9 +162,20 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
    (`4e7024e4-…` looped recoveries after a clean `kernel_isp` promote). Cap
    auto payment-CDN exits, prefer `paymentCdnOk` candidates when ranking, and
    treat title `Just a moment` as a challenge text marker.
+10. `paymentCdnOk` must require both `js.stripe.com` and `api.stripe.com`.
+    `baf33041-…` promoted `steel_managed` with js-only `paymentCdnOk=true`, then
+    live checkout hit `api.stripe.com/healthcheck` `ERR_TUNNEL_CONNECTION_FAILED`
+    and Elements stayed empty (cap blocked a second payment-CDN exit).
+11. Fast Mode write-through for the benchmark user must NOT install
+    `context.route("**/*")`. Write-only recording uses the response listener.
+    On `baf33041-…` browser-2 (Steel from preferred config, no tunnel errors,
+    js.stripe.com 200s) Billing Address / Payment Details remained empty shells
+    — Playwright routing every request breaks Stripe Elements. Also never
+    record/replay Stripe payment-CDN hosts in `browser_http` cache.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
-unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases.
+unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +
+`test_browser_cache` write-through/no-Stripe-cache cases.
 Exact-bench outcome still required before status=`fixed`.
 
 ## Human feedback
