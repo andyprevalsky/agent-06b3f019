@@ -22,13 +22,17 @@ export function getPhoneBenchmarkPaymentAuditPathOverride(): string {
 }
 
 export function getBenchmarkAgentCardCardholderIdOverride(): string {
-  return (process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID ?? '').trim();
+  return resolveBenchmarkAgentCardIds().cardholderId;
 }
 
 /**
  * Cursor Cloud can inject a truncated BENCHMARK_AGENTCARD_ORG_ID into the
  * process env (observed as 7 chars). Prefer a full AGENTCARD_* id when the
  * benchmark override is missing or too short to be a real org/cardholder id.
+ *
+ * Org and cardholder are one fixture pair: when the org id falls back to
+ * AGENTCARD_ORG_ID, the benchmark cardholder override is treated as stale too
+ * (Cursor often truncates org while leaving a full foreign cardholder id).
  */
 export function resolveBenchmarkAgentCardIds(env: NodeJS.ProcessEnv = process.env): {
   orgId: string;
@@ -38,10 +42,19 @@ export function resolveBenchmarkAgentCardIds(env: NodeJS.ProcessEnv = process.en
   const agentCardholder = (env.AGENTCARD_CARDHOLDER_ID ?? '').trim();
   const benchmarkOrg = (env.BENCHMARK_AGENTCARD_ORG_ID ?? '').trim();
   const benchmarkCardholder = (env.BENCHMARK_AGENTCARD_CARDHOLDER_ID ?? '').trim();
-  const orgId =
-    benchmarkOrg.length >= 20 ? benchmarkOrg : agentOrg.length >= 20 ? agentOrg : benchmarkOrg;
-  const cardholderId =
-    benchmarkCardholder.length >= 20
+  const orgUsesAgentFallback = benchmarkOrg.length < 20 && agentOrg.length >= 20;
+  const orgId = orgUsesAgentFallback
+    ? agentOrg
+    : benchmarkOrg.length >= 20
+      ? benchmarkOrg
+      : agentOrg.length >= 20
+        ? agentOrg
+        : benchmarkOrg;
+  const cardholderId = orgUsesAgentFallback
+    ? agentCardholder.length >= 20
+      ? agentCardholder
+      : benchmarkCardholder
+    : benchmarkCardholder.length >= 20
       ? benchmarkCardholder
       : agentCardholder.length >= 20
         ? agentCardholder

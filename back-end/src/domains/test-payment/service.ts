@@ -21,7 +21,6 @@ import {
 import {
   getBenchmarkAgentCardCardholderIdOverride,
   getPhoneBenchmarkPaymentAuditPathOverride,
-  isProductionEnv,
   TEST_PAYMENT_PUBLIC_BASE_URL,
 } from './config';
 import { TestPaymentError } from './errors';
@@ -67,12 +66,14 @@ export async function configureBenchmarkAgentCardSetup(
     return { status: 'connect_required' };
   }
   if (input.action === 'complete') {
-    const cardholderIdOverride = getBenchmarkAgentCardCardholderIdOverride();
     const cardholderId =
-      cardholderIdOverride !== '' ? cardholderIdOverride : DEFAULT_SANDBOX_CARDHOLDER_ID;
+      getBenchmarkAgentCardCardholderIdOverride() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+    const orgOAuthConfigured =
+      (process.env.AGENTCARD_ORG_OAUTH_CLIENT_ID ?? '').trim() !== '' &&
+      (process.env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET ?? '').trim() !== '';
     const getVerificationStatus =
       dependencies.getCardholderVerificationStatus ??
-      (isProductionEnv() ? getOrgCardholderVerificationStatus : undefined);
+      (orgOAuthConfigured ? getOrgCardholderVerificationStatus : undefined);
     if (getVerificationStatus !== undefined) {
       let verificationStatus: string;
       try {

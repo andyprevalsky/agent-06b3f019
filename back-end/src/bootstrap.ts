@@ -9,9 +9,21 @@
  */
 import dotenv from 'dotenv';
 
+import { applyResolvedBenchmarkAgentCardIds } from './domains/test-payment/config';
 import { assertProductionEnvironment } from './providers/productionEnvironment';
 
-dotenv.config();
+// Cursor Cloud can inject truncated BENCHMARK_AGENTCARD_* values into process
+// env. Prefer back-end/.env (override) and normalize org/cardholder as a pair.
+const callerDatabaseUrl = process.env.DATABASE_URL;
+const callerDirectUrl = process.env.DIRECT_URL;
+dotenv.config({ override: true });
+if (callerDatabaseUrl) {
+  process.env.DATABASE_URL = callerDatabaseUrl;
+}
+if (callerDirectUrl) {
+  process.env.DIRECT_URL = callerDirectUrl;
+}
+applyResolvedBenchmarkAgentCardIds();
 assertProductionEnvironment(process.env);
 
 import('./server').catch((error: unknown) => {

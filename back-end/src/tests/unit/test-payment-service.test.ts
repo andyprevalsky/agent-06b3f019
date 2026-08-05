@@ -41,6 +41,10 @@ import {
   resolvePublicBaseUrl,
   TestPaymentError,
 } from '../../domains/test-payment/service';
+import {
+  applyResolvedBenchmarkAgentCardIds,
+  resolveBenchmarkAgentCardIds,
+} from '../../domains/test-payment/config';
 import { assertClosedCardMcpParsing, threeItems } from './test-payment-service-fixtures';
 
 const createdUserIds: string[] = [];
@@ -338,7 +342,10 @@ async function main(): Promise<void> {
       () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
       /action must be reset or complete/
     );
-    const connected = await configureBenchmarkAgentCardSetup({ userId, action: 'complete' });
+    const connected = await configureBenchmarkAgentCardSetup(
+      { userId, action: 'complete' },
+      { getCardholderVerificationStatus: async () => 'verified' }
+    );
     assert.equal(connected.status, 'connected');
     const row = await prisma.integration.findUnique({
       where: { userId_name: { userId, name: 'agentcard' } },
@@ -357,6 +364,50 @@ async function main(): Promise<void> {
     assert.equal(resetRow?.status, 'NOT_CONNECTED');
     assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
   });
+
+  await test(
+    'configureBenchmarkAgentCardSetup keeps org/cardholder pair when org override is truncated',
+    async () => {
+      const userId = await seedUser();
+      const savedEnv = {
+        benchmarkOrg: process.env.BENCHMARK_AGENTCARD_ORG_ID,
+        benchmarkCardholder: process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID,
+        agentOrg: process.env.AGENTCARD_ORG_ID,
+        agentCardholder: process.env.AGENTCARD_CARDHOLDER_ID,
+      };
+      process.env.BENCHMARK_AGENTCARD_ORG_ID = 'cmqr3fk';
+      process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cmrs8yyyyyyyyyyyyyyyyy7jg';
+      process.env.AGENTCARD_ORG_ID = 'cmqr3fkkkkkkkkkkkkkkkiu0z';
+      process.env.AGENTCARD_CARDHOLDER_ID = 'cmrfpzzzzzzzzzzzzzzzzzgfto';
+      try {
+        applyResolvedBenchmarkAgentCardIds();
+        await configureBenchmarkAgentCardSetup(
+          { userId, action: 'complete' },
+          {
+            getCardholderVerificationStatus: async (cardholderId) => {
+              assert.equal(cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
+              return 'verified';
+            },
+          }
+        );
+        const row = await prisma.integration.findUnique({
+          where: { userId_name: { userId, name: 'agentcard' } },
+        });
+        const config = row?.config as { cardholderId?: string };
+        assert.equal(config?.cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
+        assert.equal(
+          resolveBenchmarkAgentCardIds().cardholderId,
+          'cmrfpzzzzzzzzzzzzzzzzzgfto'
+        );
+      } finally {
+        process.env.BENCHMARK_AGENTCARD_ORG_ID = savedEnv.benchmarkOrg;
+        process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = savedEnv.benchmarkCardholder;
+        process.env.AGENTCARD_ORG_ID = savedEnv.agentOrg;
+        process.env.AGENTCARD_CARDHOLDER_ID = savedEnv.agentCardholder;
+        applyResolvedBenchmarkAgentCardIds();
+      }
+    }
+  );
 
   await test('resolvePublicBaseUrl reflects the configured value', async () => {
     const url = await resolvePublicBaseUrl();

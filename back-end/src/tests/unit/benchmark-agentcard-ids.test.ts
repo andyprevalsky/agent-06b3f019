@@ -8,7 +8,7 @@ import {
 } from '../../domains/test-payment/config';
 
 function main(): void {
-  // Truncated Cursor-injected org id falls back to AGENTCARD_ORG_ID.
+  // Truncated Cursor-injected org id falls back to AGENTCARD_ORG_ID and cardholder pair.
   {
     const resolved = resolveBenchmarkAgentCardIds({
       BENCHMARK_AGENTCARD_ORG_ID: 'cmqr3fk',
@@ -17,7 +17,7 @@ function main(): void {
       AGENTCARD_CARDHOLDER_ID: 'cmrfpzzzzzzzzzzzzzzzzzgfto',
     });
     assert.equal(resolved.orgId, 'cmqr3fkkkkkkkkkkkkkkkiu0z');
-    assert.equal(resolved.cardholderId, 'cmrs8yyyyyyyyyyyyyyyyy7jg');
+    assert.equal(resolved.cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
   }
 
   // Truncated cardholder falls back to AGENTCARD_CARDHOLDER_ID.
