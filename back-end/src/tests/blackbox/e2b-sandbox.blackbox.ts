@@ -136,8 +136,68 @@ function testDnsNotFoundIsTransient(): void {
   );
 }
 
+/**
+ * Regression: an INCONCLUSIVE orphan lookup must never fall through to a second
+ * create. Attempt 1's response is lost (the sandbox exists remotely), then the
+ * first `Sandbox.list` fails. Collapsing that failure into "no orphan" made the
+ * retry provision a duplicate, leaving the first sandbox untracked and billed.
+ */
+async function testInconclusiveOrphanLookupDoesNotDuplicateCreate(): Promise<void> {
+  const originalCreate = Sandbox.create;
+  const originalList = Sandbox.list;
+  const originalConnect = Sandbox.connect;
+  let createCalls = 0;
+  let listCalls = 0;
+
+  const provisioned = { sandboxId: 'sandbox-provisioned-but-response-lost' } as Awaited<
+    ReturnType<typeof Sandbox.connect>
+  >;
+
+  Sandbox.create = (async () => {
+    createCalls += 1;
+    // The sandbox IS provisioned remotely; only the response is lost.
+    const transport = new Error('socket hang up');
+    (transport as NodeJS.ErrnoException).code = 'ECONNRESET';
+    throw transport;
+  }) as typeof Sandbox.create;
+
+  Sandbox.list = (() => {
+    listCalls += 1;
+    return {
+      nextItems: async () => {
+        // First lookup is inconclusive; afterwards the orphan is visible.
+        if (listCalls === 1) throw new Error('control plane unavailable');
+        return [{ sandboxId: provisioned.sandboxId }];
+      },
+    };
+  }) as typeof Sandbox.list;
+
+  Sandbox.connect = (async () => provisioned) as typeof Sandbox.connect;
+
+  try {
+    const sandbox = await createSandboxWithRetry('template', {}, 'test');
+    assert(
+      sandbox.sandboxId === provisioned.sandboxId,
+      'the already-provisioned sandbox must be adopted, not replaced'
+    );
+    assert(
+      createCalls === 1,
+      `an inconclusive lookup must not trigger another create (createCalls=${createCalls})`
+    );
+    assert(listCalls >= 2, 'the failed lookup must be retried rather than treated as absent');
+  } finally {
+    Sandbox.create = originalCreate;
+    Sandbox.list = originalList;
+    Sandbox.connect = originalConnect;
+  }
+}
+
 async function main(): Promise<void> {
   const tests: Array<{ name: string; run: () => Promise<void> | void }> = [
+    {
+      name: 'inconclusive orphan lookup does not duplicate the create',
+      run: testInconclusiveOrphanLookupDoesNotDuplicateCreate,
+    },
     {
       name: 'terminal ambiguous create adopts the provisioned sandbox',
       run: testFinalAttemptAdoptsProvisionedSandbox,
