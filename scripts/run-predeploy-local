@@ -199,6 +199,11 @@ trap 'forward_signal HUP 129' HUP
 trap 'forward_signal INT 130' INT
 trap 'forward_signal TERM 143' TERM
 
+# This launcher promises a per-run isolated stack. Do not let a caller's remote
+# cache override—or run.sh's shared-cache default—turn startup into a production
+# pooler dependency. run.sh creates the same cache schema in this run's local DB.
+unset FAST_MODE_CACHE_DATABASE_URL
+FAST_MODE_CACHE_USE_LOCAL=1 \
 BENCHMARK_SKIP_WMH_BUILD=1 \
 BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
 BENCHMARK_COMPUTE_TOKEN_TYPE=claude \

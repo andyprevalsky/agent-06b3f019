@@ -199,6 +199,56 @@ git -C "$tool_description_repo" add agents/providers/rose/browser_use.py
 expect_fail "$tool_description_repo" "tool description text requires approval"
 expect_flag_pass "$tool_description_repo" "approval flag permits a tool description edit"
 
+# Regression: 2026-08-04 Blue Bottle — SMS Tools.schemas.ts puts the description
+# string on the line AFTER `description:`, so assignment-line matching misses.
+multiline_tool_schema_repo="$(new_repo multiline-tools-schemas)"
+mkdir -p "$multiline_tool_schema_repo/back-end/src/providers/smsSupervisor"
+cat >"$multiline_tool_schema_repo/back-end/src/providers/smsSupervisor/supervisorTools.schemas.ts" <<'TS'
+export const TOOL_SCHEMAS = [
+  {
+    name: 'start_new_agent',
+    description:
+      'Spawn an autonomous agent that decomposes a goal and runs sub-agents in parallel. Use for work that cannot finish inside this SMS round-trip.',
+    parameters: { type: 'object' as const, properties: {} },
+  },
+];
+TS
+git -C "$multiline_tool_schema_repo" add back-end/src/providers/smsSupervisor/supervisorTools.schemas.ts
+git -C "$multiline_tool_schema_repo" commit -q -m "seed schemas"
+cat >"$multiline_tool_schema_repo/back-end/src/providers/smsSupervisor/supervisorTools.schemas.ts" <<'TS'
+export const TOOL_SCHEMAS = [
+  {
+    name: 'start_new_agent',
+    description:
+      "Spawn an autonomous agent that decomposes a goal and runs sub-agents in parallel. Use for work that cannot finish inside this SMS round-trip — purchases/orders. This is the SMS-surface equivalent of spawn_agent — call start_new_agent here; do not invent progress in send_user_message without calling it.",
+    parameters: { type: 'object' as const, properties: {} },
+  },
+];
+TS
+git -C "$multiline_tool_schema_repo" add back-end/src/providers/smsSupervisor/supervisorTools.schemas.ts
+expect_fail "$multiline_tool_schema_repo" "multi-line Tools.schemas.ts description requires approval"
+expect_flag_pass "$multiline_tool_schema_repo" "approval flag permits multi-line Tools.schemas.ts edit"
+
+# Same incident: SMS_SURFACE_OVERLAY bullet edited far below the const assignment.
+sms_overlay_repo="$(new_repo sms-overlay-continuation)"
+mkdir -p "$sms_overlay_repo/back-end/src/providers/smsSupervisor"
+cat >"$sms_overlay_repo/back-end/src/providers/smsSupervisor/contextBuilder.ts" <<'TS'
+export const SMS_SURFACE_OVERLAY = `# SMS Surface
+- Be conversational but concise, this is texting, not email
+- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.`;
+TS
+git -C "$sms_overlay_repo" add back-end/src/providers/smsSupervisor/contextBuilder.ts
+git -C "$sms_overlay_repo" commit -q -m "seed overlay"
+cat >"$sms_overlay_repo/back-end/src/providers/smsSupervisor/contextBuilder.ts" <<'TS'
+export const SMS_SURFACE_OVERLAY = `# SMS Surface
+- Be conversational but concise, this is texting, not email
+- Do not send a placeholder such as "I'll check now" and then stop. If you send a progress message, keep working in the same run and send the substantive result before attempt_completion.
+- Agent lifecycle tools on THIS surface are start_new_agent and kill_agent only. There is no spawn_agent tool here (that name belongs to the main agent harness). Never claim you killed, started, placed, or submitted anything unless this run's tool results just confirmed it — texting progress without the matching tool call is a failure.`;
+TS
+git -C "$sms_overlay_repo" add back-end/src/providers/smsSupervisor/contextBuilder.ts
+expect_fail "$sms_overlay_repo" "SMS surface overlay bullet continuation requires approval"
+expect_flag_pass "$sms_overlay_repo" "approval flag permits SMS surface overlay edit"
+
 pydantic_field_repo="$(new_repo pydantic-tool-field)"
 mkdir -p "$pydantic_field_repo/agents/browser_tools"
 cat >"$pydantic_field_repo/agents/browser_tools/schemas.py" <<'PY'

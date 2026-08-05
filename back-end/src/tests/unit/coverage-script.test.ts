@@ -186,10 +186,25 @@ assert.match(
   /export FAST_MODE_CACHE_DATABASE_URL="\$LOCAL_DB_URL"/,
   'coverage must isolate Fast Mode cache fixtures in the local test database'
 );
+assert.match(
+  coverageScript,
+  /BACKEND_TEST_DB_CONNECTION_LIMIT:-4[\s\S]*connection_limit=\$TEST_DB_CONNECTION_LIMIT&pool_timeout=30/,
+  'parallel coverage children must use bounded Prisma pools'
+);
 assert.ok(
   coverageScript.indexOf('npx prisma db push --skip-generate --accept-data-loss') <
     coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"'),
   'coverage must install migration-owned database triggers after Prisma schema sync'
+);
+assert.match(
+  coverageScript,
+  /DATABASE_URL="\$LOCAL_PSQL_URL" DIRECT_URL="\$LOCAL_PSQL_URL"[\s\\]+bash "\$SCRIPT_DIR\/apply-local-runtime-sql-hooks\.sh"/,
+  'the psql-backed runtime hook installer must receive the plain libpq URL'
+);
+assert.match(
+  blackboxScript,
+  /EXPLICIT_TEST_PSQL_URL="\$\{EXPLICIT_TEST_DB_URL%%\\\?\*\}"[\s\S]*psql "\$EXPLICIT_TEST_PSQL_URL"/,
+  'existing-backend reachability probes must strip Prisma-only URL parameters before invoking psql'
 );
 assert.ok(
   coverageScript.indexOf('bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh"') <

@@ -26,13 +26,16 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-5',
     gptAuthModel: 'gpt-5.6-terra',
-    waterfall: ['google/gemini-3.5-flash', 'moonshotai/kimi-k3'],
+    waterfall: ['google/gemini-3.6-flash', 'moonshotai/kimi-k3'],
   },
   'rose-1-ultra': {
     name: 'rose-1-ultra',
     claudeAuthModel: 'claude-fable-5',
     gptAuthModel: 'gpt-5.6-sol',
-    waterfall: ['anthropic/claude-opus-4.8', 'google/gemini-3.1-pro-preview', 'openai/gpt-5.6-sol'],
+    // gemini-3.1-pro-preview was removed here: OpenRouter 400s it on the
+    // rose-1-ultra execute pool. Terra replaces it as the second layer; sol
+    // stays third so ultra keeps a deeper fallback than a single retry.
+    waterfall: ['anthropic/claude-opus-4.8', 'openai/gpt-5.6-terra', 'openai/gpt-5.6-sol'],
   },
   'rose-1-browser-use': {
     name: 'rose-1-browser-use',

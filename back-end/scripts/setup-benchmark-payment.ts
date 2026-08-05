@@ -7,7 +7,10 @@ import {
   BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
 } from '../src/domains/purchases/config';
 import { isAdminUser } from '../src/utils/adminAccess';
-import { ensureAgentCardSandboxFloat } from '../src/providers/agentcard/benchmark-float';
+import {
+  ensureAgentCardSandboxFloat,
+  ensureBenchmarkOrgCardholder,
+} from '../src/providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../src/providers/agentcard/org-onboarding';
 import {
   callOrgTool as defaultCallOrgTool,
@@ -29,10 +32,10 @@ import {
 } from './setup-benchmark-payment-guards';
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-/**
- * A NON-ADMIN synthetic user. Admins are routed to `issueAdminCompanyCard` (company-funded, no
- * Stripe hold), which makes the lifecycle benchmarks' `stripeHold` assertions unreachable.
- */
+// Keep payment settlement on the normal Stripe-backed path. The dedicated lifecycle identity is
+// intentionally non-admin so benchmarks exercise Stripe hold, capture, and refund behavior:
+// admins are routed to `issueAdminCompanyCard` (company-funded, no Stripe hold), which makes the
+// lifecycle benchmarks' `stripeHold` assertions unreachable.
 const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
 /** Where Stripe returns the operator after the one-time live card-on-file setup. */
 const LIVE_CARD_SETUP_RETURN_URL = 'https://roselabs.ai/?benchmark-payment-card-saved=1';
@@ -393,7 +396,8 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
   await prisma.purchaseSpend.deleteMany({
     where: { userId, merchant: 'Rose Labs Test Payment' },
   });
-  await seedAgentCardConnection(prisma, userId, resolveSandboxCardholderId());
+  const cardholderId = resolveSandboxCardholderId();
+  await seedAgentCardConnection(prisma, userId, cardholderId);
 
   // The org identity now travels in the client-credential token itself
   // (AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET), so no explicit orgId is needed.
@@ -402,7 +406,17 @@ async function seedSandboxFixture(prisma: PrismaClient, userId: string): Promise
     `AgentCard sandbox pool ready at $${(sandboxFloat.availableCents / 100).toFixed(2)} available ` +
       `($${(sandboxFloat.balanceCents / 100).toFixed(2)} balance)`
   );
-  console.log(`Seeded Stripe and AgentCard payment fixtures for benchmark user ${userId}`);
+
+  // A funded pool still cannot mint if the cardholder itself is not KYC-ready, and that failure
+  // only surfaces mid-benchmark as a mint error. Assert it here instead.
+  const cardholder = await ensureBenchmarkOrgCardholder(cardholderId);
+  console.log(
+    `AgentCard benchmark cardholder ${cardholderId} is KYC-ready (${cardholder.verificationStatus})`
+  );
+
+  console.log(
+    `Seeded Stripe, Rose credit, and AgentCard payment fixtures for benchmark user ${userId}`
+  );
 }
 
 /**

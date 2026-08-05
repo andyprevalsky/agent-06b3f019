@@ -639,7 +639,7 @@ def test_build_conversation_summary_only_empty_text():
 def test_extract_user_name_from_context():
     from domains.message_person.service import extract_user_name
 
-    ctx = "Something else\nName: Andy Prevalsky\nMore stuff"
+    ctx = "Something else\nFull Name: Andy Prevalsky\nMore stuff"
     assert extract_user_name("Navi", ctx) == "Andy Prevalsky"
 
 
@@ -650,10 +650,10 @@ def test_extract_user_name_fallback():
 
 
 def test_extract_user_name_empty_name_falls_back():
-    """Name: with empty value falls back to system name."""
+    """Full Name: with empty value falls back to system name."""
     from domains.message_person.service import extract_user_name
 
-    assert extract_user_name("Navi", "Name: ") == "Navi"
+    assert extract_user_name("Navi", "Full Name: ") == "Navi"
 
 
 # ── build_cold_outreach_person ─────────────────────────────────────
@@ -905,7 +905,7 @@ class _WFInstance:
         self.model = "rose-labs/rose-1-lite"
         self.context = context or []
         self.system_name = "Navi"
-        self.user_context_section = "Name: Alice Tester"
+        self.user_context_section = "Full Name: Alice Tester"
         self.context_gates = None
         self.handled = []
 

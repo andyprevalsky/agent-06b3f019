@@ -161,25 +161,37 @@ export async function resolveAndSignal(
   request: ResolvableGateRequest,
   response: string
 ): Promise<{ resolved: boolean }> {
-  // Merge keeps both sides: main's generation lock plus the single atomic
-  // UPDATE ... RETURNING (race-free, and ordered so a response can never hold
-  // the row while waiting on deployment cleanup's generation lock), wrapped in
-  // this branch's transient-start retry so a contended pool surfaces as a retry
-  // rather than a hard gate-resolution failure.
-  const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(async (tx) => {
-    await lockAgentWorkflowGeneration(tx, request.agentId);
-    const [current] = await tx.$queryRaw<ResolvableGateRequest[]>`
-      UPDATE "AgentAttentionRequest"
-      SET "userResponse" = ${response}, "updatedAt" = CURRENT_TIMESTAMP
-      WHERE id = ${request.id} AND "userResponse" IS NULL
-      RETURNING id, "workflowId", "agentId", metadata
-    `;
-    if (current === undefined) {
-      return { fresh: null, finishedMessageCount: 0, resolved: false };
-    }
-    const finishedCount = await finishAttentionMessages(tx, current, true);
-    return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
-  });
+  // Resolving an approval also serializes against workflow replacement and the
+  // tool lifecycle, and it now takes the generation lock FIRST so a response can
+  // never hold the attention row while waiting for deployment cleanup's lock.
+  // Those row locks can legitimately outlive Prisma's 5s interactive-transaction
+  // default under deploy-suite/prod concurrency, and a short timeout rolled back
+  // the response and surfaced a false 500 on a healthy database. Keep one atomic
+  // transaction, but give the bounded critical section a 30s budget. The
+  // transient-start retry wrapper (rather than a bare `prisma.$transaction`) then
+  // keeps a contended pool surfacing as a retry rather than a hard gate failure.
+  const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(
+    async (tx) => {
+      // Deployment cleanup takes this lock before terminalizing attention rows.
+      // Keep the same order here so a response can never hold the row while
+      // waiting for cleanup's generation lock.
+      await lockAgentWorkflowGeneration(tx, request.agentId);
+      // Single atomic UPDATE ... RETURNING: the `userResponse IS NULL` predicate
+      // is the compare-and-swap, so two concurrent resolvers cannot both win.
+      const [current] = await tx.$queryRaw<ResolvableGateRequest[]>`
+        UPDATE "AgentAttentionRequest"
+        SET "userResponse" = ${response}, "updatedAt" = CURRENT_TIMESTAMP
+        WHERE id = ${request.id} AND "userResponse" IS NULL
+        RETURNING id, "workflowId", "agentId", metadata
+      `;
+      if (current === undefined) {
+        return { fresh: null, finishedMessageCount: 0, resolved: false };
+      }
+      const finishedCount = await finishAttentionMessages(tx, current, true);
+      return { fresh: current, finishedMessageCount: finishedCount, resolved: true };
+    },
+    { maxWait: 10_000, timeout: 30_000 }
+  );
   log.info('Resolved attention request read model', {
     request_id: request.id,
     agent_id: request.agentId,

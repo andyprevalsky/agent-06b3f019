@@ -224,6 +224,29 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isCardholderNotFoundMessage(message: string): boolean {
+  return /\bcardholder not found\b/i.test(message);
+}
+
+function throwIfCardholderNotFound(message: string): void {
+  if (!isCardholderNotFoundMessage(message)) return;
+  throw new AgentCardProviderError(
+    'AgentCard organization cardholder does not exist in the configured OAuth org; ' +
+      'verify BENCHMARK_AGENTCARD_CARDHOLDER_ID matches AGENTCARD_ORG_OAUTH_CLIENT credentials',
+    409,
+    undefined,
+    'agentcard_setup_required',
+    { agentcardStatus: 'cardholder_not_found' }
+  );
+}
+
+function providerErrorFromUnknown(error: unknown): AgentCardProviderError {
+  if (error instanceof AgentCardProviderError) return error;
+  const message = errorMessage(error);
+  throwIfCardholderNotFound(message);
+  return new AgentCardProviderError(message);
+}
+
 function isTimeoutError(error: unknown): boolean {
   const message = errorMessage(error);
   const name = error instanceof Error ? error.name : '';
@@ -347,9 +370,10 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
   const status = optionalString(record, ['status'])?.toLowerCase();
   const hasExplicitError = (result as McpResult).isError === true || status === 'error';
   if (hasExplicitError) {
-    throw new AgentCardProviderError(
-      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed')
-    );
+    const failureMessage =
+      optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed');
+    throwIfCardholderNotFound(failureMessage);
+    throw new AgentCardProviderError(failureMessage);
   }
 }
 
@@ -476,7 +500,7 @@ export class AgentCardOrgMcpProvider implements CardProvider {
               { attempts: attempt }
             );
           }
-          throw error;
+          throw providerErrorFromUnknown(error);
         }
         log.warn('AgentCard Organization MCP create_card timed out; retrying', {
           cardholder_id: maskId(this.cardholderId),

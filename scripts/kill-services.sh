@@ -187,7 +187,16 @@ is_self_ancestor() {
     while true; do
         local ppid
         ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        # Stop only when the walk runs out of parents. PID 1 must still be
+        # COMPARED against the candidate: on a Fly cloudbench guest the boot
+        # command is PID 1, so it can genuinely be our ancestor, and bailing
+        # early left it unprotected. Walking onto PID 1 terminates safely
+        # because its own parent is 0. The kill-target walk below deliberately
+        # keeps its `ppid == 1` stop, since climbing there could make PID 1 a
+        # target rather than merely classify it.
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ]; then
+            return 1
+        fi
         [ "$ppid" = "$candidate" ] && return 0
         current="$ppid"
     done
@@ -201,15 +210,46 @@ is_self_ancestor() {
 # `run-predeploy-local` starts an ISOLATED `scripts/run.sh` stack as a child. That
 # child matches the `scripts/run\.sh` root pattern below, and
 # `add_pid_with_tree_and_ancestors` then walks upward through same-worktree
-# ancestors. Protect the controller boundary before that escalation occurs.
+# ancestors. Protect the whole controller tree — not just the controller PID —
+# so a shared Step 5 stack dying under OOM/exit cannot SIGTERM an in-flight
+# isolated smoke run (observed as smoke exit 143 after backend exit 137).
 is_benchmark_controller() {
     local cmd
     cmd=$(cmd_of "$1")
-    echo "$cmd" | grep -Eq '(^|[[:space:]/])run-predeploy-(local|cloud)([[:space:]]|$)|(^|[[:space:]/])run-bench(-fleet|-cloud|-hub-poller)?([[:space:]]|$)|(^|[[:space:]])([^[:space:]]*/)?benchmarks/(local|run_benchmark|run_eval_suite)\.py([[:space:]]|$)'
+    echo "$cmd" | grep -Eq '(^|[[:space:]/])run-predeploy-(local|cloud)([[:space:]]|$)|(^|[[:space:]/])run-bench(-fleet|-cloud|-hub-poller)?([[:space:]]|$)|(^|[[:space:]])([^[:space:]]*/)?benchmarks/(local|run_benchmark|run_eval_suite)\.py([[:space:]]|$)|(^|[[:space:]])([^[:space:]]*/)?run_deploy_stage\.py([[:space:]]|$)'
+}
+
+benchmark_controller_for_pid() {
+    local current=$1
+    while true; do
+        if is_benchmark_controller "$current"; then
+            echo "$current"
+            return 0
+        fi
+        local ppid
+        ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
+        # Evaluate PID 1 before ending the walk: on Fly cloudbench the boot
+        # command is PID 1 and can be a real controller ancestor. Stop only on
+        # absent/zero/self parents (same contract as is_self_ancestor).
+        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ] && return 1
+        current="$ppid"
+    done
+}
+
+is_protected_benchmark_tree() {
+    local pid=$1
+    local target_controller self_controller
+    target_controller=$(benchmark_controller_for_pid "$pid") || return 1
+
+    # The controller process itself is never a service target. A child cleanup
+    # may, however, reap services owned by that SAME controller.
+    [ "$target_controller" = "$pid" ] && return 0
+    self_controller=$(benchmark_controller_for_pid "$SELF" 2>/dev/null || true)
+    [ -z "$self_controller" ] || [ "$target_controller" != "$self_controller" ]
 }
 
 is_protected_process() {
-    is_self_or_parent "$1" || is_self_ancestor "$1" || is_benchmark_controller "$1"
+    is_self_or_parent "$1" || is_self_ancestor "$1" || is_protected_benchmark_tree "$1"
 }
 
 service_like_process() {
@@ -419,14 +459,15 @@ done < "$ROOTS_FILE"
 # `IDENTITY_CONFLICT` during the walk.
 reduce_stable_identities "$ALL_FILE" > "$TARGETS_FILE"
 
-# Final backstop: drop any benchmark controller that entered the set as a
-# descendant. `pid_tree` walks downward and does not consult
-# `is_protected_process`, so the ancestor guard alone cannot catch this path.
+# Final backstop: drop any PID in a foreign benchmark-controller tree that
+# entered the set as a descendant. `pid_tree` walks downward and does not
+# consult `is_protected_process`, so the ancestor guard alone cannot catch
+# this path — and a shared-stack EXIT sweep must not harvest isolated smoke.
 while IFS=$'\t' read -r pid start_time; do
     [[ -n "$pid" ]] || continue
     identity_matches "$pid" "$start_time" || continue
-    if is_benchmark_controller "$pid"; then
-        echo "🛡️  Refusing to kill benchmark controller $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
+    if is_protected_benchmark_tree "$pid"; then
+        echo "🛡️  Refusing to kill benchmark controller tree PID $pid: $(cmd_of "$pid" | cut -c1-90)" >&2
         continue
     fi
     printf '%s\t%s\n' "$pid" "$start_time" >> "$KEPT_FILE"

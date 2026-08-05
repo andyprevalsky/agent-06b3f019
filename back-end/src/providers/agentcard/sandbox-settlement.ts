@@ -35,6 +35,7 @@ interface AgentCardSandboxSettlementDependencies {
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
   getCardPan?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
   claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
+  releaseHeldPurchaseClaim?: (purchaseId: string) => Promise<void>;
   testCharge?: (input: {
     cardId: string;
     amountCents: number;
@@ -134,6 +135,27 @@ export async function claimHeldPurchaseForCharge(purchaseId: string): Promise<bo
 }
 
 /**
+ * Compensating release for `claimHeldPurchaseForCharge`.
+ *
+ * The claim is a one-way latch out of HELD, so every failure between it and
+ * `markPurchaseCleared` must put the purchase back or it is stranded: retries
+ * select on `status: HELD`, find nothing, and 404 forever while the wallet
+ * transfer stays FUNDED and the issued card balance goes unspent. Observed in
+ * the agent-payment-setup-resume gate — one 500 from the charge left the
+ * purchase CHARGING, then six consecutive
+ * "No matching held AgentCard purchase was found" 404s.
+ *
+ * Scoped to CHARGING so it can never resurrect a purchase that a concurrent
+ * cleared/abandoned transition has already moved on.
+ */
+async function releaseHeldPurchaseClaim(purchaseId: string): Promise<void> {
+  await prisma.purchaseSpend.updateMany({
+    where: { id: purchaseId, status: PurchaseSpendStatus.CHARGING },
+    data: { status: PurchaseSpendStatus.HELD },
+  });
+}
+
+/**
  * Funding states from which a settlement may legitimately mark the transfer CONSUMED. RECLAIMED is
  * intentionally excluded: a concurrent abandonment cleanup that already reclaimed the org-wallet
  * transfer must NOT be overwritten back to CONSUMED, or the reclaimed float is double-counted and
@@ -185,6 +207,7 @@ export async function settleAgentCardSandboxPayment(
   const findPurchases = dependencies.findHeldPurchasesByTotal ?? findHeldPurchasesByTotal;
   const readPan = dependencies.getCardPan ?? getCardPan;
   const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
+  const releaseClaim = dependencies.releaseHeldPurchaseClaim ?? releaseHeldPurchaseClaim;
   const charge = dependencies.testCharge ?? testCharge;
   const markCleared = dependencies.markPurchaseCleared ?? markPurchaseCleared;
   const candidates = await findPurchases(input.amountCents);
@@ -231,18 +254,27 @@ export async function settleAgentCardSandboxPayment(
     const claimed = await claimForCharge(purchase.id);
     if (!claimed) continue;
 
-    const result = await charge({
-      cardId: purchase.cardId,
-      amountCents: input.amountCents,
-      merchant: input.merchant,
-    });
-    if (result.isError === true) {
-      throw new AgentCardSandboxSettlementError(
-        `AgentCard sandbox charge failed: ${result.message ?? ''}`,
-        402
-      );
+    // Everything from here to markCleared runs while the purchase is latched out
+    // of HELD. Release the claim on every failure path — a declined charge and a
+    // thrown charge/markCleared are both retryable, and leaving the row CHARGING
+    // makes the retry unable to find it at all.
+    try {
+      const result = await charge({
+        cardId: purchase.cardId,
+        amountCents: input.amountCents,
+        merchant: input.merchant,
+      });
+      if (result.isError === true) {
+        throw new AgentCardSandboxSettlementError(
+          `AgentCard sandbox charge failed: ${result.message ?? ''}`,
+          402
+        );
+      }
+      await markCleared(purchase.id);
+    } catch (error) {
+      await releaseClaim(purchase.id);
+      throw error;
     }
-    await markCleared(purchase.id);
     return {
       purchaseId: purchase.id,
       cardId: purchase.cardId,

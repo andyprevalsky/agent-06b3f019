@@ -809,6 +809,15 @@ class RoseClient:
             anthropic_api_key_tools = direct_auth_tools
         if anthropic_api_key_tools:
             anthropic_api_key_tool_choice = effective_tool_choice or "any"
+        waterfall_tools = tools
+        waterfall_tool_choice = tool_choice
+        if tools is None and direct_auth_tools and not _is_synthetic_output_toolset(direct_auth_tools):
+            # AgentAction response models already have provider-neutral native
+            # tool schemas. Preserve that contract through the OpenRouter
+            # waterfall so Anthropic is not skipped merely because the original
+            # caller supplied a response_model instead of explicit tools.
+            waterfall_tools = direct_auth_tools
+            waterfall_tool_choice = effective_tool_choice or "any"
 
         # OpenRouter's OpenAI providers apply the same strict-schema subset as
         # the Responses API. Rich AgentAction models can contain intentionally

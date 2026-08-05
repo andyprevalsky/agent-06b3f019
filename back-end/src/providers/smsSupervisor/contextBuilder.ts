@@ -103,7 +103,9 @@ interface VisibleMessage {
 export interface UserProfileContext {
   userId: string;
   name: string | null;
+  email: string | null;
   phone: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;
@@ -337,7 +339,9 @@ async function fetchUserProfile(userId: string) {
     select: {
       userId: true,
       name: true,
+      email: true,
       phone: true,
+      deliveryRecipientName: true,
       addressLine1: true,
       addressLine2: true,
       city: true,
@@ -539,15 +543,27 @@ export function formatUserContext(user: UserProfileContext | null): string {
   const assistantName = user.systemName || 'Rose';
   parts.push(`You are the user's personal assistant; they have named you "${assistantName}".`);
 
-  if (user.name) parts.push(`Name: ${user.name}`);
-  if (user.phone) parts.push(`Phone: ${user.phone}`);
+  const personalInformation = [];
+  if (user.name) personalInformation.push(`Full Name: ${user.name}`);
+  if (user.phone) personalInformation.push(`Phone: ${user.phone}`);
+  if (user.email) personalInformation.push(`Email: ${user.email}`);
+  if (personalInformation.length > 0) {
+    parts.push(`## Personal Information\n${personalInformation.join('\n')}`);
+  }
 
-  // Shipping address
+  // Delivery address identity is independent from the account owner's identity.
   const addressParts = [user.addressLine1, user.addressLine2].filter(Boolean);
   const cityStateZip = [user.city, user.state, user.postalCode].filter(Boolean).join(', ');
-  if (addressParts.length > 0 || cityStateZip) {
-    const fullAddress = [...addressParts, cityStateZip, user.country].filter(Boolean).join(', ');
-    parts.push(`Shipping address: ${fullAddress}`);
+  if (user.deliveryRecipientName || addressParts.length > 0 || cityStateZip) {
+    const fullAddress = [
+      user.deliveryRecipientName ? `Recipient Name: ${user.deliveryRecipientName}` : null,
+      ...addressParts,
+      cityStateZip,
+      user.country,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    parts.push(`## Delivery Address\n${fullAddress}`);
   } else {
     const locationParts = [user.city, user.state, user.country].filter(Boolean);
     if (locationParts.length > 0) {
@@ -606,6 +622,8 @@ Context is available to you primarily through grep, this tool's purpose is to ac
 # Your Inputs
 
 For every user message, you will receive a timestamp and a state of the agent network you are managing at that time. Treat the state block as ground truth for "right now"; older session turns may reflect stale state.
+
+Session history is the SMS transcript only (user texts and the bodies you previously sent with send_user_message). Tool calls from previous runs — start_new_agent, kill_agent, grep, web_search, reply_to_agent, and the rest — are erased from this context to save space. Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it; those turns often called tools that are not shown here. Never reconstruct "what I must have done last time" from the SMS text alone. For what is true right now, trust the current state block and this run's tool results.
 
 An example of the format of that state is as follows.
 

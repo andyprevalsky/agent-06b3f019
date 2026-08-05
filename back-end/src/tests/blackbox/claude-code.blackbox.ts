@@ -66,6 +66,7 @@ import { prisma } from '../../providers/database';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
   CodeAgentCredentialError,
+  isTransientSandboxCreateError,
   resolveClaudeCodeAuthEnvs,
   resolveClaudeCodeTokenSource,
 } from '../../providers/e2b';
@@ -556,6 +557,46 @@ function testResolveAuthEnvs_noCredsNoKeyThrows() {
     `unset-key throw must name the missing key, got: ${detail}`
   );
   assert(!detail.includes('cooldown'), `unset-key throw must not blame a cooldown, got: ${detail}`);
+}
+
+/**
+ * Regression: E2B sandbox creation must retry a transport blip but never retry a
+ * rejection. Creation was a single un-retried outbound call, so one transient
+ * `TypeError: fetch failed` became a hard 500 — reproducibly 3/3 in the
+ * concurrent blackbox batch while passing 2/2 in isolation. Retrying a 401/quota
+ * rejection would instead burn time and money, so the classifier must split them.
+ */
+function testSandboxRetry_classifiesTransientOnly() {
+  const transient: unknown[] = [
+    new TypeError('fetch failed'),
+    Object.assign(new Error('request failed'), { cause: new Error('ECONNRESET') }),
+    Object.assign(new Error('connect'), { code: 'ETIMEDOUT' }),
+    Object.assign(new Error('read'), { code: 'EADDRNOTAVAIL' }),
+    new Error('socket hang up'),
+    Object.assign(new TypeError('fetch failed'), {
+      cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+    }),
+  ];
+  for (const error of transient) {
+    assert(
+      isTransientSandboxCreateError(error),
+      `expected transient classification for ${String((error as Error).message)}`
+    );
+  }
+
+  const permanent: unknown[] = [
+    new Error('401 Unauthorized: invalid api key'),
+    new Error('403 Forbidden'),
+    new Error('404 template not found'),
+    new Error('quota exceeded for this organization'),
+    new Error('template build is invalid'),
+  ];
+  for (const error of permanent) {
+    assert(
+      !isTransientSandboxCreateError(error),
+      `expected NON-transient classification for ${String((error as Error).message)}`
+    );
+  }
 }
 
 async function testCreate_noAuth() {
@@ -1383,6 +1424,10 @@ async function runAll() {
     {
       name: 'authEnvs -- throws when no creds + no key',
       fn: async () => testResolveAuthEnvs_noCredsNoKeyThrows(),
+    },
+    {
+      name: 'sandbox retry -- transient transport errors retry, rejections do not',
+      fn: async () => testSandboxRetry_classifiesTransientOnly(),
     },
     {
       name: 'agent context -- repo-less agent resolves credential owner',

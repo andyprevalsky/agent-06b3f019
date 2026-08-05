@@ -610,6 +610,59 @@ async function main(): Promise<void> {
 
   await assertTransferVisibilityPollSharesOneRetryBudget();
 
+  // A missing cardholder must surface as setup-required (not a raw MCP failure) whether the
+  // organization MCP throws or returns an isError result.
+  const missingCardholderProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        throw new Error('create_card failed: Cardholder not found');
+      }
+      throw new Error(`unexpected missing-cardholder tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_setup_required' &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  const missingCardholderResultProvider = new AgentCardOrgMcpProvider(
+    'cardholder-missing',
+    async (name) => {
+      if (name === 'create_card') {
+        return {
+          isError: true,
+          structuredContent: { status: 'error', message: 'Cardholder not found' },
+        };
+      }
+      throw new Error(`unexpected missing-cardholder-result tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      missingCardholderResultProvider.mintCard({
+        amountCents: 4396,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:missing-cardholder-result',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_setup_required' &&
+      'details' in error &&
+      error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
   process.stdout.write('AgentCard organization MCP provider tests passed\n');
 }
 

@@ -20,6 +20,8 @@ export async function loadSettingsApi(): Promise<Record<string, unknown>> {
 /** Saves personal info fields via PUT. */
 export async function savePersonalInfoApi(data: {
   name: string;
+  email: string;
+  deliveryRecipientName: string;
   addressLine1: string;
   addressLine2: string;
   city: string;

@@ -415,7 +415,7 @@ def test_blanket_preflight_uses_tolerant_sync():
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
         patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=True),
     ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
     assert captured == {"gpt": True, "claude": True}
 
@@ -538,12 +538,19 @@ def test_blanket_preflight_overlays_fresh_local_claude_credentials_after_source_
             side_effect=lambda _url: calls.append("keychain-overlay") or True,
         ),
     ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
     assert calls == ["source-sync", "keychain-overlay"]
 
 
-def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
+def _existing_codex_auth() -> Path:
+    """A real on-disk path standing in for a machine that has `codex login`."""
+    path = Path(tempfile.gettempdir()) / "preflight-test-codex-auth.json"
+    path.write_text('{"auth_mode": "chatgpt"}', encoding="utf-8")
+    return path
+
+
+def test_anthropic_excluded_preflight_requires_gpt_only_sync():
     captured: dict[str, object] = {}
     calls: list[str] = []
 
@@ -569,13 +576,14 @@ def test_anthropic_excluded_preflight_prefers_gpt_without_requiring_codex():
         ),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
         patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=_existing_codex_auth()),
         patch.object(
             rb,
             "_refresh_local_gpt_token_from_codex_auth",
             side_effect=lambda _url: calls.append("codex-overlay") or True,
         ),
     ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
     # gpt-only sync, and a quota-blocked gpt_code (Codex) integration must not fail the run: the
     # excluded-Anthropic path still overlays this machine's Codex auth as a separate, required step.
@@ -613,6 +621,64 @@ def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():
     assert captured == {"required": ("gpt",), "gpt": True, "claude": False}
 
 
+def test_anthropic_excluded_preflight_tolerates_absent_codex_auth():
+    """A machine with no `codex login` must still run GPT-lane benchmarks.
+
+    `_sync_compute_tokens` above already REQUIRED and obtained a gpt token from
+    the verified shared workspace. Treating an absent local Codex auth file as
+    fatal made unrelated gates unrunnable — the AgentCard payment lifecycle, which
+    touches no Codex at all, could not run on any machine without a Codex login.
+    """
+    calls: list[str] = []
+
+    def fake_sync(*, required_token_types: tuple[str, ...] | None = None, **_kwargs) -> bool:
+        assert required_token_types == ("gpt",)
+        calls.append("source-sync")
+        return True
+
+    missing = Path(tempfile.gettempdir()) / "definitely-absent-codex-auth-for-test.json"
+    if missing.exists():
+        missing.unlink()
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=missing),
+        patch.object(
+            rb,
+            "_refresh_local_gpt_token_from_codex_auth",
+            side_effect=AssertionError("must not attempt an overlay without a local auth file"),
+        ),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
+
+    assert calls == ["source-sync"]
+
+
+def test_anthropic_excluded_preflight_still_fails_on_stale_codex_auth():
+    """An auth file that EXISTS but cannot be overlaid is the stale-token signal.
+
+    That case must stay fatal; only the absent-file case is tolerated.
+    """
+
+    def fake_sync(*, required_token_types: tuple[str, ...] | None = None, **_kwargs) -> bool:
+        assert required_token_types == ("gpt",)
+        return True
+
+    with (
+        patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_local_codex_auth_path", return_value=_existing_codex_auth()),
+        patch.object(rb, "_refresh_local_gpt_token_from_codex_auth", return_value=False),
+        pytest.raises(RuntimeError, match="could not refresh GPT credentials"),
+    ):
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
+
+
 def test_anthropic_excluded_compute_preflight_requests_gpt_token():
     calls: list[dict] = []
 
@@ -632,7 +698,7 @@ def test_anthropic_excluded_compute_preflight_requests_gpt_token():
         patch.object(rb, "_api_headers", new=AsyncMock(return_value={})),
         patch.object(rb.httpx, "AsyncClient", _FakeAsyncClient),
     ):
-        assert asyncio.run(rb._check_compute_code_credentials("http://localhost:3001")) is True
+        assert asyncio.run(rb._check_compute_code_credentials("http://127.0.0.1:3999")) is True
 
     assert calls[0]["params"] == {"tokenType": "gpt"}
 
@@ -646,7 +712,7 @@ def test_claude_code_preflight_rejects_missing_runtime_credential():
             _fake_async_client_with(_JsonResponse(404, {"error": "not found"})),
         ),
     ):
-        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is False
+        assert asyncio.run(rb._check_claude_code_credentials("http://127.0.0.1:3999")) is False
 
 
 def test_claude_code_preflight_accepts_claude_token():
@@ -658,7 +724,7 @@ def test_claude_code_preflight_accepts_claude_token():
             _fake_async_client_with(_JsonResponse(200, {"accessToken": "claude-token"})),
         ),
     ):
-        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is True
+        assert asyncio.run(rb._check_claude_code_credentials("http://127.0.0.1:3999")) is True
 
 
 def test_claude_code_preflight_rejects_empty_runtime_credential():
@@ -670,7 +736,7 @@ def test_claude_code_preflight_rejects_empty_runtime_credential():
             _fake_async_client_with(_JsonResponse(200, {"accessToken": ""})),
         ),
     ):
-        assert asyncio.run(rb._check_claude_code_credentials("http://localhost:3001")) is False
+        assert asyncio.run(rb._check_claude_code_credentials("http://127.0.0.1:3999")) is False
 
 
 def test_claude_code_task_rechecks_credentials_when_its_execution_slot_opens():
@@ -680,9 +746,9 @@ def test_claude_code_task_rechecks_credentials_when_its_execution_slot_opens():
         "_check_claude_code_credentials",
         new=AsyncMock(return_value=False),
     ) as credential_check:
-        result = asyncio.run(rb.run_single_task("http://localhost:3001", task))
+        result = asyncio.run(rb.run_single_task("http://127.0.0.1:3999", task))
 
-    credential_check.assert_awaited_once_with("http://localhost:3001")
+    credential_check.assert_awaited_once_with("http://127.0.0.1:3999")
     assert result.status == "SKIPPED"
     assert result.agent_id == ""
     assert result.failure_reason == rb.CLAUDE_CODE_CREDENTIAL_SKIP_REASON
@@ -744,7 +810,7 @@ def test_simulation_preflight_uses_restored_seed_without_prod_sync():
         patch.object(rb, "_is_simulate_mode", return_value=True),
         patch.object(rb, "_sync_compute_tokens", side_effect=lambda **_kwargs: calls.append(True)),
     ):
-        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+        asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
     assert calls == []
 
@@ -762,7 +828,7 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
         return True
 
     ctx = rb.LiveFixtureContext(
-        base_url="http://localhost:3001",
+        base_url="http://127.0.0.1:3999",
         user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
         auth_realm="local",
         tolerate_claude_code_unavailable=True,
@@ -783,7 +849,7 @@ def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
     # Tolerance is only about gpt_code; a genuine sync failure (claude_code missing,
     # DB unreachable, etc.) still aborts the fixture so we never run a token-starved agent.
     ctx = rb.LiveFixtureContext(
-        base_url="http://localhost:3001",
+        base_url="http://127.0.0.1:3999",
         user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
         auth_realm="local",
     )
@@ -809,7 +875,7 @@ def test_preflight_raises_when_sync_fails():
         patch.object(rb, "_sync_compute_tokens", return_value=False),
     ):
         try:
-            asyncio.run(rb._refresh_local_compute_tokens_for_run("http://localhost:3001"))
+            asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()
