@@ -2514,7 +2514,7 @@ async def test_call_llm_structured_streaming_happy_path():
 
 
 async def test_call_llm_structured_streaming_retries_malformed_output():
-    """A malformed/schema-invalid structured output is re-generated (bounded)."""
+    """A malformed output is re-generated with validation feedback (bounded)."""
     import httpx
     from helpers.httpx_capture import set_mock_handler
     from helpers.llm import call_llm_structured_streaming
@@ -2535,9 +2535,11 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
     valid_body = _sse_body([_payload('{"response": "recovered", "tool_calls": []}')])
 
     call_count = {"n": 0}
+    request_payloads = []
 
     def handler(req: httpx.Request) -> httpx.Response:
         call_count["n"] += 1
+        request_payloads.append(json.loads(req.content))
         body = malformed_body if call_count["n"] == 1 else valid_body
         return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
 
@@ -2556,11 +2558,213 @@ async def test_call_llm_structured_streaming_retries_malformed_output():
         response_model=AgentAction,
         on_chunk=on_chunk,
         call_site="test",
+        _exclude_anthropic_family=True,
     )
 
     # Exactly one retry: the malformed first generation re-generated once and parsed.
     assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    retry_messages = request_payloads[1]["messages"]
+    # The rejected turn is replayed so the model can see what it actually emitted,
+    # rather than being told "your response was wrong" with no response in context.
+    assert len(retry_messages) == 3, f"expected original + assistant replay + correction, got {retry_messages}"
+    assert retry_messages[-2]["role"] == "assistant", retry_messages
+    assert "not-a-list" in retry_messages[-2]["content"], retry_messages[-2]
+    correction = retry_messages[-1]
+    assert correction["role"] == "user", correction
+    assert "did not satisfy the required output schema" in correction["content"], correction
+    assert "input should be a valid list" in correction["content"].lower(), correction
     assert response.response == "recovered"
+
+
+async def test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers():
+    """A parse retry must not strand delta consumers on the rejected attempt's text.
+
+    `on_chunk` hands out a monotonically growing buffer, so every streaming
+    consumer (domains/reasoning/service.py, call_llm_activity, run_agent) emits
+    `text_so_far[len(last_text):]` and keeps `last_text`. A parse retry restarts
+    that buffer at "", so without a rewind the rejected text stays in the
+    consumer's accumulator and a corrected response that is NOT a
+    prefix-extension of it is delivered as an empty (or garbled tail) delta —
+    the consumer completes holding stale output.
+    """
+    import httpx
+    from helpers.httpx_capture import set_mock_handler
+    from helpers.llm import call_llm_structured_streaming
+    from utils.tool_schemas import create_agent_action_model
+
+    # Divergent AND shorter than the rejected text, so pure suffix math yields ""
+    # — this is the case that silently drops the correction entirely.
+    rejected_text = "The first attempt claims the meeting is Monday at noon."
+    corrected_text = "Actually the meeting is Friday."
+    assert not corrected_text.startswith(rejected_text)
+    assert len(corrected_text) < len(rejected_text)
+
+    def _payload(content: str) -> dict:
+        return {
+            "actual_model": "claude-sonnet-4-6",
+            "pool_name": "test-pool",
+            "pool_size": 1,
+            "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+
+    # tool_calls must be a list — the first generation fails validation only
+    # AFTER its `response` text has already streamed out through on_chunk.
+    malformed_body = _sse_body([_payload(json.dumps({"response": rejected_text, "tool_calls": "not-a-list"}))])
+    valid_body = _sse_body([_payload(json.dumps({"response": corrected_text, "tool_calls": []}))])
+
+    call_count = {"n": 0}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        call_count["n"] += 1
+        body = malformed_body if call_count["n"] == 1 else valid_body
+        return httpx.Response(200, text=body, headers={"Content-Type": "text/event-stream"})
+
+    set_mock_handler(handler)
+
+    AgentAction = create_agent_action_model([])
+
+    # Mirrors the real consumers' delta-suffix bookkeeping exactly.
+    last_text = [""]
+    broadcast: list[str] = []
+
+    async def on_chunk(text_so_far: str, tokens: int):
+        delta = text_so_far[len(last_text[0]) :]
+        if delta:
+            broadcast.append(delta)
+        last_text[0] = text_so_far
+
+    response, _usage, _detected = await call_llm_structured_streaming(
+        messages=[{"role": "user", "content": "when is the meeting?"}],
+        model="rose-labs/rose-1-lite",
+        temperature=0.7,
+        max_tokens=512,
+        response_model=AgentAction,
+        on_chunk=on_chunk,
+        call_site="test",
+        _exclude_anthropic_family=True,
+    )
+
+    assert call_count["n"] == 2, f"expected one re-generation (2 calls), got {call_count['n']}"
+    assert response.response == corrected_text, response.response
+
+    # The whole point: what the consumer reconstructed must be the corrected
+    # response, not the rejected one and not a tail of it.
+    reconstructed = "".join(broadcast)
+    assert corrected_text in reconstructed, f"correction never reached the consumer: {reconstructed!r}"
+    assert reconstructed.endswith(corrected_text), f"consumer ends on stale text: {reconstructed!r}"
+    assert last_text[0] == corrected_text, f"consumer state stranded on rejected attempt: {last_text[0]!r}"
+
+
+async def _call_llm_structured_streaming_replays_invalid_native_tool_use_case():
+    """A schema-invalid native tool_use is replayed with a paired tool_result error."""
+    from helpers.llm import call_llm_structured_streaming
+    from providers.rose.types import StreamChunk
+    from utils.tool_schemas import create_agent_action_model
+
+    captured_messages: list = []
+    calls = {"n": 0}
+
+    async def fake_cached_complete(*args, **kwargs):
+        calls["n"] += 1
+        captured_messages.append(json.loads(json.dumps(kwargs.get("messages") or [])))
+        yield StreamChunk(
+            kind="metadata",
+            data={"actual_model": "claude-sonnet-4-6-claude", "pool_name": "rose-1-lite", "request_id": "r1"},
+        )
+        if calls["n"] == 1:
+            # `query` is required by the web_search schema — this fails validation.
+            yield StreamChunk(
+                kind="tool_call",
+                data={"id": "toolu_bad", "name": "web_search", "arguments": json.dumps({})},
+            )
+        else:
+            yield StreamChunk(
+                kind="tool_call",
+                data={"id": "toolu_ok", "name": "web_search", "arguments": json.dumps({"query": "recovered"})},
+            )
+        yield StreamChunk(
+            kind="usage", data={"prompt_tokens": 1, "completion_tokens": 1, "finish_reason": "tool_calls"}
+        )
+        yield StreamChunk(kind="done", data={})
+
+    import providers.fast_cache.rose_cache as rose_cache_module
+
+    original = rose_cache_module.cached_complete
+    rose_cache_module.cached_complete = fake_cached_complete
+    try:
+        AgentAction = create_agent_action_model(["web_search"])
+
+        async def on_chunk(text: str, tokens: int):
+            pass
+
+        response, _usage, _detected = await call_llm_structured_streaming(
+            messages=[{"role": "user", "content": "search something"}],
+            model="rose",
+            temperature=1.0,
+            max_tokens=512,
+            response_model=AgentAction,
+            on_chunk=on_chunk,
+            call_site="test",
+        )
+    finally:
+        rose_cache_module.cached_complete = original
+
+    assert calls["n"] == 2, f"expected one re-generation (2 calls), got {calls['n']}"
+    retry_messages = captured_messages[1]
+    assert len(retry_messages) == 3, f"expected original + tool_use replay + tool_result, got {retry_messages}"
+
+    # The rejected tool_use is replayed as an assistant turn keyed by the
+    # provider's own id, so the paired tool_result below can reference it.
+    assistant_turn = retry_messages[-2]
+    assert assistant_turn["role"] == "assistant", retry_messages
+    assert assistant_turn["tool_calls"][0]["id"] == "toolu_bad", assistant_turn
+    assert assistant_turn["tool_calls"][0]["function"]["name"] == "web_search", assistant_turn
+
+    # The validation error comes back as a tool result, not a bare user turn —
+    # every tool_use must be answered by a tool_result with a matching id.
+    tool_result = retry_messages[-1]
+    assert tool_result["role"] == "tool", retry_messages
+    assert tool_result["tool_call_id"] == "toolu_bad", tool_result
+    assert "did not satisfy the required output schema" in tool_result["content"], tool_result
+
+    assert response.tool_calls[0].query == "recovered"
+
+
+def test_structured_retry_replay_is_wire_valid_for_anthropic():
+    """The replayed turn must survive the Anthropic transform with paired tool ids.
+
+    Anthropic rejects a tool_use block that has no tool_result with a matching
+    tool_use_id, so an unpaired replay would turn a recoverable parse retry into
+    a hard 400 on the claudeAuth path.
+    """
+    from helpers.llm import _build_structured_retry_messages
+    from providers.rose.transforms import transform_messages_for_anthropic
+
+    retry_messages = _build_structured_retry_messages(
+        [{"role": "user", "content": "search something"}],
+        error_message="tool_calls.0.query: Field required",
+        tool_use_blocks=[{"id": "toolu_bad", "name": "web_search", "input": {}}],
+        text_buffer="let me search",
+        raw_json="",
+    )
+    _system, _cache, messages = transform_messages_for_anthropic(retry_messages)
+
+    tool_use_ids, tool_result_ids = [], []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                tool_use_ids.append(block["id"])
+            elif block.get("type") == "tool_result":
+                tool_result_ids.append(block["tool_use_id"])
+
+    assert tool_use_ids == ["toolu_bad"], messages
+    assert tool_result_ids == tool_use_ids, f"unpaired tool_use would 400: {messages}"
 
 
 async def test_call_llm_structured_streaming_model_detected_callback():
@@ -6611,6 +6815,18 @@ async def run_all_tests():
     await r.record_async(
         "call_llm_structured_streaming_retries_malformed_output",
         test_call_llm_structured_streaming_retries_malformed_output,
+    )
+    await r.record_async(
+        "structured_parse_retry_rewinds_streamed_text_for_delta_consumers",
+        test_structured_parse_retry_rewinds_streamed_text_for_delta_consumers,
+    )
+    await r.record_async(
+        "call_llm_structured_streaming_replays_invalid_native_tool_use",
+        _call_llm_structured_streaming_replays_invalid_native_tool_use_case,
+    )
+    r.record(
+        "structured_retry_replay_is_wire_valid_for_anthropic",
+        test_structured_retry_replay_is_wire_valid_for_anthropic,
     )
     await r.record_async(
         "call_llm_structured_streaming_model_detected_callback",

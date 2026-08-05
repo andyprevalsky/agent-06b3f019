@@ -22,24 +22,35 @@ if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
 }
 
 /**
- * Unit tests create and delete real rows (agents, messages, attention requests)
- * through `providers/database`. That provider falls back to `back-end/.env`,
- * whose DATABASE_URL points at the PRODUCTION Supabase pooler — so running this
- * suite without an explicit local database silently exercises prod, and the
- * added network latency blows Prisma's 10s interactive-transaction budget and
+ * Refuse to run DB-touching unit tests against a remote database.
+ *
+ * These tests create and delete real rows through `providers/database`, which
+ * falls back to `back-end/.env` — whose DATABASE_URL is the PRODUCTION Supabase
+ * pooler. `run-coverage.sh` exports the local container URL before delegating
+ * here, but invoking this runner directly inherits prod and silently writes to
+ * it. Prod latency also blows Prisma's 10s interactive-transaction budget and
  * manufactures failures that look like real bugs.
  *
- * `scripts/run-coverage.sh` exports the isolated container URL before invoking
- * this runner, so the supported path is unaffected.
+ * An UNSET DATABASE_URL is refused too: that is precisely the case that falls
+ * back to the prod pooler, so treating it as "nothing to validate" would leave
+ * the original hazard open. `nonLocalDatabaseReason` is the single shared
+ * definition of "local" (src/utils/localDatabaseUrl.ts), so this runner, the
+ * checkpoint scripts, and `providers/database` cannot drift apart.
  */
-const nonLocalDatabase = nonLocalDatabaseReason(process.env.DATABASE_URL);
-if (nonLocalDatabase) {
+function assertLocalDatabaseUrl(): void {
+  // Deliberate, explicit remote runs stay possible.
+  if (process.env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1') return;
+  const reason = nonLocalDatabaseReason(process.env.DATABASE_URL);
+  if (reason === null) return;
   console.error(
-    `Refusing to run backend unit tests: ${nonLocalDatabase}. These tests create and delete real rows.\n` +
-      'Run the suite via `bash scripts/run-coverage.sh`, or export DATABASE_URL/DIRECT_URL for your workspace Postgres container first.'
+    `Refusing to run backend unit tests: ${reason}. These tests create and delete real rows.\n` +
+      'Run via `npm run test:coverage` (which exports the local container URL), or set\n' +
+      'BACKEND_UNIT_ALLOW_REMOTE_DB=1 to override deliberately.'
   );
   process.exit(2);
 }
+
+assertLocalDatabaseUrl();
 
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

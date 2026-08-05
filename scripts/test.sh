@@ -369,10 +369,10 @@ fi
 
 if should_run "agents"; then
   if $AUTO_RCA_MODE; then
-    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+    run_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
     run_suite "Agents Coverage and Blackbox" bash -c "cd agents && source venv/bin/activate && AGENTS_COVERAGE_CONCURRENCY=3 bash scripts/run-coverage.sh"
   else
-    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py"
+    bg_suite "Agents Structural" bash -c "cd agents && source venv/bin/activate && python tests/structural/structural.py && python tests/structural/structural_imports.py && python tests/structural/structural_architecture.py && python tests/structural/structural_test_registration.py"
 
     if [ -n "$DOMAIN" ] && [ "$REPO" = "agents" ]; then
       bg_suite "Agents Blackbox ($DOMAIN)" bash -c "cd agents && source venv/bin/activate && python scripts/run_blackbox_tests.py $DOMAIN"

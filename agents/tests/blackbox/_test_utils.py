@@ -5,6 +5,7 @@ Sets up the import path, loads .env, installs the capture harness,
 and provides mock response helpers.
 """
 
+import inspect
 import json
 import os
 import sys
@@ -148,10 +149,21 @@ class BlackboxResult:
         self.errors: list[str] = []
 
     def record(self, name: str, fn: Callable) -> None:
-        """Run a sync test function, record the result."""
+        """Run a sync test function, record the result.
+
+        Registering an `async def` test here used to pass silently: `fn()` just
+        builds a coroutine, never runs a single assertion, and raises nothing —
+        so a completely dead test reported ✅. Detect that and fail loudly.
+        """
         clear_captures()
         try:
-            fn()
+            returned = fn()
+            if inspect.iscoroutine(returned):
+                returned.close()
+                raise AssertionError(
+                    f"async test '{name}' was registered with record(); its assertions "
+                    f"never ran. Use `await r.record_async(...)` instead."
+                )
             self.passed += 1
             print(f"  ✅ {name}")
         except Exception as e:

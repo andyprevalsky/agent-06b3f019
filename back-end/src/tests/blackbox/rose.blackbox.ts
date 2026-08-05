@@ -292,6 +292,7 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assert(ultra.claudeAuthModel.startsWith('claude-'), 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
+  assertEqual(ultra.waterfall.at(-1), 'openai/gpt-5.6-sol', 'ultra OpenRouter fallback');
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-sol', 'browserUse.gptAuthModel');
   assertEqual(browserUse.waterfall.at(-1), 'openai/gpt-5.6-sol', 'browserUse OpenRouter fallback');
@@ -1866,7 +1867,13 @@ async function testClient_dumpContextWritesRequestAndOutput() {
       'browser_run_credential_outcomes',
       'caller config dumped'
     );
-    assertEqual(payload.config.actual_model, 'google/gemini-3.5-flash', 'actual model dumped');
+    // Read the registry rather than hardcoding: this asserted 'google/gemini-3.5-flash' and
+    // would silently pin a model rose-1-lite no longer races the moment the pool moves.
+    assertEqual(
+      payload.config.actual_model,
+      POOL_REGISTRY['rose-1-lite'].waterfall[0],
+      'actual model dumped'
+    );
     assertEqual(
       JSON.stringify(payload.response_format),
       JSON.stringify(responseFormat),

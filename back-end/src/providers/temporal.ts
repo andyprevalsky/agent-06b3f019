@@ -8,6 +8,10 @@ import {
 import { createLogger } from './logger';
 import { getCurrentAgentQueue } from './agentQueuePointer';
 import type { WorkflowLaunchConfig, WorkflowResumeState } from './workflowReplacementState';
+import {
+  createBlackboxTemporalClient,
+  shouldUseBlackboxTemporalFake,
+} from './temporalBlackboxFake';
 
 const log = createLogger('Temporal');
 
@@ -141,6 +145,13 @@ export async function cleanupSupersededWorkerActivationMarkers(
  */
 export async function getTemporalClient(): Promise<Client> {
   if (client) {
+    return client;
+  }
+
+  if (shouldUseBlackboxTemporalFake()) {
+    const namespace = process.env.TEMPORAL_NAMESPACE || 'blackbox';
+    client = createBlackboxTemporalClient(namespace);
+    log.info('Using in-memory Temporal client for blackbox route contracts', { namespace });
     return client;
   }
 
