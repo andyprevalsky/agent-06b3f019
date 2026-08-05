@@ -1,4 +1,5 @@
 import { callOrgTool as defaultCallOrgTool, type AgentCardOrgToolCaller } from './org-runtime';
+import { getOrgCardholderVerificationStatus } from './org-onboarding';
 import { extractAgentCardOrgWallet } from './org-wallet-monitor';
 import { retryWithBackoff } from '../retry';
 
@@ -96,4 +97,57 @@ export async function ensureAgentCardSandboxFloat(
     availableCents: wallet.availableCents,
     committedCents: wallet.committedCents,
   };
+}
+
+function maskCardholderId(value: string): string {
+  if (value.length <= 8) return value;
+  return `${value.slice(0, 4)}...${value.slice(-4)}`;
+}
+
+function isCardholderNotFoundMessage(message: string): boolean {
+  return /\bcardholder not found\b/i.test(message);
+}
+
+/**
+ * Confirm the benchmark cardholder exists in the same OAuth org as the sandbox wallet float
+ * check. Wallet balance alone is insufficient: a mismatched BENCHMARK_AGENTCARD_CARDHOLDER_ID
+ * passes float verification but mint loops forever on "Cardholder not found".
+ */
+export async function ensureBenchmarkOrgCardholder(
+  cardholderId: string,
+  callOrgTool: AgentCardOrgToolCaller = defaultCallOrgTool
+): Promise<{ verificationStatus: string }> {
+  const trimmedCardholderId = cardholderId.trim();
+  if (trimmedCardholderId === '') {
+    throw new Error(
+      'BENCHMARK_AGENTCARD_CARDHOLDER_ID is required for the AgentCard payment lifecycle fixture'
+    );
+  }
+
+  let verificationStatus: string;
+  try {
+    verificationStatus = await getOrgCardholderVerificationStatus(trimmedCardholderId, {
+      callOrgTool,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (isCardholderNotFoundMessage(message)) {
+      throw new Error(
+        'AgentCard benchmark cardholder does not exist in the OAuth org tied to ' +
+          'AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET. Set BENCHMARK_AGENTCARD_ORG_ID and ' +
+          'BENCHMARK_AGENTCARD_CARDHOLDER_ID together to a cardholder that belongs to that org ' +
+          `(wallet float passed but cardholder ${maskCardholderId(trimmedCardholderId)} was not found).`
+      );
+    }
+    throw new Error(`AgentCard benchmark cardholder readiness check failed: ${message}`);
+  }
+
+  if (verificationStatus !== 'verified' && verificationStatus !== 'approved') {
+    throw new Error(
+      `AgentCard benchmark cardholder is not KYC-ready (${verificationStatus}); ` +
+        'complete sandbox cardholder verification before running the payment lifecycle gate.'
+    );
+  }
+
+  return { verificationStatus };
 }
