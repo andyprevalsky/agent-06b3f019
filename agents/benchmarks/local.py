@@ -34,7 +34,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
-from benchmarks.seed_cache_path import seed_dump_path
+from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
 SERVICE_LOG = REPO_ROOT / ".context" / "local-benchmark-services.log"
@@ -902,12 +902,17 @@ def local_seed_dump_path(
     cache_root: Path | None = None,
     cache_day: str | None = None,
 ) -> Path:
-    """Resolve the producer/consumer seed path through the shared cache contract."""
-    return seed_dump_path(
-        schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma",
-        cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache",
-        cache_day,
-    )
+    """Resolve the canonical base artifact used by an isolated benchmark.
+
+    An explicit day retains the legacy synchronized-prod materialization path
+    used by setup tooling. Normal benchmark launches use the immutable base
+    revision shared with cloud runners.
+    """
+    resolved_schema = schema_path or REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    resolved_root = cache_root or BENCHMARK_CONTEXT_ROOT / "seed-cache"
+    if cache_day is not None:
+        return seed_dump_path(resolved_schema, resolved_root, cache_day)
+    return canonical_base_dump_path(resolved_schema, resolved_root)
 
 
 def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
@@ -1027,18 +1032,16 @@ def start_services(
         # take over without burning ~3 minutes of stack startup.
         env.setdefault("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", "1")
         env.setdefault("CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS", "10")
-        # Every isolated run starts with an empty per-run database. Opt into
-        # run.sh's schema/day-keyed R2 seed cache so startup restores the same
-        # prod snapshot in seconds instead of row-syncing tens of thousands of
-        # records before services.json can be published.
+        # Every isolated run starts with an empty per-run database and restores
+        # the same immutable canonical base artifact from the shared cache. Do
+        # NOT snapshot the developer's shared DB here: it is mutable and may not
+        # contain the fixture rows the cloud runner depends on.
         seed_dump = Path(env.get("BENCHMARK_SEED_DUMP") or local_seed_dump_path())
         seed_dump.parent.mkdir(parents=True, exist_ok=True)
-        _prime_local_seed_dump_from_shared_stack(seed_dump)
         env["BENCHMARK_SEED_DUMP"] = str(seed_dump)
-        # Default: require a schema-matched cached dump and refuse the slow prod
-        # cold-sync. But the very first local run on a fresh schema/day has no
-        # cached dump to restore, so allow an explicit opt-in
-        # (BENCHMARK_REQUIRE_SEED_DUMP=0) to bootstrap the cache via one cold-sync.
+        # The canonical fixture is published explicitly after validation. A cache
+        # miss must fail rather than silently substituting a fresh prod sync with
+        # different fixture contents.
         env["BENCHMARK_REQUIRE_SEED_DUMP"] = os.environ.get("BENCHMARK_REQUIRE_SEED_DUMP", "1")
         if not simulate:
             # Real-mode local benches never use the World Model Harness, so skip its

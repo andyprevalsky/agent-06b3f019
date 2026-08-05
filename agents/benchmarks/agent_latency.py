@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import glob
+import importlib
 import json
 import os
 import re
@@ -80,13 +81,14 @@ MAX_ISOLATED_STACKS = int(os.getenv("AGENT_LATENCY_MAX_ISOLATED_STACKS", "3"))
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from benchmarks.logs import (
-    FlyLogCollector,
-    fetch_clickhouse_worker_logs,
-    load_env_var,
-)
-from benchmarks.span_history import make_observation, record_span_observations
-from benchmarks.span_history import summary as span_history_summary
+_logs_module = importlib.import_module("benchmarks.logs")
+FlyLogCollector = _logs_module.FlyLogCollector
+fetch_clickhouse_worker_logs = _logs_module.fetch_clickhouse_worker_logs
+load_env_var = _logs_module.load_env_var
+_span_history_module = importlib.import_module("benchmarks.span_history")
+make_observation = _span_history_module.make_observation
+record_span_observations = _span_history_module.record_span_observations
+span_history_summary = _span_history_module.summary
 
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
@@ -172,7 +174,7 @@ def isolated_stack_log_dirs() -> List[str]:
     if explicit:
         pinned = os.path.join(explicit, "logs")
         if os.path.isdir(pinned):
-            dirs.append(pinned)
+            return [pinned]
     if os.path.isdir(ISOLATED_STACK_ROOT):
         candidates = []
         for name in os.listdir(ISOLATED_STACK_ROOT):
@@ -739,6 +741,80 @@ def _research_event_spans(events: List[_RawEvent]) -> List[Span]:
 # ---------------------------------------------------------------------------
 
 
+def _time_containment_parents(candidates: List[Span], queries: List[Span]) -> Dict[int, Span]:
+    """Find each query's narrowest enclosing closed span in O(n log² n)."""
+    from bisect import bisect_left, bisect_right
+
+    closed = sorted(
+        [span for span in candidates if span.end is not None],
+        key=lambda span: (span.start, -(span.end - span.start).total_seconds()),
+    )
+    if not closed or not queries:
+        return {}
+
+    starts = sorted({span.start for span in closed})
+    # A Fenwick node retains the two narrowest intervals in its start-time
+    # range. Two are sufficient because a closed query can match itself and
+    # must then fall through to the next enclosing interval.
+    tree: List[List[Tuple[float, int, Span]]] = [[] for _ in range(len(starts) + 1)]
+
+    def keep_two(items: List[Tuple[float, int, Span]]) -> List[Tuple[float, int, Span]]:
+        best: List[Tuple[float, int, Span]] = []
+        seen: Set[int] = set()
+        for item in sorted(items, key=lambda value: (value[0], value[1])):
+            identity = id(item[2])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            best.append(item)
+            if len(best) == 2:
+                break
+        return best
+
+    def update(position: int, item: Tuple[float, int, Span]) -> None:
+        index = position + 1
+        while index < len(tree):
+            tree[index] = keep_two([*tree[index], item])
+            index += index & -index
+
+    def prefix_best(length: int) -> List[Tuple[float, int, Span]]:
+        best: List[Tuple[float, int, Span]] = []
+        index = length
+        while index > 0:
+            best = keep_two([*best, *tree[index]])
+            index -= index & -index
+        return best
+
+    by_end = sorted(
+        enumerate(closed),
+        key=lambda item: item[1].end,
+        reverse=True,
+    )
+    ordered_queries = sorted(
+        queries,
+        key=lambda span: span.end or span.start,
+        reverse=True,
+    )
+    parents: Dict[int, Span] = {}
+    candidate_index = 0
+    for query in ordered_queries:
+        query_end = query.end or query.start
+        while candidate_index < len(by_end) and by_end[candidate_index][1].end >= query_end:
+            order, candidate = by_end[candidate_index]
+            width = (candidate.end - candidate.start).total_seconds()
+            update(
+                bisect_left(starts, candidate.start),
+                (width, order, candidate),
+            )
+            candidate_index += 1
+
+        eligible = prefix_best(bisect_right(starts, query.start))
+        parent = next((item[2] for item in eligible if item[2] is not query), None)
+        if parent is not None:
+            parents[id(query)] = parent
+    return parents
+
+
 def _assemble_tree(spans: List[Span]) -> List[Span]:
     """Link spans into a parent/child tree. Order of precedence:
       1. parent_span_id (authoritative)
@@ -788,35 +864,9 @@ def _assemble_tree(spans: List[Span]) -> List[Span]:
     # Pass 3 — time containment (shortest enclosing span wins). This mostly
     # attaches legacy backend HTTP spans to the worker LLM/spawn that
     # triggered them, and sub-agent spans to their parent's spawn() window.
-    sorted_by_start = sorted(
-        [s for s in spans if s.end is not None],
-        key=lambda s: (s.start, -(s.end - s.start).total_seconds() if s.end else 0),
-    )
-
-    def _enclose(sp: Span) -> Optional[Span]:
-        best: Optional[Span] = None
-        best_width = None
-        for cand in sorted_by_start:
-            if cand is sp:
-                continue
-            if cand.end is None:
-                continue
-            if cand.start > sp.start:
-                break
-            if cand.end < sp.start:
-                continue
-            # cand encloses sp.start; must also enclose end
-            sp_end = sp.end or sp.start
-            if cand.end < sp_end:
-                continue
-            w = (cand.end - cand.start).total_seconds()
-            if best is None or (best_width is not None and w < best_width):
-                best = cand
-                best_width = w
-        return best
-
+    containment_parents = _time_containment_parents(spans, still_unplaced)
     for s in still_unplaced:
-        parent = _enclose(s)
+        parent = containment_parents.get(id(s))
         if parent is not None and parent is not s:
             parent.children.append(s)
         else:
@@ -1139,10 +1189,12 @@ def _span_baseline_map(
     min_samples: int,
 ) -> Dict[str, Dict[str, Any]]:
     baselines: Dict[str, Dict[str, Any]] = {}
+    looked_up: Set[str] = set()
     for observation in observations:
         span_key = str(observation.get("span_key") or "")
-        if not span_key or span_key in baselines:
+        if not span_key or span_key in looked_up:
             continue
+        looked_up.add(span_key)
         stats = span_history_summary(span_key, benchmark=benchmark, environment=environment)
         if stats and stats["count"] >= min_samples:
             baselines[span_key] = stats
@@ -1376,7 +1428,6 @@ def _render_executive_summary(
         ))
 
     worker_span_names = {s.name for s in all_spans if s.source == "worker"}
-    backend_span_names = {s.name for s in all_spans if s.source == "backend"}
     expected_worker = {
         "run_agent", "execute_iteration", "call_llm", "call_llm_activity",
         "check_progress", "call_planner_llm_activity",
@@ -1861,9 +1912,9 @@ async def _fetch_fly_logs_bulk(
                 await asyncio.sleep(fly_stream_seconds)
                 for aid in all_ids:
                     agent_lines = collector.get_logs_for_agent(aid)
-                    for l in agent_lines:
-                        if not l.startswith("[fly.io]"):
-                            lines.append(l)
+                    for line in agent_lines:
+                        if not line.startswith("[fly.io]"):
+                            lines.append(line)
                 await collector.stop()
                 print(f"  [fly.io] Collected {len(lines)} lines from stream ({collector.total_lines} total streamed)")
     else:

@@ -3055,6 +3055,14 @@ require_in_app_hub_visibility() {
     fi
     [ -n "$hub_api_key" ] || {
         echo "❌ BACKEND_API_KEY is required to register benchmark runs in the in-app Hub" >&2
+        echo "   looked in: \$BENCHMARK_HUB_API_KEY, \$BACKEND_API_KEY, $ROOT_DIR/back-end/.env" >&2
+        if [ ! -e "$ROOT_DIR/back-end/.env" ]; then
+            # A plain `git worktree add` copies no credentials, so the fleet used
+            # to burn a full launch before dying here with no way to tell that
+            # the worktree was simply never provisioned.
+            echo "   cause: $ROOT_DIR/back-end/.env does not exist — this worktree was never provisioned." >&2
+            echo "   fix:   bash scripts/prepare-deploy-worktree.sh --worktree $ROOT_DIR --source <controller-workspace>" >&2
+        fi
         return 1
     }
     export BENCHMARK_HUB_UPLOAD_URL="$hub_url"
@@ -3837,11 +3845,23 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
    && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
         || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
-    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
-        || [ ! -s "$FLEET_PATCH_FILE" ]; then
+    fleet_patch_rc=0
+    cloudbench_prepare_workspace_patch \
+        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
+        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
+    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+        # The unpushed HEAD carries only content the patch generator excludes
+        # (append-only history ledgers), so the base ref already IS the code
+        # under test. Shipping nothing is exactly equivalent here.
+        rm -f "$FLEET_PATCH_FILE"
+        FLEET_PATCH_FILE=""
+        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
+    elif [ "$fleet_patch_rc" -ne 0 ]; then
         echo "❌ could not create the fleet local workspace patch" >&2
         exit 1
     fi
+fi
+if [ -n "$FLEET_PATCH_FILE" ]; then
     FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
     [ -n "$FLEET_PATCH_SHA256" ] || {
         echo "❌ could not fingerprint the fleet local workspace patch" >&2

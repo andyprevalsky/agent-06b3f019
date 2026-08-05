@@ -133,6 +133,27 @@ def test_load_config_temporal_sticky_timeout_override():
     assert result.temporal.sticky_queue_schedule_to_start_timeout_seconds == 2
 
 
+def test_temporal_connect_options_support_local_and_cloud_servers():
+    """Local benchmarks disable TLS/auth without weakening Temporal Cloud."""
+    from temporal_connection import is_local_temporal_address, temporal_connect_options
+
+    assert is_local_temporal_address("localhost:7233")
+    assert is_local_temporal_address("127.0.0.1:7233")
+    assert is_local_temporal_address("[::1]:7233")
+    assert not is_local_temporal_address("rose.tmprl.cloud:7233")
+
+    local = temporal_connect_options("127.0.0.1:7233", "default", "")
+    assert local == {"namespace": "default", "tls": False}
+
+    cloud = temporal_connect_options("rose.tmprl.cloud:7233", "rose", "secret")
+    assert cloud["namespace"] == "rose"
+    assert cloud["tls"] is not False
+    assert cloud["rpc_metadata"] == {
+        "temporal-namespace": "rose",
+        "Authorization": "Bearer secret",
+    }
+
+
 def test_load_config_temporal_balances_sticky_and_nonsticky_pollers():
     """Default workflow pollers must preserve capacity for cached workflow tasks."""
     _reset_config_cache()
@@ -193,6 +214,10 @@ async def run_all_tests():
     r.record("load_config_temporal_defaults", test_load_config_temporal_defaults)
     r.record("load_config_temporal_activity_slot_overrides", test_load_config_temporal_activity_slot_overrides)
     r.record("load_config_temporal_sticky_timeout_override", test_load_config_temporal_sticky_timeout_override)
+    r.record(
+        "temporal_connect_options_local_and_cloud",
+        test_temporal_connect_options_support_local_and_cloud_servers,
+    )
     r.record(
         "load_config_temporal_balances_sticky_and_nonsticky_pollers",
         test_load_config_temporal_balances_sticky_and_nonsticky_pollers,

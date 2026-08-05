@@ -10,6 +10,7 @@
  * Kept separate from `service.ts` so the WhatsAppClient class stays under the
  * strict max-lines cap.
  */
+import fs from 'fs';
 import type * as BaileysModule from '@whiskeysockets/baileys';
 
 let baileys: typeof BaileysModule | null = null;
@@ -35,15 +36,15 @@ export function resetBaileysCache(): void {
 interface SilentLogger {
   level: string;
   child: () => SilentLogger;
-  trace: () => void;
-  debug: () => void;
-  info: () => void;
-  warn: () => void;
-  error: () => void;
-  fatal: () => void;
+  trace: (...args: unknown[]) => void;
+  debug: (...args: unknown[]) => void;
+  info: (...args: unknown[]) => void;
+  warn: (...args: unknown[]) => void;
+  error: (...args: unknown[]) => void;
+  fatal: (...args: unknown[]) => void;
 }
 
-export const silentBaileysLogger: SilentLogger = ((): SilentLogger => {
+function makeSilentLogger(): SilentLogger {
   const logger: SilentLogger = {
     level: 'silent',
     child: () => logger,
@@ -55,4 +56,55 @@ export const silentBaileysLogger: SilentLogger = ((): SilentLogger => {
     fatal: () => {},
   };
   return logger;
+}
+
+/**
+ * Build a logger that appends Baileys' internal protocol chatter to
+ * `WHATSAPP_DEBUG_LOG`. Without this, a server-side pairing rejection is
+ * invisible — the silent logger swallows the stream error and all we observe
+ * is a bare `connection closed`, which is indistinguishable from a QR timeout.
+ *
+ * Opt-in only; production keeps the silent logger.
+ */
+function makeDebugLogger(logPath: string): SilentLogger {
+  const append = (level: string, args: unknown[]): void => {
+    const line = args
+      .map((a) => {
+        if (typeof a === 'string') return a;
+        try {
+          return JSON.stringify(a);
+        } catch {
+          return String(a);
+        }
+      })
+      .join(' ');
+    try {
+      fs.appendFileSync(logPath, `[${new Date().toISOString()}] [${level}] ${line}\n`);
+    } catch {
+      // Never let diagnostics break the connection.
+    }
+  };
+
+  const logger: SilentLogger = {
+    level: 'trace',
+    child: () => logger,
+    trace: (...args: unknown[]) => append('trace', args),
+    debug: (...args: unknown[]) => append('debug', args),
+    info: (...args: unknown[]) => append('info', args),
+    warn: (...args: unknown[]) => append('warn', args),
+    error: (...args: unknown[]) => append('error', args),
+    fatal: (...args: unknown[]) => append('fatal', args),
+  };
+  return logger;
+}
+
+/**
+ * Logger handed to Baileys. Silent unless `WHATSAPP_DEBUG_LOG` names a file to
+ * append protocol diagnostics to.
+ */
+export const silentBaileysLogger: SilentLogger = ((): SilentLogger => {
+  const debugPath = process.env.WHATSAPP_DEBUG_LOG;
+  return debugPath !== undefined && debugPath !== ''
+    ? makeDebugLogger(debugPath)
+    : makeSilentLogger();
 })();

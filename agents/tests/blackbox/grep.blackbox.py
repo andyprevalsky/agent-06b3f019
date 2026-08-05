@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from _test_utils import (
@@ -40,6 +41,13 @@ def _setup():
                         "total_messages": 120,
                         "channels": {"sms": 80, "email": 40},
                         "date_range": {"from": "2025-06-01T00:00:00Z", "to": "2026-04-01T00:00:00Z"},
+                        "latest_message": {
+                            "timestamp": "2026-04-01T12:34:56Z",
+                            "channel": "sms",
+                            "from": "me",
+                            "to": "+15551234567",
+                            "text": "Latest exact text",
+                        },
                         "threads": [
                             {"name": "Alice", "message_count": 50, "last_message": "2026-04-01"},
                             {"name": "Bob", "message_count": 30, "last_message": "2026-03-15"},
@@ -174,6 +182,8 @@ async def test_fetch_local_data_summary():
     assert "5 threads" in result
     assert "120" in result
     assert "Alice" in result
+    assert "Latest exact text" in result
+    assert "2026-04-01T12:34:56Z" in result
 
 
 async def test_grep_empty_pattern():
@@ -194,6 +204,64 @@ async def test_grep_empty_pattern():
     )
     body = json.loads(call["requestBody"])
     assert body["pattern"] == ""
+
+
+async def test_grep_summary_source_returns_compact_inventory():
+    """summary is a local grep source for aggregate counts and top threads."""
+    _setup()
+    with patch("temporalio.activity.heartbeat"):
+        from tools.grep import _data_summary_cache, grep_activity
+
+        _data_summary_cache.clear()
+        result = await grep_activity(
+            {"pattern": "message totals", "sources": ["summary"], "source": "summary"},
+            user_id="user-42",
+        )
+
+    assert result["total_matches"] == 1
+    assert result["sources"] == ["summary"]
+    assert "120" in result["message"]
+    assert "Alice" in result["message"]
+
+
+async def test_grep_invalid_regex_retries_as_literal():
+    """A phone-like literal beginning with '+' must not fail the grep tool."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from tools.grep import grep_activity
+
+    invalid_response = MagicMock()
+    invalid_response.status_code = 400
+    invalid_response.json.return_value = {
+        "error": "Invalid regular expression '+15551234567': Nothing to repeat"
+    }
+    success_response = MagicMock()
+    success_response.status_code = 200
+    success_response.json.return_value = {
+        "matches": [{"content": "+15551234567"}],
+        "total_matches": 1,
+        "truncated": False,
+    }
+    client = SimpleNamespace(post=AsyncMock(side_effect=[invalid_response, success_response]))
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("domains.grep.repo.get_http_client", return_value=client),
+    ):
+        result = await grep_activity(
+            {"pattern": "+15551234567", "source": "network"},
+            user_id="user-42",
+        )
+
+    assert client.post.await_count == 2
+    first_payload = client.post.await_args_list[0].kwargs["json"]
+    second_payload = client.post.await_args_list[1].kwargs["json"]
+    assert first_payload["pattern"] == "+15551234567"
+    assert second_payload["pattern"] == r"\+15551234567"
+    assert result["literal_fallback"] is True
+    assert result["original_pattern"] == "+15551234567"
+    assert result["effective_pattern"] == r"\+15551234567"
+    assert result["total_matches"] == 1
 
 
 async def test_grep_network_source_forwarded():
@@ -511,6 +579,8 @@ async def run_all_tests():
     await r.record_async("boundary_normalizes_model_dump_keys", test_grep_boundary_normalizes_model_dump_keys)
     await r.record_async("fetch_local_data_summary", test_fetch_local_data_summary)
     await r.record_async("empty_pattern", test_grep_empty_pattern)
+    await r.record_async("summary_source", test_grep_summary_source_returns_compact_inventory)
+    await r.record_async("invalid_regex_literal_fallback", test_grep_invalid_regex_retries_as_literal)
     await r.record_async("network_source_forwarded", test_grep_network_source_forwarded)
     r.record("truncate_pattern_short", test_truncate_pattern_short)
     r.record("truncate_pattern_long", test_truncate_pattern_long)

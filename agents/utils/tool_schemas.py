@@ -374,6 +374,7 @@ class GrepTool(BaseModel):
                 "agent_network",
                 "transactions",
                 "documents",
+                "summary",
             ]
         ]
     ] = Field(
@@ -391,6 +392,11 @@ class GrepTool(BaseModel):
             "message roles in the current agent tree and returns role/location metadata. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "summary returns a compact, precomputed inventory with message counts, date ranges, "
+            "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
+            "aggregate questions such as total messages, date coverage, or most-contacted threads; "
+            "then use the concrete channel source to inspect exact message text. Thread identifiers "
+            "in the summary are valid contact identifiers when no human-readable name is stored. "
             "If a named source's connector isn't connected, the search returns a 'source not "
             "connected' notice and the user is automatically asked to connect it - do NOT retry "
             "that source; continue with the sources you can reach."
@@ -407,6 +413,7 @@ class GrepTool(BaseModel):
             "agent_network",
             "transactions",
             "documents",
+            "summary",
         ]
     ] = Field(
         default=None,

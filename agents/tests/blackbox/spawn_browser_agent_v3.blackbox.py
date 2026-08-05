@@ -1890,6 +1890,76 @@ async def test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fai
         assert metadata["recording_file_pointer"] is None
 
 
+async def test_browser_diagnostics_finalizer_uploads_and_attaches_durable_pointer():
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.handler import _finalize_browser_diagnostics_for_fe
+
+    class DiagnosticsRecorder:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+            self.console_index_path = self.output_dir / "console" / "index.json"
+            self.network_index_path = self.output_dir / "network" / "index.json"
+
+        async def close(self):
+            self.console_index_path.parent.mkdir(parents=True, exist_ok=True)
+            self.network_index_path.parent.mkdir(parents=True, exist_ok=True)
+            self.console_index_path.write_text('{"entries":[]}', encoding="utf-8")
+            self.network_index_path.write_text('{"entries":[]}', encoding="utf-8")
+            return self.network_index_path
+
+        def export_diagnostics_bundle_bytes(self):
+            return b"redacted diagnostics zip"
+
+        async def archive_diagnostics_artifacts(self):
+            return {
+                "console": "r2://trace/console.json.gz.enc",
+                "network": "r2://trace/network.json.gz.enc",
+            }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recorder = DiagnosticsRecorder(tmp)
+        with (
+            patch(
+                "domains.spawn_browser_agent_v3.handler.upload_to_storage",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "diagnostics-pointer-1",
+                    "storage_path": "user-1/diagnostics.zip",
+                },
+            ) as upload_mock,
+            patch(
+                "domains.spawn_browser_agent_v3.handler.save_browser_action_message",
+                new_callable=AsyncMock,
+            ) as save_mock,
+        ):
+            result = await _finalize_browser_diagnostics_for_fe(
+                browser_network_recorder=recorder,
+                agent_id="agent-1",
+                task_id="task-1",
+                user_id="user-1",
+                browser_url="https://debug",
+            )
+
+    assert result is not None
+    assert result["browser_diagnostics_file_pointer"]["id"] == "diagnostics-pointer-1"
+    upload_mock.assert_awaited_once_with(
+        user_id="user-1",
+        file_content=b"redacted diagnostics zip",
+        filename="browser-diagnostics-task-1.zip",
+        mime_type="application/zip",
+    )
+    save_mock.assert_awaited_once()
+    metadata = save_mock.await_args.kwargs["extra_metadata"]
+    assert metadata["browser_diagnostics_file_pointer"]["id"] == "diagnostics-pointer-1"
+    assert metadata["console_log_path"].endswith("console/index.json")
+    assert metadata["network_recording_path"].endswith("network/index.json")
+    assert metadata["trace_archive_refs"] == {
+        "console": "r2://trace/console.json.gz.enc",
+        "network": "r2://trace/network.json.gz.enc",
+    }
+
+
 async def test_browser_cleanup_scheduler_does_not_block_on_recording_finalization():
     import tempfile
 
@@ -3327,6 +3397,13 @@ async def test_browser_network_recording_captures_response_body():
             promoted = next(item for item in same_id_entries if item["url"] == promoted_url)
             assert promoted["url"] == promoted_url
             promoted_body = json.loads((index_path.parent / promoted["body_file"]).read_text())
+            promoted = next(
+                item for item in same_id_entries if item["browser_generation"] == 2
+            )
+            assert promoted["url"] == promoted_url.split("?", 1)[0]
+            promoted_body = json.loads(
+                (index_path.parent / promoted["body_file"]).read_text()
+            )
             assert promoted_body == {"phase": "promoted"}
     finally:
         if previous_enabled is None:
@@ -3345,6 +3422,174 @@ async def test_browser_network_recording_captures_response_body():
             os.environ.pop("BROWSER_AGENT_NETWORK_CAPTURE_URL_PATTERNS", None)
         else:
             os.environ["BROWSER_AGENT_NETWORK_CAPTURE_URL_PATTERNS"] = previous_patterns
+
+
+async def test_browser_diagnostics_capture_console_and_redacted_network_metadata():
+    import io
+    import tempfile
+    import zipfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    class RegisterDomain:
+        def __init__(self):
+            self.handlers = {}
+
+        def __getattr__(self, name):
+            def register(handler):
+                self.handlers[name] = handler
+
+            return register
+
+    class SendDomain:
+        def __init__(self):
+            self.enabled_session_ids = []
+
+        async def enable(self, session_id=None):
+            self.enabled_session_ids.append(session_id)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        network_register = RegisterDomain()
+        runtime_register = RegisterDomain()
+        log_register = RegisterDomain()
+        webauthn_register = RegisterDomain()
+        network_send = SendDomain()
+        runtime_send = SendDomain()
+        log_send = SendDomain()
+        cdp_client = SimpleNamespace(
+            register=SimpleNamespace(
+                Network=network_register,
+                Runtime=runtime_register,
+                Log=log_register,
+                WebAuthn=webauthn_register,
+            ),
+            send=SimpleNamespace(
+                Network=network_send,
+                Runtime=runtime_send,
+                Log=log_send,
+            ),
+        )
+        browser_session = SimpleNamespace(
+            cdp_client=cdp_client,
+            get_or_create_cdp_session=AsyncMock(
+                return_value=SimpleNamespace(session_id="cdp-1", cdp_client=cdp_client)
+            ),
+        )
+        recorder = BrowserNetworkRecorder(
+            browser_session=browser_session,
+            agent_id="agent-1",
+            task_id="task-1",
+            session_id="browser-1",
+            output_dir=Path(tmp),
+            persist_network_log=False,
+        )
+        await recorder.start()
+
+        runtime_register.handlers["consoleAPICalled"](
+            {
+                "type": "error",
+                "timestamp": 123.5,
+                "args": [{"type": "string", "value": "token=supersecret"}],
+                "stackTrace": {
+                    "callFrames": [
+                        {"url": "https://amazon.com/login.js?sig=secret", "lineNumber": 7}
+                    ]
+                },
+            },
+            "cdp-1",
+        )
+        runtime_register.handlers["exceptionThrown"](
+            {
+                "timestamp": 124.5,
+                "exceptionDetails": {
+                    "text": "Uncaught NotAllowedError",
+                    "url": "https://amazon.com/login.js?token=secret",
+                    "lineNumber": 9,
+                },
+            },
+            "cdp-1",
+        )
+        log_register.handlers["entryAdded"](
+            {
+                "entry": {
+                    "source": "javascript",
+                    "level": "error",
+                    "text": "WebAuthn request failed",
+                    "url": "https://amazon.com/ap/signin?session=secret",
+                    "timestamp": 125.5,
+                }
+            },
+            "cdp-1",
+        )
+        webauthn_register.handlers["credentialAsserted"](
+            {
+                "authenticatorId": "authenticator-secret-id",
+                "credential": {
+                    "credentialId": "credential-secret-id",
+                    "rpId": "amazon.com",
+                    "signCount": 5201,
+                    "isResidentCredential": True,
+                },
+            },
+            "cdp-1",
+        )
+        network_register.handlers["requestWillBeSent"](
+            {
+                "requestId": "req-1",
+                "type": "Fetch",
+                "request": {
+                    "method": "POST",
+                    "url": "https://amazon.com/webauthn/assert?token=supersecret",
+                    "headers": {"Authorization": "Bearer secret"},
+                },
+            },
+            "cdp-1",
+        )
+        request_entry = next(
+            entry for entry in recorder.entries.values() if entry["request_id"] == "req-1"
+        )
+        request_entry.update(
+            {
+                "body_file": "0001-secret-response.json",
+                "body_size": 1234,
+                "body_truncated": False,
+                "body_base64_encoded": False,
+                "body_captured_at_ms": 126.5,
+            }
+        )
+        network_register.handlers["loadingFailed"](
+            {"requestId": "req-1", "errorText": "net::ERR_FAILED"},
+            "cdp-1",
+        )
+
+        network_path = await recorder.close()
+        bundle = recorder.export_diagnostics_bundle_bytes()
+
+        assert network_path == recorder.network_index_path
+        assert recorder.console_index_path is not None and recorder.console_index_path.exists()
+        assert bundle is not None
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            assert sorted(archive.namelist()) == ["console/index.json", "network/index.json"]
+            console_text = archive.read("console/index.json").decode("utf-8")
+            network_text = archive.read("network/index.json").decode("utf-8")
+
+        assert "supersecret" not in console_text
+        assert "token=[REDACTED]" in console_text
+        assert "?sig=" not in console_text and "?session=" not in console_text
+        assert "webauthn_credential_asserted" in console_text
+        assert '"rp_id": "amazon.com"' in console_text
+        assert '"sign_count": 5201' in console_text
+        assert "credential-secret-id" not in console_text
+        assert "authenticator-secret-id" not in console_text
+        assert "supersecret" not in network_text
+        assert "authorization" in network_text and "[REDACTED]" in network_text
+        assert "https://amazon.com/webauthn/assert" in network_text
+        assert "body_file" not in network_text
+        assert "body_size" not in network_text
+        assert "secret-response" not in network_text
+        assert "body_file" in recorder.network_index_path.read_text()
+        assert runtime_send.enabled_session_ids == ["cdp-1"]
+        assert log_send.enabled_session_ids == ["cdp-1"]
 
 
 def test_browser_turn_history_preserves_state_before_tool_result():
@@ -5531,6 +5776,39 @@ def test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage():
     assert restore_storage < reseed_passkeys
 
 
+def test_passkeys_are_revalidated_after_start_navigation():
+    """Start navigation may replace the CDP WebAuthn environment before first use."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    navigated = source.index("Auto-navigated to start URL")
+    main_loop = source.index("# ===== MAIN AGENT LOOP =====")
+    revalidate = source.index('sync_passkeys_onto_target(context="after start navigation")')
+
+    assert navigated < revalidate < main_loop
+
+
+def test_passkeys_are_revalidated_before_each_usage_readback():
+    """Any navigation-capable action may reset WebAuthn before the next poll."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    helper_start = source.index("async def record_passkey_usage_once()")
+    helper_end = source.index("async def sync_passkeys_onto_target(", helper_start)
+    helper = source[helper_start:helper_end]
+
+    revalidate = helper.index(
+        'await sync_passkeys_onto_target(context="before passkey usage readback")'
+    )
+    readback = helper.index("await record_used_passkey_credentials(")
+
+    assert revalidate < readback
+
+
 async def test_provider_handoff_replaces_humanizer_without_leaking_idle_work():
     from domains.spawn_browser_agent_v3.handler import _replace_browser_humanizer
 
@@ -7687,8 +7965,13 @@ async def test_provider_exit_monitor_runs_without_production_body_log_persistenc
             )
             assert recorder is not None
             assert recorder.persists_network_log is False
-            assert not recorder.network_dir.exists()
-            assert await recorder.close() is None
+            assert recorder.network_dir.exists()
+            assert recorder.console_dir.exists()
+            index_path = await recorder.close()
+            assert index_path == recorder.network_index_path
+            assert index_path.exists()
+            assert recorder.console_index_path.exists()
+            assert sorted(path.name for path in recorder.network_dir.iterdir()) == ["index.json"]
     finally:
         for name, value in previous.items():
             if value is None:
@@ -11150,7 +11433,12 @@ def test_browser_activity_memory_cleanup_clears_retained_buffers():
     )
     network_recorder = SimpleNamespace(
         entries={"request-1": {"body_file": "0001.txt"}},
+        _diagnostic_entries=[{"url": "https://example.test"}],
+        console_entries=[{"text": "error"}],
         _tasks={object()},
+        _bodies={"request-1": "response"},
+        _body_byte_sizes={"request-1": 8},
+        _body_bytes=8,
         browser_session=browser_session,
         _cdp_client=cdp_client,
     )
@@ -11172,7 +11460,12 @@ def test_browser_activity_memory_cleanup_clears_retained_buffers():
     assert recorder._cursor is None
     assert recorder.page is None
     assert network_recorder.entries == {}
+    assert network_recorder._diagnostic_entries == []
+    assert network_recorder.console_entries == []
     assert network_recorder._tasks == set()
+    assert network_recorder._bodies == {}
+    assert network_recorder._body_byte_sizes == {}
+    assert network_recorder._body_bytes == 0
     assert network_recorder.browser_session is None
     assert network_recorder._cdp_client is None
     assert turn_messages == []
@@ -13820,6 +14113,14 @@ async def run_all_tests():
         "passkeys_reseed_on_target_reset",
         test_passkeys_reseed_on_target_reset_like_cookies_and_localstorage,
     )
+    r.record(
+        "passkeys_revalidated_after_start_navigation",
+        test_passkeys_are_revalidated_after_start_navigation,
+    )
+    r.record(
+        "passkeys_revalidated_before_each_usage_readback",
+        test_passkeys_are_revalidated_before_each_usage_readback,
+    )
     await r.record_async(
         "provider_handoff_replaces_humanizer",
         test_provider_handoff_replaces_humanizer_without_leaking_idle_work,
@@ -14360,6 +14661,10 @@ async def run_all_tests():
         test_browser_recording_finalizer_keeps_local_artifacts_when_upload_fails,
     )
     await r.record_async(
+        "browser_diagnostics_finalizer_attaches_pointer",
+        test_browser_diagnostics_finalizer_uploads_and_attaches_durable_pointer,
+    )
+    await r.record_async(
         "browser_cleanup_scheduler_nonblocking",
         test_browser_cleanup_scheduler_does_not_block_on_recording_finalization,
     )
@@ -14451,6 +14756,10 @@ async def run_all_tests():
     await r.record_async(
         "browser_network_recording_captures_body",
         test_browser_network_recording_captures_response_body,
+    )
+    await r.record_async(
+        "browser_diagnostics_console_network_bundle",
+        test_browser_diagnostics_capture_console_and_redacted_network_metadata,
     )
 
     # handler statics

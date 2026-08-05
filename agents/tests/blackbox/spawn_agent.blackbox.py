@@ -573,6 +573,8 @@ async def test_handler_explore_happy_path():
         restore()
     statuses = [e.status for e in events]
     assert MessageStatus.IN_PROGRESS in statuses
+    assert fake.activity_calls[0]["name"] == "fetch_local_data_summary"
+    assert fake.start_activity_calls[0]["args"][-1] == "local"
     assert MessageStatus.FINISHED in statuses
     # FINISHED event carries result + usage
     finished = next(e for e in events if e.status == MessageStatus.FINISHED)
@@ -1883,6 +1885,7 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
             init_tool_call_id="init-tc",
             claude_token="ctok",
             attachment_texts=["[file:doc.txt] short"],
+            local_data_summary="messages/ 3 threads, 42 messages",
         )
 
     # Returned dict shape
@@ -1909,6 +1912,8 @@ async def test_spawn_explore_agent_activity_runs_run_agent_and_returns_result():
     assert "[STATE:" in user_msg["text"]
     assert "research X" in user_msg["text"]
     assert "doc.txt" in user_msg["text"]
+    assert "LOCAL DATA SUMMARY" in user_msg["text"]
+    assert "42 messages" in user_msg["text"]
 
 
 async def test_spawn_explore_agent_activity_rejects_completion_until_evidence_succeeds():
@@ -2097,6 +2102,141 @@ async def test_spawn_explore_agent_activity_rejects_tool_free_completion():
 
     assert result["status"] == "error"
     assert result["error_reason"] == "explore completed without tool evidence"
+
+
+async def test_spawn_explore_agent_activity_accepts_grounded_local_summary():
+    """A backend-fetched local summary is evidence without a redundant grep."""
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    async def fake_run_agent(**kwargs):
+        return {
+            "status": "completed",
+            "final_response": "There are 42 messages.",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Count messages",
+            model="m",
+            local_data_summary="messages/ 2 threads, 42 messages",
+        )
+
+    assert result["status"] == "completed"
+    assert result["result"] == "There are 42 messages."
+
+
+async def test_spawn_explore_agent_activity_ignores_unrequested_best_effort_source_failure():
+    """An opportunistic Gmail probe must not poison a WhatsApp-only result."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": {"matches": [{"source": "whatsapp", "content": "grounded"}]},
+            "unavailable_sources": [{"source": "gmail", "connected": False}],
+        }
+    )
+    captured: dict = {}
+
+    async def fake_run_agent(**kwargs):
+        captured.update(kwargs)
+        await kwargs["execute_tool"](
+            "grep",
+            {
+                "pattern": "contact",
+                "sources": ["whatsapp", "gmail"],
+                "require_source_access": False,
+            },
+            "tc1",
+        )
+        return {
+            "status": "completed",
+            "final_response": "WhatsApp result",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Find my most contacted person on WhatsApp",
+            model="m",
+            local_data_summary="messages/ 2 threads, 42 messages",
+        )
+
+    assert result["status"] == "completed"
+    assert result["unavailable_sources"] == []
+    assert "thread label is a valid contact identifier" in captured["initial_context"][0]["text"]
+
+
+async def test_spawn_explore_agent_activity_keeps_named_source_failure_required():
+    """A source named by the goal is still reported even with a best-effort hint.
+
+    Mirrors the opportunistic-source case above: there the disconnected source
+    is dropped entirely because the goal never asked for it. Here the goal names
+    Gmail, so the gap must survive into `unavailable_sources` and the visible
+    notice — the parent's source_connect gate depends on it. The run itself
+    stays `completed`: disconnected sources are a gap notice, not a hard explore
+    failure (see the explore activity's own comment).
+    """
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    fake_grep = MagicMock()
+    fake_grep.execute_tool = AsyncMock(
+        return_value={
+            "result": "not connected",
+            "unavailable_sources": [{"source": "gmail", "connected": False}],
+        }
+    )
+
+    async def fake_run_agent(**kwargs):
+        await kwargs["execute_tool"](
+            "grep",
+            {"pattern": "invoice", "sources": ["gmail"], "require_source_access": False},
+            "tc1",
+        )
+        return {
+            "status": "completed",
+            "final_response": "No Gmail access",
+            "tokens_in": 1,
+            "tokens_out": 1,
+        }
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("tools.grep.GrepManager", return_value=fake_grep),
+    ):
+        result = await spawn_explore_agent_activity(
+            agent_id="a",
+            user_id="u",
+            goal="Find the invoice in my Gmail",
+            model="m",
+            local_data_summary="messages/ 2 threads, 42 messages",
+        )
+
+    assert result["status"] == "completed"
+    assert result["error_reason"] is None
+    assert result["unavailable_sources"] == [{"source": "gmail", "connected": False}]
+    assert "⚠️ Source(s) not connected: gmail" in result["final_response"]
 
 
 async def test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results():
@@ -2673,6 +2813,18 @@ async def run_all_tests():
     await r.record_async(
         "explore_activity_rejects_tool_free_completion",
         test_spawn_explore_agent_activity_rejects_tool_free_completion,
+    )
+    await r.record_async(
+        "explore_activity_accepts_grounded_local_summary",
+        test_spawn_explore_agent_activity_accepts_grounded_local_summary,
+    )
+    await r.record_async(
+        "explore_activity_ignores_unrequested_best_effort_source_failure",
+        test_spawn_explore_agent_activity_ignores_unrequested_best_effort_source_failure,
+    )
+    await r.record_async(
+        "explore_activity_keeps_named_source_failure_required",
+        test_spawn_explore_agent_activity_keeps_named_source_failure_required,
     )
     await r.record_async(
         "explore_activity_rejects_empty_or_failed_tool_results",

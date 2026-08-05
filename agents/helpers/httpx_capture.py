@@ -196,9 +196,13 @@ class _CapturingTransport(httpx.AsyncBaseTransport):
         redacted_headers = {k: _redact_header(k, v) for k, v in headers.items()}
 
         request_body: str | None = None
-        if request.content:
+        try:
+            body_bytes = request.content
+        except httpx.RequestNotRead:
+            body_bytes = await request.aread()
+        if body_bytes:
             try:
-                request_body = request.content.decode("utf-8")
+                request_body = body_bytes.decode("utf-8")
             except (UnicodeDecodeError, AttributeError):
                 request_body = "[binary body]"
 

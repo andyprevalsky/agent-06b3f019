@@ -39,6 +39,34 @@ benchmark_seed_dump_path() {
     fi
 }
 
+# Immutable R2 object identity for the canonical benchmark base fixture. Unlike
+# setup-db.sh's daily developer snapshot, this changes only when the schema, the
+# pg_dump major that wrote the archive, or the explicitly reviewed base-image
+# revision changes.
+benchmark_base_cache_token() {
+    local schema_path="$1"
+    local pg_major="${2:-}"
+    local lib_dir
+    local repo_root
+    local python_bin
+
+    if [ ! -f "$schema_path" ]; then
+        echo "benchmark seed schema does not exist: $schema_path" >&2
+        return 1
+    fi
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    repo_root="$(cd "$lib_dir/../.." && pwd)"
+    python_bin="$repo_root/agents/venv/bin/python"
+    [ -x "$python_bin" ] || python_bin="$(command -v python3)"
+    if [ -n "$pg_major" ]; then
+        "$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+            --cache-token --pg-major "$pg_major" "$schema_path"
+    else
+        "$python_bin" "$repo_root/agents/benchmarks/seed_cache_path.py" \
+            --cache-token "$schema_path"
+    fi
+}
+
 # Producers and consumers hold the same per-dump directory lock across every
 # read/delete/restore or replacement of the dump + sidecar pair. The lock is
 # host-local: it coordinates sibling isolated stacks without creating a global
@@ -98,20 +126,22 @@ wait_for_benchmark_seed_publish() {
     done
 }
 
-# seed_cache_decision <seed_dump_path> <schema_hash> <cache_enabled 0|1>
+# seed_cache_decision <seed_dump_path> <schema_hash> <cache_enabled 0|1> [cache_token]
 #   echoes exactly one of:
 #     restore-local  — a schema-VALID local dump exists; restore it, skip the cache
 #     consult-remote — no valid local dump but the shared cache is on; pull from it
 #     cold-sync      — no valid local dump and no cache; seed from prod as before
 seed_cache_decision() {
-    local seed_dump="$1" schema_hash="$2" cache_enabled="$3"
+    local seed_dump="$1" schema_hash="$2" cache_enabled="$3" cache_token="${4:-}"
     # No dump path configured (e.g. local dev) → always cold-sync (unchanged).
     [ -n "$seed_dump" ] || { printf 'cold-sync\n'; return 0; }
     # A local dump is usable ONLY if it exists AND its sidecar hash matches the
     # current schema. Anything else (absent, empty, missing sidecar, drifted hash)
     # counts as "no valid local dump" and must fall through to the shared cache.
     if [ -s "$seed_dump" ] && \
-       [ "$(cat "${seed_dump}.schemahash" 2>/dev/null || printf 'x')" = "$schema_hash" ]; then
+       [ "$(cat "${seed_dump}.schemahash" 2>/dev/null || printf 'x')" = "$schema_hash" ] && \
+       { [ -z "$cache_token" ] || \
+         [ "$(cat "${seed_dump}.cachetoken" 2>/dev/null || printf 'x')" = "$cache_token" ]; }; then
         printf 'restore-local\n'; return 0
     fi
     if [ "$cache_enabled" = 1 ]; then

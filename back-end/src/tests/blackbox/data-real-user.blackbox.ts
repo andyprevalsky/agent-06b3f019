@@ -120,6 +120,15 @@ const SummaryResponse = z.object({
         from: z.string().nullable(),
         to: z.string().nullable(),
       }),
+      latest_message: z
+        .object({
+          timestamp: z.string(),
+          channel: z.string(),
+          from: z.string(),
+          to: z.string(),
+          text: z.string(),
+        })
+        .nullable(),
       threads: z.array(
         z.object({
           name: z.string(),

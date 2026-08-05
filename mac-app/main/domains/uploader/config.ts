@@ -36,6 +36,13 @@ export const UPLOAD_ENDPOINTS: Record<UploadStrategy, string> = {
   generic: '/api/integrations/upload',
 };
 
+/**
+ * Endpoint that marks the WhatsApp integration CONNECTED before any messages
+ * exist. Kept out of UPLOAD_ENDPOINTS because it carries no payload — it
+ * exists purely to break the connect/upload bootstrap deadlock.
+ */
+export const WHATSAPP_CONNECT_ENDPOINT = '/api/integrations/whatsapp/connect';
+
 /** IPC channel the renderer window listens on for upload progress. */
 export const UPLOAD_PROGRESS_CHANNEL = 'upload:progress';
 

@@ -30,6 +30,17 @@ test('runtime seed reads prefer the pooled production endpoint', () => {
   );
 });
 
+test('runtime seed reads honor an explicit operator-routed endpoint', () => {
+  assert.equal(
+    selectRemoteDatabaseUrl({
+      SEED_REMOTE_DATABASE_URL: 'postgresql://127.0.0.1:55432/postgres?sslmode=require',
+      DATABASE_URL: 'postgresql://pooler.example.test:6543/postgres?pgbouncer=true',
+      DIRECT_DATABASE_URL: 'postgresql://db.example.test:5432/postgres',
+    }),
+    'postgresql://127.0.0.1:55432/postgres?sslmode=require'
+  );
+});
+
 test('runtime seed reads fall back to the direct endpoint when no pooler is configured', () => {
   assert.equal(
     selectRemoteDatabaseUrl({
