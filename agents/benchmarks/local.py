@@ -980,6 +980,12 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
+        # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
+        # parent shell; if that leaks into an isolated run, every local smoke /
+        # AgentCard stack collapses onto one shared queue (and often the wrong
+        # backend). Force run.sh to derive the queue from this stack's workspace.
+        env.pop("TEMPORAL_TASK_QUEUE", None)
         # Isolated stacks can start in the same second and share a long
         # workspace-name prefix. Stable ngrok domains truncate that prefix,
         # which can collapse distinct runs onto one public endpoint. Give each

@@ -6929,6 +6929,7 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] == "10"
+            assert "TEMPORAL_TASK_QUEUE" not in captured["env"]
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
     finally:
         local_bench.subprocess.Popen = original_popen
