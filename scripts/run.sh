@@ -375,6 +375,37 @@ kill_stale_tree() {
     kill "$pid" 2>/dev/null || true
 }
 
+# An isolated benchmark lane (run-bench --local / run-predeploy-local) records a
+# live manifest at .context/benchmarks/<run-id>/services.json. "Stale" GC must
+# never reap one of those while it is RUNNING: doing so SIGTERMs an in-flight
+# smoke/agentcard lane and the deploy reports `run.sh exited early with code -15`
+# with no hint that a sibling stack killed it. Returns 0 when the pid belongs to
+# a live isolated run.
+pid_belongs_to_active_isolated_benchmark() {
+    local pid=$1
+    local manifest
+    for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+        [ -f "$manifest" ] || continue
+        PID="$pid" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
+import json, os, sys
+pid = int(os.environ["PID"])
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if str(data.get("status", "")).lower() == "stopped":
+    sys.exit(1)
+pids = {data.get("run_sh_pid")}
+for service in data.get("services") or []:
+    if isinstance(service, dict):
+        pids.add(service.get("pid"))
+sys.exit(0 if pid in {p for p in pids if isinstance(p, int)} else 1)
+PYEOF
+    done
+    return 1
+}
+
 kill_stale_same_worktree_benchmark_stack() {
     $BENCHMARK_MODE || return 0
 
@@ -387,6 +418,10 @@ kill_stale_same_worktree_benchmark_stack() {
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
         if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+            if pid_belongs_to_active_isolated_benchmark "$pid"; then
+                echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
+                continue
+            fi
             echo "🧹 Killing stale benchmark process from this worktree (PID $pid)"
             kill_stale_tree "$pid"
             killed_any=true
@@ -398,7 +433,8 @@ kill_stale_same_worktree_benchmark_stack() {
         for pid in $(pgrep -f "$pattern" 2>/dev/null); do
             [ "$pid" = "$$" ] && continue
             is_current_process_family "$pid" && continue
-            if process_cwd_in_this_worktree "$pid"; then
+            if process_cwd_in_this_worktree "$pid" &&
+                ! pid_belongs_to_active_isolated_benchmark "$pid"; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done
