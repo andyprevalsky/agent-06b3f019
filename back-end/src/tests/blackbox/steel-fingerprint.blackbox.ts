@@ -19,6 +19,7 @@ import {
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
+import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 
 function makeFingerprint(): FingerprintData {
   return {
@@ -104,6 +105,10 @@ function testFingerprintScriptDoesNotReferenceBackendLogger(): void {
     !script.includes('console.'),
     'fingerprint script should not write page-console logs; use backend central logging around injection instead'
   );
+}
+
+async function testFingerprintTimezoneFormatUsesUserLocation(): Promise<void> {
+  await runTimezoneFormatUsesUserLocation(makeFingerprint);
 }
 
 function testProxySettingsDropCityFallsBackToStateLevel(): void {
@@ -538,6 +543,10 @@ async function main(): Promise<void> {
     {
       name: 'fingerprint script does not reference backend logger',
       fn: testFingerprintScriptDoesNotReferenceBackendLogger,
+    },
+    {
+      name: 'fingerprint timezone format uses user location not host TZ',
+      fn: testFingerprintTimezoneFormatUsesUserLocation,
     },
     {
       name: 'proxy settings drop unsupported city and fall back to country+state',

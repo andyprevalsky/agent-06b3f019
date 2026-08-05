@@ -65,7 +65,11 @@ async function case1TransientTableIsRetriedInPlace(): Promise<void> {
     },
     { sleep: noSleep }
   );
-  check('case 1: transient table failure is retried in place', result === 3732 && attempts === 3, `result=${result} attempts=${attempts}`);
+  check(
+    'case 1: transient table failure is retried in place',
+    result === 3732 && attempts === 3,
+    `result=${result} attempts=${attempts}`
+  );
 }
 
 async function case2RetryDoesNotReplayTheWholeGraph(): Promise<void> {

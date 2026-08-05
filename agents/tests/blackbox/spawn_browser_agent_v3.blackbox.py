@@ -3388,15 +3388,14 @@ async def test_browser_network_recording_captures_response_body():
             assert index["entry_count"] == 2
             same_id_entries = [item for item in index["entries"] if item["request_id"] == "123.4"]
             assert len(same_id_entries) == 2
-            entry = next(item for item in same_id_entries if item["url"] == url)
+            # Durable index URLs are query-redacted; distinguish the reused
+            # CDP requestId across browser generations by generation, not URL.
+            entry = next(item for item in same_id_entries if item["browser_generation"] == 1)
             assert entry["url"] == url
             assert entry["status"] == 200
             assert entry["body_file"].endswith(".json")
             body = json.loads((index_path.parent / entry["body_file"]).read_text())
             assert body["errors"][0]["message"] == "unexpected error"
-            promoted = next(item for item in same_id_entries if item["url"] == promoted_url)
-            assert promoted["url"] == promoted_url
-            promoted_body = json.loads((index_path.parent / promoted["body_file"]).read_text())
             promoted = next(
                 item for item in same_id_entries if item["browser_generation"] == 2
             )
