@@ -43,6 +43,7 @@ async def apply_fingerprint_injection(
     try:
         user_agent_override = fingerprint_injection.get("userAgentOverride")
         init_script = fingerprint_injection.get("initScript")
+        timezone = fingerprint_injection.get("timezone")
 
         if not user_agent_override:
             logger.warning("[fingerprint] Missing userAgentOverride in injection data")
@@ -62,6 +63,15 @@ async def apply_fingerprint_injection(
         platform = user_agent_override.get("userAgentMetadata", {}).get("platform", "unknown")
         arch = user_agent_override.get("userAgentMetadata", {}).get("architecture", "unknown")
         logger.info(f"[fingerprint] Applied CDP userAgentOverride: platform={platform}, arch={arch}")
+
+        # Align the browser's real ICU/host timezone with the user's location.
+        # JS Intl patches alone are not enough for every formatting path; Kernel
+        # VMs default to Eastern, which made venue-local showtimes render wrong.
+        if isinstance(timezone, str) and timezone.strip():
+            await cdp_session.send(
+                "Emulation.setTimezoneOverride", {"timezoneId": timezone.strip()}
+            )
+            logger.info(f"[fingerprint] Applied CDP timezone override: {timezone.strip()}")
 
         # Apply init script for JS-level spoofing
         if init_script:
