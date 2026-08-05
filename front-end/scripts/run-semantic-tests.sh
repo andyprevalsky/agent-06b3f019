@@ -134,8 +134,15 @@ fi
 # fail during discovery with a misleading duplicate-version error.
 PLAYWRIGHT_BIN="$FRONTEND_DIR/node_modules/.bin/playwright"
 if [[ ! -x "$PLAYWRIGHT_BIN" ]]; then
-  echo "FAIL: Frontend Playwright is not installed at $PLAYWRIGHT_BIN" >&2
-  exit 1
+  # npm workspaces often hoist the CLI to the repo root. Prefer that only when
+  # front-end still declares @playwright/test (same singleton the specs import).
+  HOISTED_PLAYWRIGHT_BIN="$(cd "$FRONTEND_DIR/.." && pwd)/node_modules/.bin/playwright"
+  if [[ -x "$HOISTED_PLAYWRIGHT_BIN" ]] && grep -q '"@playwright/test"' "$FRONTEND_DIR/package.json"; then
+    PLAYWRIGHT_BIN="$HOISTED_PLAYWRIGHT_BIN"
+  else
+    echo "FAIL: Frontend Playwright is not installed at $PLAYWRIGHT_BIN" >&2
+    exit 1
+  fi
 fi
 
 if [[ $# -eq 0 ]]; then
