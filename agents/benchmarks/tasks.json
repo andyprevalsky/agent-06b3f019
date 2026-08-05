@@ -4546,5 +4546,164 @@
       "context_notes": "Production COMPLETED-purchase path on OUR OWN hosted /test_payment (distinct from the abandonment probe). Place order hands off to a real hosted Stripe Checkout on the Rose Labs account, which is the only way a live Rose-minted card can be authorized \u2014 AgentCard's test_charge is sandbox-only. The abandonment task covers the void/reclaim/refund path and must stay separate."
     },
     "bench": "pipeline-e2e"
+  },
+  {
+    "name": "browser-1015-eventim-request-card",
+    "title": "1015 Folsom Eventim Antibot to Payment Card Request",
+    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show \u2014 payment boundary only, no purchase.",
+    "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, proceed through checkout, and stop when Rose requests a payment card. Do not submit payment, place the order, or complete the purchase. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets.",
+    "timeout_seconds": 1200,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot",
+      "ecommerce",
+      "ticketing"
+    ],
+    "group": "daily",
+    "price_limit_cents": 200,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": "ignore",
+    "expected_approval_count": 1,
+    "expected_attention_kind": "payment_approval",
+    "expected_payment_receipt": {
+      "merchant": "1015 Folsom (Eventim - eventim.us)",
+      "merchantBusinessAliases": [
+        "1015 Folsom",
+        "1015",
+        "Eventim US",
+        "See Tickets",
+        "SeeTickets"
+      ],
+      "currency": "USD",
+      "requiredFields": [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId"
+      ],
+      "requiredLineItemFields": [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents"
+      ],
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
+    },
+    "success_on_payment_card_request": true,
+    "min_tool_counts": {
+      "spawn_agent": 1
+    },
+    "min_steps": {
+      "browser": 1
+    },
+    "tool_count_scope": "root",
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "eventim.us",
+        "request_payment_card",
+        "antibot"
+      ],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
+      "live_targets": [
+        "https://1015.com/",
+        "https://wl.eventim.us/",
+        "https://eventim.us/"
+      ],
+      "context_notes": "Reproduces prod agent ec03b6f2-744f-433a-87d0-e4cf7758818a (Yousuke Yukimatsu / 1015 Folsom), which reached Eventim then burned the $2 cap on Cloudflare/AXS antibot. The benchmark fixes venue + official Eventim US primary checkout, keeps artist/date flexible across upcoming 1015 Folsom shows with live inventory, and treats a single unresolved payment-card request as success. Never approve the charge or complete purchase. Secondary/resale marketplaces are forbidden. Local baseline 2026-08-05: FAIL — Cloudflare Access Denied hard-block on eventim.us/wl.eventim.us through challenge recovery; timed out at 1200s / ~15c without a payment-card request.",
+      "live_cookie_domains": [
+        "eventim.us",
+        "1015.com"
+      ]
+    },
+    "evaluators": [
+      {
+        "id": "eventim-1015-runtime-contract",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "Exactly one browser-agent session is used",
+          "The run stops after exactly one unresolved payment-card approval on the grounded Eventim US checkout for 1015 Folsom",
+          "The approval identifies 1015 Folsom / Eventim, a ticket line item, and a total amount"
+        ],
+        "checks": [
+          {
+            "type": "no_tool_failures"
+          },
+          {
+            "type": "browser_agent_session_count",
+            "min": 1,
+            "max": 1
+          },
+          {
+            "type": "expected_payment_receipt"
+          },
+          {
+            "type": "approval_request_count",
+            "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "1015"
+            ],
+            "require_amount": true
+          }
+        ]
+      },
+      {
+        "id": "eventim-1015-payment-boundary-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The pending payment approval is for exactly one ticket to an upcoming 1015 Folsom show purchased through official Eventim US primary checkout",
+          "Artist/date may be any upcoming purchasable Eventim-ticketed 1015 Folsom show; sold-out or waitlist-only listings are not success",
+          "No AXS/StubHub/SeatGeek/Ticketmaster-resale or other secondary marketplace path is used for checkout",
+          "No tables, bottle service, VIP packages, add-ons, insurance, donations, or multi-ticket cart is purchased",
+          "The trajectory ends at exactly one unresolved payment-card approval grounded to eventim.us; the harness does not approve it, and a completed purchase or generic write-lock alone is not success"
+        ],
+        "judge_prompt": "Review the browser transcript and pending payment evidence. Pass only if the agent used the official 1015 Folsom Eventim US primary ticketing flow for any upcoming show with live inventory, selected a single cheapest available ticket, defeated or recovered past antibot walls as needed, and stopped at exactly one unresolved payment-card request grounded to eventim.us / wl.eventim.us. Fail for secondary/resale marketplaces, waitlist-only/sold-out dead ends without a payment-card request, fabricated checkout facts, payment submission, or a completed purchase."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "world_surface": "live",
+    "fast_cache": "off",
+    "anti_bot": "yes",
+    "label_eval": "Single unresolved Eventim US payment-card request for one upcoming 1015 Folsom ticket; no purchase completed.",
+    "label_notes": "Artist/date intentionally flexible so the bench survives after a specific show date passes. Provenance: prod cost-cap agent wrecked on antibot after Eventim/AXS.",
+    "source": [
+      "prod-agent:ec03b6f2-744f-433a-87d0-e4cf7758818a",
+      "coverage-gap:eventim-1015-antibot-payment-boundary"
+    ]
   }
 ]
