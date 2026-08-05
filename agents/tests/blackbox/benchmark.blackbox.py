@@ -1908,10 +1908,12 @@ def test_agent_payment_catalog_requires_terminal_lifecycle_evidence():
     assert "exactly $1.00" in production.prompt
     assert production.expected_payment_receipt["totalCents"] == 100
     assert production.expected_payment_lifecycle["purchase"]["status"] == "VOIDED"
-    assert production.expected_payment_lifecycle["integrity"]["stripePaymentIntentCount"] == 0
-    assert production.expected_payment_lifecycle["integrity"]["stripeProviderPaymentIntentCount"] == 0
-    assert production.expected_payment_lifecycle["stripeHold"] is None
-    assert production.expected_payment_lifecycle["stripeRefund"] is None
+    assert production.expected_payment_lifecycle["integrity"]["stripePaymentIntentCount"] == 1
+    assert production.expected_payment_lifecycle["integrity"]["stripeProviderPaymentIntentCount"] == 1
+    assert production.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded"
+    assert production.expected_payment_lifecycle["stripeHold"]["amountCents"] == 100
+    assert production.expected_payment_lifecycle["stripeRefund"]["status"] == "succeeded"
+    assert production.expected_payment_lifecycle["stripeRefund"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["amountCents"] == 100
     assert production.expected_payment_lifecycle["orgTransfer"]["transferredCents"] == 0
     assert production.expected_payment_lifecycle["orgTransfer"]["releasedCents"] == 100
