@@ -9,6 +9,9 @@ const LAUNCHER_WINDOW_WIDTH = 500;
 const LAUNCHER_WINDOW_HEIGHT = 100;
 const LAUNCHER_WINDOW_MAX_HEIGHT = 480;
 
+/** Delay blur→hide so Finder/screenshot file-drags can re-enter the window. */
+export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 500;
+
 interface QuickQueryControllerOptions {
   getMainWindow: () => BrowserWindow | null;
   getOnboardingComplete: () => boolean;
@@ -17,6 +20,8 @@ interface QuickQueryControllerOptions {
 export class QuickQueryController {
   private quickQueryWindow: BrowserWindow | null = null;
   private blurEnabled = false;
+  private fileDragActive = false;
+  private blurHideTimer: NodeJS.Timeout | null = null;
   private lastHiddenAt = 0;
   private shownAt = 0;
   private focusTimeouts: NodeJS.Timeout[] = [];
@@ -50,6 +55,8 @@ export class QuickQueryController {
       alwaysOnTop: true,
       hasShadow: false,
       roundedCorners: false,
+      // Inactive window must still accept the first click/drag from Finder.
+      acceptFirstMouse: true,
       webPreferences: {
         nodeIntegration: false,
         contextIsolation: true,
@@ -88,6 +95,11 @@ export class QuickQueryController {
 
     ipcMain.handle('quick-query:resize', (_event, payload: unknown) => {
       return this.resizeWindow(payload);
+    });
+
+    ipcMain.handle('quick-query:file-drag', (_event, payload: unknown) => {
+      this.setFileDragActive(parseFileDragActive(payload));
+      return { success: true };
     });
 
     ipcMain.handle('shortcut:enable', () => {
@@ -161,16 +173,56 @@ export class QuickQueryController {
       console.log('[QuickQuery] Bounds:', quickWindow.getBounds());
     });
 
-    quickWindow.on('blur', () => {
-      if (this.blurEnabled) {
-        this.hideWindow();
-      }
+    // Dropping a file onto Electron navigates the webContents by default.
+    quickWindow.webContents.on('will-navigate', (event) => {
+      event.preventDefault();
     });
 
-    quickWindow.on('focus', () => undefined);
+    quickWindow.on('blur', () => {
+      if (!this.blurEnabled) return;
+      // Starting a Finder/screenshot drag steals focus. Defer hide so the
+      // drag can re-enter; renderer cancels via quick-query:file-drag.
+      this.scheduleBlurHide();
+    });
+
+    quickWindow.on('focus', () => {
+      this.cancelBlurHide();
+    });
     quickWindow.on('closed', () => {
       this.quickQueryWindow = null;
     });
+  }
+
+  private setFileDragActive(active: boolean): void {
+    this.fileDragActive = active;
+    if (!active) return;
+
+    this.cancelBlurHide();
+    const quickWindow = this.quickQueryWindow;
+    if (quickWindow === null || quickWindow.isDestroyed()) return;
+
+    // Blur-hide may have already won the race — bring the pill back under
+    // the cursor without stealing focus from the drag source.
+    if (!quickWindow.isVisible()) {
+      quickWindow.showInactive();
+      this.blurEnabled = true;
+      console.log('[QuickQuery] Re-shown inactive for in-flight file drag');
+    }
+  }
+
+  private scheduleBlurHide(): void {
+    this.cancelBlurHide();
+    this.blurHideTimer = setTimeout(() => {
+      this.blurHideTimer = null;
+      if (!this.blurEnabled || this.fileDragActive) return;
+      this.hideWindow();
+    }, QUICK_QUERY_BLUR_HIDE_DELAY_MS);
+  }
+
+  private cancelBlurHide(): void {
+    if (this.blurHideTimer === null) return;
+    clearTimeout(this.blurHideTimer);
+    this.blurHideTimer = null;
   }
 
   private showWindow(): void {
@@ -186,6 +238,8 @@ export class QuickQueryController {
       return;
     }
 
+    this.cancelBlurHide();
+    this.fileDragActive = false;
     this.blurEnabled = false;
     this.shownAt = Date.now();
     this.applyWindowHeight(quickWindow, LAUNCHER_WINDOW_HEIGHT);
@@ -211,8 +265,10 @@ export class QuickQueryController {
       return;
     }
 
+    this.cancelBlurHide();
     this.clearFocusTimeouts();
     this.blurEnabled = false;
+    this.fileDragActive = false;
     this.lastHiddenAt = Date.now();
     if (!quickWindow.isDestroyed()) {
       quickWindow.hide();
@@ -330,4 +386,12 @@ export class QuickQueryController {
     const port = process.env.MAC_APP_PORT ?? '5174';
     return `http://localhost:${port}/launcher.html`;
   }
+}
+
+function parseFileDragActive(payload: unknown): boolean {
+  return (
+    payload !== null &&
+    typeof payload === 'object' &&
+    (payload as { active?: unknown }).active === true
+  );
 }
