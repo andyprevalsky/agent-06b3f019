@@ -15,11 +15,11 @@
  */
 
 import { createHash } from 'node:crypto';
-import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
 
-import { prisma } from '../../providers/database';
 import { createLogger } from '../../providers/logger';
+import * as repo from './repo';
 import { extractStructuredGmv, type StructuredGmvCapture } from './structuredGmvExtract';
+import { PurchaseSpendStatus } from './types';
 
 const log = createLogger('StructuredGmv');
 
@@ -57,48 +57,19 @@ async function agentcardCoversPurchase(
   totalCents: number
 ): Promise<string | null> {
   if (agentId === undefined) return null;
-  const covered = await prisma.purchaseSpend.findFirst({
-    where: {
-      agentId,
-      provider: { notIn: [ORDER_CONFIRMATION_PROVIDER, MERCHANT_SAVED_PROVIDER] },
-      status: { in: AGENTCARD_COVERED_STATUSES },
-      totalCents,
-      createdAt: { gte: new Date(Date.now() - AGENTCARD_LOOKBACK_MS) },
-    },
-    select: { id: true },
+  const covered = await repo.findAgentcardCoveringPurchase({
+    agentId,
+    totalCents,
+    statuses: AGENTCARD_COVERED_STATUSES,
+    since: new Date(Date.now() - AGENTCARD_LOOKBACK_MS),
   });
   return covered?.id ?? null;
-}
-
-async function findExistingConfirmationPurchase(
-  userId: string,
-  confirmationId: string,
-  fingerprint: string
-): Promise<string | null> {
-  const existing = await prisma.purchaseSpend.findFirst({
-    where: {
-      userId,
-      OR: [
-        { fingerprint },
-        {
-          provider: ORDER_CONFIRMATION_PROVIDER,
-          // Defensive: older rows may have stored confirmation only in JSON.
-          lineItemsJson: {
-            path: ['confirmationId'],
-            equals: confirmationId,
-          },
-        },
-      ],
-    },
-    select: { id: true },
-  });
-  return existing?.id ?? null;
 }
 
 function buildLineItemsJson(
   capture: StructuredGmvCapture,
   source: string | undefined
-): Prisma.InputJsonValue {
+): Record<string, unknown> {
   return {
     currency: 'USD',
     lineItems: [],
@@ -109,7 +80,7 @@ function buildLineItemsJson(
     amountKey: capture.amountKey,
     confirmationKey: capture.confirmationKey,
     source: source ?? 'structured_response',
-    sourceFields: capture.sourceFields as Prisma.InputJsonValue,
+    sourceFields: capture.sourceFields,
   };
 }
 
@@ -132,26 +103,20 @@ async function createClearedConfirmationPurchase(input: {
   occurredAt: Date | undefined;
 }): Promise<{ id: string }> {
   const lineItemsJson = buildLineItemsJson(input.capture, input.source);
-  async function createPurchase(resolvedAgentId: string | undefined) {
-    return prisma.purchaseSpend.create({
-      data: {
-        userId: input.userId,
-        agentId: resolvedAgentId,
-        fingerprint: input.fingerprint,
-        canonicalFingerprint: input.fingerprint,
-        merchant: input.capture.merchant.slice(0, 200),
-        lineItemsJson,
-        totalCents: input.capture.totalCents,
-        status: PurchaseSpendStatus.CLEARED,
-        provider: ORDER_CONFIRMATION_PROVIDER,
-        ...(input.occurredAt !== undefined ? { createdAt: input.occurredAt } : {}),
-      },
-      select: { id: true },
-    });
-  }
+  const payload = {
+    userId: input.userId,
+    fingerprint: input.fingerprint,
+    merchant: input.capture.merchant.slice(0, 200),
+    lineItemsJson,
+    totalCents: input.capture.totalCents,
+    ...(input.occurredAt !== undefined ? { createdAt: input.occurredAt } : {}),
+  };
 
   try {
-    return await createPurchase(input.agentId);
+    return await repo.createClearedOrderConfirmation({
+      ...payload,
+      agentId: input.agentId,
+    });
   } catch (error) {
     // Historical R2 backfill: agent rows are often deleted while fixtures remain.
     if (!isAgentForeignKeyError(error, input.agentId)) throw error;
@@ -159,7 +124,10 @@ async function createClearedConfirmationPurchase(input: {
       agentId: input.agentId,
       confirmationId: input.capture.confirmationId,
     });
-    return createPurchase(undefined);
+    return repo.createClearedOrderConfirmation({
+      ...payload,
+      agentId: undefined,
+    });
   }
 }
 
@@ -192,15 +160,15 @@ export async function recordStructuredGmv(input: {
   }
 
   const fingerprint = buildConfirmationFingerprint(input.userId, capture.confirmationId);
-  const existingId = await findExistingConfirmationPurchase(
-    input.userId,
-    capture.confirmationId,
-    fingerprint
-  );
-  if (existingId !== null) {
+  const existing = await repo.findOrderConfirmationByFingerprint({
+    userId: input.userId,
+    fingerprint,
+    confirmationId: capture.confirmationId,
+  });
+  if (existing !== null) {
     return {
       status: 'recorded',
-      purchaseId: existingId,
+      purchaseId: existing.id,
       created: false,
       confirmationId: capture.confirmationId,
     };
