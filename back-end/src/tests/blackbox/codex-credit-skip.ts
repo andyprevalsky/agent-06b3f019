@@ -97,17 +97,21 @@ export function testDetectCreditExhaustion_positive(): void {
     detectCodexCreditExhaustion('request failed with status 402', []) !== null,
     'HTTP 402 must be detected as out of funds'
   );
-  // The exact wording the OpenAI API returns for a defunded account, as seen in
-  // the turn.failed event during a real deploy run.
+  // OpenAI's CURRENT out-of-funds wording, verbatim from the 2026-08-04 deploy
+  // that hard-failed because this exact phrasing was not matched.
+  const liveWording =
+    'stream disconnected before completion: You have no credits remaining. ' +
+    'Add credits to continue using the API at ' +
+    'https://platform.openai.com/settings/organization/billing/.';
+  assert(
+    detectCodexCreditExhaustion(liveWording, []) !== null,
+    'OpenAI "no credits remaining" wording must be detected as out of funds'
+  );
   assert(
     detectCodexCreditExhaustion('normal output', [
-      {
-        type: 'error',
-        message:
-          'stream disconnected before completion: You have no credits remaining. Add credits to continue using the API at https://platform.openai.com/settings/organization/billing/.',
-      },
+      { type: 'error', message: liveWording, raw_type: 'turn.failed' },
     ]) !== null,
-    'the live "no credits remaining" wording must be detected as exhaustion'
+    'OpenAI "no credits remaining" surfaced only in a turn.failed event must be detected'
   );
 }
 
