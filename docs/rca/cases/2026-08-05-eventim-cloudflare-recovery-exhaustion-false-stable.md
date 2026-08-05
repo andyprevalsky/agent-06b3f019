@@ -139,6 +139,11 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
    returns `config_key` on the promote payload. Deduced winner from those logs:
    **Steel `managed`**; Kernel isp/residential/mobile all `stablePasses=0`;
    `steel_fixed` unavailable (`No active fixed IP proxies`).
+6. Config search always strips known challenge/clearance cookies before probing
+   fresh provider/IP candidates (keep auth + opaque). Transplanting
+   `cf_clearance` from the blocked exit poisoned Eventim Turnstile probes
+   (`47cdeb21-…`: steel_managed `0/2`, kernel_mobile `1/2`, then
+   `No stable browser configuration`).
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests.
 Exact-bench outcome still required before status=`fixed`.
