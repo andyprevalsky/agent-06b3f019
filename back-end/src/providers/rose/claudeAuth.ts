@@ -25,6 +25,11 @@ import {
   RoseStallError,
 } from './errors';
 import type { PoolSpec } from './pools';
+import {
+  boundedRateLimitBackoffMs,
+  extractRateLimitedUntil,
+  providerRequiredWaitMs,
+} from './rateLimitReset';
 import { parseAnthropicSSE } from './streaming';
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from './cache';
 import { applyAnthropicToolConfig, transformMessagesForAnthropic } from './transforms';
@@ -352,11 +357,32 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
     const errorBody = response.errorBody ?? '';
 
     if (status === 429) {
-      if (attempt < MAX_ATTEMPTS - 1) {
-        await sleep(backoffFor429(response.headers, attempt), opts.abortSignal);
+      // Capture Anthropic's own reset BEFORE deciding what to do with it. This
+      // is the value the credential cooldown must be stamped with; without it
+      // the caller invents a 5-minute default that can clobber a real 5h/7d
+      // usage window written by the Python agent path.
+      const rateLimitedUntil = extractRateLimitedUntil(response.headers, errorBody) ?? undefined;
+      // Retry in place ONLY when we can honor the provider's wait inside our
+      // sleep cap. Sleeping less than it asked for is a guaranteed second 429
+      // that burns an attempt (a `retry-after: 30` clipped to the 5s cap did
+      // exactly that), and sleeping the full window would stall the activity.
+      // Anything longer — including a far-future 5h/7d usage window — rotates
+      // credentials instead. Mirrors _should_rotate_429_without_retry in
+      // agents/providers/rose/claude_auth.py.
+      const requiredWaitMs = providerRequiredWaitMs(response.headers, errorBody, rateLimitedUntil);
+      const canWaitInPlace = requiredWaitMs === null || requiredWaitMs <= BACKOFF_CAP_MS;
+      if (attempt < MAX_ATTEMPTS - 1 && canWaitInPlace) {
+        await sleep(
+          boundedRateLimitBackoffMs(attempt, requiredWaitMs, BACKOFF_CAP_MS),
+          opts.abortSignal
+        );
         continue;
       }
-      throw new RoseRateLimitError(`Anthropic 429: ${errorBody.substring(0, 200)}`, status);
+      throw new RoseRateLimitError(
+        `Anthropic 429: ${errorBody.substring(0, 200)}`,
+        status,
+        rateLimitedUntil
+      );
     }
 
     if (status === 401 || status === 403) {
@@ -401,17 +427,6 @@ export async function* claudeAuthComplete(opts: ClaudeAuthOptions): AsyncIterabl
   // Unreachable in practice — loop body either yields, returns, or throws.
   if (lastError) throw new RoseServerError(`Anthropic exhausted retries: ${lastError.message}`);
   throw new RoseServerError('Anthropic exhausted retries');
-}
-
-function backoffFor429(headers: Headers, attempt: number): number {
-  const retryAfter = headers.get('retry-after');
-  if (retryAfter) {
-    const parsed = Number.parseFloat(retryAfter);
-    if (!Number.isNaN(parsed)) {
-      return Math.max(1000, Math.min(parsed * 1000, BACKOFF_CAP_MS));
-    }
-  }
-  return Math.min(2 ** attempt * 1000, BACKOFF_CAP_MS);
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {

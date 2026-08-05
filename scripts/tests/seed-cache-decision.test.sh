@@ -107,7 +107,16 @@ SCHEMA_FILE="$TMP/schema.prisma"
 LOCAL_CACHE="$TMP/local-cache"
 SEED_CLI="$ROOT_DIR/scripts/benchmark-seed-cache"
 PYTHON_BIN="$ROOT_DIR/agents/venv/bin/python"
-[ -x "$PYTHON_BIN" ] || PYTHON_BIN=python
+if [ ! -x "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN=python3
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN=python
+  else
+    echo "❌ neither agents/venv/bin/python, python3, nor python is available" >&2
+    exit 1
+  fi
+fi
 mkdir -p "$FAKE_BIN"
 printf '%s\n' \
     '#!/bin/sh' \

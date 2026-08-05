@@ -197,7 +197,6 @@ def test_grep_tool_schema_exact_contract():
         "gmail",
         "imessage",
         "whatsapp",
-        "sms",
         "network",
         "agent_network",
         "transactions",

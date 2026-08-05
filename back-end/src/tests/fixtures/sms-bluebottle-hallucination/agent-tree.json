@@ -1,0 +1,32 @@
+[
+  {
+    "id": "92c4fa15-3b22-460c-b286-60e1e80c226f",
+    "goal": "Order Aman\u2019s usual Blue Bottle Coffee pickup at the Ferry Building in San Francisco immediately: 16oz vanilla bean shakerato with oat milk. Use saved payment if accessible. Confirm only real order total, confirmation, and pickup time. If login or an approval is required, request it immediately. Do not send progress messages unless input is required or order is actually placed.",
+    "status": "COMPLETED",
+    "source": "SMS",
+    "progress": 1.0,
+    "statusMessage": "Successfully completed: Order Aman\u2019s usual Blue Bottle Coffee pickup at the Ferry Building in San Francisco immediately: 16oz vanilla bean shakerato with oat milk.",
+    "priceLimitCents": 500,
+    "treeCostCents": 120
+  },
+  {
+    "id": "f0f03928-c3c0-4d0a-830f-c3183724dd00",
+    "goal": "Order an iron and something to iron a shirt on (ironing board or mat) via DoorDash for ASAP delivery to 88 Howard St, Apt 1413, San Francisco, CA 94105.",
+    "status": "ACTIVE",
+    "source": "SMS",
+    "progress": 0.24,
+    "statusMessage": "Processing",
+    "priceLimitCents": 500,
+    "treeCostCents": 80
+  },
+  {
+    "id": "9edecb8d-b9be-4f70-b68b-2f56d2d1ebff",
+    "goal": "Get me tickets to Alcatraz rn NO tour if possible. ",
+    "status": "ACTIVE",
+    "source": "WEB",
+    "progress": 0.0,
+    "statusMessage": "Processing",
+    "priceLimitCents": 500,
+    "treeCostCents": 50
+  }
+]

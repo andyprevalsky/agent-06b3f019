@@ -176,6 +176,78 @@ async function testRateLimitMarksRateLimitThenRotates(): Promise<void> {
   assertEqual(attempt.usedWaterfall, false, 'waterfall not used for rate-limit rotation');
 }
 
+/**
+ * Regression: the provider's reset must reach the credential-cooldown writer.
+ *
+ * This is the join between `claudeAuth`/`gptAuth` (which now read
+ * `anthropic-ratelimit-*-reset`) and `markComputeTokenUnavailable` (which writes
+ * `Integration.rateLimitedUntil`). If rotation drops the reset here, the writer
+ * silently substitutes a 5-minute default — the prod 2026-07-28 failure where a
+ * real `2026-07-30T22:00Z` window was replaced by `+5m`, the exhausted token was
+ * re-served minutes later, and Claude Code fell through to the unfunded shared
+ * ANTHROPIC_API_KEY ("credit balance is too low").
+ */
+async function testRateLimitThreadsProviderResetToMarkToken(): Promise<void> {
+  const resetAt = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
+  const marked: { reason: string; rateLimitedUntil?: string }[] = [];
+
+  await callWithChatComputeRotation({
+    userId: 'user-1',
+    agentId: 'agent-1',
+    phase: 'router',
+    initialAuth: toChatComputeAuth(token('claude', 'a')),
+    maxRotations: 3,
+    fetchToken: async () => token('gpt', 'b'),
+    markToken: async (_failed, reason, rateLimitedUntil) => {
+      marked.push({ reason, rateLimitedUntil });
+    },
+    invoke: async (auth) => {
+      if (auth.computeToken?.type === 'claude') {
+        throw new RoseRateLimitError('usage limit reached', 429, resetAt);
+      }
+      return auth.computeToken?.type ?? 'waterfall';
+    },
+  });
+
+  assertEqual(marked.length, 1, 'exactly one credential backed off');
+  assertEqual(marked[0].reason, 'rate_limit', 'classified as rate_limit');
+  assertEqual(
+    marked[0].rateLimitedUntil,
+    resetAt,
+    "rotation dropped the provider's reset — the cooldown writer will invent a short " +
+      'window and can clobber a real multi-day usage limit (prod 2026-07-28)'
+  );
+}
+
+/** A 429 with no provider timing must pass through undefined, not a fabricated date. */
+async function testRateLimitWithoutProviderResetPassesUndefined(): Promise<void> {
+  const marked: (string | undefined)[] = [];
+
+  await callWithChatComputeRotation({
+    userId: 'user-1',
+    agentId: 'agent-1',
+    phase: 'router',
+    initialAuth: toChatComputeAuth(token('claude', 'a')),
+    maxRotations: 3,
+    fetchToken: async () => token('gpt', 'b'),
+    markToken: async (_failed, _reason, rateLimitedUntil) => {
+      marked.push(rateLimitedUntil);
+    },
+    invoke: async (auth) => {
+      if (auth.computeToken?.type === 'claude') {
+        throw new RoseRateLimitError('rate limited', 429);
+      }
+      return auth.computeToken?.type ?? 'waterfall';
+    },
+  });
+
+  assertEqual(
+    marked[0],
+    undefined,
+    'no provider reset must stay undefined so the writer knowingly uses its default'
+  );
+}
+
 async function testForceWaterfallSkipsChatComputeLookup(): Promise<void> {
   const previous = process.env.CHAT_FORCE_WATERFALL;
   process.env.CHAT_FORCE_WATERFALL = 'true';
@@ -206,6 +278,14 @@ async function main(): Promise<void> {
     {
       name: 'chat compute / rate-limit marks rate_limit then rotates',
       fn: testRateLimitMarksRateLimitThenRotates,
+    },
+    {
+      name: 'chat compute / provider reset threaded to markToken',
+      fn: testRateLimitThreadsProviderResetToMarkToken,
+    },
+    {
+      name: 'chat compute / no provider reset stays undefined',
+      fn: testRateLimitWithoutProviderResetPassesUndefined,
     },
     {
       name: 'chat compute / force waterfall skips direct token lookup',

@@ -24,9 +24,18 @@ export class RoseAuthError extends RoseError {
 }
 
 export class RoseRateLimitError extends RoseError {
-  constructor(message: string, status?: number) {
+  /**
+   * The provider's OWN reset time for this credential (ISO-8601 UTC), when it
+   * gave us one — from `anthropic-ratelimit-*-reset` / `retry-after` / the error
+   * body. Undefined means the provider told us nothing, and only then may a
+   * caller substitute a synthetic cooldown. Threading this through is what stops
+   * a 5-minute default from overwriting a real multi-day usage window.
+   */
+  rateLimitedUntil?: string;
+  constructor(message: string, status?: number, rateLimitedUntil?: string) {
     super(message, status);
     this.name = 'RoseRateLimitError';
+    this.rateLimitedUntil = rateLimitedUntil;
   }
 }
 

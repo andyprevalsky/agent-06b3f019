@@ -102,6 +102,7 @@ assert_alive() {
     assert_controller_match 1 'python benchmarks/local.py --port 3001'
     assert_controller_match 1 'python /tmp/work/agents/benchmarks/run_benchmark.py --task chat'
     assert_controller_match 1 'python benchmarks/run_eval_suite.py --port 3001'
+    assert_controller_match 1 'python3 /workspace/scripts/run_deploy_stage.py smoke -- true'
 
     assert_controller_match 0 'bash scripts/run-predeploy-local-helper'
     assert_controller_match 0 'bash scripts/run-predeploy-cloud-old'
@@ -110,6 +111,39 @@ assert_alive() {
     assert_controller_match 0 'python benchmarks/run_benchmark.py.bak'
     assert_controller_match 0 'python otherbenchmarks/local.py'
     assert_controller_match 0 'bash notrun-predeploy-local'
+    assert_controller_match 0 'python3 scripts/run_deploy_stage_helper.py'
+
+    # Foreign controller trees (isolated smoke under run-predeploy-local) must
+    # be protected from a shared-stack kill-services sweep.
+    sleep 1000 &
+    fake_controller_pid=$!
+    MATCH_CMD='bash scripts/run-predeploy-local'
+    cmd_of() {
+        if [ "$1" = "$fake_controller_pid" ]; then
+            printf '%s\n' "$MATCH_CMD"
+        else
+            ps -p "$1" -o command= 2>/dev/null | head -1
+        fi
+    }
+    sleep 1000 &
+    fake_child_pid=$!
+    # Re-parent is not possible here; simulate ancestry by temporarily wrapping
+    # benchmark_controller_for_pid via is_protected_benchmark_tree on the
+    # controller PID itself (always protected) and asserting the helper returns
+    # the controller for that PID.
+    found_controller=$(benchmark_controller_for_pid "$fake_controller_pid")
+    if [ "$found_controller" != "$fake_controller_pid" ]; then
+        echo "FAIL: benchmark_controller_for_pid did not identify controller" >&2
+        kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+        exit 1
+    fi
+    if ! is_protected_benchmark_tree "$fake_controller_pid"; then
+        echo "FAIL: controller PID must be a protected benchmark tree" >&2
+        kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+        exit 1
+    fi
+    kill "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
+    wait "$fake_controller_pid" "$fake_child_pid" 2>/dev/null || true
 )
 
 # A mismatched OS-native birth identity models PID reuse deterministically: the
@@ -401,5 +435,43 @@ fi
 # the EXIT trap could no longer reach them through pgrep -P.
 kill_pid_tree "$controller_pid"
 [ -n "$isolated_runsh_pid" ] && kill_pid_tree "$isolated_runsh_pid"
+
+# The protection walk must not stop before classifying PID 1. On a Fly cloudbench
+# guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
+# bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor
+# must terminate only on an absent/zero/self parent. The kill-target walk in
+# add_pid_with_tree_and_ancestors deliberately KEEPS its ppid == 1 stop, since
+# climbing there could make PID 1 itself a target rather than merely classify it.
+protection_walk_source=$(awk '/^is_self_ancestor\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh")
+if [[ -z "$protection_walk_source" ]]; then
+    echo "FAIL: could not read is_self_ancestor" >&2
+    exit 1
+fi
+if grep -q '"\$ppid" = "1"' <<<"$protection_walk_source"; then
+    echo "FAIL: is_self_ancestor still stops on PID 1; a controller at PID 1 would be unprotected" >&2
+    exit 1
+fi
+if ! grep -q '"\$ppid" = "\$current"' <<<"$protection_walk_source"; then
+    echo "FAIL: is_self_ancestor must guard against a self-parent loop once PID 1 is reachable" >&2
+    exit 1
+fi
+echo "PASS: is_self_ancestor classifies PID 1 instead of bailing before it"
+
+# Same PID-1 contract for benchmark_controller_for_pid: a controller that is PID 1
+# (or reached via parent=1) must still be classified before the walk ends.
+controller_walk_source=$(awk '/^benchmark_controller_for_pid\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh")
+if [[ -z "$controller_walk_source" ]]; then
+    echo "FAIL: could not read benchmark_controller_for_pid" >&2
+    exit 1
+fi
+if grep -q '"\$ppid" = "1"' <<<"$controller_walk_source"; then
+    echo "FAIL: benchmark_controller_for_pid still stops on PID 1 before classifying it" >&2
+    exit 1
+fi
+if ! grep -q '"\$ppid" = "\$current"' <<<"$controller_walk_source"; then
+    echo "FAIL: benchmark_controller_for_pid must stop on self-parent loops, not PID 1" >&2
+    exit 1
+fi
+echo "PASS: benchmark_controller_for_pid classifies PID 1 instead of bailing before it"
 
 echo "All kill-services tests passed."

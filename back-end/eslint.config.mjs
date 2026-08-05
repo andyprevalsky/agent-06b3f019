@@ -99,7 +99,6 @@ export default tseslint.config(
       ]
     : []),
 
-
   // ── Domain non-config files: enforce config.ts pattern for env vars ──
   // process.env must only be read in config.ts; services/routes/repos import from config.ts.
   // NOTE: no-restricted-syntax must repeat base rules because flat-config replaces, not merges.
