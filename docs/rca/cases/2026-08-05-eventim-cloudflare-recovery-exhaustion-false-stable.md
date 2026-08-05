@@ -177,6 +177,15 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     recovery GET-probes the document URL, false-succeeds, and loops. Fix:
     treat API 403 challenge HTML as a provider-exit (config search), and after
     one `cookies_sanitized` success escalate later recoveries to config search.
+13. Eventim's cart 403 body is often a custom interstitial (embedded fonts,
+    title `page title`) with **no** classic CF markers — match large HTML 403s
+    on cart/order URLs, not only `cdn-cgi` / Access Denied text.
+14. When every candidate reports `paymentCdnOk=false`, latency ranking re-picks
+    the fastest Kernel exit (`58560205-…` promoted `kernel_isp` twice). Cart
+    worked, then checkout hit `js.stripe.com` `ERR_TUNNEL_CONNECTION_FAILED`.
+    Fix: log per-host payment CDN results, deprioritize the current failing
+    exit, prefer partial host clears, and when rotating off a failed exit with
+    no Stripe clear prefer `steel_managed`.
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +

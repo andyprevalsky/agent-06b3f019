@@ -8,6 +8,7 @@ import {
   compatiblePreferredBrowserConfig,
   pageLooksChallenged,
   probeCandidateBrowser,
+  recoveryConfigKeyForSession,
   runParallelBrowserConfigSearch,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
@@ -236,6 +237,72 @@ async function testPrefersPaymentCdnReachableWinnerWhenStablePassesTie(): Promis
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
+async function testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable(): Promise<void> {
+  // Eventim checkout: kernel_isp cleared CF but Stripe tunnel failed. Re-search
+  // with avoidConfigKey must not re-promote the same fastest Kernel exit.
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: config.key === 'kernel_isp' ? 1 : config.key === 'steel_managed' ? 9000 : 100,
+        paymentCdnOk: false,
+        paymentCdnHosts: { 'js.stripe.com': false, 'api.stripe.com': false },
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'kernel_isp' }
+  );
+  assert.strictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, ['steel_managed']);
+}
+
+async function testPrefersPartialPaymentHostClearOverSteelBias(): Promise<void> {
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'CA',
+    city: 'SAN FRANCISCO',
+  });
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: 50,
+        paymentCdnOk: false,
+        paymentCdnHosts:
+          config.key === 'kernel_residential_city'
+            ? { 'js.stripe.com': true, 'api.stripe.com': false }
+            : { 'js.stripe.com': false, 'api.stripe.com': false },
+      }),
+      promote: async () => undefined,
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'kernel_isp' }
+  );
+  assert.strictEqual(winner.config.key, 'kernel_residential_city');
+}
+
+function testRecoveryConfigKeyForSession(): void {
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'isp_city'), 'kernel_isp');
+  assert.strictEqual(
+    recoveryConfigKeyForSession('kernel', 'residential_city'),
+    'kernel_residential_city'
+  );
+  assert.strictEqual(recoveryConfigKeyForSession('steel', 'managed'), 'steel_managed');
+  assert.strictEqual(recoveryConfigKeyForSession('steel', 'fixed'), 'steel_fixed');
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'mobile_city'), 'kernel_mobile');
+}
+
 function testChallengeDetection(): void {
   assert.ok(pageLooksChallenged({ status: 403, title: '', bodyText: '', html: '' }));
   assert.ok(
@@ -323,12 +390,12 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     waitForTimeout: async () => undefined,
     evaluate: async (pageFunction: () => Promise<unknown>) => {
       const source = Function.prototype.toString.call(pageFunction);
-      // Probe requires both js.stripe.com and api.stripe.com in one evaluate.
+      // Probe returns per-host reachability for js.stripe.com + api.stripe.com.
       if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
-        return true;
+        return { 'js.stripe.com': true, 'api.stripe.com': true };
       }
       if (source.includes('js.stripe.com') || source.includes('api.stripe.com')) {
-        return false;
+        return { 'js.stripe.com': false, 'api.stripe.com': false };
       }
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
@@ -419,6 +486,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     attempts: 2,
     latencyMs: result.latencyMs,
     paymentCdnOk: true,
+    paymentCdnHosts: { 'js.stripe.com': true, 'api.stripe.com': true },
   });
 }
 
@@ -670,6 +738,9 @@ async function main(): Promise<void> {
   await testNoStableCandidateCleansEverything();
   await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
   await testPrefersPaymentCdnReachableWinnerWhenStablePassesTie();
+  await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
+  await testPrefersPartialPaymentHostClearOverSteelBias();
+  testRecoveryConfigKeyForSession();
   testChallengeDetection();
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPreferredConfigCompatibility();

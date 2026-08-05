@@ -7697,6 +7697,38 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
     }
 
 
+def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
+    """Eventim custom 403 interstitial is large HTML without classic CF markers."""
+    from domains.spawn_browser_agent_v3.recording import _is_api_challenge_html_response
+
+    large_html = (
+        b"<!doctype html><html lang='en'><head><title>page title</title></head>"
+        + (b"x" * 25_000)
+        + b"<body>blocked</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=b"<html><body>forbidden</body></html>",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://cdn.example.com/assets/font.woff2",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=large_html,
+    )
+
+
 def test_api_challenge_html_triggers_provider_exit_rejection():
     """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
     from domains.spawn_browser_agent_v3.recording import (
@@ -14177,6 +14209,10 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_accepted_fingerprint_warning",
         test_network_recorder_does_not_reject_successful_fingerprint_warning,
+    )
+    r.record(
+        "api_challenge_html_large_cart_interstitial",
+        test_api_challenge_html_large_cart_interstitial_without_classic_markers,
     )
     r.record(
         "api_challenge_html_provider_exit",

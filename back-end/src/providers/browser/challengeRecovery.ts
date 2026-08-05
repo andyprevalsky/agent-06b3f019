@@ -52,6 +52,8 @@ export interface CandidateProbeResult {
   latencyMs: number;
   /** True when the candidate can fetch js.stripe.com AND api.stripe.com (Elements). */
   paymentCdnOk: boolean;
+  /** Per-host tunnel reachability from the candidate page (for ranking + logs). */
+  paymentCdnHosts?: Record<string, boolean>;
 }
 
 export interface SuccessfulRecoveryCandidate {
@@ -169,21 +171,72 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
   return candidates;
 }
 
-function candidateScore(candidate: SuccessfulRecoveryCandidate): [number, number, number] {
-  // Prefer CF-stable, then payment-CDN-reachable (Eventim card fields need
-  // js.stripe.com + api.stripe.com through the proxy tunnel), then fastest probe.
+function paymentHostsOkCount(probe: CandidateProbeResult): number {
+  const hosts = probe.paymentCdnHosts;
+  if (!hosts) return probe.paymentCdnOk ? 2 : 0;
+  return Object.values(hosts).filter(Boolean).length;
+}
+
+function candidateScore(
+  candidate: SuccessfulRecoveryCandidate,
+  avoidConfigKey?: string
+): [number, number, number, number, number, number] {
+  // Prefer CF-stable, then full payment-CDN reachability (js+api.stripe.com),
+  // then partial host clears, then avoid the currently-failing exit. When we
+  // are rotating off a known-bad exit and nobody cleared Stripe, prefer Steel
+  // managed (historical payment-tunnel winner) before raw probe latency.
+  const rotatingOffFailedExit = Boolean(avoidConfigKey);
   return [
     -candidate.probe.stablePasses,
     candidate.probe.paymentCdnOk ? 0 : 1,
+    -paymentHostsOkCount(candidate.probe),
+    avoidConfigKey && candidate.config.key === avoidConfigKey ? 1 : 0,
+    rotatingOffFailedExit &&
+    !candidate.probe.paymentCdnOk &&
+    candidate.config.key === 'steel_managed'
+      ? 0
+      : 1,
     candidate.probe.latencyMs,
   ];
+}
+
+/** Map a live session's provider + proxyTier back to a recovery candidate key. */
+export function recoveryConfigKeyForSession(
+  provider: string | null | undefined,
+  proxyTier: string | null | undefined
+): string | undefined {
+  const tier = (proxyTier || '').trim().toLowerCase();
+  if ((provider || '').toLowerCase() === 'steel') {
+    if (tier === 'fixed') return 'steel_fixed';
+    if (tier === 'managed' || tier === '') return 'steel_managed';
+    return undefined;
+  }
+  if ((provider || '').toLowerCase() === 'kernel') {
+    if (tier.startsWith('isp')) return 'kernel_isp';
+    if (tier.startsWith('mobile')) return 'kernel_mobile';
+    if (tier.includes('residential_state') || tier === 'residential_state') {
+      return 'kernel_residential_state';
+    }
+    if (tier.includes('residential_city') || tier === 'residential_city') {
+      return 'kernel_residential_city';
+    }
+    if (tier.startsWith('residential')) return 'kernel_residential_city';
+  }
+  return undefined;
+}
+
+export interface ParallelConfigSearchOptions {
+  /** Deprioritize this candidate key (e.g. the live exit that just failed payment CDN). */
+  avoidConfigKey?: string;
 }
 
 /** Create/probe all candidates concurrently, then atomically promote one winner. */
 export async function runParallelBrowserConfigSearch(
   configs: BrowserRecoveryConfig[],
-  dependencies: ConfigSearchDependencies
+  dependencies: ConfigSearchDependencies,
+  options: ParallelConfigSearchOptions = {}
 ): Promise<SuccessfulRecoveryCandidate> {
+  const avoidConfigKey = options.avoidConfigKey;
   const attempts = await Promise.allSettled(
     configs.map(async (config) => {
       try {
@@ -197,6 +250,7 @@ export async function runParallelBrowserConfigSearch(
             stablePasses: probe.stablePasses,
             attempts: probe.attempts,
             paymentCdnOk: probe.paymentCdnOk,
+            paymentCdnHosts: probe.paymentCdnHosts ?? {},
             latencyMs: probe.latencyMs,
           });
           return { config, session, probe };
@@ -227,11 +281,13 @@ export async function runParallelBrowserConfigSearch(
   const ranked = successful
     .filter((candidate) => candidate.probe.stablePasses > 0)
     .sort((left, right) => {
-      const [leftPasses, leftPayment, leftLatency] = candidateScore(left);
-      const [rightPasses, rightPayment, rightLatency] = candidateScore(right);
-      return (
-        leftPasses - rightPasses || leftPayment - rightPayment || leftLatency - rightLatency
-      );
+      const leftScore = candidateScore(left, avoidConfigKey);
+      const rightScore = candidateScore(right, avoidConfigKey);
+      for (let index = 0; index < leftScore.length; index += 1) {
+        const delta = leftScore[index]! - rightScore[index]!;
+        if (delta !== 0) return delta;
+      }
+      return 0;
     });
   // Prefer fully-stable (passes === attempts). If Cloudflare only clears one of
   // two probe loads, still promote the best partial winner — the agent live
@@ -258,6 +314,8 @@ export async function runParallelBrowserConfigSearch(
     stablePasses: winner.probe.stablePasses,
     attempts: winner.probe.attempts,
     paymentCdnOk: winner.probe.paymentCdnOk,
+    paymentCdnHosts: winner.probe.paymentCdnHosts ?? {},
+    avoidConfigKey: avoidConfigKey ?? null,
     partial: winner.probe.stablePasses < winner.probe.attempts,
     latencyMs: winner.probe.latencyMs,
   });
@@ -413,32 +471,46 @@ function recoveryOriginStorageScript(storageState: Record<string, unknown>): str
 })();`;
 }
 
-async function probePaymentCdnReachable(page: Page): Promise<boolean> {
+async function probePaymentCdnReachable(
+  page: Page
+): Promise<{ paymentCdnOk: boolean; paymentCdnHosts: Record<string, boolean> }> {
   // Run inside the candidate page so the fetch uses the same proxy tunnel the
   // checkout card fields will need. js.stripe.com alone is insufficient —
   // Eventim Elements stay empty when api.stripe.com tunnels fail after a
-  // js-only paymentCdnOk promote (agent baf33041-…).
-  return page
+  // js-only paymentCdnOk promote (agent baf33041-…). Record per-host results so
+  // ranking can prefer partial clears and logs show which host failed.
+  const paymentCdnHosts = await page
     .evaluate(async () => {
-      const urls = ['https://js.stripe.com/v3/', 'https://api.stripe.com/healthcheck'];
-      for (const url of urls) {
+      const targets: Array<{ host: string; url: string }> = [
+        { host: 'js.stripe.com', url: 'https://js.stripe.com/v3/' },
+        { host: 'api.stripe.com', url: 'https://api.stripe.com/healthcheck' },
+      ];
+      const hosts: Record<string, boolean> = {};
+      for (const target of targets) {
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 8_000);
-          const response = await fetch(url, {
+          const response = await fetch(target.url, {
             method: 'GET',
             signal: controller.signal,
             credentials: 'omit',
           });
           clearTimeout(timer);
-          if (!response.ok) return false;
+          hosts[target.host] = response.ok;
         } catch {
-          return false;
+          hosts[target.host] = false;
         }
       }
-      return true;
+      return hosts;
     })
-    .catch(() => false);
+    .catch(() => ({
+      'js.stripe.com': false,
+      'api.stripe.com': false,
+    }));
+  const paymentCdnOk = Boolean(
+    paymentCdnHosts['js.stripe.com'] && paymentCdnHosts['api.stripe.com']
+  );
+  return { paymentCdnOk, paymentCdnHosts };
 }
 
 export async function probeCandidateBrowser(
@@ -450,6 +522,7 @@ export async function probeCandidateBrowser(
   const started = Date.now();
   let stablePasses = 0;
   let paymentCdnOk = false;
+  let paymentCdnHosts: Record<string, boolean> = {};
   const attempts = 2;
   try {
     const context = session.validationBrowser.contexts()[0];
@@ -495,11 +568,13 @@ export async function probeCandidateBrowser(
       stablePasses += 1;
     }
     if (stablePasses > 0) {
-      paymentCdnOk = await probePaymentCdnReachable(page);
+      const paymentProbe = await probePaymentCdnReachable(page);
+      paymentCdnOk = paymentProbe.paymentCdnOk;
+      paymentCdnHosts = paymentProbe.paymentCdnHosts;
       log.info('Challenge recovery candidate payment CDN probe', {
         ...logContext,
         paymentCdnOk,
-        hosts: ['js.stripe.com', 'api.stripe.com'],
+        paymentCdnHosts,
       });
     }
   } finally {
@@ -507,7 +582,13 @@ export async function probeCandidateBrowser(
     // solver-refreshed challenge cookies) alive for atomic promotion.
     await session.validationBrowser.close().catch(() => {});
   }
-  return { stablePasses, attempts, latencyMs: Date.now() - started, paymentCdnOk };
+  return {
+    stablePasses,
+    attempts,
+    latencyMs: Date.now() - started,
+    paymentCdnOk,
+    paymentCdnHosts,
+  };
 }
 
 export function buildPreferredBrowserConfig(
@@ -582,8 +663,19 @@ export async function searchAndPromoteBrowserConfig(
       }
     : DEFAULT_GEOLOCATION;
   const configs = browserRecoveryCandidates(proxyLocation);
+  const avoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
+  if (avoidConfigKey) {
+    log.info('Challenge recovery will deprioritize current failing exit', {
+      taskId: input.taskId,
+      avoidConfigKey,
+      provider: current.provider,
+      proxyTier: current.proxyTier,
+    });
+  }
 
-  const winner = await runParallelBrowserConfigSearch(configs, {
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
     create: async (config) => {
       if (config.provider === 'kernel') {
         const session = await dependencies.createKernel(current.agentId, proxyLocation, {
@@ -646,7 +738,9 @@ export async function searchAndPromoteBrowserConfig(
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },
-  });
+    },
+    { avoidConfigKey }
+  );
 
   return {
     task_id: current.id,

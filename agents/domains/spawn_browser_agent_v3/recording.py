@@ -1981,6 +1981,17 @@ def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
     return any(host in lowered for host in _PAYMENT_TUNNEL_HOST_MARKERS)
 
 
+_API_CHALLENGE_CART_URL_MARKERS = (
+    "checkaddtocart",
+    "/order/",
+    "/cart",
+    "/checkout",
+)
+# Eventim returns a ~667KB custom interstitial (embedded fonts, no classic CF
+# markers) on cart POSTs. Size + cart URL + HTML 403 is enough to rotate exit.
+_API_CHALLENGE_LARGE_HTML_BYTES = 20_000
+
+
 def _is_api_challenge_html_response(
     *,
     status: Any,
@@ -2011,7 +2022,15 @@ def _is_api_challenge_html_response(
     looks_html = "html" in mime or "<html" in sample[:800] or "<!doctype html" in sample[:800]
     if not looks_html:
         return False
-    return any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS)
+    if any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS):
+        return True
+    lowered_url = (url or "").lower()
+    if (
+        len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
+        and any(marker in lowered_url for marker in _API_CHALLENGE_CART_URL_MARKERS)
+    ):
+        return True
+    return False
 
 
 def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
