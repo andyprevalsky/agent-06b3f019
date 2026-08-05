@@ -63,6 +63,15 @@ async def test_kyc_gate_uses_canonical_detection_contract():
     }
 
 
+async def test_subscription_gate_cta_is_thirty_dollars():
+    """Purchase-gate CTA must show the live $30/mo Rose Labs Pro price."""
+    from domains.gate import service
+
+    gate = service.build_subscription_gate(checkout_url="https://roselabs.ai/s/x")
+    assert gate["presentation"]["cta"] == "Subscribe · $30/mo"
+    assert "$20" not in gate["presentation"]["cta"]
+
+
 async def test_activity_suppresses_source_connect_without_network():
     """The activity short-circuits a suppressed gate to the sentinel, no HTTP."""
     from domains.gate import repo
@@ -160,6 +169,10 @@ async def run_all_tests():
     await r.record_async("suppressible_allowlist_defaults_off", test_suppressible_allowlist_defaults_off)
     await r.record_async("flag_reenables_suppressible", test_flag_reenables_suppressible)
     await r.record_async("kyc_gate_uses_canonical_detection_contract", test_kyc_gate_uses_canonical_detection_contract)
+    await r.record_async(
+        "subscription_gate_cta_is_thirty_dollars",
+        test_subscription_gate_cta_is_thirty_dollars,
+    )
     await r.record_async("activity_suppresses_source_connect", test_activity_suppresses_source_connect_without_network)
     await r.record_async("raise_gate_direct_noop_on_sentinel", test_raise_gate_direct_noop_on_sentinel)
     await r.record_async("raise_gate_direct_blocks_on_real_request", test_raise_gate_direct_blocks_on_real_request)

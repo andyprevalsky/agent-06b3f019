@@ -403,7 +403,7 @@ describe('Terminal page', () => {
                       title: 'Subscribe to let Rose complete purchases',
                       reason:
                         'This checkout needs an active subscription before Rose can mint a payment card.',
-                      cta: 'Subscribe · $20/mo',
+                      cta: 'Subscribe · $30/mo',
                     },
                     action: {
                       kind: 'link',

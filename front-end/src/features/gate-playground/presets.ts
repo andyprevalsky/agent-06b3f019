@@ -125,7 +125,7 @@ export const GATE_PRESETS: Record<GateTypeKey, GatePreset> = {
     title: 'Subscribe to let Rose complete purchases',
     reason:
       "You've used your $1.00 of free credit — an active plan lets me finish tasks that cost real money.",
-    cta: 'Subscribe · $20/mo',
+    cta: 'Subscribe · $30/mo',
     actionKind: 'link',
     smsBody: "You're out of free credit. Subscribe to finish your task: roselabs.ai/s/9f2a",
     defaultAccent: 'rose',

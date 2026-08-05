@@ -3,15 +3,19 @@
  * Domain code must import from here instead of 'stripe' directly.
  * ESLint no-restricted-imports enforces this in src/domains/.
  *
- * ── TWO STRIPE ROLES, TWO KEYS ───────────────────────────────────────────────────────────────
- * Rose sits on BOTH sides of a Stripe transaction and they must not share a key:
+ * ── STRIPE ROLES / KEYS ──────────────────────────────────────────────────────────────────────
+ * Rose sits on multiple sides of Stripe and they must not share a key:
  *
  *   BILLING  (`STRIPE_SECRET_KEY`, the `stripe` singleton below)
- *     Subscriptions, customers, and the personal purchase hold/capture/refund lifecycle. This key
- *     deliberately STAYS test-mode: every production `Subscription.stripeCustomerId` was created in
- *     test mode, so flipping the global key to live orphans every real user's billing (a live-key
- *     lookup of an existing prod customer returns "No such customer"). Never change it to unblock
- *     an acquirer-side problem.
+ *     Legacy sandbox customers + non-production subscription minting. This key deliberately STAYS
+ *     test-mode (Stripe business name "Rose Labs sandbox"): every production
+ *     `Subscription.stripeCustomerId` was created in test mode, so flipping the global key to live
+ *     orphans every real user's billing. Never change it to unblock an acquirer-side problem.
+ *
+ *   SUBSCRIPTION CHECKOUT (live key via `STRIPE_SECRET_KEY_LIVE` /
+ *                          `ADMIN_HEALTH_STRIPE_SECRET_KEY`, see billing/checkoutMode.ts)
+ *     Production "Subscribe" gates mint Checkout on the LIVE Rose Labs account ($30/mo). Using the
+ *     billing test key here routes prod agents to "Rose Labs sandbox".
  *
  *   MERCHANT / ACQUIRER (`TEST_PAYMENT_MERCHANT_STRIPE_SECRET_KEY`,
  *                        `getTestPaymentMerchantStripeClient()`)
@@ -22,7 +26,7 @@
  *
  * Transposing them is a silent, expensive failure in both directions — a merchant charge on the
  * billing key proves nothing about live rails, and billing on the merchant key writes real-money
- * customers Rose cannot reconcile. Keep the two accessors separate and single-purpose.
+ * customers Rose cannot reconcile. Keep the accessors separate and single-purpose.
  */
 import Stripe from 'stripe';
 import { createLogger } from './logger';
@@ -57,6 +61,53 @@ const log = createLogger('Stripe');
 export const stripe = new Stripe(STRIPE_SECRET_KEY, {
   apiVersion: STRIPE_API_VERSION,
 });
+
+/** One Stripe client per distinct secret key (subscription checkout + livemode webhooks). */
+const stripeClientsBySecret = new Map<string, Stripe>();
+
+/**
+ * Return a Stripe client for an arbitrary secret key, caching by key so repeated
+ * live checkouts / livemode webhook retrieves share one connection pool.
+ */
+export function getStripeClientForSecretKey(secretKey: string): Stripe {
+  const trimmed = secretKey.trim();
+  if (trimmed === '') {
+    throw new Error('Stripe secret key is required');
+  }
+  if (trimmed === STRIPE_SECRET_KEY) {
+    return stripe;
+  }
+  let client = stripeClientsBySecret.get(trimmed);
+  if (client === undefined) {
+    client = new Stripe(trimmed, { apiVersion: STRIPE_API_VERSION });
+    stripeClientsBySecret.set(trimmed, client);
+  }
+  return client;
+}
+
+/**
+ * Pick the Stripe client that can see objects for a webhook/event's livemode flag.
+ * Live subscription invoices must not be retrieved with the sandbox billing key.
+ */
+export function getStripeClientForLivemode(livemode: boolean): Stripe {
+  if (!livemode) {
+    return stripe;
+  }
+  const liveKey = (
+    process.env.STRIPE_SECRET_KEY_LIVE?.trim() ||
+    process.env.ADMIN_HEALTH_STRIPE_SECRET_KEY?.trim() ||
+    ''
+  );
+  if (/^(?:sk|rk)_live_/.test(liveKey)) {
+    return getStripeClientForSecretKey(liveKey);
+  }
+  if (/^(?:sk|rk)_live_/.test(STRIPE_SECRET_KEY)) {
+    return stripe;
+  }
+  throw new Error(
+    'Live-mode Stripe event requires STRIPE_SECRET_KEY_LIVE or ADMIN_HEALTH_STRIPE_SECRET_KEY'
+  );
+}
 
 let stripeMetricsClient: Stripe | null = null;
 let stripeMetricsAccountVerification: Promise<void> | null = null;
