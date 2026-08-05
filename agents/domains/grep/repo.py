@@ -1,5 +1,7 @@
 """Grep domain repo - data access via backend HTTP endpoints."""
 
+import json
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
@@ -30,6 +32,17 @@ _GREP_HTTP_KEY_ALIASES = {
     "case_insensitive": "-i",
 }
 _GREP_INTERNAL_KEYS = {"tool", "tool_call_id"}
+
+
+def _is_summary_request(grep_params: Dict[str, Any]) -> bool:
+    sources = grep_params.get("sources")
+    if isinstance(sources, list) and sources:
+        return {str(source).lower() for source in sources} == {"summary"}
+    return str(grep_params.get("source") or "").lower() == "summary"
+
+
+def _is_invalid_regex_error(message: str) -> bool:
+    return "invalid regular expression" in message.lower()
 
 
 def _normalize_grep_payload(grep_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -64,6 +77,31 @@ async def grep_activity(
         source = grep_params.get("source", "all")
         activity.heartbeat(f"Searching {source} for: {pattern[:80]}")
 
+        if _is_summary_request(grep_params):
+            summary = await fetch_local_data_summary(user_id or "")
+            matches = (
+                [
+                    {
+                        "source": "summary",
+                        "path": "local_data_summary",
+                        "content": summary,
+                    }
+                ]
+                if summary
+                else []
+            )
+            return {
+                "matches": matches,
+                "total_matches": len(matches),
+                "truncated": False,
+                "pattern": pattern,
+                "sources": ["summary"],
+                "returned": len(matches),
+                "has_more": False,
+                "next_offset": None,
+                "message": summary or "No local data available.",
+            }
+
         config = load_config()
 
         payload = _normalize_grep_payload(grep_params)
@@ -87,9 +125,40 @@ async def grep_activity(
         if response.status_code != 200:
             error_data = response.json()
             error_msg = error_data.get("message", error_data.get("error", f"HTTP {response.status_code}"))
-            raise ValueError(error_msg)
-
-        data = response.json()
+            if _is_invalid_regex_error(str(error_msg)) and pattern:
+                escaped_pattern = re.escape(pattern)
+                fallback_payload = {**payload, "pattern": escaped_pattern}
+                logger.info(
+                    "Retrying invalid grep regex as a literal search",
+                    pattern=pattern[:LOG_PATTERN_MAX_LENGTH],
+                    escaped_pattern=escaped_pattern[:LOG_PATTERN_MAX_LENGTH],
+                    source=source,
+                )
+                response = await get_http_client().post(
+                    f"{config.backend.api_url}/api/data/grep",
+                    headers={
+                        "X-API-Key": config.backend.api_key or "",
+                        "X-User-Id": user_id or "",
+                        "Content-Type": "application/json",
+                    },
+                    json=fallback_payload,
+                    timeout=GREP_HTTP_TIMEOUT,
+                )
+                if response.status_code != 200:
+                    fallback_error_data = response.json()
+                    fallback_error = fallback_error_data.get(
+                        "message",
+                        fallback_error_data.get("error", f"HTTP {response.status_code}"),
+                    )
+                    raise ValueError(fallback_error)
+                data = response.json()
+                data["literal_fallback"] = True
+                data["original_pattern"] = pattern
+                data["effective_pattern"] = escaped_pattern
+            else:
+                raise ValueError(error_msg)
+        else:
+            data = response.json()
 
         total_matches = data.get("total_matches", 0)
         truncated = data.get("truncated", False)
@@ -169,6 +238,17 @@ async def fetch_local_data_summary(user_id: str) -> str:
         date_range = messages.get("date_range", {})
         from_date = date_range.get("from", "")[:10] if date_range.get("from") else "?"
         to_date = date_range.get("to", "")[:10] if date_range.get("to") else "?"
+        latest_message = messages.get("latest_message")
+        latest_message_lines = []
+        if isinstance(latest_message, dict):
+            latest_message_lines = [
+                "  Latest message record:",
+                f"    timestamp: {latest_message.get('timestamp') or '?'}",
+                f"    channel: {latest_message.get('channel') or '?'}",
+                f"    from: {json.dumps(latest_message.get('from') or '', ensure_ascii=False)}",
+                f"    to: {json.dumps(latest_message.get('to') or '', ensure_ascii=False)}",
+                f"    text: {json.dumps(latest_message.get('text') or '', ensure_ascii=False)}",
+            ]
 
         # Format top threads
         threads = messages.get("threads", [])
@@ -215,6 +295,7 @@ async def fetch_local_data_summary(user_id: str) -> str:
 messages/                              {total_threads} threads, {total_messages:,} messages
   Channels: {channel_str}
   Date range: {from_date} → {to_date}
+{chr(10).join(latest_message_lines)}
   Threads by volume:
 {chr(10).join(thread_lines)}{chr(10).join(transaction_lines)}{chr(10).join(document_lines)}"""
 

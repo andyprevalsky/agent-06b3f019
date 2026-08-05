@@ -79,7 +79,13 @@ test('no growth table is loaded whole — paging preserves every row', () => {
   for (const table of GROWTH_TABLES) {
     const calls = SEED_SOURCE.match(new RegExp(`${table}\\.findMany\\(([^)]|\\n)*?\\)`, 'g')) ?? [];
     for (const call of calls) {
-      const paged = call.includes('skip') || call.includes('pagedArgs') || call.includes('select:');
+      // `pagedOriginArgs` is main's rename of the origin pager; it still applies
+      // skip/take, so it counts as paged.
+      const paged =
+        call.includes('skip') ||
+        call.includes('pagedArgs') ||
+        call.includes('pagedOriginArgs') ||
+        call.includes('select:');
       assert.ok(paged, `${table}.findMany must page (or select only keys): ${call.slice(0, 90)}`);
     }
   }

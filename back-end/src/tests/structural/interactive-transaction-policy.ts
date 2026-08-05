@@ -144,12 +144,7 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'providers/smsSupervisor/supervisorTools.startAgent.ts',
-    scope: 'commitStartNewAgent',
-    fingerprint: '8d87e66763080f0c',
-    reason: 'legacy migration debt',
-  },
-  {
+
     file: 'providers/traceArchiveFixture.ts',
     scope: 'collectFixtureSnapshot',
     fingerprint: '5e0daf8438d614b5',

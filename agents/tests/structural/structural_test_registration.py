@@ -34,57 +34,27 @@ STRUCTURAL_DIR = AGENTS_ROOT / "tests" / "structural"
 KNOWN_UNREGISTERED: dict[str, frozenset[str]] = {
     "benchmark.blackbox.py": frozenset(
         [
-            "test_admin_bypass_card_mint_variant_wiring",
-            "test_benchmark_agent_source_override_validates_known_sources",
-            "test_benchmark_sms_source_override_updates_local_agent_source",
-            "test_browser_search_single_result_tasks_use_browser_only",
-            "test_cache_coverage_uses_root_scoped_tool_counts",
-            "test_catalog_world_model_mode_is_optional_and_validated",
-            "test_indeed_account_creation_benchmark_contract",
-            "test_keep_agents_env_preserves_successes_and_failures",
-            "test_local_services_manifest_reports_anon_capability",
-            "test_payment_benchmark_accepts_org_client_credentials_from_dotenv",
-            "test_payment_benchmark_rejects_retired_agentcard_api_key",
-            "test_payment_benchmark_rejects_retired_direct_or_user_credentials",
-            "test_payment_receipt_validation_allows_partial_live_receipts",
-            "test_prompt_user_denial_uses_rejection_sentinel",
-            "test_x_post_prompt_keeps_goal_and_prefers_email_auth",
         ]
     ),
     "llm.blackbox.py": frozenset(
         [
             "test_call_llm_structured_streaming_replayed_native_tool_call_without_json",
-            "test_heartbeat_compute_token_lineage_activity_posts_lineage_key",
         ]
     ),
     "request_payment_card.blackbox.py": frozenset(
         [
-            "test_normalize_payload_accepts_serialized_browser_tool_args",
         ]
     ),
     "rose_browser_use.blackbox.py": frozenset(
         [
-            "test_browser_attempt_completion_uses_canonical_prompt_and_empty_schema",
-            "test_build_browser_use_system_prompt_auth_priority_is_numbered",
-            "test_build_browser_use_system_prompt_reuses_main_grading_prompt",
-            "test_normalize_request_payment_card_parses_tool_string_arguments",
-            "test_normalize_request_payment_card_preserves_receipt",
         ]
     ),
     "spawn_browser_agent_v3.blackbox.py": frozenset(
         [
-            "test_agent_anti_detection_normalizes_fcaptcha_behavioral_payload",
-            "test_browser_supervisor_recovery_uses_fallback_url_when_page_url_missing",
-            "test_goto_action_returns_current_url_for_recovery_fallback",
-            "test_idle_mouse_drift_generates_visible_tremor_samples",
-            "test_select_auth_assistance_current_url_keeps_current_when_it_has_query_params",
-            "test_select_auth_assistance_current_url_restores_pre_submit_query_params",
-            "test_simulated_browser_usage_preserves_transport_model",
         ]
     ),
     "tool_schemas.blackbox.py": frozenset(
         [
-            "test_all_phase_tools_superset",
         ]
     ),
 }

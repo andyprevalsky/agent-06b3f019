@@ -52,6 +52,35 @@ cloudbench_worktree_has_changes() {  # <repo-root>
   [ -n "$first_untracked" ]
 }
 
+# Returned by cloudbench_prepare_workspace_patch when the worktree and the base
+# ref differ only by content the patch generator intentionally excludes, so
+# there is nothing to ship. This is a normal launch state, NOT a failure: the
+# guest simply runs the base ref. Kept distinct from rc=1 (generation broke) so
+# a real patch failure can never be silently downgraded to "no delta".
+CLOUDBENCH_PATCH_NO_DELTA=2
+
+# Single source of truth for "does this launch ship a workspace patch, and what
+# is in it". The launch gate MUST NOT re-derive shippability separately: the
+# fleet controller used to gate on "local HEAD != fetchable base" while
+# create-worktree-patch.sh excluded append-only history ledgers, so a /descend
+# run whose only unpushed commit was its own timing ledger produced an empty
+# patch and the controller aborted the whole fleet (2026-07-27, antibot slice).
+cloudbench_prepare_workspace_patch() {  # <repo-root> <base-ref> <out-file> [generator]
+  local repo="$1" base_ref="$2" out_file="$3"
+  local generator="${4:-$repo/scripts/create-worktree-patch.sh}"
+
+  : > "$out_file" || return 1
+  if ! bash "$generator" "$repo" "$base_ref" > "$out_file"; then
+    : > "$out_file"
+    return 1
+  fi
+  if [ ! -s "$out_file" ]; then
+    : > "$out_file"
+    return "$CLOUDBENCH_PATCH_NO_DELTA"
+  fi
+  return 0
+}
+
 cloudbench_central_hub_runs_root() {  # <port>
   curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \

@@ -12,7 +12,7 @@ from datetime import timedelta
 import psutil
 import structlog
 from dotenv import load_dotenv
-from temporalio.client import Client, TLSConfig
+from temporalio.client import Client
 from temporalio.runtime import PrometheusConfig, Runtime, TelemetryConfig
 from temporalio.worker import (
     FixedSizeSlotSupplier,
@@ -35,6 +35,7 @@ if not os.getenv("BACKEND_API_KEY"):
 # DAG executor activities
 from activities.param_populator import populate_tool_params_activity
 from config import load_config
+from temporal_connection import temporal_connect_options
 from domains.call_phone_number.handler import call_phone_number_activity
 from domains.gate.repo import (
     create_gate_request_activity,
@@ -956,18 +957,15 @@ async def main():
         environment=config.environment,
     )
 
-    # Connect to Temporal Cloud
+    # Connect to Temporal Cloud in production or the local dev server for
+    # isolated benchmarks that must not depend on outbound port 7233.
     client = await Client.connect(
         config.temporal.address,
-        namespace=config.temporal.namespace,
-        tls=TLSConfig(
-            client_cert=None,
-            client_private_key=None,
+        **temporal_connect_options(
+            config.temporal.address,
+            config.temporal.namespace,
+            config.temporal.api_key,
         ),
-        rpc_metadata={
-            "temporal-namespace": config.temporal.namespace,
-            "Authorization": f"Bearer {config.temporal.api_key}",
-        },
         runtime=runtime,
     )
 

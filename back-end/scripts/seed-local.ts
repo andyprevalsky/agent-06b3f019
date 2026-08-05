@@ -20,6 +20,7 @@ import {
   syncCookieBundleCredentials,
   syncIntegrationCredentials,
   syncPagedCredentials,
+  ORIGIN_META_SELECT,
   syncPasskeyCredentialRows,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
@@ -54,7 +55,8 @@ if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL) {
   );
 }
 
-// Parse .env file directly to get remote DB URL
+// Parse .env directly to get the normal remote DB URL. Operators may route
+// that same trusted connection through a local tunnel without editing .env.
 // (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
 // benchmark runs may explicitly source compute tokens from the already-verified
 // shared workspace DB so a production-side cooldown cannot invalidate a local
@@ -71,7 +73,10 @@ const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
 // counts with no network in the loop. Never set in prod.
 const REMOTE_URL = COMPUTE_TOKENS_ONLY
   ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
-  : process.env.SEED_REMOTE_DATABASE_URL || selectRemoteDatabaseUrl(envVars);
+  : selectRemoteDatabaseUrl({
+      ...envVars,
+      SEED_REMOTE_DATABASE_URL: process.env.SEED_REMOTE_DATABASE_URL,
+    });
 const LOCAL_URL = process.env.DATABASE_URL;
 
 if (!REMOTE_URL) {
@@ -154,31 +159,32 @@ function pagedArgs(where: unknown, page?: { skip: number; take: number }) {
     : { where: where as never };
 }
 
+/**
+ * Origin pages carry identity + `hash` only. The payload column is fetched
+ * separately, as text, and only for rows whose hash actually changed — see
+ * `syncOriginBlobCredentials`.
+ */
+function pagedOriginArgs(where: unknown, page?: { skip: number; take: number }) {
+  return { ...pagedArgs(where, page), select: ORIGIN_META_SELECT };
+}
+
 const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
   {
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
-    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) =>
+      remote.localStorageOrigin.findMany(pagedOriginArgs(where, page)),
+    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedOriginArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) =>
+      remote.cacheStorageOrigin.findMany(pagedOriginArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
   DEV_USER_ID,
   SEED_COOKIE_DOMAINS
 );
-
-async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
-  return streamJsonbOrigins({
-    remoteUrl: REMOTE_URL!,
-    localUrl: LOCAL_URL!,
-    userId: DEV_USER_ID,
-    domains: SEED_COOKIE_DOMAINS,
-    table,
-  });
-}
 
 /**
  * Peak RSS seen so far, and the worst table. Sampled around every sync step so
@@ -189,6 +195,25 @@ async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
  * was dropped from the fleet as an infra loss, with nothing recording why.
  * Enforced by src/tests/unit/seed-memory-ratchet.test.ts.
  */
+/**
+ * Origin tables move Postgres-to-Postgres with COPY: the payload never enters
+ * the Node heap, so peak memory does not scale with row size at all.
+ *
+ * The paged blob path (`syncOriginBlobCredentials`) is retained and still
+ * covered by its own tests, but it is NOT what the seed runs: measured on this
+ * merged tree it peaks at 592MB against a 230MB budget, because a page still
+ * materializes its payload in V8 before writing. COPY measures 197MB.
+ */
+async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
+  return streamJsonbOrigins({
+    remoteUrl: REMOTE_URL!,
+    localUrl: LOCAL_URL!,
+    userId: DEV_USER_ID,
+    domains: SEED_COOKIE_DOMAINS,
+    table,
+  });
+}
+
 const rssPeaks: Array<{ name: string; peakRssMb: number }> = [];
 let peakRssMb = 0;
 
@@ -527,9 +552,8 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   );
 
   // ── IndexedDB Origins ──
-  // The current prod dump's largest compressed row is only 13MB, but Prisma's
-  // nested-object materialization grew RSS by >3.8GB. Casting it to text still
-  // cost ~450MB. COPY streaming keeps both forms out of the Node heap.
+  // Few rows, but `databases` is the single largest blob in the seed (one prod
+  // row is 41MB uncompressed), so its page is deliberately one row.
   await syncRequiredTable('IndexedDB', () => syncJsonbOriginTable('IndexedDBOrigin'), failures);
 
   // ── Browser Permissions ──
@@ -820,7 +844,14 @@ async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> 
 // `localCookie.upsert()` invocation failed; the identical sync succeeded
 // seconds later). Every sync step is an idempotent upsert, so bounded retries
 // are safe. Mirrors syncComputeTokensWithRetries above.
-const BROWSER_AUTH_SYNC_ATTEMPTS = 3;
+// Retries now live per-table in syncRequiredCredentialTable, which re-runs ONLY
+// the table that failed. Keeping a second multiplier here would restore the
+// exact regression this replaced: a transient error on a late table re-read the
+// whole graph (21k cookies + 3.1k bundles + 3.7k origins + a 38MB blob) up to
+// three times and blew the bench live-fixture budget, so the task produced no
+// verdict at all (descend antibot, browser-biometrics-webdecoy, 2026-07-27).
+// One pass here; the bounded per-table budget absorbs transients.
+const BROWSER_AUTH_SYNC_ATTEMPTS = 1;
 
 async function syncBrowserAuthWithRetries(): Promise<void> {
   let lastError: unknown = null;

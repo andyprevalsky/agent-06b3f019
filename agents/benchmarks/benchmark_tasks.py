@@ -78,6 +78,7 @@ class BenchmarkTask:
     world_model_mode: Optional[str] = None  # "real" = sim off, "simulate" = WMH boundaries, "shadow" = live + WMH compare
     description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
+    context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)

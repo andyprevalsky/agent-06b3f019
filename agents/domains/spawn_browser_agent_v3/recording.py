@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import html
+import io
 import json
 import mimetypes
 import os
@@ -19,6 +21,7 @@ import shutil
 import tempfile
 import threading
 import time
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
@@ -215,6 +218,87 @@ def _mask_sensitive_headers(headers: Any) -> Dict[str, str]:
         text = str(value)
         masked[key] = f"<redacted {len(text)} chars>" if key in _SENSITIVE_HEADERS else text
     return masked
+
+
+_CONSOLE_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)\b(auth(?:orization)?|bearer|card|cookie|credential|cvv|email|key|otp|pass(?:code|word)?|"
+    r"phone|secret|session|signature|token)(\s*[:=]\s*)([^\s,;]+)"
+)
+_CONSOLE_BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
+_CONSOLE_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b")
+_CONSOLE_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+_DIAGNOSTIC_HEADER_SECRET_MARKERS = (
+    "auth",
+    "cookie",
+    "credential",
+    "key",
+    "otp",
+    "pass",
+    "secret",
+    "session",
+    "signature",
+    "token",
+)
+
+
+def _redact_console_text(value: Any, *, limit: int = 4096) -> str:
+    """Bound and redact page-controlled console text before durable storage."""
+    text = str(value or "")
+    text = _CONSOLE_URL_RE.sub(lambda match: _redact_url_query(match.group(0)), text)
+    text = _CONSOLE_BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = _CONSOLE_JWT_RE.sub("[REDACTED JWT]", text)
+    text = _CONSOLE_SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]", text)
+    return _truncate_text(text, max(0, limit)) or ""
+
+
+def _diagnostic_headers(headers: Any) -> Dict[str, str]:
+    """Redact and bound headers more strictly than the agent-facing live tool."""
+    redacted: Dict[str, str] = {}
+    for index, (name, value) in enumerate(_coerce_header_map(headers).items()):
+        if index >= 100:
+            break
+        if any(marker in name for marker in _DIAGNOSTIC_HEADER_SECRET_MARKERS):
+            redacted[name] = "[REDACTED]"
+        else:
+            redacted[name] = _redact_console_text(value, limit=2048)
+    return redacted
+
+
+def _console_remote_object_text(value: Any) -> str:
+    if not isinstance(value, dict):
+        return _redact_console_text(value)
+    if value.get("value") is not None:
+        raw = value.get("value")
+        if isinstance(raw, (dict, list)):
+            with contextlib.suppress(TypeError, ValueError):
+                return _redact_console_text(json.dumps(raw, ensure_ascii=False, default=str))
+        return _redact_console_text(raw)
+    description = value.get("description")
+    if description is not None:
+        return _redact_console_text(description)
+    subtype = value.get("subtype")
+    object_type = value.get("type")
+    return _redact_console_text(subtype or object_type or "unknown")
+
+
+def _console_stack_frames(stack_trace: Any) -> List[Dict[str, Any]]:
+    if not isinstance(stack_trace, dict):
+        return []
+    frames: List[Dict[str, Any]] = []
+    for frame in stack_trace.get("callFrames") or []:
+        if not isinstance(frame, dict):
+            continue
+        frames.append(
+            {
+                "function": _redact_console_text(frame.get("functionName") or "", limit=256),
+                "url": _redact_url_query(str(frame.get("url") or "")),
+                "line": frame.get("lineNumber"),
+                "column": frame.get("columnNumber"),
+            }
+        )
+        if len(frames) >= 20:
+            break
+    return frames
 
 
 def _encoded_len(text: Any) -> int:
@@ -2096,8 +2180,13 @@ class BrowserNetworkRecorder:
         self.session_id = session_id
         self.output_dir = output_dir
         self.network_dir = self.output_dir / "network"
+        self.console_dir = self.output_dir / "console"
+        self.network_index_path = self.network_dir / "index.json"
+        self.console_index_path = self.console_dir / "index.json"
         self.persists_network_log = persist_network_log
         self.entries: Dict[str, Dict[str, Any]] = {}
+        self._diagnostic_entries: List[Dict[str, Any]] = []
+        self.console_entries: List[Dict[str, Any]] = []
         # Request IDs that were in flight when the agent last cleared the buffer
         # (read_network_requests clear=True). Their late response events must NOT
         # resurrect a pre-clear entry, or the next read would leak old traffic.
@@ -2119,6 +2208,7 @@ class BrowserNetworkRecorder:
         self._network_generation = 0
         self._body_index = 0
         self._max_entries = max(1, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_ENTRIES", "600")))
+        self._max_console_entries = max(1, int(os.getenv("BROWSER_AGENT_CONSOLE_MAX_ENTRIES", "500")))
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
         if not self.persists_network_log:
             self._max_body_bytes = min(self._max_body_bytes, 65_536)
@@ -2189,8 +2279,11 @@ class BrowserNetworkRecorder:
         return recorder
 
     async def start(self) -> None:
-        if self.persists_network_log:
-            self.network_dir.mkdir(parents=True, exist_ok=True)
+        # Metadata + console diagnostics are always persisted. The flag only
+        # controls response-body files, which are much larger and may contain
+        # page data unsuitable for the attached redacted bundle.
+        self.network_dir.mkdir(parents=True, exist_ok=True)
+        self.console_dir.mkdir(parents=True, exist_ok=True)
         cdp_session = await self.browser_session.get_or_create_cdp_session()
         cdp_client = getattr(self.browser_session, "cdp_client", None) or cdp_session.cdp_client
         self._cdp_client = cdp_client
@@ -2219,6 +2312,7 @@ class BrowserNetworkRecorder:
         )
 
         await cdp_client.send.Network.enable(session_id=cdp_session.session_id)
+        await self._start_console_capture(cdp_client, cdp_session.session_id, generation)
         logger.info(
             (
                 "Browser network response-body recording started"
@@ -2230,6 +2324,183 @@ class BrowserNetworkRecorder:
             session_id=self.session_id,
             **({"output_dir": str(self.network_dir)} if self.persists_network_log else {}),
         )
+
+    async def _start_console_capture(self, cdp_client: Any, session_id: str, generation: int) -> None:
+        """Capture page console, uncaught exceptions, and browser log entries."""
+        register = getattr(cdp_client, "register", None)
+        send = getattr(cdp_client, "send", None)
+        runtime_register = getattr(register, "Runtime", None) if register is not None else None
+        runtime_send = getattr(send, "Runtime", None) if send is not None else None
+        log_register = getattr(register, "Log", None) if register is not None else None
+        log_send = getattr(send, "Log", None) if send is not None else None
+        webauthn_register = getattr(register, "WebAuthn", None) if register is not None else None
+
+        try:
+            if runtime_register is not None and runtime_send is not None:
+                runtime_register.consoleAPICalled(
+                    lambda event, event_session_id: self._on_console_api_called(
+                        event, event_session_id, generation
+                    )
+                )
+                runtime_register.exceptionThrown(
+                    lambda event, event_session_id: self._on_exception_thrown(
+                        event, event_session_id, generation
+                    )
+                )
+                await runtime_send.enable(session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "Browser console Runtime capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+        try:
+            if log_register is not None and log_send is not None:
+                log_register.entryAdded(
+                    lambda event, event_session_id: self._on_log_entry_added(
+                        event, event_session_id, generation
+                    )
+                )
+                await log_send.enable(session_id=session_id)
+        except Exception as exc:
+            logger.warning(
+                "Browser console Log capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+        try:
+            if webauthn_register is not None:
+                webauthn_register.credentialAsserted(
+                    lambda event, event_session_id: self._on_webauthn_credential_asserted(
+                        event, event_session_id, generation
+                    )
+                )
+        except Exception as exc:
+            logger.warning(
+                "Browser WebAuthn assertion capture failed to start",
+                agent_id=self.agent_id,
+                task_id=self.task_id,
+                error=str(exc),
+            )
+
+    def _append_console_entry(self, entry: Dict[str, Any]) -> None:
+        self.console_entries.append(entry)
+        overflow = len(self.console_entries) - self._max_console_entries
+        if overflow > 0:
+            del self.console_entries[:overflow]
+
+    def _on_console_api_called(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            self._append_console_entry(
+                {
+                    "kind": "console",
+                    "level": str(event.get("type") or "log"),
+                    "text": " ".join(_console_remote_object_text(arg) for arg in (event.get("args") or [])),
+                    "timestamp": event.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                    "execution_context_id": event.get("executionContextId"),
+                    "stack": _console_stack_frames(event.get("stackTrace")),
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser console event capture failed", error=str(exc))
+
+    def _on_exception_thrown(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            details = event.get("exceptionDetails") or {}
+            exception = details.get("exception") or {}
+            text = exception.get("description") or exception.get("value") or details.get("text") or "Uncaught exception"
+            self._append_console_entry(
+                {
+                    "kind": "exception",
+                    "level": "error",
+                    "text": _redact_console_text(text),
+                    "url": _redact_url_query(str(details.get("url") or "")),
+                    "line": details.get("lineNumber"),
+                    "column": details.get("columnNumber"),
+                    "timestamp": event.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                    "stack": _console_stack_frames(details.get("stackTrace")),
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser exception capture failed", error=str(exc))
+
+    def _on_log_entry_added(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        try:
+            entry = event.get("entry") or {}
+            self._append_console_entry(
+                {
+                    "kind": "browser_log",
+                    "source": str(entry.get("source") or ""),
+                    "level": str(entry.get("level") or "log"),
+                    "text": _redact_console_text(entry.get("text") or ""),
+                    "url": _redact_url_query(str(entry.get("url") or "")),
+                    "line": entry.get("lineNumber"),
+                    "timestamp": entry.get("timestamp"),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser log entry capture failed", error=str(exc))
+
+    def _on_webauthn_credential_asserted(
+        self,
+        event: Dict[str, Any],
+        session_id: str | None,
+        generation: int | None = None,
+    ) -> None:
+        """Record proof of assertion without persisting credential/user material."""
+        try:
+            credential = event.get("credential") or {}
+            credential_id = str(credential.get("credentialId") or "")
+            authenticator_id = str(event.get("authenticatorId") or "")
+            self._append_console_entry(
+                {
+                    "kind": "webauthn_credential_asserted",
+                    "rp_id": _redact_console_text(credential.get("rpId") or "", limit=512),
+                    "sign_count": credential.get("signCount"),
+                    "is_resident_credential": credential.get("isResidentCredential"),
+                    "backup_eligibility": credential.get("backupEligibility"),
+                    "backup_state": credential.get("backupState"),
+                    "credential_id_sha256": (
+                        hashlib.sha256(credential_id.encode("utf-8")).hexdigest()
+                        if credential_id
+                        else None
+                    ),
+                    "authenticator_id_sha256": (
+                        hashlib.sha256(authenticator_id.encode("utf-8")).hexdigest()
+                        if authenticator_id
+                        else None
+                    ),
+                    "session_id": session_id,
+                    "browser_generation": generation,
+                }
+            )
+        except Exception as exc:
+            logger.warning("Browser WebAuthn assertion capture failed", error=str(exc))
 
     async def transition_browser(self, *, browser_session: Any, session_id: str) -> None:
         """Attach the same logical network log to a promoted browser session."""
@@ -2279,8 +2550,74 @@ class BrowserNetworkRecorder:
         """
         while len(self.entries) > self._max_entries:
             oldest_key = next(iter(self.entries))
-            self.entries.pop(oldest_key, None)
+            evicted = self.entries.pop(oldest_key, None)
+            if evicted:
+                self._append_diagnostic_entry(evicted)
             self._discard_body(oldest_key)
+
+    def _redacted_network_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the bounded, secret-safe network row used for durable diagnostics."""
+        scalar_fields = (
+            "request_id",
+            "browser_generation",
+            "session_id",
+            "method",
+            "resource_type",
+            "has_post_data",
+            "initiator",
+            "request_ts_ms",
+            "status",
+            "status_text",
+            "mime_type",
+            "protocol",
+            "remote_address",
+            "from_cache",
+            "response_ts_ms",
+            "encoded_data_length",
+            "terminal",
+            "body_size",
+            "body_truncated",
+            "body_base64_encoded",
+            "body_captured_at_ms",
+            "body_file",
+            "failed",
+        )
+        redacted = {
+            field: entry.get(field)
+            for field in scalar_fields
+            if entry.get(field) is not None
+        }
+        redacted["url"] = _redact_url_query(str(entry.get("url") or ""))
+        redacted["request_headers"] = _diagnostic_headers(entry.get("request_headers"))
+        redacted["response_headers"] = _diagnostic_headers(entry.get("response_headers"))
+        redirects = []
+        for hop in entry.get("redirects") or []:
+            if not isinstance(hop, dict):
+                continue
+            redirects.append(
+                {
+                    "url": _redact_url_query(str(hop.get("url") or "")),
+                    "status": hop.get("status"),
+                    "location": _redact_url_query(str(hop.get("location") or "")),
+                }
+            )
+        if redirects:
+            redacted["redirects"] = redirects
+        if entry.get("failure"):
+            redacted["failure"] = _redact_console_text(entry.get("failure"), limit=1024)
+        if entry.get("body_error"):
+            redacted["body_error"] = _redact_console_text(entry.get("body_error"), limit=1024)
+        return redacted
+
+    def _append_diagnostic_entry(self, entry: Dict[str, Any]) -> None:
+        diagnostic_entries = getattr(self, "_diagnostic_entries", None)
+        if diagnostic_entries is None:
+            diagnostic_entries = []
+            self._diagnostic_entries = diagnostic_entries
+        diagnostic_entries.append(self._redacted_network_entry(entry))
+        overflow = len(diagnostic_entries) - getattr(self, "_max_entries", 600)
+        if overflow > 0:
+            del diagnostic_entries[:overflow]
 
     def _discard_body(self, request_key: str) -> None:
         self._bodies.pop(request_key, None)
@@ -2703,15 +3040,123 @@ class BrowserNetworkRecorder:
             # while the buffer was full, so late response events cannot resurrect
             # pre-clear traffic. Terminal events remove IDs from both sets.
             self._ignored_request_ids.update(self._active_request_ids)
+            for entry in self.entries.values():
+                self._append_diagnostic_entry(entry)
             self.entries.clear()
             self._bodies.clear()
             self._body_byte_sizes.clear()
             self._body_bytes = 0
         return rows
 
+    def _diagnostics_payloads(
+        self,
+        *,
+        include_response_body_metadata: bool = True,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        current_entries = [self._redacted_network_entry(entry) for entry in self.entries.values()]
+        durable_entries = (
+            list(getattr(self, "_diagnostic_entries", [])) + current_entries
+        )[-getattr(self, "_max_entries", 600) :]
+        if not include_response_body_metadata:
+            body_metadata_fields = {
+                "body_size",
+                "body_truncated",
+                "body_base64_encoded",
+                "body_captured_at_ms",
+                "body_file",
+                "body_error",
+            }
+            durable_entries = [
+                {
+                    key: value
+                    for key, value in entry.items()
+                    if key not in body_metadata_fields
+                }
+                for entry in durable_entries
+            ]
+        network_payload = {
+            "agent_id": self.agent_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "entry_count": len(durable_entries),
+            "redacted": True,
+            "response_bodies_included": False,
+            "entries": durable_entries,
+        }
+        console_payload = {
+            "agent_id": self.agent_id,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "entry_count": len(getattr(self, "console_entries", [])),
+            "redacted": True,
+            "entries": list(getattr(self, "console_entries", [])),
+        }
+        return network_payload, console_payload
+
+    def _write_diagnostics_indexes(self) -> None:
+        self.network_dir.mkdir(parents=True, exist_ok=True)
+        self.console_dir.mkdir(parents=True, exist_ok=True)
+        network_payload, console_payload = self._diagnostics_payloads()
+        self.network_index_path.write_text(
+            json.dumps(network_payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        self.console_index_path.write_text(
+            json.dumps(console_payload, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+
+    def export_diagnostics_bundle_bytes(self) -> Optional[bytes]:
+        """Build the small attachment used by post-run debuggers.
+
+        Raw response body files are deliberately excluded. The two indexes are
+        already redacted and bounded per browser task.
+        """
+        if not self.network_index_path.exists() or not self.console_index_path.exists():
+            return None
+        network_payload, console_payload = self._diagnostics_payloads(
+            include_response_body_metadata=False
+        )
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(
+                "network/index.json",
+                json.dumps(network_payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+            )
+            archive.writestr(
+                "console/index.json",
+                json.dumps(console_payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+            )
+        return output.getvalue()
+
+    async def archive_diagnostics_artifacts(self) -> Dict[str, str]:
+        """Archive each redacted index and return stable trace references."""
+        if not archive_enabled():
+            return {}
+        root_agent_id = current_root_agent_id() or self.agent_id
+        refs: Dict[str, str] = {}
+        network_payload, console_payload = self._diagnostics_payloads(
+            include_response_body_metadata=False
+        )
+        for kind, path, payload in (
+            ("network", self.network_index_path, network_payload),
+            ("console", self.console_index_path, console_payload),
+        ):
+            if not path.exists():
+                continue
+            result = archive_bytes(
+                root_agent_id=root_agent_id,
+                path=f"diagnostics/browser/{self.task_id}/{kind}/index.json",
+                body=json.dumps(payload, indent=2, ensure_ascii=False, default=str).encode("utf-8"),
+                content_type="application/json",
+            )
+            if isinstance(result, dict) and isinstance(result.get("ref"), str):
+                refs[kind] = result["ref"]
+        return refs
+
     async def close(self) -> Optional[Path]:
         if self._closed:
-            return self.network_dir / "index.json" if self.entries and self.persists_network_log else None
+            return self.network_index_path if self.network_index_path.exists() else None
         if self._tasks:
             done, pending = await asyncio.wait(self._tasks, timeout=3)
             for task in pending:
@@ -2725,38 +3170,14 @@ class BrowserNetworkRecorder:
                     completed=len(done),
                 )
         self._closed = True
-        if not self.persists_network_log:
-            return None
-        if not self.entries:
-            return None
-        index_path = self.network_dir / "index.json"
-        index_path.write_text(
-            json.dumps(
-                {
-                    "agent_id": self.agent_id,
-                    "task_id": self.task_id,
-                    "session_id": self.session_id,
-                    "entry_count": len(self.entries),
-                    # The index is archived alongside the recording, so the same
-                    # credential-header masking the agent sees applies here.
-                    "entries": [
-                        {
-                            **entry,
-                            "request_headers": _mask_sensitive_headers(entry.get("request_headers")),
-                            "response_headers": _mask_sensitive_headers(entry.get("response_headers")),
-                        }
-                        for entry in self.entries.values()
-                    ],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
+        self._write_diagnostics_indexes()
         logger.info(
-            "Browser network response-body recording saved",
+            "Browser console and network diagnostics saved",
             agent_id=self.agent_id,
             task_id=self.task_id,
-            index_path=str(index_path),
+            network_index_path=str(self.network_index_path),
+            console_index_path=str(self.console_index_path),
             entry_count=len(self.entries),
+            console_entry_count=len(self.console_entries),
         )
-        return index_path
+        return self.network_index_path
