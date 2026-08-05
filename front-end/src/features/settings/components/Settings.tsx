@@ -8,7 +8,7 @@
  *         |              |               |               |
  *    [TAB:CUSTOM]  [TAB:INFO]    [TAB:BILLING]    [TAB:KEYS]
  *         |              |               |               |
- *    (save custom) (save info)   (redirect to     (gen/del keys)
+ *    (save custom) (save personal + delivery) (redirect) (gen/del keys)
  *         |              |        Stripe portal)        |
  *         v              v               |               v
  *    [SAVING_CUST]  [SAVING]            |        [SUBSCRIPTION_MODAL]

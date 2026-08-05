@@ -5370,6 +5370,62 @@ async def test_rose_client_synthesizes_native_tools_for_api_key_without_oauth():
     assert tool_names == {"web_fetch", "attempt_completion"}
 
 
+async def test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth():
+    """AgentAction tools must survive through the OpenRouter waterfall."""
+    from pydantic import BaseModel
+    from typing import Literal
+
+    class _SpawnAgentTool(BaseModel):
+        tool: Literal["spawn_agent"]
+        goal: str
+
+    class _AttemptCompletionTool(BaseModel):
+        tool: Literal["attempt_completion"]
+
+    class _AgentAction(BaseModel):
+        response: str = ""
+        tool_calls: list[_SpawnAgentTool | _AttemptCompletionTool] = []
+
+    captured: dict = {}
+
+    async def _fake_waterfall_complete(**kwargs):
+        captured.update(kwargs)
+        yield StreamChunk(kind="metadata", data={"actual_model": "anthropic/claude-opus-4.8"})
+        yield StreamChunk(
+            kind="tool_call",
+            data={"name": "spawn_agent", "arguments": '{"goal":"browse"}', "id": "call-spawn"},
+        )
+        yield StreamChunk(
+            kind="usage",
+            data={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+        )
+        yield StreamChunk(kind="done", data={})
+
+    async def _always_on_cooldown():
+        return True
+
+    with (
+        patch("providers.rose.client._openai_api_key", return_value=""),
+        patch("providers.rose.client._anthropic_api_key_on_cooldown", _always_on_cooldown),
+        patch("providers.rose.client.waterfall_complete", _fake_waterfall_complete),
+    ):
+        chunks = await _drain(
+            RoseClient(openrouter_key="ork-test").complete(
+                pool="rose-1-ultra",
+                messages=[{"role": "user", "content": "Use a browser child"}],
+                response_model=_AgentAction,
+            )
+        )
+
+    assert any(chunk.kind == "tool_call" for chunk in chunks)
+    assert captured["response_format"] is None
+    assert captured["tool_choice"] == "any"
+    assert {tool["name"] for tool in captured["tools"]} == {
+        "spawn_agent",
+        "attempt_completion",
+    }
+
+
 async def test_rose_client_preserves_native_tools_for_waterfall():
     """The final OpenRouter fallback must keep AgentAction as native tools.
 
@@ -5754,6 +5810,10 @@ async def run_all_tests():
     await r.record_async(
         "rose_client_synthesizes_api_key_tools_without_oauth",
         test_rose_client_synthesizes_native_tools_for_api_key_without_oauth,
+    )
+    await r.record_async(
+        "rose_client_synthesizes_waterfall_tools_without_oauth",
+        test_rose_client_synthesizes_native_tools_for_waterfall_without_oauth,
     )
     await r.record_async(
         "rose_client_preserves_native_tools_for_waterfall",

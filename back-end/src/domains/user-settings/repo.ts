@@ -18,6 +18,8 @@ export async function upsertUser(userId: string, data: UpdateUserBody) {
     where: { userId },
     update: {
       name: data.name,
+      email: data.email,
+      deliveryRecipientName: data.deliveryRecipientName,
       addressLine1: data.addressLine1,
       addressLine2: data.addressLine2,
       city: data.city,
@@ -33,6 +35,8 @@ export async function upsertUser(userId: string, data: UpdateUserBody) {
     create: {
       userId,
       name: data.name,
+      email: data.email,
+      deliveryRecipientName: data.deliveryRecipientName,
       addressLine1: data.addressLine1,
       addressLine2: data.addressLine2,
       city: data.city,
@@ -54,6 +58,8 @@ export async function createUser(userId: string, data: UpdateUserBody) {
     data: {
       userId,
       name: data.name,
+      email: data.email,
+      deliveryRecipientName: data.deliveryRecipientName,
       addressLine1: data.addressLine1,
       addressLine2: data.addressLine2,
       city: data.city,
@@ -73,6 +79,9 @@ export async function createUser(userId: string, data: UpdateUserBody) {
 export async function partialUpdateUser(userId: string, data: UpdateUserBody) {
   const updateData: Record<string, unknown> = {};
   if (data.name !== undefined) updateData.name = data.name;
+  if (data.email !== undefined) updateData.email = data.email;
+  if (data.deliveryRecipientName !== undefined)
+    updateData.deliveryRecipientName = data.deliveryRecipientName;
   if (data.addressLine1 !== undefined) updateData.addressLine1 = data.addressLine1;
   if (data.addressLine2 !== undefined) updateData.addressLine2 = data.addressLine2;
   if (data.city !== undefined) updateData.city = data.city;
