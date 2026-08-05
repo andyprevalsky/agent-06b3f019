@@ -73,10 +73,30 @@ async function ensureUserExists(): Promise<void> {
   });
 }
 
+/**
+ * Same precedence the HTTP credential-sync path uses (see
+ * `domains/integrations/service.ts` → `resolveSyncedPoolingEnabled`): explicit
+ * per-integration override, then the account policy, then the current value.
+ */
+async function resolvePoolingEnabled(): Promise<boolean> {
+  const [user, existing] = await Promise.all([
+    prisma.user.findUnique({ where: { userId }, select: { poolTokensByDefault: true } }),
+    prisma.integration.findUnique({
+      where: { userId_name: { userId, name: 'claude_code' } },
+      select: { poolingEnabled: true, poolingEnabledOverride: true },
+    }),
+  ]);
+  const override = existing?.poolingEnabledOverride;
+  if (override !== null && override !== undefined) return override;
+  if (user?.poolTokensByDefault === true) return true;
+  return existing?.poolingEnabled ?? false;
+}
+
 async function main(): Promise<void> {
   const plaintext = getKeychainEnvelope();
   const encryptedCredentials = encryptCredentialEnvelope(plaintext);
   await ensureUserExists();
+  const poolingEnabled = await resolvePoolingEnabled();
 
   const integration = await prisma.integration.upsert({
     where: { userId_name: { userId, name: 'claude_code' } },
@@ -89,6 +109,7 @@ async function main(): Promise<void> {
       lastSyncAt: new Date(),
       lastSuccessfulSyncAt: new Date(),
       config: { encryptedCredentials },
+      poolingEnabled,
       rateLimitedUntil: null,
       failureReason: null,
     },
@@ -99,6 +120,7 @@ async function main(): Promise<void> {
       lastSyncAt: new Date(),
       lastSuccessfulSyncAt: new Date(),
       config: { encryptedCredentials },
+      poolingEnabled,
       rateLimitedUntil: null,
       failureReason: null,
       lastUsedAt: null,

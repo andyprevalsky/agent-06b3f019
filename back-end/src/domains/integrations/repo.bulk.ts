@@ -276,6 +276,29 @@ export async function findUserById(userId: string) {
   });
 }
 
+/**
+ * Account-level policy: does this account want every compute credential it
+ * syncs to be pool-eligible? Unknown users fall back to the schema default.
+ */
+export async function findUserPoolTokensByDefault(userId: string): Promise<boolean> {
+  const user = await prisma.user.findUnique({
+    where: { userId },
+    select: { poolTokensByDefault: true },
+  });
+  return user?.poolTokensByDefault ?? false;
+}
+
+/**
+ * Current pool state of a credential integration: the materialized effective
+ * value plus the explicit per-integration override (null = inherit account).
+ */
+export async function findIntegrationPoolingState(userId: string, name: string) {
+  return prisma.integration.findUnique({
+    where: { userId_name: { userId, name } },
+    select: { poolingEnabled: true, poolingEnabledOverride: true },
+  });
+}
+
 export async function findIntegrationById(integrationId: string) {
   return prisma.integration.findUnique({
     where: { id: integrationId },
