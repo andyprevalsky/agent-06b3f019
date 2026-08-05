@@ -2258,7 +2258,7 @@ worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
         sleep "$delay"
     done
     echo "❌ timed out acquiring worker ledger lock: $lock" >&2
-    return 1
+    return 75
 }
 
 worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
@@ -4268,7 +4268,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
 # authoritative over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
     local out="$1" marker name wid rc=0
-    worker_ledger_lock_acquire "$out" || return 1
+    worker_ledger_lock_acquire "$out" || return $?
     for marker in "$out"/worker-*.ready; do
         [ -e "$marker" ] || continue
         name="${marker##*/}"
@@ -4544,6 +4544,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
+    local ready_reconcile_rc=0
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
     # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
@@ -4565,7 +4566,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     }
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
-        local desired_workers tracked_workers ready_workers terminal_deadline
+        local desired_workers tracked_workers ready_workers terminal_deadline ready_reconcile_rc
         [ -e "$out/benchmark-child.finished" ] || return 1
         # Child completion stops new metrics decisions; it does not revoke
         # capacity already committed by a prior desired-count observation. Keep
@@ -4573,7 +4574,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            if ! reconcile_worker_ready_outcomes "$out"; then
+            ready_reconcile_rc=0
+            # Finalization owns the retry deadline. Use one ledger-lock attempt
+            # per poll so a nested ten-second acquisition window cannot overrun
+            # the remaining terminal budget.
+            WORKER_LEDGER_LOCK_ATTEMPTS=1 reconcile_worker_ready_outcomes "$out" \
+                || ready_reconcile_rc=$?
+            if [ "$ready_reconcile_rc" -ne 0 ]; then
+                if [ "$ready_reconcile_rc" -ne 75 ]; then
+                    fail_autoscaler "could not reconcile worker readiness outcomes"
+                    return 1
+                fi
                 if [ "$SECONDS" -ge "$terminal_deadline" ]; then
                     fail_autoscaler "could not reconcile worker readiness outcomes"
                     return 1
@@ -4749,11 +4760,23 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # lookup failure is not normal termination: a stale/failed publisher must
     # fail closed unless this autoscaler has itself observed child completion.
     while :; do
-        reconcile_worker_ready_outcomes "$out" \
-            || fail_autoscaler "could not reconcile worker readiness outcomes"
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
             return $?
+        fi
+        ready_reconcile_rc=0
+        reconcile_worker_ready_outcomes "$out" || ready_reconcile_rc=$?
+        if [ "$ready_reconcile_rc" -ne 0 ]; then
+            # The child marker can land between the loop-head lifecycle check
+            # and ledger acquisition. Hand a busy ledger to the bounded terminal
+            # reconciler instead of misclassifying that race as durable failure.
+            if [ "$ready_reconcile_rc" -eq 75 ] \
+                && [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            fail_autoscaler "could not reconcile worker readiness outcomes"
+            return 1
         fi
         if ! inventory_machine_exists "$cid"; then
             if [ -e "$out/benchmark-child.finished" ]; then
@@ -4852,8 +4875,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 fi
             done
         fi
-        reconcile_worker_ready_outcomes "$out" \
-            || fail_autoscaler "could not reconcile worker readiness outcomes"
+        ready_reconcile_rc=0
+        reconcile_worker_ready_outcomes "$out" || ready_reconcile_rc=$?
+        if [ "$ready_reconcile_rc" -ne 0 ]; then
+            if [ "$ready_reconcile_rc" -eq 75 ] \
+                && [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            fail_autoscaler "could not reconcile worker readiness outcomes"
+            return 1
+        fi
         reconcile_worker_failure_outcomes "$bench" "$out" \
             || fail_autoscaler "could not reconcile worker failure outcomes"
         # The fake-controller regression for terminal proof needs to hold the
@@ -5036,8 +5068,24 @@ for bench in "${BENCHES[@]}"; do
 
     local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
     echo "   ⚖️  [$bench] per-bench autoscaler ON (mandatory prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
+    rm -f "$out/autoscaler.pid" "$out/autoscaler.acceptance-failed"
     ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
-    AUTOSCALER_PIDS+=("$!")
+    autoscaler_pid="$!"
+    AUTOSCALER_PIDS+=("$autoscaler_pid")
+    autoscaler_pid_tmp="$out/autoscaler.pid.tmp.$$"
+    autoscaler_started=""
+    for _ in $(seq 1 50); do
+        autoscaler_started="$(ps -o lstart= -p "$autoscaler_pid" 2>/dev/null \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)"
+        [ -z "$autoscaler_started" ] || break
+        sleep 0.01
+    done
+    if [ -n "$autoscaler_started" ] \
+        && printf '%s|%s\n' "$autoscaler_pid" "$autoscaler_started" > "$autoscaler_pid_tmp"; then
+        mv "$autoscaler_pid_tmp" "$out/autoscaler.pid" 2>/dev/null || rm -f "$autoscaler_pid_tmp"
+    else
+        rm -f "$autoscaler_pid_tmp"
+    fi
     i=$((i + 1))
 done
 
@@ -5419,6 +5467,8 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
         # A live process is acceptable during the bounded drain, but never after
         # it. Counts alone are a mutable snapshot; only the autoscaler's causal
         # completion marker proves that no committed transition remains.
+        printf '%s\n' "mandatory autoscaler did not confirm terminal completion" \
+            > "${CHILD_OUT[$j]}/autoscaler.acceptance-failed" 2>/dev/null || true
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not confirm terminal completion" >&2
         AUTOSCALER_FAILURE=1
     fi

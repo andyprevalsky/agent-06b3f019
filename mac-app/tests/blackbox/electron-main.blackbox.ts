@@ -352,6 +352,7 @@ describe('blackbox: electron-main (main-wiring)', () => {
     for (const ch of [
       'quick-query:submit',
       'quick-query:hide',
+      'quick-query:resize',
       'shortcut:enable',
       'shortcut:disable',
       'shortcut:isEnabled',

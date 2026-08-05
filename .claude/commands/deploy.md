@@ -430,7 +430,7 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these eighteen independent suites without
+The concurrent runner executes exactly these nineteen independent suites without
 changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
@@ -447,6 +447,7 @@ changing their assertions or test counts: `bash scripts/tests/workspace-env.test
 `python3 scripts/tests/run-deploy-structural-gates.test.py`, and
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
+`bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`, and
 `bash scripts/tests/run-public-tunnel-routing.test.sh`.
 
@@ -588,6 +589,22 @@ python3 scripts/run_deploy_live_probes.py
 
 Both stage records must pass before closing the `runtime-blackbox` boundary.
 
+## Step 4r: Cold-seed memory ratchet (no skip)
+
+Measure five full cold seeds against the newest cached production dump. Every
+run gets a fresh target database and must pass the source/target fidelity
+fingerprints for Cookies, LocalStorage, IndexedDB, and Cache Storage. The gate
+uses the OS-level maximum resident set size; failed or fidelity-mismatched runs
+never count as a favorable low-memory sample.
+
+```bash
+cd back-end && bash ../scripts/run-deploy-stage seed-memory-ratchet -- \
+  bash scripts/measure-seed-memory.sh 5 0 0 --enforce-budget
+```
+
+The checked-in budget is the maximum of the last five stable runs plus exactly
+20% headroom, rounded up. If this gate fails, reduce the seed's peak and re-run
+all five measurements. Never raise the budget or a machine size to make it pass.
 ## Step 5: Spin up local services
 
 **Step 5.0 (MANDATORY pre-flight garbage collection):** before spinning up anything, kill any stale run.sh trees + orphaned backend/worker/supabase processes from prior aborted runs in this worktree. This guarantees a clean local blackbox/semantic stack; cloud smoke uses separate task-scoped queues.

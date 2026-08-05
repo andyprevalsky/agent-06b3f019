@@ -1,41 +1,65 @@
 /**
- * Inner form for the launcher pill — input + submit button.
+ * Inner form for the launcher pill — attach + input + submit.
  *
- * Thin view: receives state + handlers from `useLauncher` via props and
- * renders the controlled `<input>` + submit `<LiquidWhiteButton>`. No IO,
- * no business logic, no IPC.
+ * Layout (always — paperclip + send vertically centered in the FULL box):
+ *
+ *   [ 📎 ]   [ chips?          ]   [ ↑ ]
+ *            [ textarea…       ]
  */
 
-import type { CSSProperties, FormEvent, KeyboardEvent, RefObject } from 'react';
-import { ArrowUp } from 'lucide-react';
+import {
+  useEffect,
+  useRef,
+  type ChangeEvent,
+  type CSSProperties,
+  type FormEvent,
+  type KeyboardEvent,
+  type RefObject,
+} from 'react';
+import { ArrowUp, Paperclip } from 'lucide-react';
+import type { LauncherLocalAttachment } from '../types';
+import QueryFormMiddle from './QueryFormMiddle';
 
 interface QueryFormProps {
   query: string;
   setQuery: (value: string) => void;
   submitting: boolean;
-  inputRef: RefObject<HTMLInputElement | null>;
+  inputRef: RefObject<HTMLTextAreaElement | null>;
   handleSubmit: (event?: FormEvent) => Promise<void>;
-  handleKeyDown: (event: KeyboardEvent<HTMLInputElement>) => void;
+  handleKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  canSubmitWithoutQuery?: boolean;
+  attachments: LauncherLocalAttachment[];
+  onRemoveAttachment: (id: string) => void;
+  onPickFiles: (files: FileList | File[]) => void;
+  attachError: string | null;
+  onContentHeightChange?: (height: number) => void;
 }
-
-const INPUT_STYLE: CSSProperties = {
-  flex: 1,
-  minWidth: 0,
-  background: 'transparent',
-  fontSize: 13,
-  color: '#272725',
-  border: 'none',
-  outline: 'none',
-};
 
 const FORM_STYLE: CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   width: '100%',
   height: '100%',
-  gap: 12,
-  paddingLeft: 16,
+  gap: 10,
+  paddingLeft: 14,
   paddingRight: 4,
+  boxSizing: 'border-box',
+};
+
+const ATTACH_BUTTON_STYLE: CSSProperties = {
+  width: 28,
+  height: 28,
+  borderRadius: '50%',
+  border: 'none',
+  background: 'transparent',
+  color: 'rgba(39, 39, 37, 0.55)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  flexShrink: 0,
+  padding: 0,
+  cursor: 'pointer',
+  alignSelf: 'center',
 };
 
 const SUBMIT_BUTTON_STYLE: CSSProperties = {
@@ -51,7 +75,78 @@ const SUBMIT_BUTTON_STYLE: CSSProperties = {
   justifyContent: 'center',
   flexShrink: 0,
   padding: 0,
+  alignSelf: 'center',
 };
+
+function useQueryFormLayout(
+  query: string,
+  attachments: LauncherLocalAttachment[],
+  attachError: string | null,
+  inputRef: RefObject<HTMLTextAreaElement | null>,
+  middleRef: RefObject<HTMLDivElement | null>,
+  onContentHeightChange?: (height: number) => void
+): void {
+  useEffect(() => {
+    const el = inputRef.current;
+    if (el === null) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 18 * 5 + 22)}px`;
+  }, [query, inputRef]);
+
+  useEffect(() => {
+    if (onContentHeightChange === undefined || middleRef.current === null) return;
+    onContentHeightChange(middleRef.current.scrollHeight);
+  }, [query, attachments, attachError, onContentHeightChange, middleRef]);
+}
+
+function AttachButton({
+  disabled,
+  onClick,
+}: {
+  disabled: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      data-testid="attach-button"
+      aria-label="Attach files"
+      disabled={disabled}
+      onClick={onClick}
+      style={{
+        ...ATTACH_BUTTON_STYLE,
+        opacity: disabled ? 0.4 : 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+      }}
+    >
+      <Paperclip size={16} strokeWidth={2.25} />
+    </button>
+  );
+}
+
+function SubmitButton({
+  disabled,
+  onClick,
+}: {
+  disabled: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      data-testid="submit-button"
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        ...SUBMIT_BUTTON_STYLE,
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+      }}
+    >
+      <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
+    </button>
+  );
+}
 
 const QueryForm = ({
   query,
@@ -60,7 +155,24 @@ const QueryForm = ({
   inputRef,
   handleSubmit,
   handleKeyDown,
+  canSubmitWithoutQuery = false,
+  attachments,
+  onRemoveAttachment,
+  onPickFiles,
+  attachError,
+  onContentHeightChange,
 }: QueryFormProps): React.JSX.Element => {
+  const canSubmit = !submitting && (query.trim() !== '' || canSubmitWithoutQuery);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const middleRef = useRef<HTMLDivElement>(null);
+  useQueryFormLayout(query, attachments, attachError, inputRef, middleRef, onContentHeightChange);
+
+  const onFileChange = (event: ChangeEvent<HTMLInputElement>): void => {
+    const files = event.target.files;
+    if (files !== null && files.length > 0) onPickFiles(files);
+    event.target.value = '';
+  };
+
   return (
     <form
       onSubmit={(event) => {
@@ -69,32 +181,31 @@ const QueryForm = ({
       style={FORM_STYLE}
     >
       <input
-        ref={inputRef}
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        onKeyDown={handleKeyDown}
-        disabled={submitting}
-        placeholder="Enter any desire"
-        className="placeholder-input"
-        style={INPUT_STYLE}
+        ref={fileInputRef}
+        type="file"
+        multiple
+        hidden
+        data-testid="launcher-file-input"
+        onChange={onFileChange}
       />
-
-      <button
-        type="button"
-        data-testid="submit-button"
+      <AttachButton disabled={submitting} onClick={() => fileInputRef.current?.click()} />
+      <QueryFormMiddle
+        middleRef={middleRef}
+        inputRef={inputRef}
+        query={query}
+        setQuery={setQuery}
+        submitting={submitting}
+        handleKeyDown={handleKeyDown}
+        attachments={attachments}
+        onRemoveAttachment={onRemoveAttachment}
+        attachError={attachError}
+      />
+      <SubmitButton
+        disabled={!canSubmit}
         onClick={() => {
           void handleSubmit();
         }}
-        disabled={submitting}
-        style={{
-          ...SUBMIT_BUTTON_STYLE,
-          opacity: submitting ? 0.5 : 1,
-          cursor: submitting ? 'not-allowed' : 'pointer',
-        }}
-      >
-        <ArrowUp className="w-5 h-5" strokeWidth={2.5} />
-      </button>
+      />
     </form>
   );
 };

@@ -587,6 +587,7 @@ STACK_ENV=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
     "BENCHMARK_RUN_ID=$WORKSPACE_NAME"
@@ -839,6 +840,11 @@ export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
 export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
+# run.sh exports this path to the backend, but the benchmark runner is a
+# sibling process launched by this driver and cannot inherit that export.
+# Give both processes the same run-scoped fixture file so SMS tasks stay
+# deterministic in cloud runs instead of failing closed (or using live search).
+export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='$CONTEXT_DIR/sms-web-search-fixture.json'
 export BENCHMARK_REQUIRE_SEED_DUMP=1
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'

@@ -42,7 +42,10 @@ RESET_SQL='DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'
 ARCHIVE_MAGIC="$(LC_ALL=C head -c 5 "$DUMP_PATH" || true)"
 if [ "$ARCHIVE_MAGIC" != "PGDMP" ]; then
     if [ -n "$DB_CONTAINER" ]; then
-        docker exec -i "$DB_CONTAINER" psql \
+        # RESET uses -c only — do not pass -i. An interactive attach with no
+        # redirected stdin inherits the caller's TTY/pipe and can hang forever
+        # (fake docker stubs that drain stdin, and real psql waiting on input).
+        docker exec "$DB_CONTAINER" psql \
             -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" -c "$RESET_SQL"
         docker exec -i "$DB_CONTAINER" psql \
             -v ON_ERROR_STOP=1 -U "$DB_USER" -d "$DB_NAME" < "$DUMP_PATH"

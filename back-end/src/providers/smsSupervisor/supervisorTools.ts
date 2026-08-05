@@ -29,12 +29,13 @@ import {
   unknownSupervisorToolError,
 } from './supervisorTools.helpers';
 import { executeGrepTool, GrepArgs } from './supervisorTools.grep';
-import {
-  commitStartNewAgent,
-  executeWebSearchTool,
-  type StartNewAgentArgs,
-  type WebSearchArgs,
-} from './supervisorTools.startAgent';
+import { commitStartNewAgent, type StartNewAgentArgs } from './supervisorTools.startAgent';
+// web_search MUST come from supervisorTools.webSearch: it is the only copy that
+// honours BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE. A fixture-blind copy silently
+// runs a LIVE search underneath a benchmark whose whole purpose is controlling
+// what the model learns, so the run scores a trajectory nobody chose — the
+// closed-store task ordered from a restaurant whose closure it was never shown.
+import { executeWebSearchTool, type WebSearchArgs } from './supervisorTools.webSearch';
 
 const log = createLogger('SmsSupervisorTools');
 

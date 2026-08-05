@@ -21,7 +21,11 @@ import {
   formatUserContext,
   type UserProfileContext,
 } from '../../providers/smsSupervisor/contextBuilder';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import { SYSTEM_PROMPT_DYNAMIC_BOUNDARY } from '../../providers/rose';
+import { TOOL_SCHEMAS } from '../../providers/smsSupervisor/supervisorTools.schemas';
 
 function out(line: string): void {
   process.stdout.write(`${line}\n`);
@@ -170,11 +174,35 @@ runCheck(
   SMS_SURFACE_OVERLAY.includes('primarily through grep'),
   'grep grounding sentence missing from the SMS overlay'
 );
+// Tool-specific delivery mechanics belong to the tool description, where the
+// model sees them at the decision boundary, rather than in the global surface
+// prompt. The completion tool owns the other half of the send/stop contract.
+const sendUserMessage = TOOL_SCHEMAS.find((tool) => tool.name === 'send_user_message');
+const attemptCompletion = TOOL_SCHEMAS.find((tool) => tool.name === 'attempt_completion');
 runCheck(
-  'block 3 separates send_user_message from attempt_completion',
-  SMS_SURFACE_OVERLAY.includes('attempt_completion sends nothing') &&
-    SMS_SURFACE_OVERLAY.includes('Sending a message does not end your run'),
-  'SMS send/completion contract missing from the overlay'
+  'block 3 does not duplicate send_user_message delivery mechanics',
+  !SMS_SURFACE_OVERLAY.includes('What send_user_message does:'),
+  'tool-specific delivery mechanics leaked into the SMS overlay'
+);
+runCheck(
+  'send_user_message tool owns immediate irreversible delivery',
+  Boolean(
+    sendUserMessage &&
+    /real SMS/i.test(sendUserMessage.description) &&
+    /immediately/i.test(sendUserMessage.description) &&
+    /cannot be undone/i.test(sendUserMessage.description) &&
+    /does not end the run/i.test(sendUserMessage.description)
+  ),
+  'send_user_message description is missing delivery mechanics'
+);
+runCheck(
+  'attempt_completion tool owns the no-message completion contract',
+  Boolean(
+    attemptCompletion &&
+    /sends no message/i.test(attemptCompletion.description) &&
+    /successfully called send_user_message/i.test(attemptCompletion.description)
+  ),
+  'attempt_completion description is missing its send prerequisite'
 );
 runCheck(
   'block 3 states prior tool calls are erased from session history',
@@ -184,6 +212,62 @@ runCheck(
       'Do NOT assume a prior assistant turn was tool-free just because no tools appear beside it'
     ),
   'SMS session-history tool-erasure rule missing from the overlay'
+);
+
+// The overlay describes the runtime to the model, so a claim that stops being
+// true silently becomes a lie the model acts on. Lifecycle SMS ARE replayed into
+// the transcript verbatim now; the overlay previously told the model the opposite
+// ("you cannot see their wording"), which is exactly the belief that makes it
+// re-narrate progress the user was already told about — the duplicate-SMS bug.
+runCheck(
+  'block 3 does not claim lifecycle SMS wording is invisible',
+  !/cannot see their wording/i.test(SMS_SURFACE_OVERLAY) &&
+    !/only the underlying events/i.test(SMS_SURFACE_OVERLAY),
+  'SMS overlay still claims the supervisor cannot see lifecycle SMS wording, but the runtime replays them verbatim'
+);
+runCheck(
+  'block 3 tells the model lifecycle SMS already reached the phone',
+  /You do see them/i.test(SMS_SURFACE_OVERLAY) &&
+    /already read on the user's phone/i.test(SMS_SURFACE_OVERLAY),
+  'SMS overlay is missing the already-delivered framing for lifecycle SMS'
+);
+runCheck(
+  'block 3 counts the irreversible tools correctly',
+  !/those four are not/i.test(SMS_SURFACE_OVERLAY) &&
+    /those three are not/i.test(SMS_SURFACE_OVERLAY),
+  'SMS overlay names three irreversible tools but miscounts them'
+);
+
+// web_search must resolve to the ONE fixture-aware implementation. A refactor
+// that extracts a second, fixture-blind copy and re-points the dispatcher at it
+// makes every web_search benchmark silently score a LIVE search: the closed-store
+// task ordered from a restaurant whose closure it was never shown, and the run
+// still reported a clean trajectory. Nothing else catches that.
+const SUPERVISOR_DIR = join(__dirname, '..', '..', 'providers', 'smsSupervisor');
+const TOOLS_SOURCE = readFileSync(join(SUPERVISOR_DIR, 'supervisorTools.ts'), 'utf8');
+const WEB_SEARCH_SOURCE = readFileSync(
+  join(SUPERVISOR_DIR, 'supervisorTools.webSearch.ts'),
+  'utf8'
+);
+runCheck(
+  'web_search dispatch uses the fixture-aware implementation',
+  /import \{[^}]*executeWebSearchTool[^}]*\}\s*from\s*'\.\/supervisorTools\.webSearch'/s.test(
+    TOOLS_SOURCE
+  ),
+  'supervisorTools.ts must import executeWebSearchTool from supervisorTools.webSearch (the only fixture-aware copy)'
+);
+runCheck(
+  'the fixture-aware web_search honours the benchmark fixture file',
+  WEB_SEARCH_SOURCE.includes('BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE') &&
+    /benchmarkWebSearchFixture\(query\)/.test(WEB_SEARCH_SOURCE),
+  'supervisorTools.webSearch must consult BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE before a live search'
+);
+runCheck(
+  'no second web_search implementation exists to be wired in by mistake',
+  !readFileSync(join(SUPERVISOR_DIR, 'supervisorTools.startAgent.ts'), 'utf8').includes(
+    'executeWebSearchTool'
+  ),
+  'a duplicate executeWebSearchTool exists outside supervisorTools.webSearch'
 );
 
 // The SMS prompt must NOT contain main-agent phase/grader prose.

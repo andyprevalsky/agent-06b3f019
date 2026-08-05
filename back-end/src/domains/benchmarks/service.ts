@@ -50,8 +50,10 @@ interface CatalogTaskShape {
  * picker consumes. This is the single source the query box reads from, so the
  * picker can never drift from the eval catalog.
  *
- * - Only agent-runner entries are included (external vitest smokes are not
- *   agent goals).
+ * - Only agent-runner entries are included. Other runners (e.g. `sms`, which
+ *   drives the SMS supervisor through a scripted inbound thread) carry a
+ *   scenario description in `prompt`, not an agent goal, so they would be
+ *   meaningless in the query box.
  * - `{frontend_url}` (run_benchmark's token) is rewritten to the front-end's
  *   `{{TEST_PAYMENT_BASE_URL}}` token, which TestPromptsSelector resolves to
  *   the live tunnel URL.

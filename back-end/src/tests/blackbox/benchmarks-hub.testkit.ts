@@ -49,11 +49,19 @@ export async function assertToastPromptMigration(
         } as Prisma.InputJsonObject,
       },
     });
-    const migration = readFileSync(
-      resolve('prisma/migrations/20260803204500_simplify_toast_nopa_prompt/migration.sql'),
-      'utf8'
-    );
-    await prisma.$executeRawUnsafe(migration);
+    // Apply the semantic-receipt simplification, then the Toast-site naming
+    // follow-up — Hub DB truth is the chained migration result, not either
+    // SQL file alone.
+    for (const migrationName of [
+      '20260803204500_simplify_toast_nopa_prompt',
+      '20260804185235_toast_nopa_prompt_names_toast_site',
+    ]) {
+      const migration = readFileSync(
+        resolve(`prisma/migrations/${migrationName}/migration.sql`),
+        'utf8'
+      );
+      await prisma.$executeRawUnsafe(migration);
+    }
 
     const migrated = await prisma.benchmarkTask.findUnique({ where: { name: taskName } });
     if (!migrated) throw new Error(`${taskName} missing after migration`);

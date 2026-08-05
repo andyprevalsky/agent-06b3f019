@@ -66,7 +66,7 @@ const BenchmarkTaskSchema = z.object({
   start_phase: z.string().nullable(),
   // Unified eval-catalog contract (additive, optional — validated by agents/benchmarks/long_horizon.py)
   status: z.enum(['ready', 'incomplete']).optional(),
-  runner: z.enum(['agent', 'vitest']).optional(),
+  runner: z.enum(['agent', 'vitest', 'sms']).optional(),
   description: z.string().min(1).optional(),
   environment: z
     .object({

@@ -107,6 +107,8 @@ function BrowserWindow(options) {
     getSize() { return [1800, 800]; },
     getContentSize() { return [1800, 800]; },
     setContentSize() {},
+    setMinimumSize() {},
+    setMaximumSize() {},
     setPosition() {},
     setVisibleOnAllWorkspaces() {},
     setAlwaysOnTop() {},

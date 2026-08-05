@@ -43,6 +43,7 @@ async def test_apply_fingerprint_with_user_agent():
             },
         },
         "initScript": "console.log('fingerprint injected');",
+        "timezone": "America/Los_Angeles",
     }
 
     result = await apply_fingerprint_injection(mock_page, fingerprint)
@@ -52,6 +53,9 @@ async def test_apply_fingerprint_with_user_agent():
     mock_context.new_cdp_session.assert_called_once_with(mock_page)
     mock_cdp_session.send.assert_any_call("Network.enable")
     mock_cdp_session.send.assert_any_call("Network.setUserAgentOverride", fingerprint["userAgentOverride"])
+    mock_cdp_session.send.assert_any_call(
+        "Emulation.setTimezoneOverride", {"timezoneId": "America/Los_Angeles"}
+    )
 
 
 async def test_apply_fingerprint_to_context_none():

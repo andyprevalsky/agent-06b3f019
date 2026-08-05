@@ -131,6 +131,25 @@ docker_available_for_workspace_db() {
     docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
 }
 
+# True only when Docker can actually create+run a container. Daemon `info`
+# success is not enough on Cloud VMs where overlay mounts return EINVAL.
+docker_can_create_container() {
+    local name="rose-docker-probe-$$"
+    # Prefer a tiny local image if present; otherwise skip the pull-heavy probe
+    # and trust ROSE_USE_SYSTEM_PG / prior daemon failures.
+    if ! docker image inspect alpine:3.20 >/dev/null 2>&1 && \
+       ! docker image inspect hello-world >/dev/null 2>&1; then
+        # No cached image: a pull+run is too expensive for every boot. Treat as
+        # unknown-OK and let create_db_container's failure path decide later.
+        return 0
+    fi
+    if docker image inspect alpine:3.20 >/dev/null 2>&1; then
+        docker run --rm --name "$name" alpine:3.20 true >/dev/null 2>&1
+        return $?
+    fi
+    docker run --rm --name "$name" hello-world >/dev/null 2>&1
+}
+
 docker_available_for_cold_seed() {
     local attempt delay_seconds integer_part fractional_part
     delay_seconds="${COLD_SEED_DOCKER_RETRY_DELAY_SECONDS:-1}"
@@ -463,7 +482,11 @@ if $IS_CLOUD; then
         fi
     }
 
-    # Phase 1: kill everything on service ports + known process patterns
+    # Phase 1: kill everything on THIS stack's service ports.
+    # Pattern-based kills (worker.py / vite / …) are only safe for the
+    # non-isolated cloud stack: an isolated `run-bench --local` shares the
+    # worktree with the Step 5 /deploy semantic stack and must not SIGKILL its
+    # siblings. Port-scoped cleanup is enough for isolated ranges.
     CLOUD_KILLED=false
     for port in "${CLOUD_PORTS[@]}"; do
         if port_in_use "$port"; then
@@ -472,13 +495,15 @@ if $IS_CLOUD; then
             CLOUD_KILLED=true
         fi
     done
-    for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
-        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-            echo "🧹 Killing $pattern (PID $pid)"
-            kill -9 "$pid" 2>/dev/null || true
-            CLOUD_KILLED=true
+    if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
+        for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
+            for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                echo "🧹 Killing $pattern (PID $pid)"
+                kill -9 "$pid" 2>/dev/null || true
+                CLOUD_KILLED=true
+            done
         done
-    done
+    fi
 
     # Phase 2: retry until all ports are free (processes may linger briefly)
     if $CLOUD_KILLED; then
@@ -545,6 +570,13 @@ elif ! $PRESTARTED_WORKSPACE_DB && \
      [ "${BENCHMARK_REQUIRE_SEED_DUMP:-1}" = "0" ] && \
      docker_available_for_cold_seed; then
     DOCKER_OK=true
+fi
+
+# `docker info` can succeed while `docker run` fails (overlay mount EINVAL on
+# some Cloud VMs). Probe a real create before committing to the Docker path.
+if $DOCKER_OK && ! docker_can_create_container; then
+    echo "⚠️  Docker daemon responds but cannot create containers — using system Postgres"
+    DOCKER_OK=false
 fi
 
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
@@ -2072,18 +2104,21 @@ run_service() {
 #   stable local ngrok or run-scoped cloud tunnel -> Vite on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
 #
-# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
-# (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
-# provider/environment boundary and no external browser ever needs to reach the
-# frontend over the internet. Standing up a public tunnel per one-shot
-# Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
-# local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
-# dev/benchmark stack — real browser agents need the public URL.
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: point PUBLIC_BASE_URL at the local
+# frontend and skip the tunnel + tunnel smoke. Set by two callers, for the same
+# reason — nothing in the run needs to be reachable from the public internet:
+#   - scripts/run-bench-cloud: a self-contained simulate-only box, where the WMH
+#     intercepts every provider/environment boundary.
+#   - benchmarks/local.py (needs_public_tunnel): no selected task drives a
+#     browser agent or a hosted payment page. trycloudflare rate-limits per IP,
+#     so opening a tunnel a bench never uses turns a 429 into a task failure.
+# A real browser agent DOES need the public URL, so never force this on for a
+# selection that includes one — needs_public_tunnel() is what decides.
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
     export VITE_ALLOWED_HOSTS="localhost"
     export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (no selected task drives a browser)"
 else
     start_public_tunnel
 fi
@@ -2250,6 +2285,13 @@ if $BENCHMARK_MODE; then
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    # SMS-supervisor benchmarks stub web_search through a file the backend
+    # re-reads per call (the backend is already running when a task picks its
+    # fixture, so an env var set by the benchmark process can never reach it).
+    # Exported here rather than in benchmarks/local.py so the CLOUD box — which
+    # launches run.sh directly via cloudbench-run.sh and never touches local.py —
+    # gets the same contract. Absent file = live search.
+    export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE="${BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE:-$RUN_CONTEXT_DIR/sms-web-search-fixture.json}"
     # Capture-outbound flips IS_BLACKBOX_TEST, which would disable the dev-phone
     # OTP login bypass — but the message-person iMessage relay needs it to
     # auto-login the benchmark user. Re-enable the login bypass here (still
@@ -2330,7 +2372,7 @@ fi
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
-    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (simulate-only cloud bench)"
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no selected task drives a browser)"
 else
     echo "⏳ Verifying public tunnel smoke..."
     bash scripts/test-public-tunnel.sh
