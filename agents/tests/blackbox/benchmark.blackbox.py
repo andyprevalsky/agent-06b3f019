@@ -1190,6 +1190,9 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "'PORT'" in dotenv_helper
     assert "'DATABASE_URL'" in dotenv_helper
     assert "'TEMPORAL_TASK_QUEUE'" in dotenv_helper
+    assert "'NODE_ENV'" in dotenv_helper
+    assert "captureCallerOwnedRuntimeEnv" in dotenv_helper
+    assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
 def test_payment_receipt_validation_allows_partial_live_receipts():
