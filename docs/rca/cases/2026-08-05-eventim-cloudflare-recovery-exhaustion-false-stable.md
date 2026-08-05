@@ -193,10 +193,17 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
     `request_payment_card` / `payment_approval`. Block `attempt_completion` when
     the live checkout still shows card-entry markers and no card has been
     requested/approved.
+17. `88b8d4a4-…` reached checkout, called `request_payment_card`, then failed
+    only on merchant identity: `Eventim US (1015 Folsom)` vs expected
+    `1015 Folsom (Eventim - eventim.us)`. Reject confused trailing
+    parentheticals (no `Platform - host`) before creating payment_approval,
+    and teach `Business (Platform - host)` / `Business via Platform` on every
+    LLM-facing surface (tool schema, payment prompt, completion-block error).
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests +
 unit `browser-challenge-recovery` Eventim-shaped classifier / paymentCdn cases +
-`test_browser_cache` write-through/no-Stripe-cache cases.
+`test_browser_cache` write-through/no-Stripe-cache cases +
+`request_payment_card` / benchmark merchant-identity cases.
 Exact-bench outcome still required before status=`fixed`.
 
 ## Human feedback

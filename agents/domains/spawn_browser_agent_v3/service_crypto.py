@@ -875,7 +875,7 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 ## Payment Information
 AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): {PAYMENT_CARD_ENTRY_RULE}
 
-If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field.
+If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field. Set merchant to 'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') or 'Business via Platform' (e.g. '1015 Folsom via Eventim') — never a swapped venue-only parenthetical like 'Eventim US (1015 Folsom)'.
 
 Do not type any card details yet, and do not ask the user to enter a card. The one-time card is minted on demand only after you call request_payment_card and the user approves; its secret refs are then provided for you to type into the payment fields."""
 

@@ -10813,6 +10813,80 @@ def test_eventim_1015_request_card_benchmark_contract():
     ]
 
 
+def _captured_eventim_payment_approval(
+    *,
+    merchant: str = "1015 Folsom (Eventim - eventim.us)",
+    approval_url: str = "https://checkout.eventim.us/?afflky=1015Folsom",
+) -> tuple[dict, list[dict]]:
+    """Grounded Eventim payment boundary shaped like bench12 agent 88b8d4a4-…."""
+    receipt = {
+        "merchant": merchant,
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": "Rival Consoles Live A/V Tour - General Admission (Tier 1)",
+                "imageUrl": None,
+                "productUrl": "https://wl.eventim.us/event/rival-consoles-live-av-tour/686363?afflky=1015Folsom",
+                "rating": "0 stars",
+                "reviewCount": "0 reviews",
+                "unitPriceCents": 3113,
+                "quantity": 1,
+                "lineTotalCents": 3113,
+            }
+        ],
+        "fees": [{"label": "Print@Home Delivery", "amountCents": 0}],
+        "subtotalCents": 3113,
+        "totalCents": 3113,
+        "fingerprint": "b" * 64,
+        "userId": "user-123",
+        "agentId": "agent-123",
+    }
+    request = {
+        "id": "eventim-payment-attention",
+        "agentId": "agent-123",
+        "metadata": {
+            "requestPaymentCard": receipt,
+            "requestUserApproval": {
+                "url": approval_url,
+                "requestPaymentCard": receipt,
+            },
+            "writePermission": True,
+        },
+    }
+    messages: list[dict] = []
+    return request, messages
+
+
+def test_eventim_payment_merchant_identity_accepts_grounded_variants():
+    """Eventim bench accepts structured + connector merchant forms when host is grounded."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-1015-eventim-request-card")
+    for merchant in (
+        "1015 Folsom (Eventim - eventim.us)",
+        "1015 Folsom via Eventim",
+        "Eventim US (Eventim - eventim.us)",
+    ):
+        request, messages = _captured_eventim_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
+
+
+def test_eventim_payment_merchant_identity_rejects_confused_parenthetical():
+    """Bench12 failure shape: swapped venue parenthetical is not a validated payment card request."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-1015-eventim-request-card")
+    request, messages = _captured_eventim_payment_approval(merchant="Eventim US (1015 Folsom)")
+    reason = _validate_payment_receipt(task, request, messages=messages)
+    assert reason is not None
+    # Runtime schema rejects the confused parenthetical before identity matching;
+    # either surface proves the payload is not a validated payment-card request.
+    assert "Eventim US (1015 Folsom)" in reason
+    assert "merchant mismatch" in reason or "malformed complete payment receipt" in reason
+
+
 def test_history_ledger_task_names_still_exist_in_catalog():
     """History-orphan guard: renaming a catalog task orphans its pass ledger + p99 baselines.
 
@@ -12166,6 +12240,14 @@ async def run_all_tests():
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)
+    r.record(
+        "eventim_payment_merchant_grounded_variants",
+        test_eventim_payment_merchant_identity_accepts_grounded_variants,
+    )
+    r.record(
+        "eventim_payment_merchant_rejects_confused_parenthetical",
+        test_eventim_payment_merchant_identity_rejects_confused_parenthetical,
+    )
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record("long_horizon_idea_bank", test_long_horizon_idea_bank_preserves_seed_ideas_with_safety_notes)

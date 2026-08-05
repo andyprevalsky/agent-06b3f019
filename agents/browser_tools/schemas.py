@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Literal, Optional, Type
 from pydantic import AliasChoices, BaseModel, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from utils.purchase_approval import (
+    validate_payment_merchant_name,
     validate_product_detail_url,
     validate_product_rating,
     validate_product_review_count,
@@ -357,7 +358,16 @@ class RequestPaymentCardBrowserTool(BaseModel):
     """Request a one-time virtual payment card for the current checkout after extracting the full receipt."""
 
     tool: Literal["request_payment_card"]
-    merchant: str = Field(description="Merchant or site name for the purchase")
+    merchant: str = Field(
+        description=(
+            "Business + platform identity for the purchase. Prefer "
+            "'Business (Platform - checkout.host)' "
+            "(e.g. '1015 Folsom (Eventim - eventim.us)') or 'Business via Platform' "
+            "(e.g. '1015 Folsom via Eventim'). For a first-party storefront with no "
+            "separate platform, a bare business name is fine. Never use a swapped "
+            "venue-only parenthetical like 'Eventim US (1015 Folsom)'."
+        )
+    )
     currency: Literal["USD"] = Field(default="USD", description="Purchase currency; currently only USD")
     line_items: List[PaymentLineItem] = Field(
         description=(
@@ -378,6 +388,11 @@ class RequestPaymentCardBrowserTool(BaseModel):
         ge=1,
         validation_alias=AliasChoices("total_cents", "totalCents"),
     )
+
+    @field_validator("merchant")
+    @classmethod
+    def require_payment_merchant_name(cls, value: str) -> str:
+        return validate_payment_merchant_name(value)
 
     @field_validator("currency", mode="before")
     @classmethod

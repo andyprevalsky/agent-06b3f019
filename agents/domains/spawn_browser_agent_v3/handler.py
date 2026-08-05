@@ -6674,7 +6674,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 "Checkout still requires new card details. Extract the full itemized "
                                 "receipt from the page (ticket line items, fees, subtotal, total), call "
                                 "request_payment_card with that receipt, and wait for approval before "
-                                "attempt_completion. Do not treat empty Stripe Element shells as done."
+                                "attempt_completion. Set merchant to 'Business (Platform - checkout.host)' "
+                                "(e.g. '1015 Folsom (Eventim - eventim.us)') or 'Business via Platform' "
+                                "(e.g. '1015 Folsom via Eventim') — never a swapped venue-only "
+                                "parenthetical like 'Eventim US (1015 Folsom)'. Do not treat empty "
+                                "Stripe Element shells as done."
                             ),
                         }
                         blocked_tool_call_id = str(
