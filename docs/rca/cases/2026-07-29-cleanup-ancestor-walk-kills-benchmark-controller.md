@@ -19,6 +19,7 @@ tags:
   - deploy
 sources:
   - commit 8363b11a8
+  - commit 0099c4e3bfa1
 repro: scripts/tests/kill-services.test.sh
 status: fixed
 ---
@@ -45,6 +46,23 @@ single guard is insufficient: `pid_tree` walks DOWN and never consults
 This is also why `/deploy`'s Group 4 cannot actually run the smoke suite and the
 Step 5 stack concurrently in one worktree.
 
+### Recurrence on 2026-08-03
+
+The identical failure recurred while deploying commit `0099c4e3bfa1`: an
+unchanged `scripts/run-predeploy-local` smoke run exited 143 immediately after
+the shared Step 5 stack was torn down. The permanent controller-survival test
+failed on that revision with `benchmark controller (run-predeploy-local) was
+killed unexpectedly`.
+
+The deeper recurrence cause was delivery, not a new process-tree path. Commit
+`8363b11a8` contained the two required guards, but it existed only on an
+unmerged remote branch and was never an ancestor of `origin/main`. This RCA case
+nonetheless landed on `main` with `status: fixed`, so the archive claimed a
+guardrail the deployed code did not contain. Searches for both the literal
+`Received signal 15` symptom and the behavioral `cleanup benchmark controller`
+description found this case; comparing its cited fix commit with `origin/main`
+exposed the missing delivery boundary.
+
 ## Solution
 
 Two guards, matching the two directions the pid set is built from:
@@ -54,6 +72,12 @@ kill list. Cemented in `scripts/tests/kill-services.test.sh`: a stand-in control
 with an isolated `run.sh` child must survive a sweep — verified failing on the buggy
 revision ("benchmark controller was killed unexpectedly") and passing after.
 
+For the recurrence, the missing guards and regression test were applied directly
+to the active deployment branch rather than relying on the orphaned commit. The
+same checked-in test was again observed failing before the guard and passing after
+it. A case must not be marked fixed merely because a fix commit exists somewhere;
+the fix must be reachable from the target branch.
+
 ## Human feedback
 
 None recorded.
@@ -62,4 +86,5 @@ None recorded.
 
 A cleanup sweep must never escalate upward from a matched child — protect
 resource-owning controllers explicitly and filter the final kill list, since tree
-walks in both directions can reach them.
+walks in both directions can reach them. RCA closure also has a delivery
+invariant: verify the cited fix is an ancestor of the branch being declared fixed.

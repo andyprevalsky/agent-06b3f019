@@ -97,6 +97,15 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
+# A retained workspace volume may predate POSTGRES_DB=victoria. The image only
+# applies POSTGRES_DB when initializing an empty volume, so ensure the database
+# exists before resetting its schema.
+if ! docker exec "$DB_CONTAINER" psql -U postgres -d postgres -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = 'victoria'" | grep -q '^1$'; then
+    echo "🐘 Creating missing victoria database..."
+    docker exec "$DB_CONTAINER" createdb -U postgres victoria
+fi
+
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.
 echo "🧹 Resetting local database..."

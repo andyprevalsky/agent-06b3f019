@@ -111,36 +111,38 @@ if (fs.existsSync(VALIDATOR)) {
   }
 }
 
-// 4. The documented `new` command must actually reach its scaffold writer.
+// 4. The documented `new` command must actually dispatch. Exercise a copied
+//    validator in a temporary archive so this structural test never mutates the
+//    checked-in cases.
 if (fs.existsSync(VALIDATOR)) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  const probeRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rca-archive-new-'));
+  const probeValidator = path.join(probeRoot, 'scripts/rca_archive.py');
+  const probeCase = path.join(probeRoot, 'docs/rca/cases/2099-01-02-dispatch-probe.md');
+
   try {
-    const tempScriptDir = path.join(tempRoot, 'scripts');
-    const tempCasesDir = path.join(tempRoot, 'docs/rca/cases');
-    fs.mkdirSync(tempScriptDir, { recursive: true });
-    fs.mkdirSync(tempCasesDir, { recursive: true });
-    fs.copyFileSync(VALIDATOR, path.join(tempScriptDir, 'rca_archive.py'));
-    execFileSync(
-      'python3',
-      [path.join(tempScriptDir, 'rca_archive.py'), 'new', 'reachable-subcommand'],
-      {
-        cwd: tempRoot,
-        env: { ...process.env, RCA_ARCHIVE_DATE: '2099-01-02' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
-    );
-    const scaffold = path.join(tempCasesDir, '2099-01-02-reachable-subcommand.md');
-    if (!fs.existsSync(scaffold)) {
-      failures.push('rca_archive.py new exited successfully without creating its scaffold.');
+    fs.mkdirSync(path.dirname(probeValidator), { recursive: true });
+    fs.mkdirSync(path.dirname(probeCase), { recursive: true });
+    fs.copyFileSync(VALIDATOR, probeValidator);
+
+    const result = execFileSync('python3', [probeValidator, 'new', 'dispatch-probe'], {
+      cwd: probeRoot,
+      encoding: 'utf8',
+      env: { ...process.env, RCA_ARCHIVE_DATE: '2099-01-02' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (!fs.existsSync(probeCase) || !result.includes('2099-01-02-dispatch-probe.md')) {
+      failures.push(
+        `rca_archive.py new did not scaffold the requested case.\n` +
+          `    Command output:\n${result.trim()}`
+      );
     }
   } catch (error) {
-    const err = error as { stdout?: Buffer; stderr?: Buffer; status?: number };
+    const err = error as { stdout?: string; stderr?: string };
     failures.push(
-      `rca_archive.py new is unreachable (exit ${err.status ?? 'unknown'}):\n` +
-        `${err.stderr?.toString().trim() ?? ''}\n${err.stdout?.toString().trim() ?? ''}`
+      `rca_archive.py new failed:\n${(err.stderr ?? '').trim()}\n${(err.stdout ?? '').trim()}`
     );
   } finally {
-    fs.rmSync(tempRoot, { recursive: true, force: true });
+    fs.rmSync(probeRoot, { recursive: true, force: true });
   }
 }
 

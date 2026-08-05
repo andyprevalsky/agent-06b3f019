@@ -21,6 +21,7 @@ import {
 } from '../../domains/test-payment/service';
 import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
+import { assertBenchmarkAgentCardResetFixture } from './test-payment-agentcard-fixture';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const writeLine = (message = ''): void => {
@@ -189,10 +190,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           (reset.data as { status?: string }).status === 'connect_required',
           'expected reset setup state'
         );
-        const removed = await prisma.integration.findUnique({
-          where: { userId_name: { userId, name: 'agentcard' } },
-        });
-        assert(removed === null, 'expected AgentCard integration to be removed');
+        await assertBenchmarkAgentCardResetFixture(userId);
       } finally {
         await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
       }

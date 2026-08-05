@@ -348,12 +348,14 @@ async function main(): Promise<void> {
     assert.ok((config?.cardholderId ?? '').length > 0);
     const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
     assert.equal(reset.status, 'connect_required');
-    assert.equal(
-      await prisma.integration.findUnique({
-        where: { userId_name: { userId, name: 'agentcard' } },
-      }),
-      null
-    );
+    const resetRow = await prisma.integration.findUnique({
+      where: { userId_name: { userId, name: 'agentcard' } },
+    });
+    const resetConfig = resetRow?.config as {
+      onboardingSessionId?: string;
+    };
+    assert.equal(resetRow?.status, 'NOT_CONNECTED');
+    assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
   });
 
   await test('resolvePublicBaseUrl reflects the configured value', async () => {

@@ -119,6 +119,43 @@ docker_available_for_workspace_db() {
     docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
 }
 
+docker_available_for_cold_seed() {
+    local attempt delay_seconds integer_part fractional_part
+    delay_seconds="${COLD_SEED_DOCKER_RETRY_DELAY_SECONDS:-1}"
+    if [[ ! "$delay_seconds" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        delay_seconds=1
+    else
+        integer_part="${delay_seconds%%.*}"
+        fractional_part=""
+        [[ "$delay_seconds" == *.* ]] && fractional_part="${delay_seconds#*.}"
+        # Strip leading zeros before any arithmetic. `10#$integer_part` errors
+        # out on a value wider than a machine integer ("value too great for
+        # base"), which skipped the cap entirely and left a nonsense delay in
+        # place — the retry loop would then sleep effectively forever. Anything
+        # left with more than one digit is >= 10, so it caps without arithmetic.
+        integer_part="${integer_part#"${integer_part%%[!0]*}"}"
+        [ -z "$integer_part" ] && integer_part=0
+        if (( ${#integer_part} > 1 )) || (( integer_part > 5 )) || \
+           { (( integer_part == 5 )) && [[ "$fractional_part" =~ [1-9] ]]; }; then
+            delay_seconds=5
+        elif [[ "$delay_seconds" =~ ^0+([.]0+)?$ ]]; then
+            delay_seconds=0
+        fi
+    fi
+    # A false-negative Docker probe here makes the one-time seed run against a
+    # potentially newer system Postgres. Its archive can then be unreadable by
+    # the normal postgres:16 workspace container. Cold boot is rare, so spend a
+    # bounded retry window preserving a single toolchain instead of poisoning
+    # the shared seed cache.
+    for attempt in 1 2 3 4 5 6; do
+        docker_info_quick && return 0
+        if [ "$attempt" -lt 6 ] && [ "$delay_seconds" != "0" ]; then
+            sleep "$delay_seconds"
+        fi
+    done
+    return 1
+}
+
 # Check cwd first because many service command lines are just "node" or
 # "python3" and do not include the worktree path.
 process_belongs_to_this_worktree() {
@@ -474,12 +511,14 @@ if [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
 fi
 DOCKER_OK=false
 if ! $PRESTARTED_WORKSPACE_DB && \
-   docker ps --filter "name=^${DB_CONTAINER}$" --format '{{.Names}}' 2>/dev/null | grep -q .; then
-    # /deploy pre-starts this exact workspace container. Prefer that direct,
-    # authoritative check even when a busy Docker Desktop daemon makes the
-    # broader `docker info` probe miss its bounded response window.
+   [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+   docker_available_for_workspace_db "$DB_CONTAINER"; then
     DOCKER_OK=true
-elif ! $PRESTARTED_WORKSPACE_DB && docker_info_quick; then
+elif ! $PRESTARTED_WORKSPACE_DB && \
+     [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
+     [ "$BENCHMARK_ISOLATED_RUN" = "true" ] && \
+     [ "${BENCHMARK_REQUIRE_SEED_DUMP:-1}" = "0" ] && \
+     docker_available_for_cold_seed; then
     DOCKER_OK=true
 fi
 
@@ -982,41 +1021,6 @@ print(label[:50].strip("-"))
 PY
 }
 
-# Reserve an ngrok domain, defaulting to this worktree's primary domain.
-# Callers may pass an explicit domain (the smoke fallback reserves its own) and
-# may pass `soft` to warn instead of exiting when reservation fails, so a
-# best-effort fallback path never kills the whole stack.
-ensure_ngrok_domain_reserved() {
-    local domain="${1:-$WORKTREE_DOMAIN}"
-    local failure_mode="${2:-fatal}"
-    if [ -z "${NGROK_API_KEY:-}" ]; then
-        return 0
-    fi
-    echo "🌐 Checking ngrok reserved domain $domain"
-    local domains_json
-    domains_json=$(ngrok api reserved-domains list --api-key "$NGROK_API_KEY" --limit 1000 2>&1) || {
-        echo "$domains_json"
-        echo "❌ Could not list ngrok reserved domains with NGROK_API_KEY."
-        [ "$failure_mode" = "soft" ] && return 1
-        exit 1
-    }
-    if printf '%s\n' "$domains_json" | grep -q "\"domain\"[[:space:]]*:[[:space:]]*\"$domain\""; then
-        echo "🌐 Reserved domain already exists: $domain"
-        return 0
-    fi
-    echo "🌐 Reserving ngrok domain $domain"
-    local create_output
-    create_output=$(ngrok api reserved-domains create \
-        --api-key "$NGROK_API_KEY" \
-        --domain "$domain" \
-        --description "Conductor workspace $CONDUCTOR_WORKSPACE_NAME public frontend" 2>&1) || {
-        echo "$create_output"
-        echo "❌ Could not reserve $domain. Confirm the ngrok account is on Pay-as-you-go and the domain is available."
-        [ "$failure_mode" = "soft" ] && return 1
-        exit 1
-    }
-}
-
 # Cloudflare account-less quick tunnels have no uptime guarantee: a hostname is
 # published within ~2s but a meaningful fraction never route at all (DNS answers
 # with Cloudflare IPs, yet every request fails to connect indefinitely), and the
@@ -1160,10 +1164,7 @@ start_ngrok_ephemeral_tunnel() {
     local fallback_label fallback_domain
     fallback_label="$(dns_label_from_workspace)" || return 1
     fallback_domain="rose-${fallback_label}-bench.${NGROK_DOMAIN_SUFFIX:-ngrok.app}"
-    if [ -n "${NGROK_API_KEY:-}" ]; then
-        ensure_ngrok_domain_reserved "$fallback_domain" soft ||
-            echo "   Proceeding without pre-reservation of $fallback_domain."
-    fi
+    ensure_ngrok_domain_reserved "$fallback_domain"
 
     local -a ngrok_args=("http" "$FRONTEND_PORT")
     if [ -n "$fallback_domain" ]; then

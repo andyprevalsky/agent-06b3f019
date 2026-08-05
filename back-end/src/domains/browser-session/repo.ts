@@ -36,7 +36,9 @@ export async function findUserSettings(userId: string) {
     where: { userId },
     select: {
       name: true,
+      email: true,
       phone: true,
+      deliveryRecipientName: true,
       addressLine1: true,
       addressLine2: true,
       city: true,

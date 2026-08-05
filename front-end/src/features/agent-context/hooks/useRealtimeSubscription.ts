@@ -129,7 +129,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
     }
 
     const scheduleReconnect = () => {
-      if (!selectedAgentId || !canSubscribe) return;
+      if (cancelled || !selectedAgentId || !canSubscribe) return;
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -148,9 +148,14 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
         attempt === 0 ? 0 : Math.min(1000 * Math.pow(2, attempt - 1), MAX_RECONNECT_DELAY_MS);
       const delay = backoff === 0 ? 0 : backoff + Math.floor(Math.random() * 250);
 
-      reconnectTimeoutRef.current = window.setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
+        if (reconnectTimeoutRef.current === timeoutId) {
+          reconnectTimeoutRef.current = null;
+        }
+        if (cancelled) return;
         setForceResubscribeCounter((prev) => prev + 1);
       }, delay);
+      reconnectTimeoutRef.current = timeoutId;
     };
 
     const setupRealtime = async () => {
@@ -244,6 +249,7 @@ export function useRealtimeSubscription(deps: RealtimeSubscriptionDeps) {
           setIsChatMode,
         });
       } catch (error) {
+        if (cancelled) return;
         console.error('Failed to subscribe:', error);
         isReconnectingRef.current = false;
         scheduleReconnect();

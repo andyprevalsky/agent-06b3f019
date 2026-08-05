@@ -588,6 +588,146 @@ async def test_handler_condition_check_messages_carry_explore_task_id():
     assert all(e.metadata.get("exploreTaskId") for e in reestablish)
 
 
+# ── pending_timestamp_wait_to_resume (deploy-migration resume) ────
+
+
+def _ts_msg(status, *, until=None, error_code=None, call_id="wf-1"):
+    md = {"toolName": "wait_for", "waitForMode": "timestamp", "toolCallId": call_id, "toolStatus": status}
+    if until is not None:
+        md["untilTimestamp"] = until
+    if error_code is not None:
+        md["errorCode"] = error_code
+    return {"role": "TOOL", "text": "", "metadata": md}
+
+
+def test_resume_interrupted_future_wait_returns_target():
+    """A deploy-interrupted wait with a future target is resumed from that target."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        _ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z"),
+        _ts_msg("FINISHED", until="2026-08-03T17:00:00Z", error_code="DEPLOY_INTERRUPTED"),
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T17:00:00Z"
+
+
+def test_resume_interrupted_past_wait_returns_target():
+    """An elapsed interrupted wait still returns its target (caller completes it)."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        _ts_msg("IN_PROGRESS", until="2026-08-03T09:00:00Z"),
+        _ts_msg("FINISHED", until="2026-08-03T09:00:00Z", error_code="DEPLOY_INTERRUPTED"),
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T09:00:00Z"
+
+
+def test_resume_completed_wait_returns_none():
+    """A normally completed wait (Wait complete) is never resumed."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        _ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z"),
+        _ts_msg("FINISHED"),  # "Wait complete" carries waitForMode only, no errorCode
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) is None
+
+
+def test_resume_still_in_progress_returns_target():
+    """An in-flight wait not yet finalized is resumable."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [_ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z")]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T17:00:00Z"
+
+
+def test_resume_no_wait_returns_none():
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [{"role": "TOOL", "text": "", "metadata": {"toolName": "message_person", "toolStatus": "FINISHED"}}]
+    assert pending_timestamp_wait_to_resume(msgs) is None
+
+
+def test_resume_unparseable_target_returns_none():
+    """A malformed target is skipped rather than crashing the resume path."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [_ts_msg("IN_PROGRESS", until="not-a-timestamp", error_code="DEPLOY_INTERRUPTED")]
+    assert pending_timestamp_wait_to_resume(msgs) is None
+
+
+def test_resume_tolerates_nondict_metadata():
+    """A truthy non-dict metadata row must not abort the scan of later valid waits."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        {"role": "TOOL", "text": "", "metadata": "garbage-not-a-dict"},
+        _ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z", error_code="DEPLOY_INTERRUPTED"),
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T17:00:00Z"
+
+
+def test_resume_latest_wait_wins():
+    """An older completed wait is ignored; the newer interrupted wait resumes."""
+    from domains.wait_for.service import pending_timestamp_wait_to_resume
+
+    msgs = [
+        _ts_msg("IN_PROGRESS", until="2026-08-03T08:00:00Z", call_id="wf-old"),
+        _ts_msg("FINISHED", call_id="wf-old"),
+        _ts_msg("IN_PROGRESS", until="2026-08-03T17:00:00Z", call_id="wf-new"),
+        _ts_msg("FINISHED", until="2026-08-03T17:00:00Z", error_code="DEPLOY_INTERRUPTED", call_id="wf-new"),
+    ]
+    assert pending_timestamp_wait_to_resume(msgs) == "2026-08-03T17:00:00Z"
+
+
+async def test_handler_timestamp_resume_past_completes_not_errors():
+    """resume=True: an elapsed target yields FINISHED (completed), not an error."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 3, 18, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"until_timestamp": "2026-08-03T17:00:00Z", "resume": True},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.FINISHED in statuses
+    assert MessageStatus.ERROR not in statuses
+    # No sleep for an already-elapsed target.
+    assert fake.sleep_records == []
+
+
+async def test_handler_timestamp_resume_nonbool_still_errors_in_past():
+    """A truthy non-bool resume (e.g. the string 'false') must NOT bypass the past-error."""
+    from domains.wait_for.handler import WaitForManager
+    from tools.base import MessageStatus
+
+    fake = _FakeWFModule(current_time=datetime(2026, 8, 3, 18, 0, 0, tzinfo=timezone.utc))
+    restore = _patch_handler_workflow(fake)
+    try:
+        events = await _collect(
+            WaitForManager().execute_tool(
+                workflow_instance=_WFInstance(),
+                tool_call={"until_timestamp": "2026-08-03T17:00:00Z", "resume": "false"},
+                tool_call_id="tc",
+            )
+        )
+    finally:
+        restore()
+
+    statuses = [e.status for e in events]
+    assert MessageStatus.ERROR in statuses
+    assert MessageStatus.FINISHED not in statuses
+
+
 async def run_all_tests():
     print("wait-for blackbox tests:")
     r = BlackboxResult()
@@ -626,6 +766,16 @@ async def run_all_tests():
     await r.record_async("handler_cond_fetch_fail", test_handler_condition_network_fetch_failure_tolerated)
     await r.record_async("handler_cond_gates_off", test_handler_condition_gates_off_skip_fetch)
     await r.record_async("handler_cond_explore_task_id", test_handler_condition_check_messages_carry_explore_task_id)
+    r.record("resume_interrupted_future", test_resume_interrupted_future_wait_returns_target)
+    r.record("resume_interrupted_past", test_resume_interrupted_past_wait_returns_target)
+    r.record("resume_completed_none", test_resume_completed_wait_returns_none)
+    r.record("resume_in_progress", test_resume_still_in_progress_returns_target)
+    r.record("resume_no_wait_none", test_resume_no_wait_returns_none)
+    r.record("resume_unparseable_none", test_resume_unparseable_target_returns_none)
+    r.record("resume_nondict_metadata", test_resume_tolerates_nondict_metadata)
+    r.record("resume_latest_wins", test_resume_latest_wait_wins)
+    await r.record_async("handler_ts_resume_past", test_handler_timestamp_resume_past_completes_not_errors)
+    await r.record_async("handler_ts_resume_nonbool", test_handler_timestamp_resume_nonbool_still_errors_in_past)
     teardown_mock()
     return r.all_passed
 

@@ -1964,11 +1964,11 @@ async def _get_initial_payment_lifecycle_with_retry(
     base_url: str,
     agent_id: str,
     *,
-    max_attempts: int = 3,
-    retry_delay_seconds: float = 2,
+    max_attempts: int = 43,
+    retry_delay_seconds: float = 10,
     fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
 ) -> dict:
-    """Bound transient provider failures while assembling the first lifecycle snapshot."""
+    """Observe the first lifecycle snapshot across the provider's consistency window."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
     last_error: Optional[Exception] = None
@@ -2073,6 +2073,64 @@ async def abandon_test_payment(base_url: str, agent_id: str) -> dict:
         return resp.json()
 
 
+def _payment_abandonment_has_started(lifecycle: dict) -> bool:
+    """Recognize durable evidence that an indeterminate abandon POST reached the backend."""
+    purchase = lifecycle.get("purchase") if isinstance(lifecycle, dict) else None
+    funding = lifecycle.get("walletFunding") if isinstance(lifecycle, dict) else None
+    purchase_status = purchase.get("status") if isinstance(purchase, dict) else None
+    funding_status = funding.get("status") if isinstance(funding, dict) else None
+    return purchase_status in {"VOIDED", "FUNDING_RECLAIM_FAILED", "REFUND_FAILED"} or funding_status in {
+        "RECLAIMING",
+        "RECLAIMED",
+        "RECLAIM_FAILED",
+    }
+
+
+async def _start_payment_abandonment_with_recovery(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 3,
+    retry_delay_seconds: float = 2,
+    abandon_payment: Callable[[str, str], Awaitable[dict]] = abandon_test_payment,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+) -> dict:
+    """Recover an accepted abandon POST whose HTTP response was disconnected.
+
+    The mutation is idempotent, but immediately reposting it makes the provider
+    cleanup race with itself and needlessly consumes AgentCard's request budget.
+    First reconcile the indeterminate result through the read endpoint. Only
+    retry the POST when no durable reclaim state exists yet.
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return await abandon_payment(base_url, agent_id)
+        except Exception as error:
+            if not isinstance(error, httpx.TransportError) and "Failed to abandon test payment: 5" not in str(error):
+                raise
+            last_error = error
+            try:
+                lifecycle = await fetch_lifecycle(base_url, agent_id)
+                if _payment_abandonment_has_started(lifecycle):
+                    print("    ♻ Recovered accepted payment abandonment after a disconnected response")
+                    return lifecycle
+            except Exception as read_error:
+                last_error = read_error
+            if attempt >= max_attempts:
+                break
+            print(
+                "    ⚠ Payment abandonment response was indeterminate; "
+                f"retrying ({attempt}/{max_attempts}): {error}"
+            )
+            await asyncio.sleep(retry_delay_seconds)
+    raise RuntimeError(
+        f"Payment abandonment remained unavailable after {max_attempts} attempts: {last_error}"
+    ) from last_error
+
+
 async def configure_benchmark_agentcard_setup(base_url: str, action: str) -> dict:
     headers = await _api_headers()
     async with httpx.AsyncClient(timeout=30) as client:
@@ -2090,18 +2148,38 @@ async def ensure_payment_lifecycle_cleanup(
     base_url: str,
     agent_id: str,
     task: BenchmarkTask,
+    *,
+    current_lifecycle: Optional[dict] = None,
+    abandon_payment: Callable[[str, str], Awaitable[dict]] = abandon_test_payment,
+    fetch_lifecycle: Callable[[str, str], Awaitable[dict]] = get_test_payment_lifecycle,
+    poll_interval_seconds: float = 10,
 ) -> Optional[dict]:
     """Idempotently compensate issued benchmark cards before agent deletion."""
     if not agent_id or task.payment_card_request_action != "abandon":
         return None
     try:
-        lifecycle = await abandon_test_payment(base_url, agent_id)
+        if current_lifecycle is not None:
+            lifecycle_error = _validate_payment_lifecycle(
+                task,
+                {"_benchmark": {"payment_lifecycle": current_lifecycle}},
+            )
+            if lifecycle_error is None:
+                print("    🧹 Reused already-reconciled payment lifecycle")
+                return current_lifecycle
+
+        lifecycle = await _start_payment_abandonment_with_recovery(
+            base_url,
+            agent_id,
+            abandon_payment=abandon_payment,
+            fetch_lifecycle=fetch_lifecycle,
+        )
         lifecycle = await _wait_for_expected_payment_lifecycle(
             base_url,
             agent_id,
             task,
             lifecycle,
-            recover_lifecycle=abandon_test_payment,
+            poll_interval_seconds=poll_interval_seconds,
+            fetch_lifecycle=fetch_lifecycle,
         )
         lifecycle_error = _validate_payment_lifecycle(
             task,
@@ -3078,7 +3156,7 @@ async def poll_agent(
                 for message in messages
             )
         ):
-            lifecycle = await abandon_test_payment(base_url, agent_id)
+            lifecycle = await _start_payment_abandonment_with_recovery(base_url, agent_id)
             lifecycle = await _wait_for_expected_payment_lifecycle(
                 base_url,
                 agent_id,
@@ -4275,17 +4353,20 @@ def _local_victoria_database_url() -> Optional[str]:
         try:
             services = json.loads(services_path.read_text())
             if _services_manifest_is_active(services):
-                candidates.append(manifest_database_url(services))
+                # An active per-run manifest is the authoritative database
+                # identity. Do not turn discovery into a second connectivity
+                # gate: cleanup's real SQL owns that check and preserves the
+                # underlying psql error when the database is unavailable.
+                return manifest_database_url(services)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise RuntimeError(f"Invalid benchmark services manifest at {services_path}: {exc}") from exc
-    if not candidates:
-        env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
-        if env_database_url:
-            candidates.append(_psql_compatible_database_url(env_database_url))
-        candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
-        configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
-        if configured_url:
-            candidates.append(_psql_compatible_database_url(configured_url))
+    env_database_url = os.environ.get("DIRECT_URL") or os.environ.get("DATABASE_URL")
+    if env_database_url:
+        candidates.append(_psql_compatible_database_url(env_database_url))
+    candidates.append("postgresql://postgres:postgres@localhost:5432/victoria")
+    configured_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    if configured_url:
+        candidates.append(_psql_compatible_database_url(configured_url))
 
     seen: set[str] = set()
     for database_url in candidates:
@@ -4927,6 +5008,11 @@ def _refresh_local_claude_token_from_keychain(database_url: str) -> bool:
     return True
 
 
+def _local_codex_auth_path() -> Path:
+    """Where this machine's Codex/ChatGPT auth envelope lives, if it has one."""
+    return Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+
+
 def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """Overlay this Mac's current ChatGPT/Codex token onto the isolated DB.
 
@@ -4938,7 +5024,7 @@ def _refresh_local_gpt_token_from_codex_auth(database_url: str) -> bool:
     """
     if sys.platform != "darwin":
         return False
-    auth_path = Path(os.environ.get("CODEX_AUTH_PATH", Path.home() / ".codex" / "auth.json"))
+    auth_path = _local_codex_auth_path()
     if not auth_path.is_file():
         print(f"    ⚠ Local Codex refresh skipped: auth file unavailable at {auth_path}")
         return False
@@ -5332,7 +5418,19 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         if not _sync_compute_tokens(required_token_types=("gpt",)):
             raise RuntimeError("Benchmark run could not refresh local compute tokens")
         database_url = _local_victoria_database_url()
-        if not database_url or not _refresh_local_gpt_token_from_codex_auth(database_url):
+        if not database_url:
+            raise RuntimeError("Benchmark run could not resolve the isolated benchmark database")
+        # Overlaying this machine's Codex auth is an OPTIONAL freshness upgrade,
+        # not a precondition. `_sync_compute_tokens` above already required and
+        # obtained a gpt token from the verified shared workspace, so a machine
+        # with no Codex login at all is a local-setup absence, not evidence that
+        # the synced token is stale. Hard-failing there made an unrelated gate
+        # (e.g. the AgentCard payment lifecycle, which needs no Codex at all)
+        # unrunnable on any machine without `codex login`.
+        #
+        # A codex auth file that EXISTS but cannot be overlaid is still fatal:
+        # that is the stale/rotated-token signal this overlay was built to catch.
+        if _local_codex_auth_path().is_file() and not _refresh_local_gpt_token_from_codex_auth(database_url):
             raise RuntimeError("Benchmark run could not refresh GPT credentials from local Codex auth")
         return
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
@@ -8318,7 +8416,13 @@ async def run_single_task(
                 passed = False
                 failure_reason = f"Agent payment confirmation contract check failed: {e}"
 
-        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(base_url, agent_id, task)
+        current_lifecycle = data.get("_benchmark", {}).get("payment_lifecycle")
+        cleanup_lifecycle = await ensure_payment_lifecycle_cleanup(
+            base_url,
+            agent_id,
+            task,
+            current_lifecycle=current_lifecycle if isinstance(current_lifecycle, dict) else None,
+        )
         if cleanup_lifecycle is not None:
             data["_benchmark"] = {
                 **data.get("_benchmark", {}),

@@ -26,6 +26,9 @@ import {
   CODE_AGENT_ATTACHMENTS_DIR,
   CODE_AGENT_OUTPUT_DIR,
 } from './codeAgentPrompt';
+import { workDirForGithubRepo } from './e2bWorkDir';
+import { createSandboxWithRetry } from './e2bSandboxCreate';
+export { createSandboxWithRetry, isTransientSandboxCreateError } from './e2bSandboxCreate';
 export {
   closeClaudeCodeSession,
   connectToSandbox,
@@ -59,17 +62,6 @@ const DEFAULT_CODEX_CODE_TEMPLATE_ID = 'codex-code';
 const ATTACHMENTS_DIR = CODE_AGENT_ATTACHMENTS_DIR;
 const OUTPUT_DIR = CODE_AGENT_OUTPUT_DIR;
 const CLAUDE_CODE_WS_SERVER_PATH = '/home/user/ws-server.mjs';
-const CODE_AGENT_REPO_WORKDIR = '/home/user/workspace';
-
-function workDirForGithubRepo(githubRepoUrl?: string): string {
-  if (!githubRepoUrl) return '/home/user';
-  try {
-    new URL(githubRepoUrl);
-    return CODE_AGENT_REPO_WORKDIR;
-  } catch {
-    return '/home/user';
-  }
-}
 
 function findLocalClaudeCodeWsServer(): string | null {
   const candidates = [
@@ -337,11 +329,15 @@ export async function createClaudeCodeSession(
   }
 
   // Create sandbox first (before DB record) to avoid placeholder conflicts
-  const sandbox = await Sandbox.create(process.env.E2B_CLAUDE_CODE_TEMPLATE_ID, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    process.env.E2B_CLAUDE_CODE_TEMPLATE_ID,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Claude Code'
+  );
 
   log.info(`Created sandbox: ${sandbox.sandboxId}`);
   await overlayClaudeCodeWsServer(sandbox);
@@ -559,11 +555,15 @@ export async function createCodexCodeSession(
     log.info(`GitHub repo configured for Codex: ${githubRepoUrl}`);
   }
 
-  const sandbox = await Sandbox.create(templateId, {
-    apiKey: process.env.E2B_API_KEY,
-    timeoutMs: SANDBOX_TIMEOUT_MS,
-    envs,
-  });
+  const sandbox = await createSandboxWithRetry(
+    templateId,
+    {
+      apiKey: process.env.E2B_API_KEY,
+      timeoutMs: SANDBOX_TIMEOUT_MS,
+      envs,
+    },
+    'Codex Code'
+  );
 
   log.info(`Created Codex sandbox: ${sandbox.sandboxId}`);
   await overlayCodexCodeWsServer(sandbox);
