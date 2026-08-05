@@ -98,7 +98,7 @@ async function streamToBuffer(body: unknown): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
-async function get(token: string, outFile: string): Promise<number> {
+export async function get(token: string, outFile: string): Promise<number> {
   const response = await client().send(
     new GetObjectCommand({
       Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',

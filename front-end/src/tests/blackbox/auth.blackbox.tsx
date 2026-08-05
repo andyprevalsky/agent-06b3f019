@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, renderHook, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
-import { LoginButton, PhoneAuthModal } from '@/features/auth';
+import { LoginButton, PhoneAuthModal, useAuth } from '@/features/auth';
 import { shouldEnableDevAutoLogin } from '@/features/auth/config';
+import { supabase } from '@/lib/supabase';
 
 const API_BASE = 'http://localhost:3001/api';
 
@@ -158,6 +159,39 @@ describe('auth config', () => {
         clientSource: 'WEB',
       }),
     ).toBe(true);
+  });
+});
+
+describe('auth session application', () => {
+  beforeEach(() => {
+    clearAllStorage();
+  });
+
+  afterEach(() => {
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps applying user and invite state when realtime authentication rejects', async () => {
+    const session = mockSession({ userId: 'realtime-failure-user' });
+    const setAuth = vi
+      .spyOn(supabase.realtime, 'setAuth')
+      .mockRejectedValueOnce(new Error('realtime unavailable'));
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { result } = renderHook(() => useAuth({ passive: true }));
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+      expect(result.current.user?.id).toBe(session.user.id);
+      expect(result.current.isFullySignedIn).toBe(true);
+    });
+    expect(result.current.realtimeReady).toBe(false);
+    expect(setAuth).toHaveBeenCalledWith(session.access_token);
+    expect(consoleError).toHaveBeenCalledWith(
+      '[Auth] Failed to authenticate realtime session',
+      expect.any(Error),
+    );
   });
 });
 

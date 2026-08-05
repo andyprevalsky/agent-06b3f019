@@ -49,6 +49,12 @@ export const AGENTCARD_COMPANY_FLOW_RETRY_MS = parsePositiveIntEnv(
 );
 const BENCHMARK_KYC_REQUIRED_USER_ID = '00000000-0000-4000-8000-000000000103';
 
+/**
+ * Non-admin identity for the sandbox AgentCard lifecycle benchmarks. Admin users intentionally
+ * bypass personal Stripe holds, while these benchmarks assert hold/capture/refund behavior.
+ */
+export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106';
+
 function benchmarkModeEnabled(): boolean {
   const enabled = new Set(['1', 'true', 'yes', 'on']);
   return (

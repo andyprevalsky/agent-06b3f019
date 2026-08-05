@@ -41,6 +41,7 @@ import {
   resolvePublicBaseUrl,
   TestPaymentError,
 } from '../../domains/test-payment/service';
+import { assertClosedCardMcpParsing, threeItems } from './test-payment-service-fixtures';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -62,14 +63,6 @@ async function seedUser(): Promise<string> {
   await prisma.user.create({ data: { userId, isAnonymous: true } });
   createdUserIds.push(userId);
   return userId;
-}
-
-function threeItems(): Array<{ id: string; quantity: number }> {
-  return [
-    { id: 'aurora-notebook', quantity: 1 },
-    { id: 'copper-pen', quantity: 1 },
-    { id: 'ceramic-mug', quantity: 1 },
-  ];
 }
 
 async function withStubbedStripe<T>(fn: () => Promise<T>): Promise<T> {
@@ -355,12 +348,14 @@ async function main(): Promise<void> {
     assert.ok((config?.cardholderId ?? '').length > 0);
     const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
     assert.equal(reset.status, 'connect_required');
-    assert.equal(
-      await prisma.integration.findUnique({
-        where: { userId_name: { userId, name: 'agentcard' } },
-      }),
-      null
-    );
+    const resetRow = await prisma.integration.findUnique({
+      where: { userId_name: { userId, name: 'agentcard' } },
+    });
+    const resetConfig = resetRow?.config as {
+      onboardingSessionId?: string;
+    };
+    assert.equal(resetRow?.status, 'NOT_CONNECTED');
+    assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
   });
 
   await test('resolvePublicBaseUrl reflects the configured value', async () => {
@@ -376,6 +371,10 @@ async function main(): Promise<void> {
   });
 
   // ── lifecycle ──
+  await test('AgentCard lifecycle recognizes only structured card_closed responses', async () => {
+    assertClosedCardMcpParsing();
+  });
+
   await test('getTestPaymentLifecycle returns a null lifecycle when no purchase exists', async () => {
     const lifecycle = await getTestPaymentLifecycle('agent-none', {
       findPurchase: async () => null,
@@ -416,7 +415,9 @@ async function main(): Promise<void> {
       findAttentionRequests: async () => [],
       getCardSummary: async (_userId, id) => {
         assert.equal(id, cardId);
-        return { status: 'CLOSED', balanceCents: 0 };
+        throw new Error(
+          'get_card_details failed: card_closed: This card is closed and its credentials are no longer available.'
+        );
       },
       retrieveStripeHold: async () => ({
         id: 'pi_life',
@@ -475,7 +476,7 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.walletFunding?.status, 'CONSUMED');
     assert.equal(lifecycle.stripeHold?.amountReceivedCents, 4396);
     assert.equal(lifecycle.stripeRefund?.amountCents, 4396);
-    assert.equal(lifecycle.agentCard?.status, 'CLOSED');
+    assert.equal(lifecycle.agentCard?.status, 'closed');
     assert.equal(lifecycle.orgTransfer?.id, 'owt_life');
     assert.equal(lifecycle.orgTransfer?.transferredCents, 4396);
     assert.equal(lifecycle.orgTransfer?.cardId, cardId);

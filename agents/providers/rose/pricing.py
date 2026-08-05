@@ -13,13 +13,17 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
+from providers.rose.pools import POOL_REGISTRY
+
 # Per-token USD pricing for every provider model that appears in any pool's
 # waterfall. Values come from the providers' published per-million-token prices.
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
+    "google/gemini-3.6-flash":        {"prompt": 1.50 / 1_000_000, "completion": 7.50 / 1_000_000},
     "moonshotai/kimi-k2.5":           {"prompt": 0.38 / 1_000_000, "completion": 1.72 / 1_000_000},
     "moonshotai/kimi-k2.7-code":      {"prompt": 0.74 / 1_000_000, "completion": 3.50 / 1_000_000},
+    "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
     "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
@@ -93,11 +97,13 @@ ANTHROPIC_MODEL_PRICING: Dict[str, Dict[str, float]] = {
 }
 
 
-# Pool waterfall composition — must stay in sync with pools.py.
+# Pool waterfall composition, DERIVED from the pool registry rather than restated
+# here. A hand-copied duplicate silently drifts the moment a pool's waterfall
+# changes, and the resulting mispricing is invisible — every pool keeps returning
+# a plausible number computed from the wrong models. (The copy this replaced had
+# already lost rose-1-mini entirely, so that pool priced as None.)
 _POOL_WATERFALLS: Dict[str, tuple[str, ...]] = {
-    "rose-1-lite":         ("google/gemini-3.5-flash", "moonshotai/kimi-k2.7-code"),
-    "rose-1-ultra":        ("anthropic/claude-opus-4.8", "google/gemini-3.1-pro-preview"),
-    "rose-1-browser-use":  ("anthropic/claude-opus-4.8", "openai/gpt-5.6-sol"),
+    name: tuple(spec.waterfall) for name, spec in POOL_REGISTRY.items()
 }
 
 

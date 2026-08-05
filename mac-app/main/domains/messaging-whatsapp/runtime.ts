@@ -23,6 +23,7 @@ import { BatchUploader } from '../../services/batchUploader';
 import { Uploader } from '../../services/uploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 // Imported via the legacy shim path so blackbox tests' vi.mock() on
 // '../../main/services/messaging/platforms/whatsapp/WhatsAppClient'
 // intercepts the constructor used here (Vitest mocks module specifiers, not
@@ -222,7 +223,7 @@ export class WhatsAppSync {
       return;
     }
 
-    const session = await AuthService.getSession();
+    const session = sessionForLocalMachineData(await AuthService.getSession());
     if (session === null) {
       console.log('[WhatsAppSync] Skipping upload - not authenticated');
       return;

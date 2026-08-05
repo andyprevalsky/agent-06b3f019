@@ -2,6 +2,7 @@ import { AuthService } from '../../services/auth';
 import { IMessageReader } from '../../services/iMessageReader';
 import { BatchUploader } from '../../services/batchUploader';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
+import { sessionForLocalMachineData } from '../auth/impersonation';
 import type {
   AuthSession,
   IMessageData,
@@ -14,7 +15,7 @@ import type {
  * Fetch the current authenticated session, if any.
  */
 export async function getSession(): Promise<AuthSession | null> {
-  return AuthService.getSession();
+  return sessionForLocalMachineData(await AuthService.getSession());
 }
 
 /**

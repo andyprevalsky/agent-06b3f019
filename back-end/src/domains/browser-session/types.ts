@@ -114,7 +114,9 @@ export interface SerializedPasskey {
 
 export interface UserSettings {
   name: string | null;
+  email: string | null;
   phone: string | null;
+  deliveryRecipientName: string | null;
   addressLine1: string | null;
   addressLine2: string | null;
   city: string | null;

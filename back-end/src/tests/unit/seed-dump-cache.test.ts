@@ -2,13 +2,39 @@
 
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import path from 'node:path';
 
 import { cacheRequestTimeoutMs, objectKey } from '../../../scripts/seed-dump-cache';
 
-const tsxCli = path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs');
+/**
+ * Resolve the tsx CLI used to spawn the script under test.
+ *
+ * npm workspaces normally hoist tsx to the REPO ROOT, but a worktree whose root
+ * install failed (or that installed `back-end` on its own) only has it under
+ * back-end/. Hard-coding the hoisted path made every spawn here run a
+ * non-existent file: the child died instantly with MODULE_NOT_FOUND, so the
+ * deadline test reported the misleading "never reached the hanging endpoint",
+ * and the exit-code test passed VACUOUSLY because a missing module also exits 1.
+ * Probe both locations and fail with the real reason when neither exists.
+ */
+function resolveTsxCli(): string {
+  const candidates = [
+    path.resolve(__dirname, '../../../../node_modules/tsx/dist/cli.mjs'),
+    path.resolve(__dirname, '../../../node_modules/tsx/dist/cli.mjs'),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  assert.ok(
+    found !== undefined,
+    `tsx CLI not found. Looked in:\n  ${candidates.join('\n  ')}\n` +
+      'Run `npm ci` in back-end/ (or at the repo root) before this suite.'
+  );
+  return found;
+}
+
+const tsxCli = resolveTsxCli();
 
 function test(name: string, fn: () => void): void {
   try {

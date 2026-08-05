@@ -495,8 +495,9 @@ class SpawnAgentManager(ToolManager):
             accumulated_usage = result.get("accumulated_usage", [])
             llm_iteration_usage = result.get("llm_iteration_usage", [])
             # Data sources the explore tried to grep but whose connector isn't
-            # connected. When present the explore is a FAILED sub-agent, and the
-            # parent (spawn_agent) raises one blocking source_connect gate each.
+            # connected. Keep them on the event so the parent can raise one
+            # blocking source_connect gate each — but do NOT mark the explore
+            # itself ERROR; the result already includes a not-connected notice.
             unavailable_sources = result.get("unavailable_sources") or []
             explore_failed = result.get("status") not in {None, "completed"}
             explore_error_reason = result.get("error_reason")
@@ -530,19 +531,16 @@ class SpawnAgentManager(ToolManager):
             if explore_error_reason:
                 event_data["error_reason"] = explore_error_reason
                 event_metadata["error_reason"] = explore_error_reason
-            event_message = (
-                explore_error_reason
-                if (unavailable_sources or explore_failed) and explore_error_reason
-                else explore_result
-            )
+            # User-visible message is the explore result (including any
+            # not-connected notice). Only genuine explore failures swap in
+            # error_reason / ERROR status.
+            event_message = explore_error_reason if explore_failed and explore_error_reason else explore_result
 
-            # FINISHED with result and usage — or ERROR when a required data
-            # source wasn't connected (the explore couldn't finish its job).
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title=ui_goal[:EXPLORE_GOAL_DISPLAY_LEN],
                 message=event_message,
-                status=MessageStatus.ERROR if unavailable_sources or explore_failed else MessageStatus.FINISHED,
+                status=MessageStatus.ERROR if explore_failed else MessageStatus.FINISHED,
                 data=event_data,
                 metadata=event_metadata,
             )
@@ -914,7 +912,8 @@ async def spawn_agent(workflow_instance, tool_call: Dict, tool_call_id: str):
     # A required data source wasn't connected: raise one blocking source_connect
     # gate per source (dedup/fan-in collapses duplicates across sub-agents). Each
     # gate posts its own card to the main chat and blocks until the user resolves
-    # it. The explore stays FAILED so the main agent re-spawns once connected.
+    # it. The explore itself stays FINISHED with a not-connected notice in its
+    # result so partial findings are not clobbered for the user/parent.
     if unavailable_sources:
         await _raise_source_connect_gates(workflow_instance, unavailable_sources)
 

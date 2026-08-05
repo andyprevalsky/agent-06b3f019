@@ -17,6 +17,7 @@ import {
   startRealTimeWatchers,
   stopRealTimeWatchers,
   syncAllPlatforms,
+  syncingWouldWriteToAnotherUser,
   syncPlatform,
 } from './service';
 import type { Platform } from './types';
@@ -38,6 +39,7 @@ import type { Platform } from './types';
 export class SyncManager {
   private static intervalIds: NodeJS.Timeout[] = [];
   private static isRunning = false;
+  private static lifecycleGeneration = 0;
 
   /** Start all syncs — single entry point for app startup. */
   static async startAll(): Promise<void> {
@@ -45,13 +47,23 @@ export class SyncManager {
       logConsole('SyncManager', 'Already running');
       return;
     }
+    if (await syncingWouldWriteToAnotherUser()) {
+      logConsole('SyncManager', 'Not starting syncs: impersonating another account');
+      return;
+    }
 
     logConsole('SyncManager', 'Starting all syncs...');
+    const generation = ++this.lifecycleGeneration;
     this.isRunning = true;
 
     await runStartupSyncs();
+    if (!this.isRunning || generation !== this.lifecycleGeneration) return;
     this.startPeriodicDispatcher();
     await startRealTimeWatchers();
+    if (!this.isRunning || generation !== this.lifecycleGeneration) {
+      await stopRealTimeWatchers();
+      return;
+    }
     IMessageQueueService.start();
 
     logConsole('SyncManager', 'All syncs started');
@@ -60,6 +72,8 @@ export class SyncManager {
   /** Stop all syncs. */
   static async stopAll(): Promise<void> {
     logConsole('SyncManager', 'Stopping all syncs...');
+    this.lifecycleGeneration += 1;
+    this.isRunning = false;
 
     for (const intervalId of this.intervalIds) {
       clearInterval(intervalId);
@@ -69,7 +83,6 @@ export class SyncManager {
     await stopRealTimeWatchers();
     IMessageQueueService.stop();
 
-    this.isRunning = false;
     logConsole('SyncManager', 'All syncs stopped');
   }
 

@@ -242,6 +242,55 @@ describe('useRealtimeSubscription', () => {
     expect(deps.reconnectAttemptRef.current).toBeGreaterThan(before);
   });
 
+  // Regression: vitest can tear down jsdom while a reconnect timer is still
+  // queued; setState after window is gone becomes an unhandled ReferenceError
+  // and fails the whole coverage run even when every test assertion passed.
+  it('reconnect timeout no-ops when window is gone', async () => {
+    let capturedHandlers: CapturedAgentHandlers = {};
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(async (_, h) => {
+      capturedHandlers = h as CapturedAgentHandlers;
+      return fakeChannel();
+    });
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    await waitFor(() => expect(capturedHandlers.onDisconnect).toBeTypeOf('function'));
+
+    let reconnectCb: (() => void) | null = null;
+    const realSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (typeof handler === 'function' && timeout === 0 && reconnectCb === null) {
+        reconnectCb = handler as () => void;
+        return 0 as unknown as ReturnType<typeof setTimeout>;
+      }
+      return realSetTimeout(handler as never, timeout as never, ...(args as never[]));
+    }) as typeof setTimeout);
+
+    act(() => {
+      capturedHandlers.onDisconnect?.();
+    });
+    expect(reconnectCb).toBeTypeOf('function');
+
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: undefined,
+    });
+    try {
+      expect(() => reconnectCb?.()).not.toThrow();
+      expect(deps.setForceResubscribeCounter).not.toHaveBeenCalled();
+    } finally {
+      if (windowDescriptor) {
+        Object.defineProperty(globalThis, 'window', windowDescriptor);
+      }
+      setTimeoutSpy.mockRestore();
+      unmount();
+    }
+  });
+
   it('on subscribe failure, logs error and schedules reconnect', async () => {
     vi.mocked(RealtimeMod.subscribeToAgent).mockRejectedValueOnce(new Error('boom'));
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -250,6 +299,29 @@ describe('useRealtimeSubscription', () => {
     await waitFor(() => expect(errSpy).toHaveBeenCalled());
     expect(deps.reconnectAttemptRef.current).toBeGreaterThan(0);
     errSpy.mockRestore();
+  });
+
+  it('does not schedule reconnect when subscribe rejects after unmount', async () => {
+    let rejectSubscription!: (error: Error) => void;
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSubscription = reject;
+        }),
+    );
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    expect(RealtimeMod.subscribeToAgent).toHaveBeenCalledTimes(1);
+
+    unmount();
+    await act(async () => {
+      rejectSubscription(new Error('late subscribe failure'));
+      await Promise.resolve();
+    });
+
+    expect(deps.reconnectAttemptRef.current).toBe(0);
+    expect(deps.reconnectTimeoutRef.current).toBeNull();
+    expect(deps.setForceResubscribeCounter).not.toHaveBeenCalled();
   });
 
   it('reconnection refetches agent detail and merges messages', async () => {

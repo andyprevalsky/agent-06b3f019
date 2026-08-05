@@ -2,7 +2,29 @@ import { IntegrationStatus, IntegrationType } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 export async function resetBenchmarkAgentCardSetup(userId: string): Promise<void> {
-  await prisma.integration.deleteMany({ where: { userId, name: 'agentcard' } });
+  const config = {
+    orgManaged: true,
+    onboardingSessionId: `benchmark-agentcard-onboarding-${userId}`,
+    onboardingSetupUrl: 'https://example.invalid/agentcard/benchmark-onboarding',
+  };
+  await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'agentcard' } },
+    create: {
+      userId,
+      name: 'agentcard',
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.NOT_CONNECTED,
+      isActive: true,
+      config,
+    },
+    update: {
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.NOT_CONNECTED,
+      isActive: true,
+      config,
+      lastUsedAt: new Date(),
+    },
+  });
 }
 
 export async function completeBenchmarkAgentCardSetup(

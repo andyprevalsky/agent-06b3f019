@@ -12,6 +12,10 @@ export function track(event: string, properties?: TrackProperties): void {
   amplitude.track(event, properties);
 }
 
+export function flush(): void {
+  amplitude.flush();
+}
+
 export function setUserId(userId: string | undefined): void {
   amplitude.setUserId(userId);
 }

@@ -80,6 +80,7 @@ import {
   markUserTokenRateLimited,
 } from '../../providers/claudeCredentials';
 import { withComputePoolLock } from './compute-pool-lock.testkit';
+import { generateSupabaseSession } from '../../providers/sessionTokens';
 config();
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
@@ -1358,6 +1359,167 @@ async function testCookiesUpload_happyPath() {
   assertSchema(CookiesUploadResponse, res.data, 'cookies happy');
   const body = res.data as { cookieCount: number };
   assert(body.cookieCount === 1, `Expected cookieCount=1, got ${body.cookieCount}`);
+}
+
+// ==================== IMPERSONATION CONTAINMENT ====================
+//
+// An impersonated session is an admin VIEWING another account, and every one of
+// these endpoints ingests data harvested from the CALLER'S OWN MACHINE. Because
+// the mac-app authenticates as the current session, an unguarded upload writes
+// the operator's cookies, passwords, iMessage history and provider credentials
+// into the viewed user's account — silent cross-account corruption that no later
+// fix can un-write. The `act` claim the backend already stamps on impersonated
+// tokens is the server-signed signal, so containment belongs HERE and not only
+// in the desktop client: a client-side guard is reintroduced by any stale build.
+
+/** Mint a genuine impersonated session, exactly as POST /api/admin-health/impersonate does. */
+function impersonatedTokenFor(targetUserId: string, actorUserId: string): string {
+  return generateSupabaseSession(targetUserId, '', { actorUserId }).access_token;
+}
+
+/**
+ * Every route that ingests machine-harvested data. Enumerated so a new upload
+ * endpoint that forgets containment fails this test rather than silently
+ * reopening the leak.
+ */
+const MACHINE_DATA_INGEST_ROUTES: { path: string; method?: string; body: () => unknown }[] = [
+  {
+    path: '/api/integrations/cookies/upload',
+    body: () => ({ ...encryptPayload([]), browser: 'chrome' }),
+  },
+  { path: '/api/integrations/localStorage/upload', body: () => encryptPayload({ origins: [] }) },
+  { path: '/api/integrations/indexedDB/upload', body: () => encryptPayload({ origins: [] }) },
+  { path: '/api/integrations/cacheStorage/upload', body: () => encryptPayload({ origins: [] }) },
+  { path: '/api/integrations/permissions/upload', body: () => encryptPayload({ permissions: [] }) },
+  { path: '/api/integrations/passwords/upload', body: () => encryptPayload([]) },
+  {
+    path: '/api/integrations/fingerprint/upload',
+    body: () => encryptPayload({ navigator: {}, screen: {} }),
+  },
+  { path: '/api/integrations/passkeys/upload', body: () => encryptPayload([]) },
+  { path: '/api/integrations/imessage/upload', body: () => ({ messages: [] }) },
+  { path: '/api/integrations/whatsapp/upload', body: () => ({ messages: [] }) },
+  { path: '/api/integrations/telegram/upload', body: () => ({ messages: [] }) },
+  { path: '/api/integrations/telegram/connect', body: () => ({}) },
+  {
+    path: '/api/integrations/claude-code/credentials/upload',
+    body: () => encryptPayload({ accessToken: 'x' }),
+  },
+  {
+    path: '/api/integrations/gpt-code/credentials/upload',
+    body: () => encryptPayload({ accessToken: 'x' }),
+  },
+  { path: '/api/integrations/upload', body: () => ({ integrationType: 'generic' }) },
+  { path: '/api/integrations/linkedin/upload', body: () => ({}) },
+  { path: '/api/integrations/contacts/upload', body: () => ({}) },
+  { path: '/api/integrations/email/upload', body: () => ({}) },
+  { path: '/api/integrations/documents/upload', body: () => ({ documents: [] }) },
+  { path: '/api/integrations/passwords/apple/upload', body: () => ({}) },
+  // Outside /api/integrations — these were missed by the first version of this
+  // list, and POST /api/upload is the same class as /documents/upload.
+  { path: '/api/upload', body: () => ({}) },
+  { path: '/api/download-telemetry', body: () => ({ event: 'download_started' }) },
+  // Claiming a queued message registers THIS machine as the account's iMessage
+  // bridge and sends from it — never on behalf of a viewed user.
+  { path: '/api/imessage/queue/pop', method: 'GET', body: () => undefined },
+  {
+    path: '/api/imessage/queue/00000000-0000-0000-0000-000000000000/result',
+    body: () => ({ success: true }),
+  },
+];
+
+/**
+ * No machine-data ingest route may accept an impersonated session.
+ *
+ * Runs against a dedicated target user: a cookie upload is a SNAPSHOT — an empty
+ * array deletes that browser's stored cookies — so sharing a user with the other
+ * upload tests would let this test destroy their fixtures (and vice versa).
+ */
+async function testMachineDataIngest_rejectsImpersonatedSession() {
+  const [target, operator] = await Promise.all([createAnonSession(), createAnonSession()]);
+  const token = impersonatedTokenFor(target.userId, operator.userId);
+  const accepted: string[] = [];
+
+  for (const route of MACHINE_DATA_INGEST_ROUTES) {
+    const method = route.method ?? 'POST';
+    const payload = route.body();
+    const res = await request(`${BASE_URL}${route.path}`, {
+      method,
+      headers: authHeaders(token),
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
+    });
+    // 403 is the only correct answer. A 400/422 would mean the request merely
+    // failed validation, which does not prove containment, so those count as
+    // accepted too — the guard must reject BEFORE any payload parsing.
+    if (res.status !== 403) accepted.push(`${route.path} -> ${res.status}`);
+  }
+
+  assert(
+    accepted.length === 0,
+    `machine-data ingest accepted an impersonated session on ${accepted.length}/` +
+      `${MACHINE_DATA_INGEST_ROUTES.length} route(s): ${accepted.join(', ')}`
+  );
+}
+
+/**
+ * The containment must be a real write barrier, not just a status code: assert
+ * the operator's cookie never lands in the viewed user's account.
+ */
+async function testCookiesUpload_impersonatedSessionWritesNothing() {
+  const [target, operator] = await Promise.all([createAnonSession(), createAnonSession()]);
+  const token = impersonatedTokenFor(target.userId, operator.userId);
+  const domain = '.operator-machine-leak.test';
+  const encrypted = encryptPayload([
+    {
+      host_key: domain,
+      name: 'operator_machine_cookie',
+      value: 'leaked-secret',
+      path: '/',
+      expires_utc: '13300000000000000',
+      is_secure: true,
+      is_httponly: false,
+      top_frame_site_key: '',
+    },
+  ]);
+
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(token),
+    body: JSON.stringify({ ...encrypted, browser: 'chrome' }),
+  });
+  assertStatus(res.status, 403, res.data);
+
+  const leaked = await prisma.cookie.count({ where: { userId: target.userId, domain } });
+  assert(
+    leaked === 0,
+    `operator machine cookie leaked into the impersonated account: ${leaked} row(s) for ${domain}`
+  );
+}
+
+/** Containment must not touch ordinary sessions — the same upload still works. */
+async function testCookiesUpload_ownSessionStillAccepted() {
+  const own = await createAnonSession();
+  const domain = '.own-session-allowed.test';
+  const encrypted = encryptPayload([
+    {
+      host_key: domain,
+      name: 'own_cookie',
+      value: 'kept',
+      path: '/',
+      expires_utc: '13300000000000000',
+      is_secure: true,
+      is_httponly: false,
+      top_frame_site_key: '',
+    },
+  ]);
+  const res = await request(`${BASE_URL}/api/integrations/cookies/upload`, {
+    method: 'POST',
+    headers: authHeaders(own.accessToken),
+    body: JSON.stringify({ ...encrypted, browser: 'chrome' }),
+  });
+  assertStatus(res.status, 200, res.data);
+  const stored = await prisma.cookie.count({ where: { userId: own.userId, domain } });
+  assert(stored === 1, `own-session upload should persist 1 cookie, found ${stored}`);
 }
 
 async function testLocalStorageUpload_missingFields() {
@@ -4568,6 +4730,94 @@ async function testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope() 
   }
 }
 
+/**
+ * Regression: a generic short cooldown must never SHORTEN a provider-supplied
+ * long reset window.
+ *
+ * Prod 2026-07-28 (agent 49b3cc7a): the compute-token endpoint marked the user's
+ * claude_code token rate-limited until 2026-07-30T22:00:00Z (the reset Anthropic
+ * actually reported) at 16:54:51, then a second generic call at 16:55:06 — with no
+ * `rateLimitedUntil` in the body — overwrote it with the default 5-minute window
+ * (17:00:06Z). Five minutes later the still-exhausted token was handed out again.
+ * Meanwhile, for every second the token was flagged, `fetchClaudeCodeCredentialsWithMeta`
+ * skipped it, the pool was exhausted too, and the Claude Code path fell through to
+ * the unfunded shared ANTHROPIC_API_KEY — surfacing as "Your credit balance is too
+ * low" and `POST /api/claude-code-session/create -> 500` ("No Claude Code credentials
+ * available"), even though a perfectly valid synced OAuth token was sitting in the row.
+ */
+async function testRotation_rateLimitWindowIsMonotonic() {
+  const caller = await createAnonSession();
+  const poolOwner = await createAnonSession();
+  const userToken = await seedClaudeIntegration(caller.userId, { poolingEnabled: false });
+  const poolToken = await seedClaudeIntegration(poolOwner.userId, { poolingEnabled: true });
+
+  const longReset = new Date(Date.now() + 48 * 60 * 60 * 1000);
+
+  const markRateLimited = async (body: Record<string, unknown>) => {
+    const res = await request(`${BASE_URL}/api/integrations/compute-code/token/rate-limited`, {
+      method: 'POST',
+      headers: apiKeyHeaders(),
+      body: JSON.stringify(body),
+    });
+    assertStatus(res.status, 200, res.data);
+  };
+
+  try {
+    // 1. Provider reported an explicit long reset.
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    const afterLong = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterLong?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `Expected the provider reset ${longReset.toISOString()}, got ${String(afterLong?.rateLimitedUntil)}`
+    );
+
+    // 2. A later generic backoff (no rateLimitedUntil → short default) must NOT shorten it.
+    await markRateLimited({ type: 'claude', source: 'user', userId: caller.userId });
+    const afterGeneric = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the provider reset window to ${String(afterGeneric?.rateLimitedUntil)} ` +
+        `(expected it to stay ${longReset.toISOString()}). An exhausted token would be re-served early, ` +
+        `and the Claude Code path would fall through to the unfunded ANTHROPIC_API_KEY.`
+    );
+
+    // 3. Same invariant on the pool side.
+    await markRateLimited({
+      type: 'claude',
+      source: 'pool',
+      poolTokenId: poolToken.id,
+      rateLimitedUntil: longReset.toISOString(),
+    });
+    await markRateLimited({ type: 'claude', source: 'pool', poolTokenId: poolToken.id });
+    const afterPoolGeneric = await prisma.integration.findUnique({ where: { id: poolToken.id } });
+    assert(
+      afterPoolGeneric?.rateLimitedUntil?.getTime() === longReset.getTime(),
+      `A generic backoff shortened the pool token's provider reset window to ${String(afterPoolGeneric?.rateLimitedUntil)}`
+    );
+
+    // 4. A genuinely LONGER window must still extend the backoff.
+    const longerReset = new Date(longReset.getTime() + 60 * 60 * 1000);
+    await markRateLimited({
+      type: 'claude',
+      source: 'user',
+      userId: caller.userId,
+      rateLimitedUntil: longerReset.toISOString(),
+    });
+    const afterExtend = await prisma.integration.findUnique({ where: { id: userToken.id } });
+    assert(
+      afterExtend?.rateLimitedUntil?.getTime() === longerReset.getTime(),
+      `A longer provider reset must extend the window, got ${String(afterExtend?.rateLimitedUntil)}`
+    );
+  } finally {
+    await cleanupIntegrations([userToken.id, poolToken.id]);
+  }
+}
+
 async function testRotation_gptUserAuthErrorDisablesToken() {
   const caller = await createAnonSession();
   const poolOwner = await createAnonSession();
@@ -5716,6 +5966,18 @@ async function runAll() {
     { name: 'POST /cookies/upload bad encryption -> 400', fn: testCookiesUpload_invalidEncryption },
     { name: 'POST /cookies/upload happy path', fn: testCookiesUpload_happyPath },
     {
+      name: 'machine-data ingest rejects an impersonated session (all routes)',
+      fn: testMachineDataIngest_rejectsImpersonatedSession,
+    },
+    {
+      name: 'POST /cookies/upload writes nothing for an impersonated session',
+      fn: testCookiesUpload_impersonatedSessionWritesNothing,
+    },
+    {
+      name: 'POST /cookies/upload still accepted for an ordinary session',
+      fn: testCookiesUpload_ownSessionStillAccepted,
+    },
+    {
       name: 'POST /localStorage/upload missing fields -> 400',
       fn: testLocalStorageUpload_missingFields,
     },
@@ -6136,6 +6398,10 @@ async function runAll() {
     {
       name: 'rotation -- direct auth_error keeps refreshable Claude Code envelope',
       fn: testRotation_directAuthErrorKeepsRefreshableClaudeCodeEnvelope,
+    },
+    {
+      name: 'rotation -- rate-limit window never shortens',
+      fn: testRotation_rateLimitWindowIsMonotonic,
     },
     {
       name: 'rotation -- GPT user auth_error disables token',

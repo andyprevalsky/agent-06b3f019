@@ -1,0 +1,5 @@
+ALTER TABLE "GoalHistory"
+ADD COLUMN "worldModelMode" TEXT NOT NULL DEFAULT 'real',
+ADD COLUMN "wasAgentRun" BOOLEAN NOT NULL DEFAULT false,
+ADD COLUMN "costTelemetry" JSONB,
+ADD COLUMN "costCapturedAt" TIMESTAMP(3);

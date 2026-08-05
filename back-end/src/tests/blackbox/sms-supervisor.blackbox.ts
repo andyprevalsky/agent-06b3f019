@@ -46,6 +46,7 @@ import {
   testRealLlm_supervisorRoundTrip,
 } from './sms-supervisor.behavior';
 import { smsDeliveryBehaviorCases } from './sms-supervisor.delivery.behavior';
+import { smsBluebottleBehaviorCases } from './sms-supervisor.bluebottle.behavior';
 import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
@@ -663,6 +664,7 @@ async function runAll() {
       fn: () => testAttemptCompletion_requiresSuccessfulUserMessage(prisma),
     },
     ...smsDeliveryBehaviorCases(prisma),
+    ...smsBluebottleBehaviorCases(prisma),
     {
       name: 'real-llm -- answers contact fact via grep without asking user (opt-in)',
       fn: () => testRealLlm_answersContactFactViaGrep(prisma),

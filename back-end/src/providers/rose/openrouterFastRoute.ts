@@ -18,6 +18,7 @@ import {
 import { clearsChatStallGuard } from './cerebrasRoute';
 import { parseOpenAISSE } from './streaming';
 import { postOpenRouterStream } from './transport';
+import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
 export const OPENROUTER_FAST_CHAT_MODEL = 'google/gemini-2.5-flash-lite';
@@ -34,7 +35,7 @@ function chatIdleTimeoutMs(): number {
 export function buildOpenRouterFastChatBody(options: CompletionOptions): Record<string, unknown> {
   return {
     model: OPENROUTER_FAST_CHAT_MODEL,
-    messages: options.messages,
+    messages: normalizeOpenAiToolCalls(options.messages),
     stream: true,
     stream_options: { include_usage: true },
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),

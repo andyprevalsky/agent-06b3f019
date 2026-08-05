@@ -8,7 +8,7 @@ import { type RequestHandler, type Response, Router } from 'express';
 import multer from 'multer';
 // eslint-disable-next-line no-restricted-imports -- temp file cleanup for multer uploads
 import fs from 'fs';
-import { type AuthRequest, authenticate } from '../../providers/auth';
+import { type AuthRequest, authenticateMachineUpload } from '../../providers/auth';
 import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS } from './config';
@@ -29,7 +29,7 @@ const upload = multer({
 /** POST /api/integrations/upload */
 router.post(
   '/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.single('file') as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
@@ -68,7 +68,7 @@ router.post(
 /** POST /api/integrations/linkedin/upload */
 router.post(
   '/linkedin/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.single('file') as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
@@ -111,7 +111,7 @@ router.post(
 /** POST /api/integrations/contacts/upload */
 router.post(
   '/contacts/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.single('file') as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
@@ -151,7 +151,7 @@ router.post(
 /** POST /api/integrations/email/upload */
 router.post(
   '/email/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.single('file') as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const jobId = `email-upload-${Date.now()}`;
@@ -210,7 +210,7 @@ router.post(
 /** POST /api/integrations/imessage/upload */
 router.post(
   '/imessage/upload',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const { contacts, accessedAt } = req.body;
@@ -231,7 +231,7 @@ router.post(
 /** POST /api/integrations/whatsapp/upload */
 router.post(
   '/whatsapp/upload',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const { contacts, accessedAt } = req.body;
@@ -263,7 +263,7 @@ router.post(
 /** POST /api/integrations/telegram/connect */
 router.post(
   '/telegram/connect',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const integration = await service.processTelegramConnect(userId);
@@ -274,7 +274,7 @@ router.post(
 /** POST /api/integrations/telegram/upload */
 router.post(
   '/telegram/upload',
-  authenticate,
+  authenticateMachineUpload,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const { contacts, accessedAt } = req.body;
@@ -299,7 +299,7 @@ router.post(
 /** POST /api/integrations/passwords/apple/upload */
 router.post(
   '/passwords/apple/upload',
-  authenticate,
+  authenticateMachineUpload,
   upload.single('file') as unknown as RequestHandler,
   asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;

@@ -84,6 +84,9 @@ const COMPUTE_TOKEN_SYNC_ATTEMPTS = 5;
 const COMPUTE_TOKEN_REQUIRED_TYPES = parseComputeTokenRequiredTypes(
   process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES
 );
+const POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS =
+  process.env.SEED_POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS === '1';
+const ISOLATED_BENCHMARK_RUN = process.env.BENCHMARK_ISOLATED_RUN === 'true';
 
 // SEED_COOKIE_DOMAINS scopes every domain-bearing browser-auth table to the
 // domains a benchmark task needs. Set by run_benchmark from the task's
@@ -121,12 +124,10 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) =>
-      remote.localStorageOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
     indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) =>
-      remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
@@ -174,10 +175,41 @@ async function syncRequiredTable(
   }
 }
 
+/**
+ * Upsert prod rows into the local database keyed on primary id.
+ *
+ * A model can carry a compound unique key in addition to `id` (for example
+ * `EmailIntegrationCredential` is unique on `(userId, provider, email)`). When a
+ * stale local row holds the same tuple under a DIFFERENT primary key, the
+ * id-keyed upsert falls through to `create` and dies on P2002, which aborts the
+ * entire seed and blocks every deploy from that worktree. Reconcile by updating
+ * the row that already owns the tuple, preserving its local id so dependent rows
+ * survive — the same treatment `syncIntegrationCredentials` gives `Integration`.
+ */
 async function upsertById(model: any, records: any[]): Promise<number> {
   for (const r of records) {
     const { id, ...rest } = r;
-    await model.upsert({ where: { id }, create: r, update: rest });
+    try {
+      await model.upsert({ where: { id }, create: r, update: rest });
+    } catch (error) {
+      const target =
+        (error as { code?: string; meta?: { target?: unknown } })?.code === 'P2002'
+          ? (error as { meta?: { target?: unknown } }).meta?.target
+          : undefined;
+      if (!Array.isArray(target) || target.length === 0 || target.includes('id')) throw error;
+      // Only the CREATE branch is safe to recover. If `id` already exists then
+      // the update moved that row onto a compound key owned by a different
+      // local row; rewriting the other row would silently leave the row we were
+      // actually asked to sync stale, so surface it instead.
+      const existingById = await model.findUnique({ where: { id }, select: { id: true } });
+      if (existingById) throw error;
+
+      const fields = target as string[];
+      const compoundKey = fields.join('_');
+      const compoundValue = Object.fromEntries(fields.map((field) => [field, r[field]]));
+      // Refresh the conflicting row in place; its local id stays authoritative.
+      await model.update({ where: { [compoundKey]: compoundValue }, data: rest });
+    }
   }
   return records.length;
 }
@@ -210,6 +242,40 @@ async function syncIntegrations(): Promise<number> {
     console.log(`  🧹 Integrations: ${deleted.count} stale local compute tokens deleted`);
   }
   return syncedIds.length;
+}
+
+/**
+ * Synthetic benchmark users must not receive copies of the developer's credential rows. For
+ * isolated benchmark databases only, this explicit opt-in exposes the already-synced dev-owned
+ * provider through the normal compute pool instead. Ownership and encrypted configuration stay
+ * on the original Integration row; only its local pool eligibility changes.
+ */
+async function poolRequiredDevComputeTokensForSyntheticUsers(): Promise<number> {
+  if (!POOL_DEV_COMPUTE_TOKENS_FOR_SYNTHETIC_USERS) return 0;
+  if (!ISOLATED_BENCHMARK_RUN) {
+    console.warn(
+      '  ⚠️  Compute Tokens (integrations): refusing synthetic-user pool eligibility ' +
+        'outside an explicitly isolated benchmark database'
+    );
+    return 0;
+  }
+
+  const requiredNames = [...COMPUTE_TOKEN_REQUIRED_TYPES].map((type) =>
+    type === 'claude' ? 'claude_code' : 'gpt_code'
+  );
+  const result = await local.integration.updateMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: requiredNames },
+      status: 'CONNECTED',
+    },
+    data: { poolingEnabled: true },
+  });
+  console.log(
+    `  🧪 Compute Tokens (integrations): ${result.count} dev-owned row(s) made pool-eligible ` +
+      'inside the isolated synthetic-user benchmark database'
+  );
+  return result.count;
 }
 
 // Browser auth sync shared by full sync and --credentials-only. Natural-keyed
@@ -490,6 +556,7 @@ async function syncComputeTokensWithRetries(): Promise<void> {
   for (let attempt = 1; attempt <= COMPUTE_TOKEN_SYNC_ATTEMPTS; attempt++) {
     try {
       const count = await syncIntegrations();
+      await poolRequiredDevComputeTokensForSyntheticUsers();
       const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {

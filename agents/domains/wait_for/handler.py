@@ -46,9 +46,16 @@ class WaitForManager(ToolManager):
         until_timestamp = tool_call.get("until_timestamp")
         condition = tool_call.get("condition")
         description = tool_call.get("description")
+        # resume=True (deploy-migration re-arm): an already-elapsed target
+        # completes immediately instead of erroring "in the past". Require a
+        # strict boolean True so only the internal _resume_interrupted_wait path
+        # enables it — a truthy string (e.g. an LLM-forwarded "false") must not.
+        resume = tool_call.get("resume") is True
 
         if until_timestamp:
-            async for event in self._timestamp_mode(workflow_instance, until_timestamp, tool_call_id):
+            async for event in self._timestamp_mode(
+                workflow_instance, until_timestamp, tool_call_id, resume=resume
+            ):
                 yield event
         elif condition:
             if not isinstance(description, str) or not 3 <= len(description) <= 80:
@@ -85,6 +92,7 @@ class WaitForManager(ToolManager):
         workflow_instance: Any,
         until_timestamp: str,
         tool_call_id: str,
+        resume: bool = False,
     ) -> AsyncGenerator[ToolEvent, None]:
         """Wait until a specific timestamp."""
         try:
@@ -106,6 +114,18 @@ class WaitForManager(ToolManager):
 
         delta_seconds = int((target - now).total_seconds())
         if delta_seconds <= 0:
+            if resume:
+                # Deploy migration re-armed a wait whose target elapsed during
+                # downtime — treat it as satisfied so the agent proceeds without
+                # depending on the LLM to re-issue wait_for.
+                yield ToolEvent(
+                    type=EventType.POST_MESSAGE,
+                    title="Wait complete",
+                    message=f"Reached {until_timestamp} (target already elapsed during deploy)",
+                    status=MessageStatus.FINISHED,
+                    metadata={"waitForMode": "timestamp", "resumed": True},
+                )
+                return
             yield ToolEvent(
                 type=EventType.POST_MESSAGE,
                 title="wait_for failed",
@@ -165,6 +185,7 @@ class WaitForManager(ToolManager):
         routing explore events as spawn_agent messages so the FE groups them
         correctly. wait_for events reference the explore via exploreTaskId.
         """
+        from domains.spawn_agent.handler import _raise_source_connect_gates
         from tools.spawn_agent import SpawnAgentManager
 
         # Validate
@@ -253,6 +274,7 @@ class WaitForManager(ToolManager):
             # persisted into ToolEvent.data / shipped across activity boundaries.
             explore_tool_call_results: list[str] = []
             explore_usage: dict[str, list[Any]] = {}
+            explore_unavailable_sources: list[dict] = []
 
             async for event in spawn_mgr._spawn_explore(
                 workflow_instance,
@@ -265,11 +287,22 @@ class WaitForManager(ToolManager):
                 # Route explore events as spawn_agent messages (correct toolName for FE grouping)
                 await workflow_instance._handle_tool_event(event, explore_tool_call_id, "spawn_agent")
 
-                # Capture usage from the FINISHED event (raw tool results come via the collector)
-                if event.status == MessageStatus.FINISHED and event.data:
-                    explore_usage = event.data.get("usage", {})
+                # Usage is FINISHED-only; unavailable_sources can also arrive on
+                # ERROR when an explore had connector gaps plus another failure.
+                if event.data:
+                    if event.status == MessageStatus.FINISHED:
+                        explore_usage = event.data.get("usage", {})
+                    if "unavailable_sources" in event.data:
+                        explore_unavailable_sources = event.data.get("unavailable_sources") or []
 
-            # Check if explore was cancelled (paused during explore)
+            # Direct _spawn_explore callers must raise source_connect gates the
+            # same way execute_tool does; wait_for previously dropped them.
+            # Skip when already paused so we reach the pause branch below instead
+            # of parking on raise_gate_direct's response wait.
+            if explore_unavailable_sources and not workflow_instance.is_paused:
+                await _raise_source_connect_gates(workflow_instance, explore_unavailable_sources)
+
+            # Check if explore was cancelled (paused during explore / gate wait)
             if workflow_instance.is_paused:
                 yield ToolEvent(
                     type=EventType.POST_MESSAGE,

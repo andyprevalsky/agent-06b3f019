@@ -34,11 +34,17 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import pLimit from 'p-limit';
+import {
+  buildStoredRootCostTelemetry,
+  type CostTelemetrySourceRow,
+  type StoredRootCostTelemetry,
+} from '../src/domains/admin-health/costTelemetry';
 
 dotenv.config();
 
 const MY_USER_ID = process.env.MY_USER_ID || '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 const WORKTREE_ROOT = path.resolve(__dirname, '..', '..');
+const COST_TELEMETRY_AGENT_CHUNK_SIZE = 250;
 
 interface DbTarget {
   label: string;
@@ -59,6 +65,32 @@ interface CleanupStats {
   blueprintsClearedCount: number;
   attentionClearedCount: number;
   cleanupFailures: number;
+}
+
+async function loadRootCostTelemetry(
+  db: PrismaClient,
+  rootAgentIds: string[]
+): Promise<Map<string, StoredRootCostTelemetry>> {
+  const result = new Map<string, StoredRootCostTelemetry>();
+  for (let offset = 0; offset < rootAgentIds.length; offset += COST_TELEMETRY_AGENT_CHUNK_SIZE) {
+    const agentIds = rootAgentIds.slice(offset, offset + COST_TELEMETRY_AGENT_CHUNK_SIZE);
+    const rows = await db.toolUsage.findMany({
+      where: { agentId: { in: agentIds } },
+      select: { agentId: true, toolName: true, usageItems: true },
+    });
+    const byAgent = new Map<string, CostTelemetrySourceRow[]>();
+    for (const row of rows) {
+      if (row.agentId === null) continue;
+      const agentRows = byAgent.get(row.agentId) ?? [];
+      agentRows.push(row);
+      byAgent.set(row.agentId, agentRows);
+    }
+    for (const agentId of agentIds) {
+      const telemetry = buildStoredRootCostTelemetry(byAgent.get(agentId) ?? []);
+      if (telemetry !== null) result.set(agentId, telemetry);
+    }
+  }
+  return result;
 }
 
 function emptyStats(): CleanupStats {
@@ -310,6 +342,7 @@ async function cleanupDatabase(
       deletedAt: true,
       temporalWorkflowId: true,
       isBenchmark: true,
+      worldModelMode: true,
     } as const;
     try {
       agents = await prisma.agent.findMany({
@@ -350,6 +383,11 @@ async function cleanupDatabase(
         `📦 Archiving ${allAgentsToArchive.length} goals from other users to GoalHistory...\n`
       );
 
+      const costTelemetryByAgentId = await loadRootCostTelemetry(
+        prisma,
+        allAgentsToArchive.filter((agent) => agent.depth === 0).map((agent) => agent.id)
+      );
+
       await Promise.all(
         allAgentsToArchive.map((agent) =>
           limit(async () => {
@@ -358,7 +396,21 @@ async function cleanupDatabase(
                 where: { originalAgentId: agent.id },
                 select: { id: true },
               });
+              const costTelemetry = costTelemetryByAgentId.get(agent.id);
               if (existing) {
+                await prisma.goalHistory.update({
+                  where: { id: existing.id },
+                  data: {
+                    worldModelMode: agent.worldModelMode,
+                    ...(agent.depth === 0 ? { costCapturedAt: new Date() } : {}),
+                    ...(costTelemetry === undefined
+                      ? {}
+                      : {
+                          wasAgentRun: true,
+                          costTelemetry: costTelemetry as unknown as Prisma.InputJsonValue,
+                        }),
+                  },
+                });
                 return;
               }
               await prisma.goalHistory.create({
@@ -380,6 +432,12 @@ async function cleanupDatabase(
                   agentUpdatedAt: agent.updatedAt,
                   agentDeletedAt: agent.deletedAt,
                   isBenchmark: agent.isBenchmark,
+                  worldModelMode: agent.worldModelMode,
+                  wasAgentRun: costTelemetry !== undefined,
+                  ...(agent.depth === 0 ? { costCapturedAt: new Date() } : {}),
+                  ...(costTelemetry === undefined
+                    ? {}
+                    : { costTelemetry: costTelemetry as unknown as Prisma.InputJsonValue }),
                 },
               });
               console.log(

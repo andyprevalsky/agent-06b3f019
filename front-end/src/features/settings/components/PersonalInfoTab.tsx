@@ -1,3 +1,17 @@
+/**
+ * STATE MACHINE: Personal information
+ *
+ * [READY] --edit personal/delivery field--> [DIRTY]
+ *    ^                                      |
+ *    |                                      v save
+ * [SAVED] <----------------------------- [SAVING]
+ *    |                                      |
+ *    +---------- after 3 seconds -----------+ error -> [DIRTY]
+ *
+ * The verified phone is read-only. Personal identity and delivery recipient
+ * are edited independently, then persisted together by the parent settings flow.
+ */
+
 import { Loader2, Save, Check } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,122 +28,114 @@ interface PersonalInfoTabProps {
   onSave: () => void;
 }
 
-function AddressFields({
+function PersonalFields({
   userData,
   onFieldChange,
 }: Pick<PersonalInfoTabProps, 'userData' | 'onFieldChange'>) {
-  return (
-    <div className="space-y-4">
-      <h3 className="text-lg font-semibold">Delivery Address</h3>
-
-      <div className="space-y-2">
-        <Label htmlFor="addressLine1">Address Line 1</Label>
-        <Input
-          id="addressLine1"
-          placeholder="123 Main Street"
-          value={userData.addressLine1}
-          onChange={(e) => onFieldChange('addressLine1', e.target.value)}
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="addressLine2">Address Line 2 (Optional)</Label>
-        <Input
-          id="addressLine2"
-          placeholder="Apt 4B, Suite 100, etc."
-          value={userData.addressLine2}
-          onChange={(e) => onFieldChange('addressLine2', e.target.value)}
-        />
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor="city">City</Label>
-          <Input
-            id="city"
-            placeholder="New York"
-            value={userData.city}
-            onChange={(e) => onFieldChange('city', e.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="state">State</Label>
-          <Input
-            id="state"
-            placeholder="NY"
-            value={userData.state}
-            onChange={(e) => onFieldChange('state', e.target.value)}
-          />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-2">
-          <Label htmlFor="postalCode">Postal Code</Label>
-          <Input
-            id="postalCode"
-            placeholder="10001"
-            value={userData.postalCode}
-            onChange={(e) => onFieldChange('postalCode', e.target.value)}
-          />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="country">Country</Label>
-          <Input
-            id="country"
-            placeholder="United States"
-            value={userData.country}
-            onChange={(e) => onFieldChange('country', e.target.value)}
-          />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export default function PersonalInfoTab({
-  userData,
-  onFieldChange,
-  saving,
-  saved,
-  onSave,
-}: PersonalInfoTabProps) {
   return (
     <Card>
       <CardHeader>
         <CardTitle>Personal Information</CardTitle>
         <CardDescription>
-          Your information used when purchasing items through your agents
+          Your identity and contact details. Agents use these details when referring to you.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="name">Full Name</Label>
+          <Label htmlFor="name">Personal Full Name</Label>
           <Input
             id="name"
+            autoComplete="name"
             placeholder="John Doe"
             value={userData.name}
-            onChange={(e) => onFieldChange('name', e.target.value)}
+            onChange={(event) => onFieldChange('name', event.target.value)}
           />
         </div>
 
-        <AddressFields userData={userData} onFieldChange={onFieldChange} />
+        <div className="space-y-2">
+          <Label htmlFor="email">Email</Label>
+          <Input
+            id="email"
+            type="email"
+            autoComplete="email"
+            placeholder="you@example.com"
+            value={userData.email}
+            onChange={(event) => onFieldChange('email', event.target.value)}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="phone">Verified Phone</Label>
+          <Input id="phone" type="tel" value={userData.phone} disabled />
+          <p className="text-sm text-muted-foreground">
+            This is the verified phone number associated with your account.
+          </p>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function DeliveryFields({ userData, onFieldChange, saving, saved, onSave }: PersonalInfoTabProps) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Delivery Address</CardTitle>
+        <CardDescription>
+          The recipient and address agents should use for deliveries and purchases.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="deliveryRecipientName">Recipient Full Name</Label>
+          <Input
+            id="deliveryRecipientName"
+            autoComplete="shipping name"
+            placeholder="Delivery recipient"
+            value={userData.deliveryRecipientName}
+            onChange={(event) => onFieldChange('deliveryRecipientName', event.target.value)}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="addressLine1">Address Line 1</Label>
+          <Input
+            id="addressLine1"
+            autoComplete="shipping address-line1"
+            placeholder="123 Main Street"
+            value={userData.addressLine1}
+            onChange={(event) => onFieldChange('addressLine1', event.target.value)}
+          />
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="addressLine2">Address Line 2 (Optional)</Label>
+          <Input
+            id="addressLine2"
+            autoComplete="shipping address-line2"
+            placeholder="Apt 4B, Suite 100, etc."
+            value={userData.addressLine2}
+            onChange={(event) => onFieldChange('addressLine2', event.target.value)}
+          />
+        </div>
+
+        <DeliveryLocationFields userData={userData} onFieldChange={onFieldChange} />
 
         <div className="flex gap-4 pt-4">
           <Button onClick={onSave} disabled={saving} className="min-w-[120px]">
             {saving ? (
               <>
-                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                 Saving...
               </>
             ) : saved ? (
               <>
-                <Check className="w-4 h-4 mr-2" />
+                <Check className="mr-2 h-4 w-4" />
                 Saved!
               </>
             ) : (
               <>
-                <Save className="w-4 h-4 mr-2" />
+                <Save className="mr-2 h-4 w-4" />
                 Save Settings
               </>
             )}
@@ -137,5 +143,69 @@ export default function PersonalInfoTab({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function DeliveryLocationFields({
+  userData,
+  onFieldChange,
+}: Pick<PersonalInfoTabProps, 'userData' | 'onFieldChange'>) {
+  return (
+    <>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="city">City</Label>
+          <Input
+            id="city"
+            autoComplete="shipping address-level2"
+            placeholder="New York"
+            value={userData.city}
+            onChange={(event) => onFieldChange('city', event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="state">State</Label>
+          <Input
+            id="state"
+            autoComplete="shipping address-level1"
+            placeholder="NY"
+            value={userData.state}
+            onChange={(event) => onFieldChange('state', event.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div className="space-y-2">
+          <Label htmlFor="postalCode">Postal Code</Label>
+          <Input
+            id="postalCode"
+            autoComplete="shipping postal-code"
+            placeholder="10001"
+            value={userData.postalCode}
+            onChange={(event) => onFieldChange('postalCode', event.target.value)}
+          />
+        </div>
+        <div className="space-y-2">
+          <Label htmlFor="country">Country</Label>
+          <Input
+            id="country"
+            autoComplete="shipping country-name"
+            placeholder="United States"
+            value={userData.country}
+            onChange={(event) => onFieldChange('country', event.target.value)}
+          />
+        </div>
+      </div>
+    </>
+  );
+}
+
+export default function PersonalInfoTab(props: PersonalInfoTabProps) {
+  return (
+    <div className="space-y-6">
+      <PersonalFields userData={props.userData} onFieldChange={props.onFieldChange} />
+      <DeliveryFields {...props} />
+    </div>
   );
 }
