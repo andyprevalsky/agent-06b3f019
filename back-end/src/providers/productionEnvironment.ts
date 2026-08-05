@@ -38,7 +38,7 @@ const VALUE_VALIDATORS: Partial<
   STRIPE_WEBHOOK_SECRET: (value) => /^whsec_\S+$/.test(value),
 };
 
-function isProductionEnvironment(environment: Readonly<NodeJS.ProcessEnv>): boolean {
+export function isProductionEnvironment(environment: Readonly<NodeJS.ProcessEnv>): boolean {
   return environment.RENDER === 'true' || environment.NODE_ENV === 'production';
 }
 

@@ -22,6 +22,8 @@ type SnapshotLookupWhere = {
   userId: { in: string[] };
   /** Narrows the snapshot read to just the rows in the current page. */
   origin?: { in: string[] };
+  authRealm?: { in: string[] };
+  OR?: Array<Record<string, unknown>>;
 };
 
 type SnapshotLookupModel<T extends { userId: string }> = {
@@ -71,6 +73,62 @@ export async function syncPagedCredentials<T>(
     const rows = await readPage({ skip, take: pageSize });
     if (rows.length === 0) break;
     total += await syncPage(rows);
+    if (rows.length < pageSize) break;
+  }
+  return total;
+}
+
+export interface JsonTextOrigin {
+  id: string;
+  userId: string;
+  origin: string;
+  payload: string;
+  hash: string;
+  updatedAt: Date;
+}
+
+/**
+ * Copy JSONB-bearing origin rows without deserializing their payload into a
+ * JavaScript object. Postgres returns the JSONB as canonical text and accepts
+ * that exact text back through a `::jsonb` parameter at the write boundary.
+ *
+ * A one-row page is intentional: a 13MB compressed IndexedDB JSONB value from
+ * production expands to more than 3.8GB when Prisma materializes its nested
+ * object graph. Row-count paging cannot bound that expansion; keeping the
+ * payload as a string does.
+ */
+export async function syncJsonTextOrigins(
+  readPage: (page: { afterId?: string; take: number }) => Promise<JsonTextOrigin[]>,
+  readLocalHash: (userId: string, origin: string) => Promise<string | null>,
+  writeRow: (row: JsonTextOrigin) => Promise<void>,
+  pageSize: number
+): Promise<number> {
+  if (!Number.isInteger(pageSize) || pageSize < 1) {
+    throw new Error(`JSON text sync page size must be a positive integer, got ${pageSize}`);
+  }
+
+  let afterId: string | undefined;
+  let total = 0;
+  for (;;) {
+    const rows = await readPage({ afterId, take: pageSize });
+    if (rows.length === 0) break;
+    if (rows.length > pageSize) {
+      throw new Error(
+        `JSON text sync reader returned ${rows.length} rows for page size ${pageSize}`
+      );
+    }
+
+    for (const row of rows) {
+      const localHash = await readLocalHash(row.userId, row.origin);
+      if (localHash !== row.hash) await writeRow(row);
+    }
+    total += rows.length;
+
+    const nextAfterId = rows.at(-1)?.id;
+    if (nextAfterId === undefined || nextAfterId === afterId) {
+      throw new Error('JSON text sync reader did not advance its id cursor');
+    }
+    afterId = nextAfterId;
     if (rows.length < pageSize) break;
   }
   return total;
@@ -257,7 +315,17 @@ export async function syncCookieCredentials(
         cookie.browserSource,
         cookie.browserProfile,
       ]),
-    (remote, local) => cookieContent(remote) === cookieContent(local)
+    (remote, local) => cookieContent(remote) === cookieContent(local),
+    (rows) => ({
+      OR: rows.map((cookie) => ({
+        domain: cookie.domain,
+        name: cookie.name,
+        path: cookie.path,
+        topFrameSiteKey: cookie.topFrameSiteKey,
+        browserSource: cookie.browserSource,
+        browserProfile: cookie.browserProfile,
+      })),
+    })
   );
   const concurrency = 8;
   for (let index = 0; index < cookiesToSync.length; index += concurrency) {
@@ -299,7 +367,8 @@ export async function syncCookieBundleCredentials(
     localCookieBundle,
     (bundle) =>
       rowSignature([bundle.userId, bundle.authRealm, bundle.browserSource, bundle.browserProfile]),
-    (remote, local) => cookieBundleContent(remote) === cookieBundleContent(local)
+    (remote, local) => cookieBundleContent(remote) === cookieBundleContent(local),
+    (rows) => ({ authRealm: { in: [...new Set(rows.map((row) => row.authRealm))] } })
   );
   for (const bundle of bundlesToSync) {
     const { id: remoteId, ...updateData } = bundle;
@@ -688,7 +757,13 @@ export async function syncBrowserPasswordCredentials(
     passwords,
     localPassword,
     (password) => rowSignature([password.userId, password.origin, password.username]),
-    (remote, local) => browserPasswordContent(remote) === browserPasswordContent(local)
+    (remote, local) => browserPasswordContent(remote) === browserPasswordContent(local),
+    (rows) => ({
+      OR: rows.map((password) => ({
+        origin: password.origin,
+        username: password.username,
+      })),
+    })
   );
   for (const password of passwordsToSync) {
     const { id: remoteId, ...updateData } = password;

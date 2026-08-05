@@ -7411,6 +7411,7 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert seed_dump.parent.is_dir()
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
+            assert captured["env"]["FAST_MODE_CACHE_USE_LOCAL"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] == "10"
             assert "TEMPORAL_TASK_QUEUE" not in captured["env"]
@@ -10086,6 +10087,7 @@ def test_message_side_effect_benchmarks_force_fast_cache_off():
 
 def test_unified_catalog_validates_and_covers_benchmark_tasks():
     """tasks.json is the benchmark catalog: valid contract, ready entries, holding set split."""
+    from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS
     from benchmarks.long_horizon import EVALUATION_METHODS, validate_catalog
 
     tasks = validate_catalog()
@@ -10094,7 +10096,10 @@ def test_unified_catalog_validates_and_covers_benchmark_tasks():
     statuses = {(t.get("runner", "agent"), t.get("status", "ready")) for t in tasks}
     assert ("agent", "ready") in statuses
     assert ("agent", "incomplete") in statuses
-    assert {runner for runner, _ in statuses} == {"agent"}
+    # Every declared runner must be one run_benchmark.py can actually dispatch,
+    # otherwise a suite run silently skips the task.
+    assert {runner for runner, _ in statuses} <= RUNNABLE_TASK_RUNNERS
+    assert ("sms", "ready") in statuses
     methods = {e["method"] for t in tasks for e in t.get("evaluators", [])}
     assert methods == EVALUATION_METHODS
     # Enriched long-horizon migrations carry the full environment contract

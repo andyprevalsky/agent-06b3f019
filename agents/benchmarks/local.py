@@ -32,7 +32,7 @@ REPO_ROOT = AGENTS_DIR.parent
 if str(AGENTS_DIR) not in sys.path:
     sys.path.insert(0, str(AGENTS_DIR))
 
-from benchmarks.benchmark_tasks import all_tasks, selected_tasks_require_gate_type
+from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS, all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
@@ -712,6 +712,41 @@ def needs_frontend_tunnel(tasks: Sequence[str]) -> bool:
     )
 
 
+def sms_web_search_fixture_path(stack: "ServiceStack") -> str:
+    """The single absolute path the backend reads and run_benchmark.py writes.
+
+    Defined once because the two sides are a contract: if they ever disagree the
+    fixture silently no-ops and the SMS benchmarks score live search while
+    reporting green.
+    """
+    return str((stack.context_dir / "sms-web-search-fixture.json").resolve())
+
+
+def needs_public_tunnel(tasks: Sequence[str]) -> bool:
+    """True when some selected task actually needs a publicly reachable frontend.
+
+    run.sh opens a trycloudflare quick tunnel on every benchmark stack. Real
+    browser agents need it — they drive a hosted page and must reach it from the
+    provider's network — but a bench that never opens a browser does not, and
+    trycloudflare rate-limits per IP: back-to-back local runs start getting 429s,
+    run.sh exits 1, and a task that never wanted a tunnel is recorded as failed.
+    Only pay that dependency when a task's own contract asks for it.
+    """
+    selected = set(tasks)
+    if os.environ.get("BENCHMARK_PUBLIC_TUNNEL") == "1":
+        return True
+    if selected & TEST_PAYMENT_FRONTEND_TASK_NAMES:
+        return True
+    for task in all_tasks():
+        if task.name not in selected:
+            continue
+        if task.requires_browser_agent:
+            return True
+        if "{frontend_url}" in task.prompt:
+            return True
+    return False
+
+
 def needs_imessage_relay(tasks: Sequence[str]) -> bool:
     return "message-person" in set(tasks) and sys.platform == "darwin"
 
@@ -987,11 +1022,13 @@ def start_services(
     anon_steel_profile: bool = False,
     simulate: bool = False,
     world_model_name: str | None = None,
+    tasks: Sequence[str] = (),
 ) -> tuple[subprocess.Popen, dict]:
     stack.context_dir.mkdir(parents=True, exist_ok=True)
     if clean_first and not stack.isolated:
         subprocess.run(["bash", "scripts/kill-services.sh"], cwd=REPO_ROOT, check=True)
     env = {**os.environ, "DISABLE_GMAIL_SYNC": "1"}
+    skip_public_tunnel = bool(tasks) and not needs_public_tunnel(tasks)
     if anon_steel_profile:
         env["BENCHMARK_ANON_STEEL_PROFILE"] = "true"
         env["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = "true"
@@ -1014,6 +1051,11 @@ def start_services(
         env["CONDUCTOR_WORKSPACE_NAME"] = stack.workspace_name
         env["CONDUCTOR_PORT"] = str(stack.base_port)
         env["ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME"] = "1"
+        # The benchmark owns a fresh isolated Postgres. Its Fast Mode cache is
+        # task-local state, so routing schema setup through the shared production
+        # pooler only adds an external startup dependency. A closed or saturated
+        # pooler previously aborted the stack before either task could run.
+        env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
         # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
         # parent shell; if that leaks into an isolated run, every local smoke /
@@ -1025,7 +1067,7 @@ def start_services(
         # which can collapse distinct runs onto one public endpoint. Give each
         # isolated stack a provider-assigned quick tunnel instead; the shared
         # dev stack keeps its stable ngrok domain.
-        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "1"
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0" if skip_public_tunnel else "1"
         # trycloudflare quick tunnels often never route from cloud VMs (edge
         # probe stays at curl status 000 for the full timeout). Fail the CF
         # provider after one short attempt so the existing ngrok fallback can
@@ -1059,6 +1101,26 @@ def start_services(
             resolved_model = world_model_name or os.environ.get("WMH_MODEL_NAME")
             if resolved_model:
                 env["WMH_MODEL_NAME"] = resolved_model
+    # The SMS benchmarks stub web_search through a file the backend re-reads per
+    # call. The path has to be in the BACKEND's env at boot — it is already
+    # running by the time a task selects its fixture — so publish it here.
+    env["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(stack)
+    # A/B the SMS supervisor against another model with everything else held
+    # fixed. Read from the caller's env so `BENCHMARK_SMS_SUPERVISOR_MODEL=x
+    # scripts/run-bench --local <task>` just works; the backend needs it at boot.
+    for key in ("BENCHMARK_SMS_SUPERVISOR_MODEL", "BENCHMARK_SMS_SUPERVISOR_ROUTE"):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+
+    if skip_public_tunnel:
+        # No selected task drives a browser or a hosted page, so nothing in this
+        # run needs to be reachable from the public internet. Skip the quick
+        # tunnel (and, with it, the ephemeral-URL publish that would otherwise
+        # have nothing to publish) rather than take a per-IP-rate-limited
+        # external dependency for nothing. See needs_public_tunnel().
+        env["BENCHMARK_SKIP_PUBLIC_TUNNEL"] = "1"
+        env["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
+
     try:
         with open(stack.service_log, "w") as service_log:
             process = subprocess.Popen(
@@ -1721,18 +1783,18 @@ def tasks_from_args(args: argparse.Namespace) -> list[str]:
         return known_task_names()
     if args.suite:
         if args.suite == "all":
-            selected = [task for task in all_tasks() if task.runner == "agent" and task.status == "ready"]
+            selected = [task for task in all_tasks() if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready"]
         elif args.suite in ("rose-bench", "pipeline-e2e"):
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner == "agent" and task.status == "ready" and task.bench == args.suite
+                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and task.bench == args.suite
             ]
         else:
             selected = [
                 task
                 for task in all_tasks()
-                if task.runner == "agent" and task.status == "ready" and args.suite in task.tags
+                if task.runner in RUNNABLE_TASK_RUNNERS and task.status == "ready" and args.suite in task.tags
             ]
         if not selected:
             raise ValueError(f"No ready agent benchmark tasks matched suite/tag: {args.suite}")
@@ -1959,6 +2021,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 anon_steel_profile=args.anon,
                 simulate=args.simulate,
                 world_model_name=args.world_model_name,
+                tasks=selected_tasks,
             )
         apply_manifest_environment(manifest)
         if stack.isolated:
@@ -1969,6 +2032,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             # database — e.g. the grep fixture's direct agent lookup hits system Postgres
             # instead of the isolated container and fails with "root agent not found".
             os.environ["BENCHMARK_CONTEXT_DIR"] = _context_dir_env_value(stack.context_dir)
+            # The SMS web_search stub is a two-process contract: the backend was
+            # given this absolute path at boot, and run_benchmark.py must write
+            # the file there. Exporting it to the backend alone leaves the runner
+            # writing somewhere the backend never reads — the fixture no-ops and
+            # the run scores live search. Both sides get the same string.
+            os.environ["BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE"] = sms_web_search_fixture_path(
+                stack
+            )
             ports = manifest.get("ports", {})
             print(
                 "Isolated benchmark stack: "

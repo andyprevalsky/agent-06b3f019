@@ -36,12 +36,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'domains/attention-requests/repo.ts',
-    scope: 'appendGateWaiter',
-    fingerprint: '9a86693274e1b66a',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/auth-assistance/repo.ts',
     scope: 'createRequest',
     fingerprint: '363b182fffe86b00',
@@ -150,6 +144,7 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
+
     file: 'providers/traceArchiveFixture.ts',
     scope: 'collectFixtureSnapshot',
     fingerprint: '5e0daf8438d614b5',

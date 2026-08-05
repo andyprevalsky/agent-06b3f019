@@ -265,6 +265,36 @@ def test_shared_workspace_source_requires_usable_claude_code(tmp_path: Path):
     assert any('FROM "Integration"' in command[-1] for command in commands)
 
 
+def test_shared_workspace_source_falls_back_to_verified_canonical_container(tmp_path: Path):
+    """An isolated run can recover the top-level DB after services.json is gone."""
+    shared_context = tmp_path / ".context"
+    shared_context.mkdir()
+    isolated_context = shared_context / "benchmarks" / "isolated"
+    commands: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        commands.append(command)
+        if command[:2] == ["docker", "inspect"]:
+            assert command[2] == f"victoria-db-{tmp_path.name}"
+            return subprocess.CompletedProcess(command, 0, "true 55195\n", "")
+        if command[0] == "psql":
+            assert command[1] == "postgresql://postgres:postgres@localhost:55195/victoria"
+            assert 'FROM "Integration"' in command[-1]
+            return subprocess.CompletedProcess(command, 0, "t\n", "")
+        raise AssertionError(f"unexpected command: {command}")
+
+    with (
+        patch.object(rb, "REPO_ROOT", tmp_path),
+        patch.object(rb, "_benchmark_context_path", return_value=isolated_context),
+        patch.object(rb.subprocess, "run", side_effect=fake_run),
+    ):
+        assert rb._shared_workspace_database_url() == (
+            "postgresql://postgres:postgres@localhost:55195/victoria"
+        )
+
+    assert [command[0] for command in commands] == ["docker", "psql"]
+
+
 def test_sync_prefers_verified_shared_source_and_clears_ambient_source():
     seen: dict[str, dict[str, str]] = {}
 
