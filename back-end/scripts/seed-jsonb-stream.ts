@@ -94,8 +94,14 @@ const PRISMA_ONLY_URL_PARAMETERS = [
  * it never constructs the canonical JSON string or lets Prisma deserialize the
  * JSONB into a multi-gigabyte object graph.
  */
-export async function pipeJsonbCopy(source: Readable, target: Writable): Promise<void> {
-  await pipeline(source, target);
+export async function pipeJsonbCopy(
+  source: Readable,
+  target: Writable,
+  options: { end?: boolean } = {}
+): Promise<void> {
+  // `end: false` keeps the writable open after the readable finishes so the
+  // caller can decide whether a clean EOF (commit) is actually warranted.
+  await pipeline(source, target, { end: options.end ?? true });
 }
 
 function quoteSqlLiteral(value: string): string {
@@ -289,16 +295,28 @@ async function runCopyStream({
   const sourceError = captureOutput(source.stderr);
   const targetOutput = captureOutput(target.stdout);
   const targetError = captureOutput(target.stderr);
-  const copy = pipeJsonbCopy(source.stdout!, target.stdin!).then(
+
+  // Do NOT let the pipeline close the target's stdin. A source that dies partway
+  // through still closes its stdout cleanly, which psql reads as a COMPLETE
+  // `COPY FROM STDIN` — so the target would COMMIT the truncated page set and
+  // only afterwards would we notice the source's non-zero exit. Holding stdin
+  // open until the source exits 0 makes a partial stream unable to commit:
+  // on failure the target is killed mid-transaction and Postgres rolls back.
+  const copy = pipeJsonbCopy(source.stdout!, target.stdin!, { end: false }).then(
     () => null,
     (error: unknown) => error
   );
 
-  const [sourceExit, targetExit, copyError] = await Promise.all([
-    waitForExit(source),
-    waitForExit(target),
-    copy,
-  ]);
+  const [sourceExit, copyError] = await Promise.all([waitForExit(source), copy]);
+
+  if (sourceExit.code === 0 && copyError === null) {
+    target.stdin!.end();
+  } else {
+    // Never a clean EOF: that is what would let a partial merge commit.
+    target.kill('SIGKILL');
+  }
+
+  const targetExit = await waitForExit(target);
 
   if (sourceExit.code !== 0) {
     throw new Error(

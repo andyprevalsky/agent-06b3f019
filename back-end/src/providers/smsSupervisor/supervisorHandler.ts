@@ -26,6 +26,7 @@ import {
 } from './supervisorTools';
 import { createLogger } from '../logger';
 import { getComputeToken } from './supervisorComputeToken';
+import { isProductionEnvironment } from '../productionEnvironment';
 import { appendOutboundSms, fetchSessionMessagesSince } from './sessionStore';
 import * as environment from './environmentMessages';
 import { callWithRetries, dispatchToolSafely } from './supervisorResilience';
@@ -69,6 +70,23 @@ interface SupervisorToolTraceEntry {
   result: string;
   resultTruncated: boolean;
   error?: string;
+}
+
+/**
+ * Drop user content from a trace entry while keeping it useful as evidence.
+ *
+ * Tool arguments are the model's own words (a search query, a goal) and are the
+ * point of the audit, so they stay. Results are whatever the tool read back on
+ * the user's behalf and never belong in a shipped log.
+ */
+function redactTraceEntry(entry: SupervisorToolTraceEntry): SupervisorToolTraceEntry {
+  return {
+    ...entry,
+    result: `[redacted ${String(entry.result.length)} chars]`,
+    ...(entry.error === undefined
+      ? {}
+      : { error: `[redacted ${String(entry.error.length)} chars]` }),
+  };
 }
 
 // User-facing last-resort line when a run genuinely cannot produce a reply after
@@ -748,10 +766,18 @@ export async function handleSmsSupervisorMessage(config: {
   // the trace as a JSON string because the dev logger otherwise renders arrays
   // as "[object Object]". The report can now prove whether web_search happened,
   // with which arguments, and what result preceded an irreversible action.
+  //
+  // Tool RESULTS carry user content — grep hits over the user's own data, search
+  // snippets, SMS bodies. The logger redacts by key, so a serialized blob slips
+  // straight past it. In production the shape is preserved (every call, its
+  // order, its arguments, whether it succeeded) but result/error bodies are
+  // replaced by their length, which is what the evidence actually needs.
   log.info('[SmsSupervisor] TOOL_TRACE', {
     userId,
     mySeq,
-    toolTrace: JSON.stringify(toolTrace),
+    toolTrace: JSON.stringify(
+      isProductionEnvironment(process.env) ? toolTrace.map(redactTraceEntry) : toolTrace
+    ),
   });
 
   log.info('[SmsSupervisor] === END ===', {
