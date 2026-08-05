@@ -2,21 +2,20 @@
  * Cross-clone benchmark seed-dump cache (R2).
  *
  * A freshly-cloned cloud-bench guest has no local `victoria-seed.dump` on its
- * /data volume, so `run.sh` otherwise pays a full ~19-min production DB
- * cold-sync on first boot. This CLI lets a clone publish its dump to a shared
- * R2 bucket after the first cold-sync, and lets every subsequent clone (in ANY
- * workspace) pull a schema-matched dump and `pg_restore` it in seconds instead.
+ * /data volume. This CLI lets an explicit publication workflow put a reviewed
+ * canonical base in shared R2, and lets every clone (in ANY workspace) pull and
+ * restore that same base instead of synthesizing it from a production cold-sync.
  *
  * Neighbor-safe by construction: this is purely additive. `--get` exits non-zero
- * on any miss/error so `run.sh` transparently falls back to the existing
- * cold-sync path; a corrupt download is caught by the existing `pg_restore`
- * failure fallback. It never mutates a shared warm box or its Fly snapshots, so
- * a concurrently-running fleet is unaffected.
+ * on any miss/error; callers decide whether an optional seed may cold-sync or a
+ * required canonical benchmark base must fail closed. It never mutates a shared
+ * warm box or its Fly snapshots, so a concurrently-running fleet is unaffected.
  *
  * Key: `benchmark-seed-dumps/<token>.dump`, where the caller's token embeds the
- * schema hash (correctness) and a UTC day bucket (bounds staleness to 24h). The
- * schema hash guarantees a pulled dump matches the clone's `schema.prisma`; the
- * caller re-verifies via the `.schemahash` sidecar before restoring.
+ * schema hash and a reviewed base-fixture revision. The schema hash guarantees a
+ * pulled dump matches the clone's `schema.prisma`; the fixture revision makes
+ * row-content changes explicit and immutable. The caller re-verifies both via
+ * local sidecars before restoring.
  *
  * Usage:
  *   npx tsx scripts/seed-dump-cache.ts get <token> <out-file>

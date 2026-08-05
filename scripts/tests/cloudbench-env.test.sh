@@ -23,6 +23,9 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   "export BENCHMARK_SEED_DUMP='\$STACK_SEED_DUMP'" \
   "cloud benchmark process must receive the configured seed-dump freshness proof"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  "export BENCHMARK_REQUIRE_SEED_DUMP=1" \
+  "cloud benchmarks must fail closed instead of replacing the canonical base"
 # shellcheck source=../lib/cloudbench-env.sh
 source "$HELPER_SRC"
 

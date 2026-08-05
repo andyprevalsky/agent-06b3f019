@@ -35,6 +35,16 @@ check "no dump path → cold-sync" "cold-sync" "$(seed_cache_decision "" "$HASH"
 VALID="$TMP/valid.dump"; printf 'x' > "$VALID"; printf '%s' "$HASH" > "$VALID.schemahash"
 check "valid local dump → restore-local" "restore-local" "$(seed_cache_decision "$VALID" "$HASH" 1)"
 
+# Canonical base restores additionally require the immutable cache-token sidecar.
+# A same-schema daily snapshot is not evidence that the reviewed fixture rows
+# (including WhatsApp history) are present.
+CACHE_TOKEN="$HASH-victoria-prod-sync-v1-whatsapp-v2"
+check "same-schema dump without canonical token → consult-remote" \
+    "consult-remote" "$(seed_cache_decision "$VALID" "$HASH" 1 "$CACHE_TOKEN")"
+printf '%s' "$CACHE_TOKEN" > "$VALID.cachetoken"
+check "schema + canonical token → restore-local" \
+    "restore-local" "$(seed_cache_decision "$VALID" "$HASH" 1 "$CACHE_TOKEN")"
+
 # 3. THE BUG: stale dump (present, sidecar hash mismatched) + cache ON.
 #    Old `[ ! -s ]` guard skipped the cache and cold-synced. Must now consult-remote.
 STALE="$TMP/stale.dump"; printf 'x' > "$STALE"; printf 'OLD-drifted-hash' > "$STALE.schemahash"
@@ -61,16 +71,23 @@ check "zero-byte dump + cache on → consult-remote" "consult-remote" "$(seed_ca
 # Wiring guard: run.sh must actually source the helper and branch on the decision,
 # so the fix can't regress by reverting run.sh to the inline `[ ! -s ]` guard.
 if grep -q 'lib/seed-cache.sh' "$ROOT_DIR/scripts/run.sh" \
-   && grep -q 'seed_cache_decision' "$ROOT_DIR/scripts/run.sh"; then
+   && grep -q 'seed_cache_decision' "$ROOT_DIR/scripts/run.sh" \
+   && grep -q 'benchmark_base_cache_token' "$ROOT_DIR/scripts/run.sh" \
+   && grep -q '\.cachetoken' "$ROOT_DIR/scripts/run.sh"; then
     PASS=$((PASS+1)); echo "  ✅ run.sh sources + calls seed_cache_decision"
 else
-    FAIL=$((FAIL+1)); echo "  ❌ run.sh does not wire seed_cache_decision"
+    FAIL=$((FAIL+1)); echo "  ❌ run.sh does not wire the canonical base cache identity"
 fi
 # And it must NOT reintroduce the buggy guard that skipped the cache on any dump.
 if grep -qE '\[ *! *-s *"\$_SEED_DUMP" *\].*seed-dump-cache|! -s "\$_SEED_DUMP" \] && \[ "\$_SEED_CACHE_ENABLED"' "$ROOT_DIR/scripts/run.sh"; then
     FAIL=$((FAIL+1)); echo "  ❌ run.sh still gates the R2 download on '! -s dump' (the stale-dump bug)"
 else
     PASS=$((PASS+1)); echo "  ✅ run.sh no longer gates the R2 download on '! -s dump'"
+fi
+if grep -q 'BENCHMARK_PUBLISH_SEED_DUMP' "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ ordinary cold syncs cannot overwrite the canonical base artifact"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ canonical base publication is not explicitly gated"
 fi
 
 echo

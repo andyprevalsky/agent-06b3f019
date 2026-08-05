@@ -1,17 +1,18 @@
 """Canonical DB fixture / base-image registry for the eval catalog.
 
 Every task in `tasks.json` runs on top of a base image — a known DB state the
-agent's user context (contacts, messages, sessions, credentials) comes from.
+agent's user context (contacts, messages, sessions, browser state) comes from.
+Infrastructure compute tokens are a live overlay refreshed after restoration;
+they are not pinned by the base image.
 Tasks that don't declare `environment.base_images` default to
 `DEFAULT_BASE_IMAGE` (injected at load time in benchmark_tasks.py), so every
 eval has a reproducible starting state by construction.
 
-The default base image is the workspace's synced-prod Victoria DB, produced by
-`bash scripts/setup-db.sh`. `ensure_base_image_snapshot()` freezes it to a
-pg_dump file (same pattern as run_benchmark.py's grep frozen snapshot) so a
-run's exact DB state can be archived alongside its trajectory and restored in
-a sim later. Task-specific fixtures (e.g. `digital_twin_store_v1`) are deltas
-applied on top of a base image.
+The default base image is the canonical Victoria DB fixture shared by local and
+cloud benchmark runners. `ensure_base_image_snapshot()` can freeze a local copy
+to a pg_dump file so a run's exact DB state can be archived alongside its
+trajectory and restored in a sim later. Task-specific fixtures (e.g.
+`digital_twin_store_v1`) are deltas applied on top of this one base image.
 """
 
 from __future__ import annotations
@@ -25,28 +26,15 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 DEFAULT_BASE_IMAGE = "base:victoria-prod-sync-v1"
 
-WHATSAPP_BASE_IMAGE = "base:victoria-whatsapp-v1"
-
 BASE_IMAGES: dict[str, dict[str, str]] = {
     DEFAULT_BASE_IMAGE: {
         "description": (
             "Workspace Victoria DB synced from prod (users, people, messages, "
-            "integrations, browser state, credentials)."
+            "integrations, browser state), including the frozen WhatsApp contact "
+            "and message history used by recall benchmarks. Compute tokens are "
+            "refreshed from the live fixture after this base is restored."
         ),
         "create": "bash scripts/setup-db.sh",
-    },
-    WHATSAPP_BASE_IMAGE: {
-        "description": (
-            "Prod-sync base plus a real WhatsApp history sync (MessageRecord rows "
-            "with channel=WHATSAPP, their Person threads, and a CONNECTED whatsapp "
-            "Integration). Produced by pairing the mac-app WhatsApp client, which "
-            "uploads history through /api/integrations/whatsapp/upload. Kept as a "
-            "SEPARATE image rather than folded into the prod-sync default so tasks "
-            "that assume no WhatsApp data stay unaffected. The snapshot lives under "
-            "the gitignored .context/ tree — it contains real personal messages and "
-            "must never be committed."
-        ),
-        "create": "bash scripts/setup-db.sh && bash mac-app/scripts/whatsapp-live.sh",
     },
 }
 

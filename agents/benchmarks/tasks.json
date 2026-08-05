@@ -4382,12 +4382,12 @@
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
-      "base_images": ["base:victoria-whatsapp-v1"],
+      "base_images": ["base:victoria-prod-sync-v1"],
       "live_fixtures": [],
       "services": [],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "Frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
+      "context_notes": "The canonical Victoria base fixture includes frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
     },
     "evaluators": [
       {

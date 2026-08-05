@@ -62,7 +62,6 @@ from benchmarks.benchmark_tasks import (
     list_all_tasks,
 )
 from benchmarks.context_validator import validate_context
-from benchmarks.fixtures import DEFAULT_BASE_IMAGE
 from benchmarks.live_fixtures import LIVE_FIXTURE_NAMES, resolve_live_fixtures
 from benchmarks.llm_usage import aggregate_repeatable_cache_usage, aggregate_usage_items
 from benchmarks.local import manifest_database_url
@@ -4785,17 +4784,13 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     Real local tasks refresh from the verified shared workspace. Simulated cloud
-    stacks already restore the current dated seed dump and deliberately have no
+    stacks already restore the canonical base fixture and deliberately have no
     second source DB endpoint, so they use that restored credential state.
     """
     if not _is_local_base_url(base_url):
         return
     if _is_simulate_mode():
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
-        return
-    base_image_name = os.environ.get("BENCHMARK_BASE_IMAGE_NAME", DEFAULT_BASE_IMAGE)
-    if base_image_name != DEFAULT_BASE_IMAGE:
-        print(f"    🧊 {base_image_name} — using compute tokens from the frozen base image")
         return
     if _anthropic_family_excluded():
         if not _sync_compute_tokens(required_token_types=("gpt",)):
@@ -6674,22 +6669,30 @@ def _declared_evaluator_evidence(data: dict) -> list[dict]:
             )
             if key in metadata
         }
-        completion_summary = metadata.get("completionSummary")
-        if isinstance(completion_summary, dict):
-            # The completion card is the root agent's user-facing final response.
-            # Preserve its verified values for semantic judges instead of exposing
-            # only the empty TOOL-row text that backs the rendered card.
-            summary = completion_summary.get("summary")
-            outputs = completion_summary.get("outputs")
-            evidence_metadata["completionSummary"] = {
-                "summary": str(summary or "")[:12000],
-                "outputs": outputs[:100] if isinstance(outputs, list) else [],
-            }
         evidence.append(
             {
                 "role": role or "UNKNOWN",
                 "text": text_value[:12000],
                 "metadata": evidence_metadata,
+            }
+        )
+    # The frontend renders completionSummary metadata as the root agent's final
+    # answer card, while its backing TOOL message normally has empty text. Give
+    # the semantic judge the same summary + outputs as one normalized assistant
+    # row; omit tool usage and cost metadata that are not part of that answer.
+    summaries = _final_completion_summaries(data)
+    if summaries:
+        completion = summaries[-1]
+        outputs = completion.get("outputs")
+        payload = {
+            "summary": str(completion.get("summary") or "")[:12000],
+            "outputs": outputs[:100] if isinstance(outputs, list) else [],
+        }
+        evidence.append(
+            {
+                "role": "ASSISTANT",
+                "text": json.dumps(payload, default=str),
+                "metadata": {"evidence_type": "final_completion"},
             }
         )
     evidence.append({"benchmark_state": data.get("_benchmark", {})})

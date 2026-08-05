@@ -2077,8 +2077,8 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
-def test_declared_evaluator_evidence_includes_user_facing_completion_card():
-    """Semantic judges can see final values rendered by CompletionSummaryCard."""
+def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
+    """Semantic judges receive the rendered final answer as assistant evidence."""
     from benchmarks.run_benchmark import _declared_evaluator_evidence
 
     outputs = [
@@ -2105,12 +2105,21 @@ def test_declared_evaluator_evidence_includes_user_facing_completion_card():
         }
     )
 
-    completion = evidence[0]["metadata"]["completionSummary"]
-    assert completion == {
+    final_answers = [
+        item
+        for item in evidence
+        if item.get("metadata", {}).get("evidence_type") == "final_completion"
+    ]
+    assert len(final_answers) == 1
+    assert final_answers[0]["role"] == "ASSISTANT"
+    assert json.loads(final_answers[0]["text"]) == {
         "summary": "Answered all WhatsApp questions.",
         "outputs": outputs,
     }
-    assert "toolUsage" not in completion
+    assert all(
+        "completionSummary" not in item.get("metadata", {})
+        for item in evidence
+    )
 
 
 def _opentable_static_evaluator():
@@ -5342,25 +5351,32 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
     ]
 
 
-async def test_local_compute_refresh_preserves_frozen_base_image():
-    """A frozen base image must not be mutated by a live production sync."""
-    from unittest.mock import patch
+async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
+    """Frozen base data must never suppress the live compute-token refresh."""
+    from unittest.mock import AsyncMock, patch
 
     import benchmarks.run_benchmark as bench
 
     with (
         patch.dict(
             os.environ,
-            {"BENCHMARK_BASE_IMAGE_NAME": "base:victoria-whatsapp-v1"},
+            {"BENCHMARK_BASE_IMAGE_NAME": "base:any-frozen-snapshot"},
             clear=False,
         ),
-        patch.object(bench, "_sync_compute_tokens") as sync,
-        patch.object(bench, "_has_usable_anthropic_api_key_fallback") as fallback,
+        patch.object(bench, "_sync_compute_tokens", return_value=True) as sync,
+        patch.object(
+            bench,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ) as fallback,
     ):
         await bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
 
-    sync.assert_not_called()
-    fallback.assert_not_called()
+    fallback.assert_awaited_once_with("http://localhost:55120")
+    sync.assert_called_once_with(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=False,
+    )
 
 
 def test_compute_token_sync_reads_source_file_not_isolated_process_target():
@@ -6635,79 +6651,27 @@ def test_runner_fixtures_reject_manifest_without_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
-def test_local_runner_selects_declared_task_base_image():
-    """A task's declared base image must control its isolated DB snapshot."""
-    from benchmarks import local as local_bench
+def test_whatsapp_task_uses_the_canonical_cloud_base_image():
+    """WhatsApp history belongs to the one base shared by local and cloud runners."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.fixtures import BASE_IMAGES, DEFAULT_BASE_IMAGE
 
-    assert (
-        local_bench.selected_base_image(["whatsapp-history-recall"])
-        == "base:victoria-whatsapp-v1"
-    )
-
-    try:
-        local_bench.selected_base_image(["whatsapp-history-recall", "spawn-sub-agents"])
-    except ValueError as exc:
-        assert "cannot mix base images" in str(exc)
-    else:
-        raise AssertionError("mixed base images were silently run against one database")
+    assert set(BASE_IMAGES) == {DEFAULT_BASE_IMAGE}
+    assert "WhatsApp" in BASE_IMAGES[DEFAULT_BASE_IMAGE]["description"]
+    task = get_task_by_name("whatsapp-history-recall")
+    assert task is not None
+    assert task.environment["base_images"] == [DEFAULT_BASE_IMAGE]
 
 
-def test_local_custom_base_image_is_copied_into_run_context():
-    """A private base image is restored from a disposable per-run copy."""
-    from unittest.mock import patch
+def test_canonical_base_cache_token_is_revisioned_not_daily():
+    """Every runner resolves one immutable R2 base artifact until its revision changes."""
+    from benchmarks.seed_cache_path import BASE_IMAGE_CACHE_REVISION, seed_cache_token
 
-    from benchmarks import local as local_bench
-
-    captured = {}
-
-    class FakeProcess:
-        pass
-
-    def fake_popen(command, **kwargs):
-        captured["command"] = command
-        captured["env"] = kwargs["env"]
-        return FakeProcess()
-
-    prior_base_image = os.environ.get("BENCHMARK_BASE_IMAGE_NAME")
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            source = root / "private-whatsapp.sql"
-            source.write_text("-- private fixture\nSELECT 1;\n")
-            schema_hash = hashlib.sha1(
-                (local_bench.REPO_ROOT / "back-end" / "prisma" / "schema.prisma").read_bytes()
-            ).hexdigest()
-            Path(f"{source}.schemahash").write_text(schema_hash)
-            context_dir = root / "isolated-run"
-            stack = local_bench.ServiceStack(
-                run_id="isolated-run",
-                context_dir=context_dir,
-                manifest_path=context_dir / "services.json",
-                service_log=context_dir / "services.log",
-                isolated=True,
-                workspace_name="blackbox-bench-isolated-run",
-                base_port=55120,
-            )
-            os.environ["BENCHMARK_BASE_IMAGE_NAME"] = "base:victoria-whatsapp-v1"
-            with (
-                patch.object(local_bench, "base_image_snapshot_path", return_value=source),
-                patch.object(local_bench.subprocess, "Popen", side_effect=fake_popen),
-                patch.object(local_bench, "wait_for_services", return_value={"ports": {}}),
-                patch.object(local_bench, "_prime_local_seed_dump_from_shared_stack") as prime,
-            ):
-                local_bench.start_services(stack, clean_first=False)
-
-            copied = Path(captured["env"]["BENCHMARK_SEED_DUMP"])
-            assert copied == context_dir / source.name
-            assert copied.read_bytes() == source.read_bytes()
-            assert Path(f"{copied}.schemahash").read_text() == schema_hash
-            assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
-            prime.assert_not_called()
-    finally:
-        if prior_base_image is None:
-            os.environ.pop("BENCHMARK_BASE_IMAGE_NAME", None)
-        else:
-            os.environ["BENCHMARK_BASE_IMAGE_NAME"] = prior_base_image
+    schema = Path(__file__).resolve().parents[3] / "back-end" / "prisma" / "schema.prisma"
+    token = seed_cache_token(schema)
+    assert token.endswith(f"-{BASE_IMAGE_CACHE_REVISION}")
+    assert "victoria-prod-sync-v1" in token
+    assert "20260803" not in token
 
 
 def test_local_isolated_stack_opts_into_fast_seed_dump():
@@ -6726,17 +6690,15 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
 
     original_popen = local_bench.subprocess.Popen
     original_wait = local_bench.wait_for_services
-    original_prime = local_bench._prime_local_seed_dump_from_shared_stack
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
     prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
     os.environ["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] = "0"
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
-        local_bench._prime_local_seed_dump_from_shared_stack = (
-            lambda path: captured.setdefault("primed_seed_dump", path) is path
-        )
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            local_bench, "_prime_local_seed_dump_from_shared_stack"
+        ) as prime_seed:
             context_dir = Path(tmp) / "isolated-run"
             stack = local_bench.ServiceStack(
                 run_id="isolated-run",
@@ -6753,14 +6715,13 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
             assert seed_dump.name.endswith(".dump")
             assert seed_dump.parent.is_dir()
-            assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
+            prime_seed.assert_not_called()
     finally:
         local_bench.subprocess.Popen = original_popen
         local_bench.wait_for_services = original_wait
-        local_bench._prime_local_seed_dump_from_shared_stack = original_prime
         if prior_seed_dump is not None:
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
         if prior_ephemeral_tunnel is None:
@@ -10688,8 +10649,8 @@ async def run_all_tests():
         test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
     )
     await r.record_async(
-        "local_compute_refresh_preserves_frozen_base_image",
-        test_local_compute_refresh_preserves_frozen_base_image,
+        "local_compute_refresh_rehydrates_tokens_after_base_restore",
+        test_local_compute_refresh_rehydrates_tokens_after_base_restore,
     )
     r.record(
         "compute_token_source_ignores_isolated_process_target",
@@ -10778,12 +10739,12 @@ async def run_all_tests():
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
     r.record(
-        "local_declared_base_image_selection",
-        test_local_runner_selects_declared_task_base_image,
+        "whatsapp_task_uses_canonical_cloud_base",
+        test_whatsapp_task_uses_the_canonical_cloud_base_image,
     )
     r.record(
-        "local_private_base_image_run_copy",
-        test_local_custom_base_image_is_copied_into_run_context,
+        "canonical_base_cache_token_is_revisioned",
+        test_canonical_base_cache_token_is_revisioned_not_daily,
     )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
@@ -11092,8 +11053,8 @@ async def run_all_tests():
         test_required_declared_evaluator_controls_pass_fail,
     )
     r.record(
-        "declared_evaluator_evidence_completion_card",
-        test_declared_evaluator_evidence_includes_user_facing_completion_card,
+        "declared_evaluator_evidence_normalized_completion_card",
+        test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
     r.record(
         "opentable_static_runtime_contract",

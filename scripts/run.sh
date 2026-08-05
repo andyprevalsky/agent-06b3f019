@@ -721,13 +721,12 @@ _SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
 _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
 # Cross-clone seed-dump cache (R2): a freshly-cloned cloud guest's /data has no
 # local dump, so without this it pays the full ~19-min prod cold-sync every time.
-# Pull a schema-matched dump from the SHARED cache first. This is purely additive
-# and neighbor-safe: on any miss/error $_SEED_DUMP stays absent and the block
-# below cold-syncs exactly as before (then repopulates the cache); the schemahash
-# guard + pg_restore fallback catch any mismatch/corruption, so it can never break
-# a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
-# + UTC day (bounds staleness to 24h). Local dev leaves BENCHMARK_SEED_DUMP unset.
-_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+# Pull the immutable canonical base fixture from the SHARED cache first. The key
+# combines schema hash with an explicit base-image revision, so local and cloud
+# restore the same reviewed rows until that revision changes. A separate
+# cachetoken sidecar prevents an older same-schema daily snapshot from being
+# mistaken for this base. Local dev leaves BENCHMARK_SEED_DUMP unset.
+_SEED_CACHE_TOKEN="$(benchmark_base_cache_token back-end/prisma/schema.prisma)"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
@@ -753,22 +752,23 @@ fi
 # baked into the warm snapshot must fall through to the shared cache, NOT shadow
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
 # a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
-_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED" "$_SEED_CACHE_TOKEN")"
 if [ "$_SEED_DECISION" = "consult-remote" ]; then
     # Drop any stale local dump so a clean cache object lands in its place.
-    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
         _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
-        echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+        echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
     fi
 fi
 if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
-    fail_required_seed_dump "Isolated local benchmarks require a schema-matched seed dump; refusing a slow production cold-sync."
+    fail_required_seed_dump "Benchmarks require the canonical base fixture; refusing a slow production cold-sync substitute."
 fi
 if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
@@ -786,9 +786,9 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         # The target database's own pg_restore just proved this archive bad.
         # Invalidate it so a failed regeneration cannot make every later boot
         # retry the same unreadable archive and matching schema sidecar.
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
         if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
-            fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
+            fail_required_seed_dump "Required canonical base fixture could not be restored; refusing a slow production cold-sync substitute."
         fi
     fi
 fi
@@ -885,12 +885,14 @@ if [ -n "$_SEED_DUMP" ]; then
         "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
         "$_SEED_DUMP_CONTAINER"; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        rm -f "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
-        # Publish to the shared cache so the NEXT clone (any workspace — including a
-        # neighbor's daily run) restores in seconds instead of cold-syncing. Best-
-        # effort; a failed upload never blocks the boot.
-        if [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+        # Canonical base publication is an explicit operator action: an ordinary
+        # cold sync must never overwrite reviewed fixture rows such as WhatsApp
+        # history. The opt-in exists for the dedicated publication workflow only.
+        if [ "$_SEED_CACHE_ENABLED" = 1 ] && [ "${BENCHMARK_PUBLISH_SEED_DUMP:-0}" = "1" ]; then
             if (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
+                printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
             fi
         fi
