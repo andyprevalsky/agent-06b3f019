@@ -20,7 +20,12 @@ _CENTS_KEY_RE = re.compile(
 _AMOUNT_KEY_RE = re.compile(
     r"^(total|amount|price|cost|paid|charged)$|"
     r"(checkout|order|cart|grand|final|purchase).*(total|amount|price)|"
-    r"(.*price.*usd)|(.*_total)$|(total_usd|amount_usd)$",
+    r"(.*price.*usd)|(.*_total)$|(total_usd|amount_usd)$|"
+    r"((total|amount).*(paid|charged)|(paid|charged).*(total|amount))$",
+    re.IGNORECASE,
+)
+_LINE_ITEM_PRICE_PATH_RE = re.compile(
+    r"(purchased_products|line_items|lineitems|products|items|cart_items)\.\d+\.price$",
     re.IGNORECASE,
 )
 _CONFIRMATION_KEY_RE = re.compile(
@@ -112,8 +117,24 @@ def _leaf(path: str) -> str:
 
 def _amount_score(path: str) -> int:
     leaf = _leaf(path).lower()
+    # Line-item unit prices must not beat order totals (setup-resume shape).
+    if _LINE_ITEM_PRICE_PATH_RE.search(path):
+        return 0
     if leaf in {"total_cents", "totalcents"}:
         return 100
+    if leaf in {
+        "total_amount_paid",
+        "totalamountpaid",
+        "total_paid",
+        "totalpaid",
+        "amount_paid",
+        "amountpaid",
+        "total_charged",
+        "totalcharged",
+    }:
+        return 95
+    if "total" in leaf and ("paid" in leaf or "charged" in leaf):
+        return 88
     if "checkout" in leaf and "total" in leaf:
         return 90
     if "order" in leaf and "total" in leaf:

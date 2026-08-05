@@ -121,4 +121,29 @@ assert.ok(listNested !== null);
 assert.equal(listNested.totalCents, 4200);
 assert.equal(listNested.confirmationId, 'ORD-A1');
 
+// setup-resume / browser completion shape: total_amount_paid must win over
+// purchased_products[].price (otherwise GMV records $12 + "unknown merchant").
+const setupResume = extractStructuredGmv({
+  total_amount_paid: 43.96,
+  purchased_products: [
+    { name: 'Aurora Notebook', price: 12 },
+    { name: 'Ceramic Mug', price: 9 },
+    { name: 'Canvas Tote', price: 15 },
+  ],
+  order_confirmation_id: 'tp_60b2f90f',
+});
+assert.ok(setupResume !== null);
+assert.equal(setupResume.totalCents, 4396);
+assert.equal(setupResume.confirmationId, 'tp_60b2f90f');
+assert.equal(setupResume.amountKey, 'total_amount_paid');
+
+const totalPaid = extractStructuredGmv({
+  total_paid: '$43.96',
+  purchased_products: ['Aurora Notebook', 'Ceramic Mug', 'Canvas Tote'],
+  order_confirmation_id: 'tp_66930a77',
+});
+assert.ok(totalPaid !== null);
+assert.equal(totalPaid.totalCents, 4396);
+assert.equal(totalPaid.amountKey, 'total_paid');
+
 process.stdout.write('structured gmv extract: passed\n');

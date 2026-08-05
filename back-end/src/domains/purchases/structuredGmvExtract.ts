@@ -21,7 +21,10 @@ export interface StructuredGmvCapture {
 const CENTS_KEY_RE =
   /(total|amount|paid|charged|price|cost|subtotal|checkout|order|grand).*cents$|^cents$/i;
 const AMOUNT_KEY_RE =
-  /^(total|amount|price|cost|paid|charged)$|(checkout|order|cart|grand|final|purchase).*(total|amount|price)|(.*price.*usd)|(.*_total)$|(total_usd|amount_usd)$/i;
+  /^(total|amount|price|cost|paid|charged)$|(checkout|order|cart|grand|final|purchase).*(total|amount|price)|(.*price.*usd)|(.*_total)$|(total_usd|amount_usd)$|((total|amount).*(paid|charged)|(paid|charged).*(total|amount))$/i;
+/** Nested unit prices under cart/product arrays are not order totals. */
+const LINE_ITEM_PRICE_PATH_RE =
+  /(purchased_products|line_items|lineitems|products|items|cart_items)\.\d+\.price$/i;
 const CONFIRMATION_KEY_RE =
   /(order|payment|booking|reservation).*(id|number|confirmation)|(confirmation).*(id|code|number)|receipt_id|transaction_id/i;
 /** Card PANs / one-time card fields are payment instruments, not order ids. */
@@ -147,7 +150,27 @@ function hasExplicitNegativeCompletion(entries: Array<{ key: string; value: unkn
 
 function scoreAmountKey(key: string): number {
   const leaf = leafKey(key).toLowerCase();
+  // Line-item `price` fields (e.g. purchased_products.0.price) must never beat an
+  // order total — setup-resume agents emit both, and mistaking $12 for $43.96
+  // creates a shadowing order_confirmation PurchaseSpend with "unknown merchant".
+  if (LINE_ITEM_PRICE_PATH_RE.test(key)) return 0;
   if (leaf === 'total_cents' || leaf === 'totalcents') return 100;
+  // Common browser/agent completion keys: total_amount_paid, total_paid, amount_paid.
+  if (
+    leaf === 'total_amount_paid' ||
+    leaf === 'totalamountpaid' ||
+    leaf === 'total_paid' ||
+    leaf === 'totalpaid' ||
+    leaf === 'amount_paid' ||
+    leaf === 'amountpaid' ||
+    leaf === 'total_charged' ||
+    leaf === 'totalcharged'
+  ) {
+    return 95;
+  }
+  if (leaf.includes('total') && (leaf.includes('paid') || leaf.includes('charged'))) {
+    return 88;
+  }
   if (leaf.includes('checkout') && leaf.includes('total')) return 90;
   if (leaf.includes('order') && leaf.includes('total')) return 85;
   if (leaf === 'total' || leaf === 'amount') return 80;
