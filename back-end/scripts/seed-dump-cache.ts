@@ -27,7 +27,15 @@
 import fs from 'fs';
 import { resolve } from 'path';
 
-import { GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+  UploadPartCommand,
+} from '@aws-sdk/client-s3';
 import dotenv from 'dotenv';
 
 const KEY_PREFIX = 'benchmark-seed-dumps';
@@ -64,13 +72,45 @@ export function cacheRequestTimeoutMs(
   return Math.min(Math.max(Math.floor(configured), 100), 60_000);
 }
 
-function client(): S3Client {
+// The canonical base fixture is ~150MB. One TLS stream that large under the
+// 30s probe timeout and maxAttempts:1 either times out or dies mid-flight with
+// an `sslv3 alert bad record mac`, which is how a republication silently fails
+// and every consumer then refuses to boot. Bulk transfers get their own budget
+// and their own retries; the probe path keeps the short timeout.
+export function bulkTransferTimeoutMs(
+  env: Record<string, string | undefined> = process.env
+): number {
+  const configured = Number(env.SEED_DUMP_CACHE_BULK_TIMEOUT_MS);
+  if (!Number.isFinite(configured) || configured <= 0) return 300_000;
+  return Math.min(Math.max(Math.floor(configured), 1_000), 1_800_000);
+}
+
+// S3/R2 requires >=5MiB parts (except the last). 16MiB keeps the part count for
+// a 150MB artifact in single digits while staying small enough that one flaky
+// part is cheap to retry.
+export const MULTIPART_CHUNK_BYTES = 16 * 1024 * 1024;
+
+// Below this, a single PutObject is strictly simpler and just as reliable.
+export const MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
+
+export function planUploadParts(
+  size: number,
+  chunkBytes: number = MULTIPART_CHUNK_BYTES
+): Array<{ partNumber: number; start: number; end: number }> {
+  const parts: Array<{ partNumber: number; start: number; end: number }> = [];
+  for (let start = 0, partNumber = 1; start < size; start += chunkBytes, partNumber += 1) {
+    parts.push({ partNumber, start, end: Math.min(start + chunkBytes, size) });
+  }
+  return parts;
+}
+
+function client(bulk = false): S3Client {
   const accountId = process.env.R2_ACCOUNT_ID || '';
-  const requestTimeout = cacheRequestTimeoutMs();
+  const requestTimeout = bulk ? bulkTransferTimeoutMs() : cacheRequestTimeoutMs();
   return new S3Client({
     region: 'auto',
     endpoint: process.env.R2_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`,
-    maxAttempts: 1,
+    maxAttempts: bulk ? 3 : 1,
     requestHandler: {
       connectionTimeout: Math.min(requestTimeout, 5_000),
       requestTimeout,
@@ -99,7 +139,9 @@ async function streamToBuffer(body: unknown): Promise<Buffer> {
 }
 
 export async function get(token: string, outFile: string): Promise<number> {
-  const response = await client().send(
+  // Bulk budget: the object is ~150MB, far past the probe timeout. A miss still
+  // returns immediately (NoSuchKey), so the longer budget costs nothing there.
+  const response = await client(true).send(
     new GetObjectCommand({
       Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
       Key: objectKey(token),
@@ -113,14 +155,101 @@ export async function get(token: string, outFile: string): Promise<number> {
   return 0;
 }
 
+async function uploadMultipart(
+  s3: S3Client,
+  bucket: string,
+  key: string,
+  inFile: string,
+  size: number
+): Promise<void> {
+  const created = await s3.send(
+    new CreateMultipartUploadCommand({
+      Bucket: bucket,
+      Key: key,
+      ContentType: 'application/octet-stream',
+    })
+  );
+  const uploadId = created.UploadId;
+  if (uploadId === undefined) throw new Error('R2 did not return an UploadId');
+
+  const fd = fs.openSync(inFile, 'r');
+  try {
+    const completed: Array<{ ETag: string; PartNumber: number }> = [];
+    const plan = planUploadParts(size);
+    const totalParts = plan.length;
+    for (const part of plan) {
+      const buf = Buffer.alloc(part.end - part.start);
+      fs.readSync(fd, buf, 0, buf.length, part.start);
+
+      // Retry the individual part: a mid-stream TLS reset kills one 16MiB part
+      // instead of the whole 150MB upload.
+      let lastError: unknown;
+      let etag: string | undefined;
+      for (let attempt = 1; attempt <= 3 && etag === undefined; attempt += 1) {
+        try {
+          const uploaded = await s3.send(
+            new UploadPartCommand({
+              Bucket: bucket,
+              Key: key,
+              UploadId: uploadId,
+              PartNumber: part.partNumber,
+              Body: buf,
+            })
+          );
+          etag = uploaded.ETag;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await new Promise((r) => setTimeout(r, 1_000 * attempt));
+        }
+      }
+      if (etag === undefined) {
+        const detail = lastError instanceof Error ? lastError.message : String(lastError);
+        throw new Error(`part ${part.partNumber}/${totalParts} failed after 3 attempts: ${detail}`);
+      }
+      completed.push({ ETag: etag, PartNumber: part.partNumber });
+      if (process.env.SEED_DUMP_CACHE_VERBOSE === '1') {
+        process.stderr.write(`seed-dump-cache: part ${part.partNumber}/${totalParts} ok\n`);
+      }
+    }
+
+    await s3.send(
+      new CompleteMultipartUploadCommand({
+        Bucket: bucket,
+        Key: key,
+        UploadId: uploadId,
+        MultipartUpload: { Parts: completed },
+      })
+    );
+  } catch (error) {
+    // Never leave a dangling multipart upload accruing storage on the bucket.
+    await s3
+      .send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: key, UploadId: uploadId }))
+      .catch(() => undefined);
+    throw error;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 async function put(token: string, inFile: string): Promise<number> {
-  if (!fs.existsSync(inFile) || fs.statSync(inFile).size === 0) return 1;
-  const body = fs.readFileSync(inFile);
-  await client().send(
+  if (!fs.existsSync(inFile)) return 1;
+  const size = fs.statSync(inFile).size;
+  if (size === 0) return 1;
+
+  const bucket = process.env.R2_BUCKET_TRACE_ARCHIVE || '';
+  const key = objectKey(token);
+  const s3 = client(true);
+
+  if (size >= MULTIPART_THRESHOLD_BYTES) {
+    await uploadMultipart(s3, bucket, key, inFile, size);
+    return 0;
+  }
+
+  await s3.send(
     new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_TRACE_ARCHIVE || '',
-      Key: objectKey(token),
-      Body: body,
+      Bucket: bucket,
+      Key: key,
+      Body: fs.readFileSync(inFile),
       ContentType: 'application/octet-stream',
     })
   );
