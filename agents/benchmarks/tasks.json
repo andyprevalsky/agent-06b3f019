@@ -3321,9 +3321,9 @@
       "integrity": {
         "purchaseCount": 1,
         "walletFundingCount": 1,
-        "stripePaymentIntentCount": 0,
+        "stripePaymentIntentCount": 1,
         "cardCount": 1,
-        "stripeProviderPaymentIntentCount": 0,
+        "stripeProviderPaymentIntentCount": 1,
         "agentCardProviderCardCount": 1,
         "agentCardProviderTransferCount": 1,
         "agentCardProviderUnlinkedTransferCount": 0
@@ -3337,8 +3337,16 @@
         "status": "RECLAIMED",
         "amountCents": 100
       },
-      "stripeHold": null,
-      "stripeRefund": null,
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 100,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 100
+      },
+      "stripeRefund": {
+        "status": "succeeded",
+        "amountCents": 100
+      },
       "agentCard": {
         "balanceCents": 0
       },
@@ -3369,7 +3377,7 @@
         "api.roselabs.ai",
         "roselabs.ai"
       ],
-      "context_notes": "Production-only bounded lifecycle. The task uses the production admin identity, so Rose fronts the card through AgentCard company_flow without a Stripe capture. The card is never submitted to a merchant; benchmark cleanup must reclaim the AgentCard organization transfer."
+      "context_notes": "Production-only bounded lifecycle. The harness runs as NON-ADMIN BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID (00000000-0000-4000-8000-000000000107) so resolveAndIssuePurchaseCard creates a live Stripe hold (admin/company_flow never authorizes a hold). The card is never submitted to a merchant; benchmark cleanup must close the card, reclaim the AgentCard organization transfer, and refund the Stripe capture."
     },
     "bench": "pipeline-e2e"
   },
