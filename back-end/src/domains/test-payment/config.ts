@@ -25,6 +25,14 @@ export function getBenchmarkAgentCardCardholderIdOverride(): string {
   return resolveBenchmarkAgentCardIds().cardholderId;
 }
 
+/** True when org OAuth client credentials are present for cardholder verification. */
+export function isAgentCardOrgOAuthConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (
+    (env.AGENTCARD_ORG_OAUTH_CLIENT_ID ?? '').trim() !== '' &&
+    (env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET ?? '').trim() !== ''
+  );
+}
+
 /**
  * Cursor Cloud can inject a truncated BENCHMARK_AGENTCARD_ORG_ID into the
  * process env (observed as 7 chars). Prefer a full AGENTCARD_* id when the

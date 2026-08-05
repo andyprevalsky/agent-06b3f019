@@ -16,7 +16,6 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PurchaseSpendStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
 import {
   assertCardPresent,
@@ -34,20 +33,14 @@ import {
 } from '../../domains/test-payment/lifecyclePagination';
 import {
   abandonTestPayment,
-  configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
   recordPhoneBenchmarkPaymentAudit,
   resolvePublicBaseUrl,
   TestPaymentError,
 } from '../../domains/test-payment/service';
-import {
-  applyResolvedBenchmarkAgentCardIds,
-  resolveBenchmarkAgentCardIds,
-} from '../../domains/test-payment/config';
 import { assertClosedCardMcpParsing, threeItems } from './test-payment-service-fixtures';
 
-const createdUserIds: string[] = [];
 let passed = 0;
 const failures: string[] = [];
 
@@ -60,13 +53,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
     failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     process.stdout.write(`  FAIL ${name}\n`);
   }
-}
-
-async function seedUser(): Promise<string> {
-  const userId = `test-payment-unit-${randomUUID()}`;
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-  createdUserIds.push(userId);
-  return userId;
 }
 
 async function withStubbedStripe<T>(fn: () => Promise<T>): Promise<T> {
@@ -331,84 +317,7 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── service: benchmark AgentCard setup + misc ──
-  await test('configureBenchmarkAgentCardSetup toggles connect/reset state', async () => {
-    const userId = await seedUser();
-    await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ action: 'complete' }),
-      /userId is required/
-    );
-    await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
-      /action must be reset or complete/
-    );
-    const connected = await configureBenchmarkAgentCardSetup(
-      { userId, action: 'complete' },
-      { getCardholderVerificationStatus: async () => 'verified' }
-    );
-    assert.equal(connected.status, 'connected');
-    const row = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
-    });
-    const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
-    assert.equal(config?.orgManaged, true);
-    assert.ok((config?.cardholderId ?? '').length > 0);
-    const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
-    assert.equal(reset.status, 'connect_required');
-    const resetRow = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
-    });
-    const resetConfig = resetRow?.config as {
-      onboardingSessionId?: string;
-    };
-    assert.equal(resetRow?.status, 'NOT_CONNECTED');
-    assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
-  });
-
-  await test(
-    'configureBenchmarkAgentCardSetup keeps org/cardholder pair when org override is truncated',
-    async () => {
-      const userId = await seedUser();
-      const savedEnv = {
-        benchmarkOrg: process.env.BENCHMARK_AGENTCARD_ORG_ID,
-        benchmarkCardholder: process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID,
-        agentOrg: process.env.AGENTCARD_ORG_ID,
-        agentCardholder: process.env.AGENTCARD_CARDHOLDER_ID,
-      };
-      process.env.BENCHMARK_AGENTCARD_ORG_ID = 'cmqr3fk';
-      process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cmrs8yyyyyyyyyyyyyyyyy7jg';
-      process.env.AGENTCARD_ORG_ID = 'cmqr3fkkkkkkkkkkkkkkkiu0z';
-      process.env.AGENTCARD_CARDHOLDER_ID = 'cmrfpzzzzzzzzzzzzzzzzzgfto';
-      try {
-        applyResolvedBenchmarkAgentCardIds();
-        await configureBenchmarkAgentCardSetup(
-          { userId, action: 'complete' },
-          {
-            getCardholderVerificationStatus: async (cardholderId) => {
-              assert.equal(cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
-              return 'verified';
-            },
-          }
-        );
-        const row = await prisma.integration.findUnique({
-          where: { userId_name: { userId, name: 'agentcard' } },
-        });
-        const config = row?.config as { cardholderId?: string };
-        assert.equal(config?.cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
-        assert.equal(
-          resolveBenchmarkAgentCardIds().cardholderId,
-          'cmrfpzzzzzzzzzzzzzzzzzgfto'
-        );
-      } finally {
-        process.env.BENCHMARK_AGENTCARD_ORG_ID = savedEnv.benchmarkOrg;
-        process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = savedEnv.benchmarkCardholder;
-        process.env.AGENTCARD_ORG_ID = savedEnv.agentOrg;
-        process.env.AGENTCARD_CARDHOLDER_ID = savedEnv.agentCardholder;
-        applyResolvedBenchmarkAgentCardIds();
-      }
-    }
-  );
-
+  // ── service: misc (AgentCard setup cases live in test-payment-agentcard-setup.test.ts) ──
   await test('resolvePublicBaseUrl reflects the configured value', async () => {
     const url = await resolvePublicBaseUrl();
     assert.ok(url === null || typeof url === 'string');
@@ -672,21 +581,11 @@ async function main(): Promise<void> {
   for (const failure of failures) process.stdout.write(`  ${failure}\n`);
 }
 
-async function cleanup(): Promise<void> {
-  for (const userId of createdUserIds) {
-    await prisma.integration.deleteMany({ where: { userId } });
-    await prisma.user.deleteMany({ where: { userId } });
-  }
-  await prisma.$disconnect();
-}
-
 main()
-  .then(async () => {
-    await cleanup();
+  .then(() => {
     if (failures.length > 0) process.exit(1);
   })
-  .catch(async (error) => {
+  .catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    await cleanup();
     process.exit(1);
   });
