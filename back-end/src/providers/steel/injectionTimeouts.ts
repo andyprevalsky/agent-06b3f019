@@ -3,18 +3,33 @@
 const DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS = 15_000;
 
+/** Node stores a timer delay in a signed 32-bit int. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * `setTimeout` silently collapses a fractional or out-of-range delay to 1ms, so
+ * `0.5` or `2147483648` would make injection "time out" almost immediately.
+ * Accept only positive integers inside the timer range; anything else falls
+ * back to the default.
+ */
+function timerDelayFromEnv(raw: string | undefined, fallbackMs: number): number {
+  const configured = Number(raw);
+  const usable = Number.isInteger(configured) && configured > 0 && configured <= MAX_TIMER_DELAY_MS;
+  return usable ? configured : fallbackMs;
+}
+
 export function credentialCdpConnectTimeoutMs(): number {
-  const configured = Number(process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+  return timerDelayFromEnv(
+    process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS,
+    DEFAULT_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS
+  );
 }
 
 export function browserStateInjectionTimeoutMs(): number {
-  const configured = Number(process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS);
-  return Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS;
+  return timerDelayFromEnv(
+    process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS,
+    DEFAULT_BROWSER_STATE_INJECTION_TIMEOUT_MS
+  );
 }
 
 /** Distinguishes "we ran out of time" from a genuine injection failure. */

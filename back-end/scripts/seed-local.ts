@@ -60,7 +60,9 @@ const REMOTE_URL = COMPUTE_TOKENS_ONLY
   : selectRemoteDatabaseUrl(envVars);
 const requestedRemoteTransport = COMPUTE_TOKENS_ONLY
   ? 'postgres'
-  : (process.env.SEED_REMOTE_TRANSPORT?.trim() ?? 'auto');
+  : // `export SEED_REMOTE_TRANSPORT=` yields '', which is not nullish, so `??`
+    // would not apply and the allowlist check below would abort the seed.
+    process.env.SEED_REMOTE_TRANSPORT?.trim() || 'auto';
 if (!['auto', 'postgres', 'https'].includes(requestedRemoteTransport)) {
   throw new Error(
     `SEED_REMOTE_TRANSPORT must be auto, postgres, or https; received ${JSON.stringify(

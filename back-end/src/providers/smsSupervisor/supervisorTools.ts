@@ -241,6 +241,17 @@ async function validateReplyToAgent(
   pendingWrites: PendingOp[],
   invocationContext?: ToolInvocationContext
 ): Promise<ToolResult> {
+  // dispatchToolCall casts raw LLM arguments, so `message` is unchecked here. A
+  // missing/non-string value would reach createMessage and fail the required
+  // Message.text write at commit time, after the op was already queued.
+  if (typeof args.message !== 'string' || args.message.trim() === '') {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'reply_to_agent requires a non-empty string "message"',
+    };
+  }
   const agent = await resolveAgentPrefix(args.agent_id_or_prefix, userId);
   if (!agent) {
     return {

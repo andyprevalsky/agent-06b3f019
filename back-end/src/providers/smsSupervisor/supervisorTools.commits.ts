@@ -224,6 +224,7 @@ export async function commitIncreaseBudget(
   });
 
   // If agent was cost-limited, signal workflow to resume
+  let signalDelivered = true;
   if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
     try {
       const client = await getTemporalClient();
@@ -237,6 +238,7 @@ export async function commitIncreaseBudget(
         newLimitCents,
       });
     } catch (error) {
+      signalDelivered = false;
       log.error('Failed to signal workflow', {
         phase: 'budget',
         workflowId: agent.temporalWorkflowId,
@@ -245,10 +247,20 @@ export async function commitIncreaseBudget(
     }
   }
 
+  // A cost-limited agent whose price_limit_increased signal never landed stays
+  // paused. Reporting "agent resuming" there tells the supervisor LLM the job is
+  // done, so it never retries or tells the user.
+  const wasCostLimited = agent.status === 'COST_LIMIT_REACHED';
+  const resumeNote = wasCostLimited
+    ? signalDelivered
+      ? ' — agent resuming'
+      : ' — agent still paused: resume signal failed, retry or notify the user'
+    : '';
+
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${resumeNote}`,
   };
 }
 
