@@ -132,3 +132,44 @@ def build_cold_outreach_person(email: str | None, phone: str | None) -> dict[str
         "email": email,
         "phoneNumber": phone,
     }
+
+
+def build_message_approval_question(
+    system_name: str,
+    channel: str,
+    channel_label: str,
+    person_display: str,
+    recipient: str | None,
+    from_email: str,
+    generated_subject: str | None,
+    intent: str,
+    generated_message: str,
+) -> str:
+    """Format the SMS/FE approval question for a drafted outbound message.
+
+    Plain text only — this string is sent to iMessage/SMS via write_lock notify,
+    which does not render Markdown. Never emit `**bold**` markers here.
+    The full generated_message must be preserved; callers must not truncate it.
+    """
+    article = "an" if channel == "email" else "a"
+    lines = [
+        f"{system_name} wants to send {article} {channel_label}",
+        "",
+        f"To: {person_display} ({recipient})",
+    ]
+    if channel == "email":
+        lines.append(f"From: {from_email}")
+        if generated_subject:
+            lines.append(f"Subject: {generated_subject}")
+    lines.extend(
+        [
+            "",
+            f"Intent: {intent}",
+            "",
+            "Message:",
+            generated_message,
+            "",
+            'Reply to approve, or say "no" to cancel.',
+        ]
+    )
+    return "\n".join(lines)

@@ -4697,6 +4697,82 @@ async def test_call_llm_openrouter_path():
     assert result["finish_reason"] == "stop"
 
 
+async def test_call_llm_escalates_max_tokens_on_finish_reason_length():
+    """Non-streaming call_llm must retry once when finish_reason=length.
+
+    Reproduces message_person truncation: max_tokens=1024 cut email drafts
+    mid-sentence ("Please share the") because call_llm did not escalate the
+    way call_llm_structured_streaming already does.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from helpers.llm import call_llm
+
+    truncated = (
+        "Subject: LLM and Cloud Credit Amounts for Speedrun Marketplace\n"
+        "Hi Speedrun Team,\n\nPlease share the"
+    )
+    full = (
+        truncated
+        + " exact credit amounts by provider for OpenAI, Anthropic, AWS, "
+        "Google Cloud, Azure, and Runpod.\n\nThanks,\nAndy"
+    )
+    calls: list[int] = []
+
+    class FakeRoseClient:
+        async def collect(self, **kwargs):
+            max_tokens = kwargs["max_tokens"]
+            calls.append(max_tokens)
+            if max_tokens < 32768:
+                return SimpleNamespace(
+                    content=truncated,
+                    tool_calls=[],
+                    reasoning="",
+                    codex_reasoning_items=[],
+                    actual_model="claude-sonnet-4-6-claude",
+                    pool_name="rose-1-lite",
+                    request_id="req-trunc",
+                    claude_token_error=None,
+                    gpt_token_error=None,
+                    usage={
+                        "prompt_tokens": 200,
+                        "completion_tokens": max_tokens,
+                        "total_tokens": 200 + max_tokens,
+                        "finish_reason": "length",
+                    },
+                )
+            return SimpleNamespace(
+                content=full,
+                tool_calls=[],
+                reasoning="",
+                codex_reasoning_items=[],
+                actual_model="claude-sonnet-4-6-claude",
+                pool_name="rose-1-lite",
+                request_id="req-full",
+                claude_token_error=None,
+                gpt_token_error=None,
+                usage={
+                    "prompt_tokens": 200,
+                    "completion_tokens": 180,
+                    "total_tokens": 380,
+                    "finish_reason": "stop",
+                },
+            )
+
+    with patch("temporalio.activity.heartbeat"), patch("helpers.llm.RoseClient", FakeRoseClient):
+        result = await call_llm(
+            messages=[{"role": "user", "content": "draft the email"}],
+            model="rose-labs/rose-1-lite",
+            max_tokens=1024,
+            call_site="message_person",
+        )
+
+    assert calls == [1024, 32768], f"Expected escalation retry, got max_tokens calls={calls}"
+    assert result["finish_reason"] == "stop"
+    assert result["content"] == full
+    assert "exact credit amounts by provider" in result["content"]
+
+
 async def test_call_llm_verifier_claude_token_error_surfaces():
     """When claudeAuth Anthropic call fails 401, RoseClient falls through to
     waterfall and surfaces `claude_token_error` on the metadata chunk."""
@@ -6378,6 +6454,10 @@ async def run_all_tests():
     )
     await r.record_async("stream_attention_streaming", test_call_llm_structured_streaming_attention_streaming)
     await r.record_async("call_llm_openrouter_path", test_call_llm_openrouter_path)
+    await r.record_async(
+        "call_llm_escalates_max_tokens_on_length",
+        test_call_llm_escalates_max_tokens_on_finish_reason_length,
+    )
     await r.record_async("verifier_claude_token_error", test_call_llm_verifier_claude_token_error_surfaces)
     await r.record_async("verifier_reasoning_fallback_to_json", test_call_llm_verifier_reasoning_fallback_to_json)
     await r.record_async("verifier_no_json_raises", test_call_llm_verifier_no_json_raises)
