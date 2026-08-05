@@ -303,6 +303,7 @@ describe('messaging-whatsapp > public barrel (platforms/whatsapp/index.ts)', () 
 });
 
 const UPLOAD_PATH = '/api/integrations/whatsapp/upload';
+const CONNECT_PATH = '/api/integrations/whatsapp/connect';
 const uploadCalls = () => fetchCaptures.filter((c) => c.url.includes(UPLOAD_PATH));
 
 describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () => {
@@ -335,6 +336,11 @@ describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () 
     restoreFetch = installFetchCapture({
       [UPLOAD_PATH]: () =>
         new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      [CONNECT_PATH]: () =>
+        new Response(JSON.stringify({ message: 'WhatsApp connected successfully' }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }),
@@ -544,5 +550,222 @@ describe('messaging-whatsapp > WhatsAppSync (coordinator + fetch boundary)', () 
     const calls = uploadCalls();
     expect(calls).toHaveLength(0);
     expect(WhatsAppSync.isConnected()).toBe(false);
+  });
+});
+
+/**
+ * Baileys socket semantics around the connection.update close branch.
+ *
+ * These drive the REAL WhatsAppClient (imported from the domain path, which the
+ * legacy-shim mock above does not intercept) against a faked Baileys module, so
+ * the credential-lifecycle decisions are exercised end to end rather than
+ * asserted on a pure helper alone.
+ */
+describe('messaging-whatsapp > backend registration on connect', () => {
+  let restoreFetch: (() => void) | null = null;
+
+  beforeEach(async () => {
+    tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-register-test-'));
+    tmpAuthDir = path.join(tmpUserData, 'whatsapp-auth');
+    clearFetchCaptures();
+    vi.clearAllMocks();
+
+    const { AuthService } = await import('../../main/services/auth');
+    vi.mocked(AuthService.getSession).mockResolvedValue({
+      access_token: 'test-access-token',
+      refresh_token: 'test-refresh-token',
+      user: { id: 'user-1' },
+      expires_at: Date.now() + 60 * 60 * 1000,
+    });
+
+    restoreFetch = installFetchCapture({
+      [CONNECT_PATH]: () =>
+        new Response(JSON.stringify({ message: 'WhatsApp connected successfully' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    });
+  });
+
+  afterEach(async () => {
+    restoreFetch?.();
+    restoreFetch = null;
+    const { WhatsAppSync } =
+      await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
+    await WhatsAppSync.logout();
+    if (tmpUserData && fs.existsSync(tmpUserData)) {
+      fs.rmSync(tmpUserData, { recursive: true, force: true });
+    }
+  });
+
+  const connectCalls = () => fetchCaptures.filter((c) => c.url.includes(CONNECT_PATH));
+
+  it('marks the integration CONNECTED on pair, breaking the upload deadlock', async () => {
+    const { WhatsAppSync } =
+      await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
+
+    await WhatsAppSync.connect();
+
+    // Without this POST the uploader's isConnected() gate never opens and every
+    // synced message is silently dropped.
+    expect(connectCalls()).toHaveLength(1);
+  });
+
+  it('invalidates the integration cache so the next flush sees the new row', async () => {
+    const { WhatsAppSync } =
+      await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
+    const { IntegrationCache } = await import('../../main/services/sync/IntegrationCache');
+
+    await WhatsAppSync.connect();
+
+    expect(vi.mocked(IntegrationCache.invalidate)).toHaveBeenCalled();
+  });
+
+  it('registers exactly once per connect, not once per callback path', async () => {
+    const { WhatsAppSync } =
+      await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
+
+    await WhatsAppSync.connect();
+
+    expect(connectCalls()).toHaveLength(1);
+  });
+
+  it('does not register when unauthenticated', async () => {
+    const { AuthService } = await import('../../main/services/auth');
+    vi.mocked(AuthService.getSession).mockResolvedValue(null);
+
+    const { WhatsAppSync } =
+      await import('../../main/services/messaging/platforms/whatsapp/WhatsAppSync');
+    await WhatsAppSync.connect();
+
+    expect(connectCalls()).toHaveLength(0);
+  });
+});
+
+describe('messaging-whatsapp > connection close (Baileys socket semantics)', () => {
+  const STATUS_LOGGED_OUT = 401;
+  const STATUS_RESTART_REQUIRED = 515;
+
+  let harness: Awaited<ReturnType<typeof bootClient>>;
+
+  /**
+   * Boot a real WhatsAppClient over a fake Baileys socket rooted at a per-test
+   * tmp userData dir, with a `creds.json` already on disk (a paired session).
+   */
+  async function bootClient() {
+    const electron = await import('electron');
+    vi.resetModules();
+    vi.doMock('electron', () => ({
+      ...electron,
+      app: { ...electron.app, getPath: vi.fn(() => tmpUserData) },
+    }));
+
+    const { EventEmitter: EE } = await import('events');
+    const sock = Object.assign(new EE(), {
+      ev: new EE(),
+      ws: Object.assign(new EE(), { close: vi.fn() }),
+      user: { id: '15555551212:1@s.whatsapp.net' },
+    });
+    // Baileys' `ev` needs `.off`; EventEmitter provides it. Resolve connect()
+    // promptly by reporting an open connection once handlers are attached.
+    const makeWASocket = vi.fn(() => {
+      setImmediate(() => sock.ev.emit('connection.update', { connection: 'open' }));
+      return sock;
+    });
+
+    vi.doMock('../../main/domains/messaging-whatsapp/client-loader', () => ({
+      loadBaileys: vi.fn(async () => ({
+        makeWASocket,
+        useMultiFileAuthState: vi.fn(async () => ({
+          state: { creds: {}, keys: {} },
+          saveCreds: vi.fn(async () => {}),
+        })),
+        fetchLatestBaileysVersion: vi.fn(async () => ({ version: [2, 0, 0] })),
+        makeCacheableSignalKeyStore: vi.fn((keys: unknown) => keys),
+      })),
+      resetBaileysCache: vi.fn(),
+      silentBaileysLogger: { level: 'silent', child: () => ({}) },
+    }));
+
+    const { WhatsAppClient } = await import('../../main/domains/messaging-whatsapp/service');
+    const { WhatsAppAuth } = await import('../../main/domains/messaging-whatsapp/repo');
+
+    WhatsAppAuth.ensureAuthDir();
+    const credsPath = path.join(WhatsAppAuth.getAuthDir(), 'creds.json');
+    fs.writeFileSync(credsPath, JSON.stringify({ me: { id: 'paired' } }));
+
+    const client = new WhatsAppClient();
+    await client.connect({ onQRCode: vi.fn() });
+
+    return { client, sock, makeWASocket, credsPath };
+  }
+
+  /** Emit a Baileys `connection: 'close'` carrying a DisconnectReason code. */
+  function emitClose(h: Awaited<ReturnType<typeof bootClient>>, statusCode: number): void {
+    h.sock.ev.emit('connection.update', {
+      connection: 'close',
+      lastDisconnect: { error: { output: { statusCode } } },
+    });
+  }
+
+  beforeEach(() => {
+    tmpUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'whatsapp-close-test-'));
+    tmpAuthDir = path.join(tmpUserData, 'whatsapp-auth');
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    if (harness) await harness.client.disconnect().catch(() => {});
+    if (tmpUserData && fs.existsSync(tmpUserData)) {
+      fs.rmSync(tmpUserData, { recursive: true, force: true });
+    }
+    vi.doUnmock('../../main/domains/messaging-whatsapp/client-loader');
+  });
+
+  it('keeps credentials on 515 restartRequired (post-pairing handshake)', async () => {
+    harness = await bootClient();
+    expect(fs.existsSync(harness.credsPath)).toBe(true);
+
+    emitClose(harness, STATUS_RESTART_REQUIRED);
+
+    // 515 means "re-dial with the creds you just saved". Wiping them here bounces
+    // the user back to a fresh QR code, so pairing can never complete.
+    expect(fs.existsSync(harness.credsPath)).toBe(true);
+    expect(tmpAuthDir).toContain('whatsapp-auth');
+  });
+
+  it('reconnects after 515 reusing the existing credentials', async () => {
+    harness = await bootClient();
+    expect(harness.makeWASocket).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    emitClose(harness, STATUS_RESTART_REQUIRED);
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    expect(harness.makeWASocket).toHaveBeenCalledTimes(2);
+    expect(fs.existsSync(harness.credsPath)).toBe(true);
+  });
+
+  it('clears credentials on 401 loggedOut', async () => {
+    harness = await bootClient();
+    expect(fs.existsSync(harness.credsPath)).toBe(true);
+
+    emitClose(harness, STATUS_LOGGED_OUT);
+
+    expect(fs.existsSync(harness.credsPath)).toBe(false);
+  });
+
+  it('does not resurrect the socket when disconnect() races a pending reconnect', async () => {
+    harness = await bootClient();
+    expect(harness.makeWASocket).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers();
+    emitClose(harness, STATUS_RESTART_REQUIRED);
+    await harness.client.disconnect();
+    await vi.advanceTimersByTimeAsync(5_000);
+
+    // The reconnect timer must be cancelled by the explicit disconnect.
+    expect(harness.makeWASocket).toHaveBeenCalledTimes(1);
+    expect(harness.client.isConnected()).toBe(false);
   });
 });

@@ -2482,6 +2482,51 @@ async def test_required_declared_evaluator_controls_pass_fail():
     ]
 
 
+def test_declared_evaluator_evidence_normalizes_user_facing_completion_card():
+    """Semantic judges receive the rendered final answer as assistant evidence."""
+    from benchmarks.run_benchmark import _declared_evaluator_evidence
+
+    outputs = [
+        {"key": "total_messages", "label": "Total Messages", "value": 3825},
+        {"key": "most_contacted", "label": "Most Contacted", "value": "+39900262981823"},
+    ]
+    evidence = _declared_evaluator_evidence(
+        {
+            "messages": [
+                {
+                    "role": "TOOL",
+                    "text": "",
+                    "metadata": {
+                        "toolName": "completion_summary",
+                        "toolStatus": "FINISHED",
+                        "completionSummary": {
+                            "summary": "Answered all WhatsApp questions.",
+                            "outputs": outputs,
+                            "toolUsage": [{"name": "spawn_agent", "count": 1}],
+                        },
+                    },
+                }
+            ]
+        }
+    )
+
+    final_answers = [
+        item
+        for item in evidence
+        if item.get("metadata", {}).get("evidence_type") == "final_completion"
+    ]
+    assert len(final_answers) == 1
+    assert final_answers[0]["role"] == "ASSISTANT"
+    assert json.loads(final_answers[0]["text"]) == {
+        "summary": "Answered all WhatsApp questions.",
+        "outputs": outputs,
+    }
+    assert all(
+        "completionSummary" not in item.get("metadata", {})
+        for item in evidence
+    )
+
+
 def _opentable_static_evaluator():
     return {
         "id": "opentable-runtime-contract",
@@ -5834,6 +5879,34 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
     ]
 
 
+async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
+    """Frozen base data must never suppress the live compute-token refresh."""
+    from unittest.mock import AsyncMock, patch
+
+    import benchmarks.run_benchmark as bench
+
+    with (
+        patch.dict(
+            os.environ,
+            {"BENCHMARK_BASE_IMAGE_NAME": "base:any-frozen-snapshot"},
+            clear=False,
+        ),
+        patch.object(bench, "_sync_compute_tokens", return_value=True) as sync,
+        patch.object(
+            bench,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(return_value=False),
+        ) as fallback,
+    ):
+        await bench._refresh_local_compute_tokens_for_run("http://localhost:55120")
+
+    fallback.assert_awaited_once_with("http://localhost:55120")
+    sync.assert_called_once_with(
+        tolerate_gpt_code_unavailable=True,
+        tolerate_claude_code_unavailable=False,
+    )
+
+
 def test_compute_token_sync_reads_source_file_not_isolated_process_target():
     """The isolated target DSN must not shadow the explicit production source."""
     from unittest.mock import patch
@@ -7305,6 +7378,29 @@ def test_runner_fixtures_reject_manifest_without_database_identity():
             os.environ["BENCHMARK_CONTEXT_DIR"] = prior_context
 
 
+def test_whatsapp_task_uses_the_canonical_cloud_base_image():
+    """WhatsApp history belongs to the one base shared by local and cloud runners."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.fixtures import BASE_IMAGES, DEFAULT_BASE_IMAGE
+
+    assert set(BASE_IMAGES) == {DEFAULT_BASE_IMAGE}
+    assert "WhatsApp" in BASE_IMAGES[DEFAULT_BASE_IMAGE]["description"]
+    task = get_task_by_name("whatsapp-history-recall")
+    assert task is not None
+    assert task.environment["base_images"] == [DEFAULT_BASE_IMAGE]
+
+
+def test_canonical_base_cache_token_is_revisioned_not_daily():
+    """Every runner resolves one immutable R2 base artifact until its revision changes."""
+    from benchmarks.seed_cache_path import BASE_IMAGE_CACHE_REVISION, seed_cache_token
+
+    schema = Path(__file__).resolve().parents[3] / "back-end" / "prisma" / "schema.prisma"
+    token = seed_cache_token(schema)
+    assert token.endswith(f"-{BASE_IMAGE_CACHE_REVISION}")
+    assert "victoria-prod-sync-v1" in token
+    assert "20260803" not in token
+
+
 def test_local_isolated_stack_opts_into_fast_seed_dump():
     """An isolated stack must use its own tunnel and restore a cached seed."""
     from benchmarks import local as local_bench
@@ -7321,7 +7417,6 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
 
     original_popen = local_bench.subprocess.Popen
     original_wait = local_bench.wait_for_services
-    original_prime = local_bench._prime_local_seed_dump_from_shared_stack
     prior_seed_dump = os.environ.pop("BENCHMARK_SEED_DUMP", None)
     prior_ephemeral_tunnel = os.environ.get("BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL")
     prior_cf_attempts = os.environ.pop("CLOUDFLARE_TUNNEL_MAX_ATTEMPTS", None)
@@ -7330,10 +7425,12 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
     try:
         local_bench.subprocess.Popen = fake_popen
         local_bench.wait_for_services = lambda *_args, **_kwargs: {"ports": {}}
-        local_bench._prime_local_seed_dump_from_shared_stack = lambda path: (
-            captured.setdefault("primed_seed_dump", path) is path
-        )
-        with tempfile.TemporaryDirectory() as tmp:
+        # An isolated run must restore the immutable canonical artifact, never a
+        # snapshot of the developer's mutable shared DB: that DB is not the
+        # reviewed row set and may be missing fixtures the cloud runner has.
+        with tempfile.TemporaryDirectory() as tmp, patch.object(
+            local_bench, "_prime_local_seed_dump_from_shared_stack"
+        ) as prime_seed:
             context_dir = Path(tmp) / "isolated-run"
             stack = local_bench.ServiceStack(
                 run_id="isolated-run",
@@ -7350,17 +7447,16 @@ def test_local_isolated_stack_opts_into_fast_seed_dump():
             assert seed_dump.parent == local_bench.BENCHMARK_CONTEXT_ROOT / "seed-cache"
             assert seed_dump.name.endswith(".dump")
             assert seed_dump.parent.is_dir()
-            assert captured["primed_seed_dump"] == seed_dump
             assert captured["env"]["BENCHMARK_REQUIRE_SEED_DUMP"] == "1"
             assert captured["env"]["BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_MAX_ATTEMPTS"] == "1"
             assert captured["env"]["CLOUDFLARE_TUNNEL_EDGE_TIMEOUT_SECONDS"] == "10"
             assert "TEMPORAL_TASK_QUEUE" not in captured["env"]
             assert captured["command"] == ["bash", "scripts/run.sh", "--benchmark"]
+            prime_seed.assert_not_called()
     finally:
         local_bench.subprocess.Popen = original_popen
         local_bench.wait_for_services = original_wait
-        local_bench._prime_local_seed_dump_from_shared_stack = original_prime
         if prior_seed_dump is not None:
             os.environ["BENCHMARK_SEED_DUMP"] = prior_seed_dump
         if prior_ephemeral_tunnel is None:
@@ -7974,7 +8070,7 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         tmp_path = Path(tmp)
         command_log = tmp_path / "commands.log"
         dump = tmp_path / "seed.dump"
-        dump.write_bytes(b"custom-archive-fixture")
+        dump.write_bytes(b"PGDMPcustom-archive-fixture")
 
         host_restore = tmp_path / "pg_restore"
         host_restore.write_text(
@@ -8015,6 +8111,48 @@ def test_seed_dump_restore_uses_target_container_pg_restore():
         calls = command_log.read_text()
         assert "docker exec -i victoria-db-owned-run pg_restore" in calls
         assert "host pg_restore" not in calls
+
+
+def test_seed_dump_restore_supports_plain_sql_base_images():
+    """Task-specific pg_dump SQL snapshots restore with the target psql client."""
+    repo_root = Path(__file__).resolve().parents[3]
+    helper = repo_root / "scripts" / "restore-seed-dump.sh"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        command_log = tmp_path / "commands.log"
+        dump = tmp_path / "base-image.sql"
+        dump.write_text("-- PostgreSQL database dump\nSELECT 1;\n")
+        docker = tmp_path / "docker"
+        docker.write_text('#!/bin/sh\necho "docker $*" >> "$COMMAND_LOG"\ncat >/dev/null\nexit 0\n')
+        docker.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(helper),
+                str(dump),
+                "localhost",
+                "55395",
+                "postgres",
+                "victoria",
+                "victoria-db-owned-run",
+            ],
+            cwd=repo_root,
+            env={
+                **os.environ,
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+                "COMMAND_LOG": str(command_log),
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        calls = command_log.read_text()
+        assert "docker exec -i victoria-db-owned-run psql" in calls
+        assert "pg_restore" not in calls
 
 
 def test_workspace_dependency_preflight_respects_hoisted_installs():
@@ -11515,6 +11653,10 @@ async def run_all_tests():
         "local_compute_refresh_accepts_anthropic_api_key_fallback",
         test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback,
     )
+    await r.record_async(
+        "local_compute_refresh_rehydrates_tokens_after_base_restore",
+        test_local_compute_refresh_rehydrates_tokens_after_base_restore,
+    )
     r.record(
         "compute_token_source_ignores_isolated_process_target",
         test_compute_token_sync_reads_source_file_not_isolated_process_target,
@@ -11613,6 +11755,14 @@ async def run_all_tests():
         "runner_fixture_manifest_database_identity_required",
         test_runner_fixtures_reject_manifest_without_database_identity,
     )
+    r.record(
+        "whatsapp_task_uses_canonical_cloud_base",
+        test_whatsapp_task_uses_the_canonical_cloud_base_image,
+    )
+    r.record(
+        "canonical_base_cache_token_is_revisioned",
+        test_canonical_base_cache_token_is_revisioned_not_daily,
+    )
     r.record("local_isolated_fast_seed_dump", test_local_isolated_stack_opts_into_fast_seed_dump)
     r.record(
         "local_cold_seed_extended_start_timeout",
@@ -11682,6 +11832,10 @@ async def run_all_tests():
     r.record(
         "seed_dump_restore_target_client",
         test_seed_dump_restore_uses_target_container_pg_restore,
+    )
+    r.record(
+        "seed_dump_restore_plain_sql",
+        test_seed_dump_restore_supports_plain_sql_base_images,
     )
     r.record(
         "workspace_dependency_preflight",
@@ -11975,6 +12129,10 @@ async def run_all_tests():
     await r.record_async(
         "required_declared_evaluator_controls_pass_fail",
         test_required_declared_evaluator_controls_pass_fail,
+    )
+    r.record(
+        "declared_evaluator_evidence_normalized_completion_card",
+        test_declared_evaluator_evidence_normalizes_user_facing_completion_card,
     )
     r.record(
         "opentable_static_runtime_contract",

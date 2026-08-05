@@ -4453,6 +4453,64 @@
     ]
   },
   {
+    "name": "whatsapp-history-recall",
+    "title": "WhatsApp History Recall",
+    "description": "Answer three factual questions about synced WhatsApp history using local data search.",
+    "prompt": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
+    "timeout_seconds": 300,
+    "is_chat_mode": false,
+    "expected_tools": ["spawn_agent"],
+    "tags": ["grep", "whatsapp", "messages"],
+    "group": "daily",
+    "price_limit_cents": 150,
+    "requires_browser_agent": false,
+    "requires_claude_code": false,
+    "attachment": null,
+    "approval_handling": null,
+    "start_phase": "execute",
+    "status": "ready",
+    "runner": "agent",
+    "bench": "rose-bench",
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [],
+      "base_images": ["base:victoria-prod-sync-v1"],
+      "live_fixtures": [],
+      "services": [],
+      "secrets": [],
+      "live_targets": [],
+      "context_notes": "The canonical Victoria base fixture includes frozen WhatsApp history synced from a real paired device: 3825 MessageRecord rows with channel=WHATSAPP across 561 Person threads, spanning 2022-07-16 to 2026-07-29, plus a CONNECTED whatsapp Integration. Reachable through the messages/whatsapp grep source and the local data summary. No network or live service is touched."
+    },
+    "evaluators": [
+      {
+        "id": "whatsapp-recall-runtime",
+        "method": "static_check",
+        "criteria": [
+          "No tool call fails",
+          "The agent reaches a completed state"
+        ],
+        "checks": [
+          { "type": "no_tool_failures" },
+          { "type": "agent_status", "value": "COMPLETED" }
+        ]
+      },
+      {
+        "id": "whatsapp-recall-semantics",
+        "method": "single_turn_llm_judge",
+        "criteria": [
+          "The agent searched the user's own WhatsApp data (grep against the whatsapp/messages source, or the local data summary) rather than answering from assumption",
+          "Q1 last message: the final answer reports the most recent WhatsApp message as the text 'ur just talking about the main download link right?'; direction and timestamp are optional details",
+          "Q2 most contacted: the final answer identifies the busiest WhatsApp correspondent as the thread/contact +39900262981823; its approximately 2197-message subtotal is optional",
+          "Q3 volume and range: the final answer reports approximately 3825 total WhatsApp messages spanning about July 2022 to July 2026; the roughly 561 contacts/threads count is optional",
+          "All three questions are answered in the final response"
+        ],
+        "judge_prompt": "Review the final answer and the tool transcript. Every number and quotation that the answer does include must be grounded in actual grep or data-summary output, not asserted. Minor formatting differences are acceptable, a paraphrased date range is fine, and the contact may be named by its thread id or phone-style identifier. Do not require optional supporting statistics that the user did not ask for, such as the top contact's message subtotal or the number of contacts/threads. Score 1.0 only when all three requested answers are present and each matches the expected value. Score 0.0 if any requested answer is missing, contradicted by the transcript, or produced without actually searching the WhatsApp data."
+      }
+    ],
+    "enforce_declared_evaluators": true,
+    "source": ["user:whatsapp-bench-2026-07-29"]
+  },
+  {
     "name": "agent-payment-production-purchase",
     "title": "Agent Payment Production Completed Purchase",
     "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",

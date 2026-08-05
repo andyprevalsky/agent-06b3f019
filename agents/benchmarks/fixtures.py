@@ -1,21 +1,23 @@
 """Canonical DB fixture / base-image registry for the eval catalog.
 
 Every task in `tasks.json` runs on top of a base image — a known DB state the
-agent's user context (contacts, messages, sessions, credentials) comes from.
+agent's user context (contacts, messages, sessions, browser state) comes from.
+Infrastructure compute tokens are a live overlay refreshed after restoration;
+they are not pinned by the base image.
 Tasks that don't declare `environment.base_images` default to
 `DEFAULT_BASE_IMAGE` (injected at load time in benchmark_tasks.py), so every
 eval has a reproducible starting state by construction.
 
-The default base image is the workspace's synced-prod Victoria DB, produced by
-`bash scripts/setup-db.sh`. `ensure_base_image_snapshot()` freezes it to a
-pg_dump file (same pattern as run_benchmark.py's grep frozen snapshot) so a
-run's exact DB state can be archived alongside its trajectory and restored in
-a sim later. Task-specific fixtures (e.g. `digital_twin_store_v1`) are deltas
-applied on top of a base image.
+The default base image is the canonical Victoria DB fixture shared by local and
+cloud benchmark runners. `ensure_base_image_snapshot()` can freeze a local copy
+to a pg_dump file so a run's exact DB state can be archived alongside its
+trajectory and restored in a sim later. Task-specific fixtures (e.g.
+`digital_twin_store_v1`) are deltas applied on top of this one base image.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 from pathlib import Path
@@ -28,7 +30,9 @@ BASE_IMAGES: dict[str, dict[str, str]] = {
     DEFAULT_BASE_IMAGE: {
         "description": (
             "Workspace Victoria DB synced from prod (users, people, messages, "
-            "integrations, browser state, credentials)."
+            "integrations, browser state), including the frozen WhatsApp contact "
+            "and message history used by recall benchmarks. Compute tokens are "
+            "refreshed from the live fixture after this base is restored."
         ),
         "create": "bash scripts/setup-db.sh",
     },
@@ -81,7 +85,16 @@ def ensure_base_image_snapshot(name: str = DEFAULT_BASE_IMAGE, *, refresh: bool 
     if name not in BASE_IMAGES:
         raise ValueError(f"Unknown base image '{name}'. Known: {sorted(BASE_IMAGES)}")
     path = base_image_snapshot_path(name)
-    if path.exists() and path.stat().st_size > 0 and not refresh:
+    schema_path = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
+    schema_hash = hashlib.sha1(schema_path.read_bytes()).hexdigest()
+    hash_path = Path(f"{path}.schemahash")
+    if (
+        path.exists()
+        and path.stat().st_size > 0
+        and hash_path.exists()
+        and hash_path.read_text().strip() == schema_hash
+        and not refresh
+    ):
         return path
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,6 +116,11 @@ def ensure_base_image_snapshot(name: str = DEFAULT_BASE_IMAGE, *, refresh: bool 
     if result.returncode != 0:
         stderr = result.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"Base image snapshot failed: {stderr}")
-    path.write_bytes(result.stdout)
+    path_tmp = Path(f"{path}.tmp-{os.getpid()}")
+    hash_tmp = Path(f"{hash_path}.tmp-{os.getpid()}")
+    path_tmp.write_bytes(result.stdout)
+    hash_tmp.write_text(schema_hash)
+    os.replace(path_tmp, path)
+    os.replace(hash_tmp, hash_path)
     print(f"    🧊 Base image snapshot written: {path}")
     return path

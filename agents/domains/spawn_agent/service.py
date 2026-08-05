@@ -73,6 +73,16 @@ _TOOL_EVIDENCE_METADATA_KEYS = {
     "url",
 }
 
+_SOURCE_GOAL_TERMS = {
+    "email": ("email", "gmail"),
+    "gmail": ("email", "gmail"),
+    "imessage": ("imessage", "i message"),
+    "whatsapp": ("whatsapp", "whats app"),
+    "sms": ("sms", "text message", "text messages"),
+    "transactions": ("transaction", "transactions", "plaid", "bank"),
+    "documents": ("document", "documents", "file", "files", "notes"),
+}
+
 
 def _has_usable_tool_evidence(value: Any) -> bool:
     """Return whether a successful tool result contains non-empty evidence."""
@@ -102,6 +112,22 @@ def _has_usable_tool_evidence(value: Any) -> bool:
     if isinstance(value, (list, tuple, set)):
         return any(_has_usable_tool_evidence(item) for item in value)
     return bool(value)
+
+
+def _unavailable_source_is_required(source: str, goal: str, require_source_access: Any) -> bool:
+    """Distinguish required connector failures from opportunistic probes.
+
+    The explore model may broaden a mixed-source grep beyond the user's request.
+    An explicit ``require_source_access=False`` makes that broadening best-effort,
+    unless the requested source is named in the explore goal itself. Calls with
+    no hint preserve the existing fail-closed connector behavior.
+    """
+    if require_source_access is not False:
+        return True
+    normalized_goal = " ".join(str(goal or "").lower().replace("-", " ").split())
+    normalized_source = str(source or "").lower().replace("-", "_")
+    terms = _SOURCE_GOAL_TERMS.get(normalized_source, (normalized_source.replace("_", " "),))
+    return any(term in normalized_goal for term in terms)
 
 
 # =============================================================================
@@ -271,6 +297,7 @@ async def spawn_explore_agent_activity(
     depth: Optional[str] = None,
     max_iterations: Optional[int] = None,
     world_model_mode: str = "real",
+    local_data_summary: str = "",
 ) -> Dict[str, Any]:
     """Run the explore agent loop inside a Temporal activity.
 
@@ -314,7 +341,10 @@ async def spawn_explore_agent_activity(
 
     # Collect raw tool call results for callers that need evidence
     tool_call_results: List[str] = []
-    has_usable_tool_evidence = False
+    # The local summary is fetched by a trusted backend activity before this
+    # leaf starts. Treat it as grounded evidence so an aggregate/latest-message
+    # lookup can complete without a redundant grep solely to satisfy the guard.
+    has_usable_tool_evidence = bool(local_data_summary.strip())
 
     # Data sources the explore agent tried to grep but whose connector isn't
     # connected. Surfaced to the parent workflow, which raises one blocking
@@ -485,8 +515,15 @@ async def spawn_explore_agent_activity(
                     else:
                         source = str(st) if st else None
                         normalized = {"source": source} if source else None
-                    if source and normalized and not any(
-                        u.get("source") == source for u in unavailable_sources_collected
+                    if (
+                        source
+                        and normalized
+                        and _unavailable_source_is_required(
+                            source, goal, tool_args.get("require_source_access")
+                        )
+                        and not any(
+                            u.get("source") == source for u in unavailable_sources_collected
+                        )
                     ):
                         unavailable_sources_collected.append(normalized)
         elif tool_name in ("attempt_completion", "attempt_completion_with_result"):
@@ -562,6 +599,16 @@ async def spawn_explore_agent_activity(
     resolved_max_iterations = max_iterations or explore_limits_for_depth(effective_depth)[0]
     state_line = f"[STATE: now={current_ts}] [Thoroughness: {effective_depth}]"
     initial_user_text = f"{state_line}\n\n{goal}"
+    if local_data_summary:
+        initial_user_text = (
+            initial_user_text
+            + "\n\nLOCAL DATA SUMMARY (aggregate facts from the user's connected data; "
+            "use these directly and use grep only for missing message-level details). "
+            "A thread label is a valid contact identifier. If it contains only a phone number, "
+            "report that identifier exactly; do not guess or use unrelated web, email, or document "
+            "searches to invent a person's identity. Search only sources relevant to the goal:\n"
+            + local_data_summary
+        )
     if attachment_texts:
         initial_user_text = initial_user_text + "\n\n" + "\n\n".join(attachment_texts)
 
@@ -650,7 +697,10 @@ async def spawn_explore_agent_activity(
     # explores may legitimately summarize the supplied content without another
     # tool call, so preserve that path.
     completed_without_tool_evidence = (
-        result.get("status") == "completed" and not has_usable_tool_evidence and not attachment_texts
+        result.get("status") == "completed"
+        and not has_usable_tool_evidence
+        and not attachment_texts
+        and not local_data_summary
     )
     run_completed = result.get("status") == "completed" and not completed_without_tool_evidence
     result_payload = {

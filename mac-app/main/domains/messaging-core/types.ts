@@ -101,6 +101,12 @@ export interface TelegramAuthCallbacks {
 
 export interface WhatsAppAuthCallbacks {
   onQRCode: (qr: string) => void;
+  /**
+   * Fired when the socket actually reaches `connection === 'open'`. Backend
+   * registration hangs off this rather than off `connect()` resolving, because
+   * `connect()` also resolves on the QR-scan timeout without a pairing.
+   */
+  onConnected?: () => void | Promise<void>;
 }
 
 /**

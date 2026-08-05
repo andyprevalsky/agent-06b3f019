@@ -77,7 +77,7 @@ def _backend_grep_call(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
 # Local, always-available sources: no external connector, so they never gate
 # and don't need a connectivity probe.
-_LOCAL_SOURCES = {"messages", "network", "agent_network"}
+_LOCAL_SOURCES = {"messages", "network", "agent_network", "summary"}
 _DOCUMENT_PROVIDER_ALIASES = {
     "chat_gpt": "chatgpt",
     "chatgpy": "chatgpt",

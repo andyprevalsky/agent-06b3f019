@@ -43,3 +43,6 @@ coverage/
 package-lock.json
 yarn.lock
 pnpm-lock.yaml
+
+# Local WhatsApp pairing harness state (Baileys credentials + logs — never commit)
+.whatsapp-harness/
