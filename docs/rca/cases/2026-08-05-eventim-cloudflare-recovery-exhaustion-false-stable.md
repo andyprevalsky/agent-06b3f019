@@ -124,13 +124,21 @@ Generalizable harness fixes (no timeout / evaluator relaxation):
 1. Live re-verify via `verify_live_page_cleared_challenge` after promote+restore
    before emitting recovery success; false-stable promotions now fail with
    `passed candidate probes but the live tab is still challenged`.
-2. Preloaded restore skips same-host re-navigation (WAF re-trigger) and uses the
+2. That live verify must **navigation-probe** the target URL (not accept a
+   static snapshot of already-loaded probe content). Repro on
+   `bad0cac8-3668-462e-9a44-10e4d0d1491f`: backend promoted
+   `steel_managed` (`stablePasses=2`), static live verify claimed clean, then
+   the agent's next same-host goto re-hit Access Denied Ray
+   `a26810d81beac303`.
+3. Preloaded restore skips same-host re-navigation (WAF re-trigger) and uses the
    45s probe navigation budget when a goto is required.
-3. CAPTCHA solver wait keeps polling while the live page looks challenged even
+4. CAPTCHA solver wait keeps polling while the live page looks challenged even
    when Kernel `isSolving` is null.
-4. Backend `BrowserChallengeRecovery` logs every candidate
+5. Backend `BrowserChallengeRecovery` logs every candidate
    create/probe/promote with `configKey` / `proxyMode` / `stablePasses`, and
-   returns `config_key` on the promote payload.
+   returns `config_key` on the promote payload. Deduced winner from those logs:
+   **Steel `managed`**; Kernel isp/residential/mobile all `stablePasses=0`;
+   `steel_fixed` unavailable (`No active fixed IP proxies`).
 
 Cemented by `challenge_recovery` + `spawn_browser_agent_v3` blackbox tests.
 Exact-bench outcome still required before status=`fixed`.

@@ -288,11 +288,12 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
             return self.page.body_text
 
     class FakePage:
-        def __init__(self, title, body_text, html):
+        def __init__(self, title, body_text, html, *, flip_to_denied_on_goto=False):
             self._title = title
             self.body_text = body_text
             self._html = html
             self.goto_count = 0
+            self.flip_to_denied_on_goto = flip_to_denied_on_goto
 
         async def title(self):
             return self._title
@@ -306,6 +307,10 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
 
         async def goto(self, *_args, **_kwargs):
             self.goto_count += 1
+            if self.flip_to_denied_on_goto:
+                self._title = "Access Denied"
+                self.body_text = "Access Denied"
+                self._html = "<h1>Access Denied</h1>"
             return None
 
         async def wait_for_timeout(self, _milliseconds):
@@ -313,15 +318,31 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
 
     clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
     assert await verify_live_page_cleared_challenge(
-        clean, "https://wl.eventim.us/event/lyny/1", solver_timeout_seconds=0
+        clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
     )
-    assert clean.goto_count == 0
+    # Must navigation-probe — static preloaded content is not enough.
+    assert clean.goto_count == 2
 
     denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
     assert not await verify_live_page_cleared_challenge(
-        denied, "https://wl.eventim.us/event/lyny/1", solver_timeout_seconds=0
+        denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
     )
     assert denied.goto_count == 1
+
+    # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
+    false_stable = FakePage(
+        "LYNY",
+        "General Admission Tier 2",
+        "<main>tickets</main>",
+        flip_to_denied_on_goto=True,
+    )
+    assert not await verify_live_page_cleared_challenge(
+        false_stable,
+        "https://wl.eventim.us/event/lyny/1",
+        attempts=1,
+        solver_timeout_seconds=0,
+    )
+    assert false_stable.goto_count == 1
 
 
 async def test_live_cookie_commit_requires_two_clean_loads():

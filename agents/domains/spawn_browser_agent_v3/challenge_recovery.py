@@ -222,26 +222,11 @@ async def verify_live_page_cleared_challenge(
 ) -> bool:
     """Require the canonical live tab to clear challenge markers after promote/restore.
 
-    Candidate probes can false-stable: a remote session looks clean, then the live
-    reconnect + restore navigation lands on Access Denied again. Success may only
-    be claimed after this live check.
+    Candidate probes can false-stable: a remote session's already-loaded probe
+    content looks clean, then a fresh same-host navigation lands on Access Denied
+    (Eventim Cloudflare). Never accept a static snapshot of preloaded content —
+    always navigation-probe the target URL on the live tab.
     """
-    snapshot = await asyncio.gather(
-        page.title(),
-        page.locator("body").inner_text(timeout=2_000),
-        page.content(),
-        return_exceptions=True,
-    )
-    title = snapshot[0] if isinstance(snapshot[0], str) else ""
-    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
-    html = snapshot[2] if isinstance(snapshot[2], str) else ""
-    if not page_looks_challenged(
-        status=None,
-        title=title[:1_000],
-        body_text=body_text[:20_000],
-        html=html[:100_000],
-    ):
-        return True
     return await _probe_page(
         page,
         target_url,
