@@ -1,8 +1,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
-import { createLogger } from '../../providers/logger';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID, TEST_PAYMENT_ENABLED } from './config';
+import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID } from './config';
 import {
   abandonTestPayment,
   configureBenchmarkAgentCardSetup,
@@ -13,28 +12,16 @@ import {
   getTestPaymentLifecycle,
   recordPhoneBenchmarkPaymentAudit,
   resolvePublicBaseUrl,
-  TestPaymentError,
 } from './service';
+import { checkoutRouter } from './routes.checkout';
+import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
+import type { TestPaymentConfirmInput } from './types';
 
 const router = Router();
-const log = createLogger('TestPayment');
 
-/**
- * Report an unexpected route failure before collapsing it to a generic 500.
- *
- * These handlers used to discard every non-`TestPaymentError`, which made the
- * resulting 500 undiagnosable by construction: a benchmark could fail with
- * "Failed to abandon test payment lifecycle" and leave nothing in the backend
- * log to explain it. Recorded occurrences on 2026-07-11 and 2026-07-14 were
- * never root-caused for exactly this reason.
- */
-function logUnexpectedRouteFailure(operation: string, error: unknown, agentId?: string): void {
-  log.error(`${operation} failed`, {
-    agentId,
-    error: error instanceof Error ? error.message : String(error),
-    stack: error instanceof Error ? error.stack : undefined,
-  });
-}
+// Real-merchant (hosted Stripe Checkout) endpoints live in their own module to keep this file
+// inside the max-lines budget.
+router.use(checkoutRouter);
 
 /**
  * Caller authorization scope for the benchmark lifecycle routes.
@@ -97,17 +84,6 @@ async function authorizeAgentForCaller(
     res.status(403).json({ error: 'Payment benchmark access denied for this agent' });
     return false;
   }
-  return true;
-}
-
-function rejectWhenDisabled(
-  res: Response,
-  options: { allowProductionBenchmark?: boolean } = {}
-): boolean {
-  if (TEST_PAYMENT_ENABLED || (options.allowProductionBenchmark === true && isProductionEnv())) {
-    return false;
-  }
-  res.status(404).json({ error: 'Not found' });
   return true;
 }
 
@@ -182,12 +158,7 @@ router.post(
       }
       res.json(await configureBenchmarkAgentCardSetup(body));
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      logUnexpectedRouteFailure('configure benchmark AgentCard setup', error);
-      res.status(500).json({ error: 'Failed to configure benchmark AgentCard setup' });
+      respondTestPaymentError(res, error, 'Failed to configure benchmark AgentCard setup');
     }
   })
 );
@@ -197,20 +168,19 @@ router.post(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
-    // Declared outside the try so the failure log can name the agent.
-    const body = req.body as Record<string, unknown>;
+    // Never assume a body parser ran. body-parser 1.x (Express 4) happens to default `req.body`
+    // to `{}` before its Content-Type check, but body-parser 2.x (Express 5) dropped that and
+    // leaves `undefined` for anything it skips — an omitted body, or `text/plain`. Reading
+    // `.agentId` off `undefined` throws OUTSIDE the try below, escaping `respondTestPaymentError`
+    // into Express' default error page instead of this endpoint's own 400.
+    const body = (req.body ?? {}) as Record<string, unknown>;
     const agentId = typeof body.agentId === 'string' ? body.agentId : '';
     try {
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
       const result = await abandonTestPayment(agentId);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      logUnexpectedRouteFailure('abandon test payment lifecycle', error, agentId);
-      res.status(500).json({ error: 'Failed to abandon test payment lifecycle' });
+      respondTestPaymentError(res, error, 'Failed to abandon test payment lifecycle', { agentId });
     }
   })
 );
@@ -230,18 +200,13 @@ router.get(
   requireProductionBenchmarkAccess,
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res, { allowProductionBenchmark: true })) return;
+    const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
     try {
-      const agentId = typeof req.query.agentId === 'string' ? req.query.agentId : '';
       if (!(await authorizeAgentForCaller(benchmarkCaller(req), agentId, res))) return;
       const result = await getTestPaymentLifecycle(agentId);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      logUnexpectedRouteFailure('read test payment lifecycle', error);
-      res.status(500).json({ error: 'Failed to read test payment lifecycle' });
+      respondTestPaymentError(res, error, 'Failed to read test payment lifecycle', { agentId });
     }
   })
 );
@@ -251,15 +216,13 @@ router.post(
   asyncHandler(async (req, res) => {
     if (rejectWhenDisabled(res)) return;
     try {
-      const result = await confirmTestPayment(req.body);
+      // Same unparsed-body hazard: `confirmTestPayment(undefined)` throws a TypeError on
+      // `input.items`, which `respondTestPaymentError` can only report as an opaque 500.
+      // An empty object reaches `normalizeLineItems`, which answers with its own 400.
+      const result = await confirmTestPayment((req.body ?? {}) as TestPaymentConfirmInput);
       res.json(result);
     } catch (error) {
-      if (error instanceof TestPaymentError) {
-        res.status(error.statusCode).json({ error: error.message });
-        return;
-      }
-      logUnexpectedRouteFailure('confirm test payment', error);
-      res.status(500).json({ error: 'Failed to confirm test payment' });
+      respondTestPaymentError(res, error, 'Failed to confirm test payment');
     }
   })
 );

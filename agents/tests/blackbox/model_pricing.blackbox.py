@@ -14,11 +14,37 @@ async def test_fetch_pricing_pool_average():
         result = await fetch_model_pricing("rose-1-ultra")
 
     # rose-1-ultra waterfall: anthropic/claude-opus-4.8 ($5/$25 per M) +
-    # openai/gpt-5.6-terra ($2.50/$15 per M).
-    # Average input: (5+2.5)/2 = $3.75/M -> 0.375 cents/1k
-    assert abs(result["input_cents_per_1k"] - 0.375) < 1e-9
-    # Average output: (25+15)/2 = $20/M -> 2.0 cents/1k
-    assert abs(result["output_cents_per_1k"] - 2.0) < 1e-9
+    # openai/gpt-5.6-terra ($2.50/$15 per M) + openai/gpt-5.6-sol ($5/$30 per M).
+    # Average input: (5+2.5+5)/3 = $4.1666.../M -> 0.41666... cents/1k
+    assert abs(result["input_cents_per_1k"] - (12.5 / 30)) < 1e-9
+    # Average output: (25+15+30)/3 = $23.333.../M -> 2.3333... cents/1k
+    assert abs(result["output_cents_per_1k"] - (70 / 30)) < 1e-9
+
+
+async def test_every_pool_model_has_provider_pricing():
+    """Every model in every pool waterfall must be priceable.
+
+    `_average_pool_pricing` indexes `_PROVIDER_PRICING` directly, so a pool
+    model with no pricing row raises KeyError rather than returning a number.
+    Deriving the waterfall table from POOL_REGISTRY made that reachable for
+    rose-1-mini (anthropic/claude-haiku-4.5 had no entry).
+    """
+    from providers.rose.pools import POOL_REGISTRY
+    from providers.rose.pricing import _PROVIDER_PRICING, get_pool_pricing
+
+    missing = [
+        (name, model)
+        for name, spec in POOL_REGISTRY.items()
+        for model in spec.waterfall
+        if model not in _PROVIDER_PRICING
+    ]
+    assert missing == [], f"pool models with no pricing entry: {missing}"
+
+    for name in POOL_REGISTRY:
+        pricing = get_pool_pricing(name)
+        assert pricing is not None, f"{name} priced as None"
+        assert pricing["input_cents_per_1k"] > 0
+        assert pricing["output_cents_per_1k"] > 0
 
 
 def test_get_anthropic_pricing_claude():
@@ -90,6 +116,9 @@ async def run_all_tests():
     print("model-pricing blackbox tests:")
     r = BlackboxResult()
     await r.record_async("fetch_pricing_pool_average", test_fetch_pricing_pool_average)
+    await r.record_async(
+        "every_pool_model_has_provider_pricing", test_every_pool_model_has_provider_pricing
+    )
     r.record("get_anthropic_pricing_claude", test_get_anthropic_pricing_claude)
     r.record("get_anthropic_pricing_claude_auth_zero", test_get_anthropic_pricing_claude_auth_zero)
     r.record("get_anthropic_pricing_gpt_auth_zero", test_get_anthropic_pricing_gpt_auth_zero)

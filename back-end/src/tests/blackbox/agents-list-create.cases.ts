@@ -404,11 +404,17 @@ test('GET /:id/ancestors — child agent returns parent', async () => {
   await prepareTestParentWorkflow(parentId);
 
   // Create child agent via API with parent_agent_id
-  const childCreateRes = await postAgentWithRetry(apiKeyHeaders(session.user.id), {
-    goal: 'Child agent',
-    parent_agent_id: parentId,
-    parent_workflow_id: parentId,
-    bus_id: parentId,
+  // A failed descendant workflow start can return 500 after the child row is
+  // committed, so retrying this request without a stable child ID is unsafe.
+  const childCreateRes = await request(`${BASE_URL}/api/agents`, {
+    method: 'POST',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      goal: 'Child agent',
+      parent_agent_id: parentId,
+      parent_workflow_id: parentId,
+      bus_id: parentId,
+    }),
   });
 
   let childId: string;

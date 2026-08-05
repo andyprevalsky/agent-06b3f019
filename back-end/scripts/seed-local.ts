@@ -214,11 +214,39 @@ async function upsertById(model: any, records: any[]): Promise<number> {
   return records.length;
 }
 
+// Columns this sync reads FROM PRODUCTION. An unqualified findMany() selects
+// every column in the LOCAL schema, so the moment a migration adds a column that
+// prod has not deployed yet, the cold-sync dies with P2022 and every isolated
+// benchmark stack fails to boot. Local-policy columns (poolingEnabledOverride)
+// are deliberately absent: they are decided locally, never sourced from prod.
+const PROD_INTEGRATION_COLUMNS = {
+  id: true,
+  userId: true,
+  type: true,
+  name: true,
+  status: true,
+  isActive: true,
+  lastSyncAt: true,
+  lastSuccessfulSyncAt: true,
+  lastFailedSyncAt: true,
+  failureReason: true,
+  config: true,
+  poolingEnabled: true,
+  rateLimitedUntil: true,
+  lastUsedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 async function syncIntegrations(): Promise<number> {
   // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-  const userIntegrations = await remote.integration.findMany({ where: { userId: DEV_USER_ID } });
+  const userIntegrations = await remote.integration.findMany({
+    where: { userId: DEV_USER_ID },
+    select: PROD_INTEGRATION_COLUMNS,
+  });
   const poolIntegrations = await remote.integration.findMany({
     where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
+    select: PROD_INTEGRATION_COLUMNS,
   });
   const all = [...userIntegrations, ...poolIntegrations];
   // Pool tokens reference foreign users — ensure those User records exist locally

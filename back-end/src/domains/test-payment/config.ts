@@ -9,6 +9,8 @@ export const TEST_PAYMENT_PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL ?? '')
   .trim()
   .replace(/\/$/, '');
 
+export const TEST_PAYMENT_LIVE_LIFECYCLE_QUERY = 'agentcard-live-lifecycle';
+
 /**
  * The single JWT-authenticated end user permitted to reach the production
  * benchmark lifecycle routes. Fails closed: when BENCHMARK_USER_ID is unset or
@@ -84,3 +86,12 @@ export function applyResolvedBenchmarkAgentCardIds(env: NodeJS.ProcessEnv = proc
   }
   return resolved;
 }
+
+/**
+ * Where Stripe returns the shopper after a hosted Checkout. Prefers the tunnel/base URL a benchmark
+ * stack advertises so a cloud browser agent lands somewhere it can actually reach; falls back to
+ * production. Stripe requires an absolute URL, so this can never be a relative path.
+ */
+export const TEST_PAYMENT_CHECKOUT_RETURN_URL = (
+  TEST_PAYMENT_PUBLIC_BASE_URL !== '' ? TEST_PAYMENT_PUBLIC_BASE_URL : 'https://roselabs.ai'
+).replace(/\/+$/, '');

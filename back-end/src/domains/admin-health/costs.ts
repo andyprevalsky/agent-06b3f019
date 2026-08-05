@@ -81,9 +81,11 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'gpt-5.4': openAi(1.75, 14),
   'google/gemini-3-flash-preview': openRouter(0.5, 3),
   'google/gemini-3.5-flash': openRouter(1.5, 9),
+  'google/gemini-3.6-flash': openRouter(1.5, 7.5),
   'google/gemini-3.1-pro-preview': openRouter(2, 12),
   'moonshotai/kimi-k2.5': openRouter(0.38, 1.72),
   'moonshotai/kimi-k2.7-code': openRouter(0.74, 3.5),
+  'moonshotai/kimi-k3': openRouter(3, 15),
   'zai-glm-4.7': uncached(2.25, 2.75),
   // Pool identifiers appear in some older usage rows before actual-model
   // provenance was recorded. Use the mean of their waterfall provider rates.

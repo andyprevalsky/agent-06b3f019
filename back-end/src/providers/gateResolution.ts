@@ -167,13 +167,17 @@ export async function resolveAndSignal(
   // Those row locks can legitimately outlive Prisma's 5s interactive-transaction
   // default under deploy-suite/prod concurrency, and a short timeout rolled back
   // the response and surfaced a false 500 on a healthy database. Keep one atomic
-  // transaction, but give the bounded critical section a 30s budget.
+  // transaction, but give the bounded critical section a 30s budget. The
+  // transient-start retry wrapper (rather than a bare `prisma.$transaction`) then
+  // keeps a contended pool surfacing as a retry rather than a hard gate failure.
   const { fresh, finishedMessageCount, resolved } = await runTransactionWithRetry(
     async (tx) => {
       // Deployment cleanup takes this lock before terminalizing attention rows.
       // Keep the same order here so a response can never hold the row while
       // waiting for cleanup's generation lock.
       await lockAgentWorkflowGeneration(tx, request.agentId);
+      // Single atomic UPDATE ... RETURNING: the `userResponse IS NULL` predicate
+      // is the compare-and-swap, so two concurrent resolvers cannot both win.
       const [current] = await tx.$queryRaw<ResolvableGateRequest[]>`
         UPDATE "AgentAttentionRequest"
         SET "userResponse" = ${response}, "updatedAt" = CURRENT_TIMESTAMP

@@ -790,8 +790,26 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # below cold-syncs exactly as before (then repopulates the cache); the schemahash
 # guard + pg_restore fallback catch any mismatch/corruption, so it can never break
 # a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
-# + UTC day (bounds staleness to 24h). Local dev leaves BENCHMARK_SEED_DUMP unset.
-_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+# + pg_dump major (compatibility) + UTC day (bounds staleness to 24h). Local dev
+# leaves BENCHMARK_SEED_DUMP unset.
+#
+# The pg major belongs in the token because a custom-format archive is NOT
+# backward compatible: a PG18 client emits header format 1.16, which the pinned
+# postgres:16-alpine pg_restore rejects outright ("unsupported version (1.16) in
+# file header"). Without it every publisher shares one token, so a single
+# neighbour on a newer client poisons the shared cache for every consumer — each
+# of which then fails its restore and, under BENCHMARK_REQUIRE_SEED_DUMP=1,
+# refuses to boot at all. Keying by major lets mismatched clients coexist rather
+# than clobber each other.
+_SEED_DUMP_CLIENT_MAJOR="$(
+    if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
+        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+    else
+        echo 16 # the pinned postgres:16-alpine container below writes the archive
+    fi
+)"
+[ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
+_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-pg${_SEED_DUMP_CLIENT_MAJOR}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
@@ -1173,6 +1191,41 @@ CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECONDS="${CLOUDFLARE_TUNNEL_RETRY_BACKOFF_SECON
 # 1.1.1.1 / 8.8.8.8 / local resolver) even after "Registered tunnel connection".
 # Curl then reports 000 forever; fail that case early instead of burning the
 # full edge timeout × retry budget.
+# One Cloudflare-edge status probe, supervised from the parent shell.
+#
+# Prints the HTTP status ('' or 000 when unreachable). Extra args are passed to
+# curl so the caller can select an address family. curl's --max-time normally
+# bounds this, but under extreme host contention the process has been observed
+# to outlive the entire isolated harness watchdog; a wedged probe must never
+# block quick-tunnel recycling or the ngrok fallback, so the parent enforces its
+# own deadline and escalates TERM -> KILL.
+supervised_edge_probe() {
+    local url="$1"
+    shift
+    local curl_timeout="${CLOUDFLARE_TUNNEL_CURL_TIMEOUT_SECONDS:-5}"
+    [[ "$curl_timeout" =~ ^[1-9][0-9]*$ ]] || curl_timeout=5
+    local status_file probe_pid probe_deadline status
+    status_file="$(mktemp "${TMPDIR:-/tmp}/rose-cloudflare-edge.XXXXXX")"
+    curl "$@" -s -o /dev/null -w '%{http_code}' --noproxy '*' \
+        --connect-timeout "$curl_timeout" --max-time "$curl_timeout" "$url" \
+        >"$status_file" 2>/dev/null &
+    probe_pid=$!
+    probe_deadline=$((SECONDS + curl_timeout + 2))
+    while kill -0 "$probe_pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$probe_deadline" ]; then
+            kill "$probe_pid" 2>/dev/null || true
+            sleep 1
+            kill -9 "$probe_pid" 2>/dev/null || true
+            break
+        fi
+        sleep 1
+    done
+    wait "$probe_pid" 2>/dev/null || true
+    status="$(cat "$status_file" 2>/dev/null || true)"
+    rm -f "$status_file"
+    printf '%s' "$status"
+}
+
 public_tunnel_hostname_resolves() {
     local url="$1" host
     host="${url#https://}"
@@ -1218,9 +1271,16 @@ cloudflare_tunnel_edge_is_routing() {
         # AAAA first and curl Happy Eyeballs reports http_code 000 on broken
         # IPv6 while the same hostname answers 200/502 over IPv4. Without -4 the
         # probe falsely declares a healthy tunnel dead and recycles forever.
-        status="$(curl -4 -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+        #
+        # Each attempt is supervised from the parent shell: curl's own --max-time
+        # is normally sufficient, but under extreme host contention we have seen
+        # the process stay stuck past the entire isolated harness watchdog, and a
+        # wedged edge probe must not block quick-tunnel recycling / ngrok
+        # fallback. Merge keeps both protections — IPv4-first for correctness,
+        # supervision for liveness.
+        status="$(supervised_edge_probe "$url" -4)"
         if [ -z "$status" ] || [ "$status" = "000" ]; then
-            status="$(curl -s -o /dev/null -w '%{http_code}' --noproxy '*' --max-time 10 "$url" 2>/dev/null || true)"
+            status="$(supervised_edge_probe "$url")"
         fi
         if [ -n "$status" ] && [ "$status" != "000" ]; then
             return 0

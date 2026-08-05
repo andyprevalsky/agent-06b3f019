@@ -44,6 +44,7 @@ function hasSafeProviderFailureCode(error: Error): boolean {
     'agentcard_org_wallet_funding_required',
     'agentcard_wallet_funding_required',
     'agentcard_payment_method_required',
+    'agentcard_cardholder_not_found',
     'kyc_required',
   ]).has(error.code);
 }
@@ -105,7 +106,6 @@ export async function classifyFundingResumeFailure(
     state.walletFundingPrepared &&
     ((boundaryError instanceof PurchaseError &&
       boundaryError.code === 'agentcard_company_funding_in_progress') ||
-      state.fundingRetryClaimed ||
       ambiguousExternalOutcome ||
       funding?.status === PurchaseWalletFundingStatus.FAILED ||
       walletWasFunded);

@@ -19,6 +19,7 @@ Model contract (P1):
         claudeAuth = claude-fable-5
         gptAuth    = gpt-5.6-sol
         waterfall  = anthropic/claude-opus-4.8 -> openai/gpt-5.6-terra
+                     -> openai/gpt-5.6-sol
 
     rose-1-browser-use:
         claudeAuth = claude-fable-5
@@ -80,7 +81,12 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
         gpt_auth_model="gpt-5.6-sol",
         waterfall=(
             "anthropic/claude-opus-4.8",
+            # gemini-3.1-pro-preview was removed here: OpenRouter 400s it on the
+            # rose-1-ultra execute pool. Terra is the replacement second layer;
+            # sol stays as the third so ultra keeps a deeper fallback than a
+            # single retry.
             "openai/gpt-5.6-terra",
+            "openai/gpt-5.6-sol",
         ),
     ),
     # Browser-use shares the claudeAuth + waterfall machinery; the only

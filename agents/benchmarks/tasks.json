@@ -26,7 +26,7 @@
   {
     "name": "single-creator-arm",
     "title": "Single-Creator Arm (baseline for mass-agent throttling)",
-    "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics — if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name — the creator's name.\n2. rank_from_initial_list — the rank number from the item.\n3. platform_handles_and_urls — string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform — per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas — 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days — 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars — the creator's main recurring topics.\n8. audience_persona — who they serve.\n9. monetization_funnels — visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps — what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman — how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach — how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources — URLs/source notes used.\n14. confidence_level — high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
+    "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics \u2014 if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name \u2014 the creator's name.\n2. rank_from_initial_list \u2014 the rank number from the item.\n3. platform_handles_and_urls \u2014 string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform \u2014 per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas \u2014 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days \u2014 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars \u2014 the creator's main recurring topics.\n8. audience_persona \u2014 who they serve.\n9. monetization_funnels \u2014 visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps \u2014 what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman \u2014 how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach \u2014 how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources \u2014 URLs/source notes used.\n14. confidence_level \u2014 high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
     "timeout_seconds": 600,
     "is_chat_mode": false,
     "expected_tools": [
@@ -269,13 +269,13 @@
       ],
       "secrets": [],
       "live_targets": [],
-      "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
+      "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json \u2014 real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
     },
     "group": "daily"
   },
   {
     "name": "plaid-transactions-monthly-spend",
-    "title": "Plaid Transactions — Monthly Spend",
+    "title": "Plaid Transactions \u2014 Monthly Spend",
     "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2025-09-01\", until=\"2025-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -347,7 +347,7 @@
   },
   {
     "name": "plaid-transactions-doordash-count",
-    "title": "Plaid Transactions — DoorDash Count",
+    "title": "Plaid Transactions \u2014 DoorDash Count",
     "prompt": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
@@ -419,7 +419,7 @@
   },
   {
     "name": "plaid-transactions-dead-subscriptions",
-    "title": "Plaid Transactions — Dead Subscriptions",
+    "title": "Plaid Transactions \u2014 Dead Subscriptions",
     "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
@@ -655,7 +655,7 @@
   },
   {
     "name": "gate-subscription-free-credit",
-    "title": "Gate — Free Credit Exhausted",
+    "title": "Gate \u2014 Free Credit Exhausted",
     "description": "Local fixture: a new account has exactly $0.01 free credit, $0.01 non-compute usage, and no active subscription; the agent must raise a subscription gate before continuing.",
     "prompt": "Summarize what Rose can do in one sentence. This task intentionally starts from a benchmark account whose free credits are exhausted and has no active subscription.",
     "timeout_seconds": 120,
@@ -721,9 +721,9 @@
   },
   {
     "name": "gate-subscription-card-mint",
-    "title": "Gate — Card Mint Requires Subscription",
+    "title": "Gate \u2014 Card Mint Requires Subscription",
     "description": "Local fixture: a benchmark account has enough free credits but no active subscription; when the browser agent attempts to mint a purchase card, the agent must raise a subscription gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": [
@@ -789,9 +789,9 @@
   },
   {
     "name": "gate-subscription-card-mint-admin-bypass",
-    "title": "Gate — Admin Bypasses Card-Mint Subscription",
+    "title": "Gate \u2014 Admin Bypasses Card-Mint Subscription",
     "description": "Local fixture: the SAME depleted account state as gate-subscription-card-mint (free credits, no active subscription), but the run user is a synthetic ADMIN (ADMIN_USER_IDS_EXTRA). Admins bypass the subscription / card-on-file requirement, so the browser agent must mint a company-funded card and complete checkout with NO subscription gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": [
@@ -857,9 +857,9 @@
   },
   {
     "name": "gate-kyc-card-mint",
-    "title": "Gate — Card Mint Requires KYC",
+    "title": "Gate \u2014 Card Mint Requires KYC",
     "description": "Local fixture: a benchmark account has enough free credits and an active subscription, but the purchase-card mint endpoint returns the benchmark AgentCard KYC-required response; the agent must raise a KYC gate.",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
     "expected_tools": [
@@ -929,7 +929,7 @@
   },
   {
     "name": "gate-source-connect-gmail",
-    "title": "Gate — Gmail Source Not Connected",
+    "title": "Gate \u2014 Gmail Source Not Connected",
     "description": "Local fixture: a benchmark account has no connected Gmail integration; a task that explicitly requires Gmail must raise a source_connect gate.",
     "prompt": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
     "timeout_seconds": 180,
@@ -2171,7 +2171,7 @@
   {
     "name": "browser-imax-group-tickets",
     "title": "IMAX Group Movie Tickets with Adjacent Seats",
-    "description": "Buy multiple premium-format movie tickets for tonight with all seats adjacent in the same row — a group purchase that stresses quantity, seat-adjacency, and format selection beyond the single-ticket case.",
+    "description": "Buy multiple premium-format movie tickets for tonight with all seats adjacent in the same row \u2014 a group purchase that stresses quantity, seat-adjacency, and format selection beyond the single-ticket case.",
     "prompt": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -2742,7 +2742,7 @@
   {
     "name": "agent-payment-test-shop",
     "title": "Agent Payment Test Shop",
-    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
+    "prompt": "Use a browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number \u2014 the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -2828,6 +2828,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "group": "daily",
@@ -2930,6 +2952,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3034,6 +3078,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e",
     "min_steps": {
@@ -3161,6 +3227,28 @@
       "attention": {
         "openKinds": []
       }
+    },
+    "environment": {
+      "mode": "synthetic",
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
+      "base_images": [],
+      "services": [
+        "browser_agent",
+        "test_payment",
+        "purchases",
+        "billing",
+        "agentcard",
+        "attention_requests"
+      ],
+      "secrets": [
+        "STRIPE_SECRET_KEY",
+        "AGENTCARD_ORG_OAUTH_CLIENT_ID",
+        "AGENTCARD_ORG_OAUTH_CLIENT_SECRET"
+      ],
+      "live_targets": [],
+      "context_notes": "Local isolated stack only. back-end/scripts/setup-benchmark-payment.ts seeds the dedicated NON-ADMIN synthetic user 00000000-0000-4000-8000-000000000106 (BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts) with a Stripe test customer + default card, an active subscription, credit headroom, and the org-managed AgentCard integration; the harness runs these tasks as that user (run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID). The user MUST NOT be an admin: resolveAndIssuePurchaseCard routes ADMIN_USER_IDS to issueAdminCompanyCard, which mints a company-funded card with no personal Stripe hold, making the stripeHold / payment_approval assertions below unreachable. The admin funding path has its own benchmark (gate-subscription-card-mint-admin-bypass)."
     },
     "bench": "pipeline-e2e"
   },
@@ -3504,7 +3592,7 @@
   {
     "name": "load-test-sias",
     "title": "Load-Test: Fan Out N General-Purpose Agents",
-    "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
+    "prompt": "LOAD TEST \u2014 your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive \u2014 no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING \u2014 do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path \u2014 only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3683,7 +3771,7 @@
   {
     "name": "calendly-schedule-meeting",
     "title": "Create Calendly Link & Send Meeting Invite",
-    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
+    "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event \u2014 the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3706,8 +3794,8 @@
   },
   {
     "name": "people-search-criteria",
-    "title": "People Search — Criteria Discovery via Explore Agent",
-    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search \u2014 Criteria Discovery via Explore Agent",
+    "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery \u2014 do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -3734,8 +3822,8 @@
   },
   {
     "name": "people-search-targeted",
-    "title": "People Search — Targeted Lookup via Explore Agent",
-    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
+    "title": "People Search \u2014 Targeted Lookup via Explore Agent",
+    "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge \u2014 you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4080,7 +4168,7 @@
   },
   {
     "name": "browser-rotate-ip-escalation",
-    "title": "Browser rotate_ip recovery ladder (Kernel residential → Kernel mobile → Steel)",
+    "title": "Browser rotate_ip recovery ladder (Kernel residential \u2192 Kernel mobile \u2192 Steel)",
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
@@ -4351,5 +4439,104 @@
       ".context/blue-bottle-bench-findings.md",
       "prod-agent:53feac08-d4a9-4baa-a9f1-23453af7a183"
     ]
+  },
+  {
+    "name": "agent-payment-production-purchase",
+    "title": "Agent Payment Production Completed Purchase",
+    "prompt": "Use one browser agent (spawn_agent with type=\"browser\" \u2014 do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 \u2014 do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
+    "timeout_seconds": 900,
+    "is_chat_mode": false,
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-production"
+    ],
+    "price_limit_cents": 500,
+    "requires_browser_agent": true,
+    "requires_claude_code": false,
+    "min_steps": {
+      "browser": 2
+    },
+    "attachment": null,
+    "approval_handling": "auto_approve",
+    "expected_attention_kind": "payment_approval",
+    "start_phase": "execute",
+    "production_only": true,
+    "response_schema": {
+      "fields": [
+        {
+          "name": "one_time_payment_card_last4",
+          "type": "str",
+          "required": true,
+          "description": "Last four digits of the one-time card issued for this purchase"
+        },
+        {
+          "name": "payment_succeeded",
+          "type": "bool",
+          "required": true,
+          "description": "True only when Stripe confirmed the payment succeeded"
+        }
+      ]
+    },
+    "expected_payment_lifecycle": {
+      "integrity": {
+        "purchaseCount": 1,
+        "walletFundingCount": 1,
+        "cardCount": 1,
+        "agentCardProviderCardCount": 1,
+        "agentCardProviderTransferCount": 1,
+        "stripePaymentIntentCount": 1,
+        "stripeProviderPaymentIntentCount": 1
+      },
+      "purchase": {
+        "status": "CLEARED",
+        "totalCents": 100
+      },
+      "walletFunding": {
+        "status": "CONSUMED",
+        "amountCents": 100
+      },
+      "stripeHold": {
+        "status": "succeeded",
+        "amountCents": 100,
+        "amountCapturableCents": 0,
+        "amountReceivedCents": 100
+      },
+      "orgTransfer": {
+        "status": "consumed",
+        "amountCents": 100,
+        "transferredCents": 100,
+        "livemode": true
+      },
+      "agentCard": {
+        "balanceCents": 0
+      },
+      "attention": {
+        "openKinds": []
+      }
+    },
+    "environment": {
+      "mode": "live",
+      "db_fixtures": [],
+      "base_images": [],
+      "services": [
+        "production-backend",
+        "production-frontend"
+      ],
+      "secrets": [
+        "stripe-live",
+        "agentcard-live"
+      ],
+      "live_targets": [
+        "roselabs.ai",
+        "checkout.stripe.com",
+        "api.roselabs.ai"
+      ],
+      "context_notes": "Production COMPLETED-purchase path on OUR OWN hosted /test_payment (distinct from the abandonment probe). Place order hands off to a real hosted Stripe Checkout on the Rose Labs account, which is the only way a live Rose-minted card can be authorized \u2014 AgentCard's test_charge is sandbox-only. The abandonment task covers the void/reclaim/refund path and must stay separate."
+    },
+    "bench": "pipeline-e2e"
   }
 ]

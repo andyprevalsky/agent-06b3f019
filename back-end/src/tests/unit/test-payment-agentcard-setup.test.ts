@@ -8,10 +8,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../providers/database';
 import { configureBenchmarkAgentCardSetup } from '../../domains/test-payment/service';
-import {
-  applyResolvedBenchmarkAgentCardIds,
-  resolveBenchmarkAgentCardIds,
-} from '../../domains/test-payment/config';
 
 const createdUserIds: string[] = [];
 let passed = 0;
@@ -48,7 +44,10 @@ async function main(): Promise<void> {
     );
     const connected = await configureBenchmarkAgentCardSetup(
       { userId, action: 'complete' },
-      { getCardholderVerificationStatus: async () => 'verified' }
+      {
+        resolveCardholderId: async () => 'cardholder-live-fixture',
+        getCardholderVerificationStatus: async () => 'verified',
+      }
     );
     assert.equal(connected.status, 'connected');
     const row = await prisma.integration.findUnique({
@@ -56,7 +55,7 @@ async function main(): Promise<void> {
     });
     const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
     assert.equal(config?.orgManaged, true);
-    assert.ok((config?.cardholderId ?? '').length > 0);
+    assert.equal(config?.cardholderId, 'cardholder-live-fixture');
     const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
     assert.equal(reset.status, 'connect_required');
     const resetRow = await prisma.integration.findUnique({
@@ -69,41 +68,27 @@ async function main(): Promise<void> {
     assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
   });
 
-  await test('configureBenchmarkAgentCardSetup keeps org/cardholder pair when org override is truncated', async () => {
+  await test('configureBenchmarkAgentCardSetup ignores stale BENCHMARK cardholder override', async () => {
     const userId = await seedUser();
-    const savedEnv = {
-      benchmarkOrg: process.env.BENCHMARK_AGENTCARD_ORG_ID,
-      benchmarkCardholder: process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID,
-      agentOrg: process.env.AGENTCARD_ORG_ID,
-      agentCardholder: process.env.AGENTCARD_CARDHOLDER_ID,
-    };
-    process.env.BENCHMARK_AGENTCARD_ORG_ID = 'cmqr3fk';
-    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cmrs8yyyyyyyyyyyyyyyyy7jg';
-    process.env.AGENTCARD_ORG_ID = 'cmqr3fkkkkkkkkkkkkkkkiu0z';
-    process.env.AGENTCARD_CARDHOLDER_ID = 'cmrfpzzzzzzzzzzzzzzzzzgfto';
+    const previous = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
+    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cardholder-stale-missing';
     try {
-      applyResolvedBenchmarkAgentCardIds();
-      await configureBenchmarkAgentCardSetup(
+      const connected = await configureBenchmarkAgentCardSetup(
         { userId, action: 'complete' },
         {
-          getCardholderVerificationStatus: async (cardholderId) => {
-            assert.equal(cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
-            return 'verified';
-          },
+          resolveCardholderId: async () => 'cardholder-from-list',
+          getCardholderVerificationStatus: async () => 'verified',
         }
       );
+      assert.equal(connected.status, 'connected');
       const row = await prisma.integration.findUnique({
         where: { userId_name: { userId, name: 'agentcard' } },
       });
       const config = row?.config as { cardholderId?: string };
-      assert.equal(config?.cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
-      assert.equal(resolveBenchmarkAgentCardIds().cardholderId, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
+      assert.equal(config?.cardholderId, 'cardholder-from-list');
     } finally {
-      process.env.BENCHMARK_AGENTCARD_ORG_ID = savedEnv.benchmarkOrg;
-      process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = savedEnv.benchmarkCardholder;
-      process.env.AGENTCARD_ORG_ID = savedEnv.agentOrg;
-      process.env.AGENTCARD_CARDHOLDER_ID = savedEnv.agentCardholder;
-      applyResolvedBenchmarkAgentCardIds();
+      if (previous === undefined) delete process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
+      else process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = previous;
     }
   });
 

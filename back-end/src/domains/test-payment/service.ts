@@ -7,19 +7,18 @@ import {
   type AgentCardSandboxSettlementInput,
   type AgentCardSandboxSettlementResult,
 } from '../../providers/agentcard/sandbox-settlement';
+import { resolveBenchmarkCardholderId } from '../../providers/agentcard/benchmark-float';
 import { getOrgCardholderVerificationStatus } from '../../providers/agentcard/org-onboarding';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { stripe } from '../../providers/stripe';
 import {
   assertCardPresent,
   calculateTotals,
-  isAgentCardSandboxPan,
   normalizeExpiry,
   normalizeLineItems,
   paymentMethodIdForBenchmarkCard,
 } from './catalog';
 import {
-  getBenchmarkAgentCardCardholderIdOverride,
   getPhoneBenchmarkPaymentAuditPathOverride,
   isAgentCardOrgOAuthConfigured,
   TEST_PAYMENT_PUBLIC_BASE_URL,
@@ -44,13 +43,14 @@ export { findAgentOwnerId } from './repo';
 
 const PHONE_BENCHMARK_DEFAULT_AMOUNT_CENTS = 3420;
 const PHONE_BENCHMARK_DEFAULT_ITEM = 'Dozen red roses with delivery';
-const DEFAULT_SANDBOX_CARDHOLDER_ID = 'cmrfpz6d1000bl804w1gggfto';
 
 interface TestPaymentDependencies {
   settleAgentCardSandboxPayment?: (
     input: AgentCardSandboxSettlementInput
   ) => Promise<AgentCardSandboxSettlementResult>;
   getCardholderVerificationStatus?: (cardholderId: string) => Promise<string>;
+  /** Override live list_cardholders resolution (unit tests / offline fixtures). */
+  resolveCardholderId?: () => Promise<string>;
 }
 
 export async function configureBenchmarkAgentCardSetup(
@@ -67,8 +67,25 @@ export async function configureBenchmarkAgentCardSetup(
     return { status: 'connect_required' };
   }
   if (input.action === 'complete') {
-    const cardholderId =
-      getBenchmarkAgentCardCardholderIdOverride() || DEFAULT_SANDBOX_CARDHOLDER_ID;
+    // Never trust BENCHMARK_AGENTCARD_CARDHOLDER_ID alone — per-task "complete"
+    // previously overwrote setup-benchmark-payment's live resolve with a stale id,
+    // producing create_card "Cardholder not found" loops.
+    let cardholderId: string;
+    try {
+      cardholderId = await (dependencies.resolveCardholderId ?? resolveBenchmarkCardholderId)();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new TestPaymentError(
+        `Benchmark AgentCard cardholder resolution failed: ${message}`,
+        502
+      );
+    }
+    if (cardholderId.trim() === '') {
+      throw new TestPaymentError(
+        'Benchmark AgentCard cardholder resolution returned an empty id',
+        502
+      );
+    }
     const getVerificationStatus =
       dependencies.getCardholderVerificationStatus ??
       (isAgentCardOrgOAuthConfigured() ? getOrgCardholderVerificationStatus : undefined);
@@ -117,9 +134,16 @@ export async function confirmTestPayment(
   const normalizedCardNumber = input.card.number.replace(/\s+/g, '');
   const postalCode = input.card.postalCode?.trim();
 
-  if (isAgentCardSandboxPan(normalizedCardNumber)) {
-    const settle = dependencies.settleAgentCardSandboxPayment ?? settleAgentCardSandboxPayment;
-    const settlement = await settle({
+  // Route by OWNERSHIP, not by BIN. `isAgentCardSandboxPan` only matched the
+  // 424242424242xxxx sandbox BIN, so a LIVE Rose-minted card (real Visa BIN) fell through to the
+  // raw-PAN Stripe path — which Stripe blocks in live mode (PCI). Settlement already proves
+  // ownership itself: it matches the typed PAN against the minted card on a HELD purchase and
+  // throws 404 when nothing matches. So attempt it for any PAN and fall through only on that 404,
+  // which keeps genuine third-party cards on the Stripe path while letting a live Rose card settle.
+  const settle = dependencies.settleAgentCardSandboxPayment ?? settleAgentCardSandboxPayment;
+  let roseCardSettlement: Awaited<ReturnType<typeof settleAgentCardSandboxPayment>> | null = null;
+  try {
+    roseCardSettlement = await settle({
       cardNumber: normalizedCardNumber,
       amountCents: totals.totalCents,
       merchant: 'Rose Labs Test Payment',
@@ -127,11 +151,23 @@ export async function confirmTestPayment(
     return {
       orderId: `tp_${randomUUID().slice(0, 8)}`,
       status: 'succeeded',
-      paymentIntentId: settlement.stripePaymentIntentId,
-      purchaseId: settlement.purchaseId,
-      cardId: settlement.cardId,
+      paymentIntentId: roseCardSettlement.stripePaymentIntentId,
+      purchaseId: roseCardSettlement.purchaseId,
+      cardId: roseCardSettlement.cardId,
       receipt: { lineItems, totals },
     };
+  } catch (error) {
+    // 404 = this PAN is not a Rose-minted card on a HELD purchase, so it is an ordinary shopper
+    // card and belongs on the Stripe path below. Every other failure is a REAL settlement fault
+    // (wrong amount, missing hold, charge declined) and must surface instead of silently
+    // re-charging the customer through a second provider.
+    // The local wrapper above rewraps AgentCardSandboxSettlementError as TestPaymentError, keeping
+    // the status code, so match on that — an injected test double may still raise the raw provider
+    // error, so accept either.
+    const notARoseCard =
+      (error instanceof TestPaymentError || error instanceof AgentCardSandboxSettlementError) &&
+      error.statusCode === 404;
+    if (!notARoseCard) throw error;
   }
 
   const paymentMethodId = (

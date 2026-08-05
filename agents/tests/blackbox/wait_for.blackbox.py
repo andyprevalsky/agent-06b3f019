@@ -636,7 +636,7 @@ async def test_handler_condition_raises_source_connect_gates_from_explore_error(
     SpawnAgentManager._spawn_explore = fake_spawn_explore
     try:
         with patch(
-            "domains.spawn_agent.handler._raise_source_connect_gates",
+            "domains.wait_for.handler.raise_source_connect_gates",
             new=fake_raise_gates,
         ):
             await _collect(
@@ -704,7 +704,7 @@ async def test_handler_condition_skips_source_connect_gates_when_paused():
     SpawnAgentManager._spawn_explore = fake_spawn_explore
     try:
         with patch(
-            "domains.spawn_agent.handler._raise_source_connect_gates",
+            "domains.wait_for.handler.raise_source_connect_gates",
             new=fake_raise_gates,
         ):
             events = await _collect(

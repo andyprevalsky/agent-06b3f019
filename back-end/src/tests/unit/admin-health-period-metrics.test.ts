@@ -9,7 +9,12 @@ import {
   readStoredRootCostTelemetry,
 } from '../../domains/admin-health/costTelemetry';
 import { calculateTaskCostPerTask } from '../../domains/admin-health/costs';
-import { buildRetentionCohorts, buildSeries } from '../../domains/admin-health/metrics';
+import {
+  buildRetentionCohorts,
+  buildSeries,
+  gmvPerTaskCents,
+  sumGmvCents,
+} from '../../domains/admin-health/metrics';
 import { parseTimeSlice } from '../../domains/admin-health/service';
 import { buildPeriods } from '../../domains/admin-health/time';
 import type { AdminHealthPeriod } from '../../domains/admin-health/types';
@@ -41,6 +46,19 @@ const task = (id: string, createdAt: string, userId = 'subscriber-user', goal = 
 const run = (taskId: string, createdAt: string) => ({ taskId, createdAt: new Date(createdAt) });
 
 const waitlistSignup = (createdAt: string) => ({ createdAt: new Date(createdAt) });
+
+const gmvRecord = (
+  totalCents: number,
+  createdAt: string,
+  userId = 'subscriber-user',
+  provider = 'agentcard'
+) => ({
+  userId,
+  agentId: `agent-${createdAt}`,
+  totalCents,
+  createdAt: new Date(createdAt),
+  provider,
+});
 
 const usage = (
   taskId: string,
@@ -93,6 +111,11 @@ const series = buildSeries(
     { andyLinearPoints: 0, githubCommits: 0, tamaraLinearPoints: 0 },
   ],
   [
+    gmvRecord(1000, '2026-05-04T00:00:00.000Z'),
+    gmvRecord(500, '2026-05-18T00:00:00.000Z', 'subscriber-user', 'order_confirmation'),
+    gmvRecord(3000, '2026-06-05T00:00:00.000Z'),
+  ],
+  [
     run('may-1', '2026-05-03T00:00:00.000Z'),
     run('may-outside-cohort', '2026-05-21T00:00:00.000Z'),
     run('jun-1', '2026-06-03T00:00:00.000Z'),
@@ -120,6 +143,19 @@ assert.deepStrictEqual(
   [2, 3],
   'Task metrics must exclude users outside the counted user cohort'
 );
+assert.deepStrictEqual(
+  series.map((point) => point.gmvCents),
+  [1500, 3000],
+  'GMV must sum CLEARED AgentCard + order_confirmation spend per period'
+);
+assert.deepStrictEqual(
+  series.map((point) => point.gmvPerTask),
+  [750, 1000],
+  'GMV / task must divide period GMV by subscriber root-task count'
+);
+assert.strictEqual(sumGmvCents([gmvRecord(100, '2026-05-01T00:00:00.000Z')]), 100);
+assert.strictEqual(gmvPerTaskCents(1500, 2), 750);
+assert.strictEqual(gmvPerTaskCents(100, 0), 0);
 assert.deepStrictEqual(
   series.map((point) => point.costPerTask.zeroLlmCostDollars),
   [5.1, 0.3],

@@ -155,6 +155,8 @@ this merge or an earlier `/sync` remain lint seeds.
 
 All Phase 1 commands run from the repo root. Compute changed paths from the complete active worktree: committed branch changes, staged/unstaged tracked changes, and untracked non-ignored files. This prevents pre-commit deploy checks from incorrectly treating a dirty branch as unchanged.
 
+**Run every Phase 1 block that expands a file list — `$CHANGED_TS`, `$LINT_TS` — under `bash`, e.g. `bash -c '<block>'`.** These lists are newline-separated and rely on shell word splitting to become separate argv entries. The agent harness shell is zsh, which does NOT word-split unquoted parameter expansions, so running them directly passes the whole list as one filename and the stage fails with `No files matching the pattern were found`. Persist the computed lists to files (`/tmp/deploy-changed-ts.txt`, `/tmp/deploy-lint-ts.txt`) so each `bash -c` block can re-read them instead of relying on exported shell state, which does not persist between tool calls.
+
 ```bash
 BASE_REF="${DEPLOY_BASE_REF:-origin/main}"
 SYNC_MERGES=$(
@@ -2084,6 +2086,24 @@ python benchmarks/run_benchmark.py \
   --bootstrap
 python3 scripts/record_factory_event.py deploy production-finish agentcard
 ```
+
+**Prod payment identity (prerequisite).** These tasks run as the NON-admin
+`BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID` (`...000107`), because the admin path
+(`issueAdminCompanyCard`) never authorizes a personal Stripe hold and the task asserts
+`stripeHold: succeeded`. Every credential needed is already in `back-end/.env` — do NOT ask
+the user for them. If the run fails closed on a missing identity, provision it:
+
+```bash
+cd back-end && set -a && . ./.env && set +a && \
+  DATABASE_URL="$DIRECT_URL" STRIPE_SECRET_KEY="$STRIPE_SECRET_KEY_LIVE" \
+  BENCHMARK_ALLOW_LIVE_STRIPE=1 BENCHMARK_PAYMENT_ALLOW_REMOTE_DB=1 \
+  npx tsx scripts/setup-benchmark-payment.ts --live
+```
+
+Use `DIRECT_URL`; the 6543 pooler fails with `Can't reach database server`. The only step an
+agent cannot perform is saving a card on the live Stripe customer (entering a card number is
+prohibited) — the script prints a one-time hosted Checkout link for a human, and it persists
+permanently once done.
 
 This production-only task reserves exactly $1.00 from the existing AgentCard organization float, captures the matching live Stripe payment, issues a live AgentCard, and deliberately leaves merchant checkout unsubmitted. The benchmark must then close the card, observe the organization transfer as `reclaimed` with `livemode=true`, refund the Stripe capture, and report no open payment attention request.
 

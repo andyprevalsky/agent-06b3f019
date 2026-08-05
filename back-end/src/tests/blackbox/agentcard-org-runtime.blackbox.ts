@@ -57,6 +57,42 @@ async function main(): Promise<void> {
       'a lifecycle fanout must share one client-credential token exchange'
     );
 
+    const originalDateNow = Date.now;
+    let nowMs = 1_700_000_000_000;
+    let refreshRequests = 0;
+    const lifecycleTokens: string[] = [];
+    try {
+      Date.now = () => nowMs;
+      const transientRefreshRuntime = new AgentCardOrgRuntime(
+        async (accessToken) => {
+          lifecycleTokens.push(accessToken);
+          return { structuredContent: { transfers: [] } };
+        },
+        async () => {
+          refreshRequests += 1;
+          if (refreshRequests === 1) {
+            return new Response(
+              JSON.stringify({ access_token: 'lifecycle-org-token', expires_in: 120 }),
+              { status: 200, headers: { 'content-type': 'application/json' } }
+            );
+          }
+          return new Response(JSON.stringify({ error: 'Backend init failed' }), { status: 500 });
+        }
+      );
+
+      await transientRefreshRuntime.callTool('get_card', { card_id: 'card-1' });
+      nowMs += 61_000;
+      await transientRefreshRuntime.callTool('list_transfers', { limit: 100 });
+      assert.deepEqual(
+        lifecycleTokens,
+        ['lifecycle-org-token', 'lifecycle-org-token'],
+        'a provider refresh outage must not break lifecycle reads while the cached token is valid'
+      );
+      assert.equal(refreshRequests, 2);
+    } finally {
+      Date.now = originalDateNow;
+    }
+
     for (const name of CREDENTIAL_ENV) delete process.env[name];
     process.env.AGENTCARD_API_KEY = 'sk_test_retired';
     process.env.AGENTCARD_OAUTH_CLIENT_ID = 'user-client';

@@ -147,11 +147,16 @@ if (envTimeoutMs !== undefined && (!Number.isInteger(envTimeoutMs) || envTimeout
 }
 const timeoutMs = envTimeoutMs ?? 15 * 60 * 1000;
 const artifactDir = readEnv('BLACKBOX_TEST_ARTIFACT_DIR', 'CONTRACT_TEST_ARTIFACT_DIR');
-// These domains assert whole-database aggregates, so running them while other
-// domains create fixtures makes the assertion and the backend's per-day cache
-// observe different snapshots. Keep only those aggregate domains exclusive;
-// every fixture-scoped domain still uses the parallel pool.
-const lateExclusiveDomainNames = new Set(['admin-health', 'benchmarks-test-prompts']);
+// These domains assert whole-database aggregates or read/write the shared
+// benchmark catalog cache. Running them alongside fixture writers or the Hub
+// catalog editor makes one test observe multiple global snapshots. Every
+// fixture-scoped domain still uses the parallel pool.
+const lateExclusiveDomainNames = new Set([
+  'admin-health',
+  'benchmarks',
+  'benchmarks-hub',
+  'benchmarks-test-prompts',
+]);
 const domainWeights = new Map<string, number>([
   ['benchmarks-hub-pipeline', 90],
   ['browser-provider', 60],

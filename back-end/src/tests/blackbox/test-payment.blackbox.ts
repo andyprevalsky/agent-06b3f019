@@ -142,7 +142,10 @@ const tests: Array<[string, () => Promise<void>]> = [
       try {
         await configureBenchmarkAgentCardSetup(
           { userId, action: 'complete' },
-          { getCardholderVerificationStatus: async () => 'not_started' }
+          {
+            resolveCardholderId: async () => 'cardholder-unverified-fixture',
+            getCardholderVerificationStatus: async () => 'not_started',
+          }
         );
       } catch (error) {
         errorMessage = error instanceof Error ? error.message : String(error);

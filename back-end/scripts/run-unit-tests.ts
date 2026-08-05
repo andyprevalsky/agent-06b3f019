@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdir, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
+import { nonLocalDatabaseReason } from '../src/utils/localDatabaseUrl';
 
 type UnitResult = {
   durationMs: number;
@@ -19,6 +20,37 @@ if (!Number.isInteger(requestedConcurrency) || requestedConcurrency < 1) {
   console.error('BACKEND_UNIT_CONCURRENCY must be a positive integer.');
   process.exit(2);
 }
+
+/**
+ * Refuse to run DB-touching unit tests against a remote database.
+ *
+ * These tests create and delete real rows through `providers/database`, which
+ * falls back to `back-end/.env` — whose DATABASE_URL is the PRODUCTION Supabase
+ * pooler. `run-coverage.sh` exports the local container URL before delegating
+ * here, but invoking this runner directly inherits prod and silently writes to
+ * it. Prod latency also blows Prisma's 10s interactive-transaction budget and
+ * manufactures failures that look like real bugs.
+ *
+ * An UNSET DATABASE_URL is refused too: that is precisely the case that falls
+ * back to the prod pooler, so treating it as "nothing to validate" would leave
+ * the original hazard open. `nonLocalDatabaseReason` is the single shared
+ * definition of "local" (src/utils/localDatabaseUrl.ts), so this runner, the
+ * checkpoint scripts, and `providers/database` cannot drift apart.
+ */
+function assertLocalDatabaseUrl(): void {
+  // Deliberate, explicit remote runs stay possible.
+  if (process.env.BACKEND_UNIT_ALLOW_REMOTE_DB === '1') return;
+  const reason = nonLocalDatabaseReason(process.env.DATABASE_URL);
+  if (reason === null) return;
+  console.error(
+    `Refusing to run backend unit tests: ${reason}. These tests create and delete real rows.\n` +
+      'Run via `npm run test:coverage` (which exports the local container URL), or set\n' +
+      'BACKEND_UNIT_ALLOW_REMOTE_DB=1 to override deliberately.'
+  );
+  process.exit(2);
+}
+
+assertLocalDatabaseUrl();
 
 async function findTests(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });

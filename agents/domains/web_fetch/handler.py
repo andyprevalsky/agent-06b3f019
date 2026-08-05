@@ -29,7 +29,12 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
 
 from domains.web_fetch.config import FIRECRAWL_COST_CENTS, MAX_MARKDOWN_LENGTH, PARALLEL_EXTRACT_COST_CENTS
-from domains.web_fetch.service import WebFetchProvidersFailed, download_and_attach, scrape_url
+from domains.web_fetch.service import (
+    WebFetchProvidersFailed,
+    assert_fetchable_url,
+    download_and_attach,
+    scrape_url,
+)
 from domains.web_fetch.types import ExecuteActivityCallable
 from helpers.handle_tool_event import handle_tool_event
 from helpers.summarize import summarize_and_filter_links
@@ -139,6 +144,12 @@ class WebFetchManager(ToolManager):
         )
 
         try:
+            # Reject non-fetchable URLs at the tool boundary, before scheduling
+            # the scrape activity (Firecrawl + Parallel Extract), the Haiku
+            # summarize call, or the download activity. Raises a non-retryable
+            # ApplicationError so the agent sees a real tool error.
+            assert_fetchable_url(url)
+
             logger.info("Calling web_fetch_activity", url=url, objective_len=len(objective))
 
             # 1) Firecrawl scrape (Fast Mode caches the scrape by normalized URL)
