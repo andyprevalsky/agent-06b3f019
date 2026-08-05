@@ -606,6 +606,10 @@ Each turn you will receive a snapshot of the current browser environment which i
 - By default, only elements in the visible viewport are listed; use scroll if content is offscreen
 - Scroll with direction and a pixel amount; about 600 pixels is roughly one page
 - If you fill an input field and the action is interrupted, suggestions may have appeared
+- When the goal requires the cheapest available ticket/tier/option, first use evaluate to extract
+  every visible tier/variant with its price and availability (including sold-out / waitlist),
+  then select quantity 1 of the cheapest available option. Leave that tier/price list in the
+  evaluate tool result before checkout so the selection is grounded in tool evidence.
 
 # Output Format
 

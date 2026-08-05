@@ -230,6 +230,16 @@ def test_build_browser_use_system_prompt_reuses_main_grading_prompt():
     assert "Browser-specific notes:" not in prompt
 
 
+def test_build_browser_use_system_prompt_grounds_cheapest_tier_selection():
+    """Bench16 judge failed when Tier 2 was selected without tier/price evidence."""
+    prompt = build_browser_use_system_prompt([])
+
+    assert "cheapest available ticket/tier/option" in prompt
+    assert "every visible tier/variant" in prompt
+    assert "sold-out" in prompt or "sold out" in prompt
+    assert "evaluate tool result before checkout" in prompt
+
+
 def test_build_browser_use_tools_preserves_catalog_descriptions():
     tools = build_browser_use_tools(
         [
@@ -1905,6 +1915,10 @@ async def run_all_tests():
     r.record(
         "build_browser_use_system_prompt_reuses_main_grading_prompt",
         test_build_browser_use_system_prompt_reuses_main_grading_prompt,
+    )
+    r.record(
+        "build_browser_use_system_prompt_grounds_cheapest_tier_selection",
+        test_build_browser_use_system_prompt_grounds_cheapest_tier_selection,
     )
     r.record(
         "browser_attempt_completion_uses_canonical_prompt_and_empty_schema",
