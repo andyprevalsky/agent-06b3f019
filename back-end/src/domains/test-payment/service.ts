@@ -20,7 +20,7 @@ import {
 } from './catalog';
 import {
   getPhoneBenchmarkPaymentAuditPathOverride,
-  isProductionEnv,
+  isAgentCardOrgOAuthConfigured,
   TEST_PAYMENT_PUBLIC_BASE_URL,
 } from './config';
 import { TestPaymentError } from './errors';
@@ -88,7 +88,7 @@ export async function configureBenchmarkAgentCardSetup(
     }
     const getVerificationStatus =
       dependencies.getCardholderVerificationStatus ??
-      (isProductionEnv() ? getOrgCardholderVerificationStatus : undefined);
+      (isAgentCardOrgOAuthConfigured() ? getOrgCardholderVerificationStatus : undefined);
     if (getVerificationStatus !== undefined) {
       let verificationStatus: string;
       try {

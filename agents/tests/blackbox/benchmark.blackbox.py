@@ -1188,6 +1188,27 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "tx.credit.create" in fixture
     assert "prisma.credit.deleteMany" not in fixture
     assert "if (isAdminUser(userId))" in fixture
+    assert "loadDotenvWithCallerOverrides()" in fixture
+    bootstrap = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "bootstrap.ts"
+    ).read_text()
+    assert "loadDotenvWithCallerOverrides()" in bootstrap
+    dotenv_helper = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "src"
+        / "providers"
+        / "loadDotenvWithCallerOverrides.ts"
+    ).read_text()
+    assert "'PORT'" in dotenv_helper
+    assert "'DATABASE_URL'" in dotenv_helper
+    assert "'TEMPORAL_TASK_QUEUE'" in dotenv_helper
+    assert "'NODE_ENV'" in dotenv_helper
+    assert "captureCallerOwnedRuntimeEnv" in dotenv_helper
+    assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
 def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():

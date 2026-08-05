@@ -16,7 +16,6 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { PurchaseSpendStatus } from '@prisma/client';
-import { prisma } from '../../providers/database';
 import { stripe } from '../../providers/stripe';
 import {
   assertCardPresent,
@@ -34,7 +33,6 @@ import {
 } from '../../domains/test-payment/lifecyclePagination';
 import {
   abandonTestPayment,
-  configureBenchmarkAgentCardSetup,
   confirmPhoneBenchmarkPayment,
   confirmTestPayment,
   recordPhoneBenchmarkPaymentAudit,
@@ -43,7 +41,6 @@ import {
 } from '../../domains/test-payment/service';
 import { assertClosedCardMcpParsing, threeItems } from './test-payment-service-fixtures';
 
-const createdUserIds: string[] = [];
 let passed = 0;
 const failures: string[] = [];
 
@@ -56,13 +53,6 @@ async function test(name: string, fn: () => Promise<void>): Promise<void> {
     failures.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
     process.stdout.write(`  FAIL ${name}\n`);
   }
-}
-
-async function seedUser(): Promise<string> {
-  const userId = `test-payment-unit-${randomUUID()}`;
-  await prisma.user.create({ data: { userId, isAnonymous: true } });
-  createdUserIds.push(userId);
-  return userId;
 }
 
 async function withStubbedStripe<T>(fn: () => Promise<T>): Promise<T> {
@@ -327,61 +317,7 @@ async function main(): Promise<void> {
     }
   });
 
-  // ── service: benchmark AgentCard setup + misc ──
-  await test('configureBenchmarkAgentCardSetup toggles connect/reset state', async () => {
-    const userId = await seedUser();
-    await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ action: 'complete' }),
-      /userId is required/
-    );
-    await assert.rejects(
-      () => configureBenchmarkAgentCardSetup({ userId, action: 'nonsense' }),
-      /action must be reset or complete/
-    );
-    const connected = await configureBenchmarkAgentCardSetup(
-      { userId, action: 'complete' },
-      { resolveCardholderId: async () => 'cardholder-live-fixture' }
-    );
-    assert.equal(connected.status, 'connected');
-    const row = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
-    });
-    const config = row?.config as { orgManaged?: boolean; cardholderId?: string };
-    assert.equal(config?.orgManaged, true);
-    assert.equal(config?.cardholderId, 'cardholder-live-fixture');
-    const reset = await configureBenchmarkAgentCardSetup({ userId, action: 'reset' });
-    assert.equal(reset.status, 'connect_required');
-    const resetRow = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
-    });
-    const resetConfig = resetRow?.config as {
-      onboardingSessionId?: string;
-    };
-    assert.equal(resetRow?.status, 'NOT_CONNECTED');
-    assert.equal(resetConfig?.onboardingSessionId, `benchmark-agentcard-onboarding-${userId}`);
-  });
-
-  await test('configureBenchmarkAgentCardSetup ignores stale BENCHMARK cardholder override', async () => {
-    const userId = await seedUser();
-    const previous = process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
-    process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = 'cardholder-stale-missing';
-    try {
-      const connected = await configureBenchmarkAgentCardSetup(
-        { userId, action: 'complete' },
-        { resolveCardholderId: async () => 'cardholder-from-list' }
-      );
-      assert.equal(connected.status, 'connected');
-      const row = await prisma.integration.findUnique({
-        where: { userId_name: { userId, name: 'agentcard' } },
-      });
-      const config = row?.config as { cardholderId?: string };
-      assert.equal(config?.cardholderId, 'cardholder-from-list');
-    } finally {
-      if (previous === undefined) delete process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID;
-      else process.env.BENCHMARK_AGENTCARD_CARDHOLDER_ID = previous;
-    }
-  });
-
+  // ── service: misc (AgentCard setup cases live in test-payment-agentcard-setup.test.ts) ──
   await test('resolvePublicBaseUrl reflects the configured value', async () => {
     const url = await resolvePublicBaseUrl();
     assert.ok(url === null || typeof url === 'string');
@@ -645,21 +581,11 @@ async function main(): Promise<void> {
   for (const failure of failures) process.stdout.write(`  ${failure}\n`);
 }
 
-async function cleanup(): Promise<void> {
-  for (const userId of createdUserIds) {
-    await prisma.integration.deleteMany({ where: { userId } });
-    await prisma.user.deleteMany({ where: { userId } });
-  }
-  await prisma.$disconnect();
-}
-
 main()
-  .then(async () => {
-    await cleanup();
+  .then(() => {
     if (failures.length > 0) process.exit(1);
   })
-  .catch(async (error) => {
+  .catch((error) => {
     process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
-    await cleanup();
     process.exit(1);
   });

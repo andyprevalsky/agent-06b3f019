@@ -3559,6 +3559,7 @@ async def call_llm(
     agent_id: Optional[str] = None,
     local_context: Optional[List[Dict[str, Any]]] = None,
     user_id: Optional[str] = None,
+    _is_escalation: bool = False,  # Internal: prevents infinite recursion on max_tokens escalation
 ) -> Dict[str, Any]:
     """
     Call OpenRouter LLM for agent reasoning.
@@ -3694,7 +3695,45 @@ async def call_llm(
                 tokens=result["usage"]["total_tokens"],
                 content_length=len(content),
                 content_preview=content[:100] if content else "EMPTY",
+                finish_reason=result["finish_reason"],
             )
+
+            # Parity with call_llm_structured_streaming: escalate once when the
+            # non-streaming path hits max_tokens (finish_reason=length). Without
+            # this, message_person drafts truncated mid-sentence and shipped to
+            # SMS approval (incident eab955b6 / "Please share the"). Escalate
+            # before caching so we never persist a truncated draft.
+            if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
+                logger.warning(
+                    f"⚠️ [{call_site}] Response truncated at max_tokens={max_tokens}, "
+                    "retrying with 32768"
+                )
+                return await call_llm(
+                    messages=messages,
+                    model=model,
+                    temperature=temperature,
+                    max_tokens=32768,
+                    response_format=response_format,
+                    response_model=response_model,
+                    claude_token=claude_token,
+                    claude_token_source=claude_token_source,
+                    claude_token_pool_id=claude_token_pool_id,
+                    claude_token_user_id=claude_token_user_id,
+                    gpt_token=gpt_token,
+                    gpt_account_id=gpt_account_id,
+                    gpt_token_source=gpt_token_source,
+                    gpt_token_pool_id=gpt_token_pool_id,
+                    gpt_token_user_id=gpt_token_user_id,
+                    compute_token_lineage_key=compute_token_lineage_key,
+                    compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                    cache_sequence_id=cache_sequence_id,
+                    skip_cache_write=skip_cache_write,
+                    call_site=call_site,
+                    agent_id=agent_id,
+                    local_context=local_context,
+                    user_id=user_id,
+                    _is_escalation=True,
+                )
 
             if response_model is not None and not skip_cache_write and not usage.get("from_fast_cache"):
                 ctx = current_fast_cache_context()
@@ -3788,7 +3827,40 @@ async def call_llm(
             tokens=result["usage"]["total_tokens"],
             content_length=len(content),
             content_preview=content[:100] if content else "EMPTY",
+            finish_reason=result["finish_reason"],
         )
+
+        if result.get("finish_reason") == "length" and max_tokens < 32768 and not _is_escalation:
+            logger.warning(
+                f"⚠️ [{call_site}] OpenRouter response truncated at max_tokens={max_tokens}, "
+                "retrying with 32768"
+            )
+            return await call_llm(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+                max_tokens=32768,
+                response_format=response_format,
+                response_model=response_model,
+                claude_token=claude_token,
+                claude_token_source=claude_token_source,
+                claude_token_pool_id=claude_token_pool_id,
+                claude_token_user_id=claude_token_user_id,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                gpt_token_user_id=gpt_token_user_id,
+                compute_token_lineage_key=compute_token_lineage_key,
+                compute_token_fast_cache_affinity_key=compute_token_fast_cache_affinity_key,
+                cache_sequence_id=cache_sequence_id,
+                skip_cache_write=skip_cache_write,
+                call_site=call_site,
+                agent_id=agent_id,
+                local_context=local_context,
+                user_id=user_id,
+                _is_escalation=True,
+            )
 
         return result
 

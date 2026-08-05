@@ -89,5 +89,33 @@ if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -qE -- '--api-key[[:spac
 fi
 echo "$ensure_fn" | grep -q 'malformed' \
   || { echo "FAIL: ensure_ngrok_domain_reserved must fail on malformed listing JSON" >&2; exit 1; }
+echo "$ensure_fn" | grep -q 'raw.find("{")' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must tolerate ngrok CLI HTTP status prefixes before JSON" >&2; exit 1; }
+# Behavioral cement: a "200 OK\\n{...}" listing still resolves an existing domain.
+status_prefixed_listing='200 OK
+{"next_page_uri": null, "reserved_domains": [{"id": "rd_test", "domain": "rose-status-prefix.ngrok.app"}]}'
+parse_out=$(printf '%s\n' "$status_prefixed_listing" | python3 -c '
+import json, sys
+requested_domain = sys.argv[1]
+raw = sys.stdin.read()
+brace = raw.find("{")
+if brace < 0:
+    print("malformed:no JSON object in reserved-domains listing", file=sys.stderr)
+    sys.exit(2)
+data = json.loads(raw[brace:])
+reserved_domains = data.get("reserved_domains") or []
+if any(item.get("domain") == requested_domain for item in reserved_domains if isinstance(item, dict)):
+    print("found")
+    sys.exit(0)
+print("done")
+' "rose-status-prefix.ngrok.app") || {
+  echo "FAIL: status-prefixed ngrok listing must parse" >&2
+  exit 1
+}
+[ "$parse_out" = "found" ] || {
+  echo "FAIL: status-prefixed listing should report found, got: $parse_out" >&2
+  exit 1
+}
 echo "PASS: run.sh reserved-domain listing uses env key and fails closed on bad JSON"
+echo "PASS: run.sh reserved-domain listing tolerates ngrok CLI HTTP status prefixes"
 

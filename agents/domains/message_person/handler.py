@@ -16,6 +16,7 @@ from domains.message_person.service import (
     build_agent_sms_idempotency_key,
     build_cold_outreach_person,
     build_conversation_summary,
+    build_message_approval_question,
     classify_person_id,
     extract_user_name,
     fetch_recent_messages_activity,
@@ -475,19 +476,18 @@ class MessagePersonManager(ToolManager):
         intent: str,
         generated_message: str,
     ) -> ToolEvent | None:
-        approval_text = (
-            f"""{workflow_instance.system_name} wants to send """
-            f"""{"an" if channel == "email" else "a"} **{channel_label}**\n\n"""
-            f"""**To:** {person_display} ({recipient})"""
-        )
-
-        if channel == "email":
-            approval_text += f"\n**From:** {from_email}"
-            if generated_subject:
-                approval_text += f"\n**Subject:** {generated_subject}"
-
-        approval_text += (
-            f'\n\n**Intent:** {intent}\n\n**Message:**\n{generated_message}\n\nReply to approve, or say "no" to cancel.'
+        # Plain text only — this question is SMS'd via write_lock notify and
+        # iMessage does not render Markdown. Keep the full generated_message.
+        approval_text = build_message_approval_question(
+            system_name=workflow_instance.system_name,
+            channel=channel,
+            channel_label=channel_label,
+            person_display=person_display,
+            recipient=recipient,
+            from_email=from_email,
+            generated_subject=generated_subject,
+            intent=intent,
+            generated_message=generated_message,
         )
 
         try:
