@@ -78,7 +78,20 @@ function getBackoffDelay<T>(error: unknown, attempt: number, opts: RetryOptions<
     log.warn(
       `${opts.component ?? 'Retry'}: discarding non-finite dynamic backoff delay on attempt ${attempt}, falling back to exponential backoff`
     );
-  } else if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+  } else {
+    return errorlessBackoffDelay(attempt, opts);
+  }
+  return errorlessBackoffDelay(attempt, opts);
+}
+
+/**
+ * The delay schedule that does not depend on an error: `fixedDelays` when the
+ * caller configured one, else exponential backoff. Shared by the error and
+ * result retry paths so a caller's `fixedDelays` contract cannot apply to one
+ * and not the other.
+ */
+function errorlessBackoffDelay<T>(attempt: number, opts: RetryOptions<T>): number {
+  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
     const fixed = normalizeDelayMs(opts.fixedDelays[attempt - 1]);
     if (fixed !== null) return fixed;
   }
@@ -145,9 +158,10 @@ export async function retryWithBackoff<T>(
     if (retryableResult && attempt < maxRetries) {
       await opts.beforeRetryResult?.(result);
       // There is no error on the result path, so the dynamic `getBackoffDelayMs`
-      // hook is deliberately skipped rather than invoked with `undefined`.
-      const base = normalizeDelayMs(opts.initialBackoffMs ?? 1000) ?? 1000;
-      const delay = Math.min(base * Math.pow(2, attempt - 1), MAX_BACKOFF_DELAY_MS);
+      // hook is deliberately skipped rather than invoked with `undefined` -- but
+      // `fixedDelays` still applies, so share the errorless schedule instead of
+      // recomputing only the exponential branch.
+      const delay = errorlessBackoffDelay(attempt, opts);
       log.warn(
         `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
       );

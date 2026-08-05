@@ -222,13 +222,29 @@ function selectedFields(select: Record<string, boolean> | undefined, model: Mode
   return fields.join(',');
 }
 
+/**
+ * Tie-breaker fields for a stable order. Models such as `AgentTool` and
+ * `TemporalWorkflowCleanup` have no `id` and use a composite primary key, so
+ * asking for `id` throws. Fall back to the declared primary-key fields.
+ */
+function tieBreakerFields(model: ModelMetadata): string[] {
+  if (model.fields.some((field) => field.name === 'id')) return ['id'];
+  const composite = model.primaryKey?.fields ?? [];
+  if (composite.length > 0) return [...composite];
+  const unique = model.uniqueFields?.[0] ?? [];
+  if (unique.length > 0) return [...unique];
+  throw new Error(`${model.name} has no id, primary key, or unique field to order by`);
+}
+
 function stableOrder(args: SeedFindArgs, model: ModelMetadata): string {
   const explicit = Object.entries(args.orderBy ?? {}).map(
     ([field, direction]) => `${databaseFieldName(model, field)}.${direction}`
   );
-  const idField = databaseFieldName(model, 'id');
-  if (!explicit.some((entry) => entry.startsWith(`${idField}.`))) {
-    explicit.push(`${idField}.asc`);
+  for (const fieldName of tieBreakerFields(model)) {
+    const dbField = databaseFieldName(model, fieldName);
+    if (!explicit.some((entry) => entry.startsWith(`${dbField}.`))) {
+      explicit.push(`${dbField}.asc`);
+    }
   }
   return explicit.join(',');
 }
@@ -485,9 +501,13 @@ function compareValues(left: unknown, right: unknown): number {
   return as < bs ? -1 : as > bs ? 1 : 0;
 }
 
-function sortRows(rows: SeedRow[], args: SeedFindArgs): SeedRow[] {
+function sortRows(rows: SeedRow[], args: SeedFindArgs, model: ModelMetadata): SeedRow[] {
   const order = Object.entries(args.orderBy ?? {}) as Array<[string, SortDirection]>;
-  if (!order.some(([field]) => field === 'id')) order.push(['id', 'asc']);
+  // Mirror stableOrder's tie-breakers so the chunked client-side slice matches
+  // the server-side page for composite-key models too.
+  for (const fieldName of tieBreakerFields(model)) {
+    if (!order.some(([field]) => field === fieldName)) order.push([fieldName, 'asc']);
+  }
   return rows.sort((left, right) => {
     for (const [field, direction] of order) {
       const compared = compareValues(left[field], right[field]);
@@ -539,7 +559,7 @@ async function fetchModelRows(
   const dedupeKey = (row: Record<string, unknown>): string =>
     String(row.id ?? JSON.stringify(row, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)));
   const uniqueRows = [...new Map(rows.map((row) => [dedupeKey(row), row])).values()];
-  const sorted = sortRows(uniqueRows, args);
+  const sorted = sortRows(uniqueRows, args, model);
   const start = args.skip ?? 0;
   return sorted.slice(start, args.take === undefined ? undefined : start + args.take);
 }

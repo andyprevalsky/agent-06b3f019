@@ -308,6 +308,41 @@ def test_challenge_page_classifier_detects_non_cloudflare_vendors():
     )
 
 
+def test_recovered_page_keeping_vendor_sensor_markup_reads_clean():
+    """A vendor sensor bundle stays loaded AFTER a challenge clears.
+
+    _CHALLENGE_HTML_MARKERS deliberately includes sensor hosts so a DataDome
+    interstitial is caught (see the non-Cloudflare vendor test). But those same
+    hosts remain on the real page once the wall lifts, so a marker alone must
+    not mean "still challenged" - otherwise _wait_for_clean_page can never
+    converge and recovery reports failure for a page that already works.
+    """
+    recovered = (
+        '<html><head><title>Expedia - Hotels in San Francisco</title></head><body>'
+        '<script src="//client.perimeterx.net/px.js"></script>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "<h1>Hotels in San Francisco</h1>"
+        + ("<p>Book a room at one of 480 available San Francisco hotels tonight. </p>" * 20)
+        + "</body></html>"
+    )
+    body = "Hotels in San Francisco " + ("Book a room at one of 480 available hotels. " * 20)
+    assert not page_looks_challenged(
+        status=200,
+        title="Expedia - Hotels in San Francisco",
+        body_text=body,
+        html=recovered,
+    ), "a recovered page that still loads sensor markup must read clean"
+
+    # The interstitial form of the same vendor markup must still be caught.
+    interstitial = (
+        '<html><head><title>expedia.com</title></head><body>'
+        '<div id="ddchallengebody"></div>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "</body></html>"
+    )
+    assert page_looks_challenged(status=200, title="expedia.com", body_text="", html=interstitial)
+
+
 def test_challenge_page_classifier_ignores_incidental_captcha_prose():
     """Widening vendor coverage must not flag pages that merely discuss captchas."""
     assert not page_looks_challenged(
@@ -412,6 +447,10 @@ async def run_all_tests():
     result.record(
         "challenge_page_classifier_vendors",
         test_challenge_page_classifier_detects_non_cloudflare_vendors,
+    )
+    result.record(
+        "recovered_page_with_vendor_markup_reads_clean",
+        test_recovered_page_keeping_vendor_sensor_markup_reads_clean,
     )
     result.record(
         "challenge_page_classifier_prose",

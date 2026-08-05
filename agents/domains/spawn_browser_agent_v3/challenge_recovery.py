@@ -86,6 +86,9 @@ _CHALLENGE_TEXT_MARKERS = (
 # burned four cycles / 312s looping on false recoveries. The false-negative cost
 # here was paid for real; the false-positive one is theoretical. Incidental
 # captcha PROSE is handled separately by the classifier's prose guard.
+# A recovered page renders real content; interstitials are near-empty.
+_CLEAN_PAGE_MIN_VISIBLE_CHARS = 600
+
 _CHALLENGE_HTML_MARKERS = (
     # Cloudflare
     "/cdn-cgi/challenge-platform",
@@ -171,7 +174,23 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True
-    return any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS)
+    if not any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS):
+        return False
+    # A vendor marker alone is not proof: sensor scripts (perimeterx.net,
+    # captcha-delivery.com, /cdn-cgi/challenge-platform) stay loaded on the real
+    # page AFTER a challenge clears. Without this, _wait_for_clean_page could
+    # never converge on a site that keeps its sensor bundle, and recovery would
+    # report failure for a page that already works. A page that has recovered
+    # renders substantive content, so treat that as clean.
+    if _has_substantive_content(title, body_text, visible_markup):
+        return False
+    return True
+
+
+def _has_substantive_content(title: str, body_text: str, visible_markup: str) -> bool:
+    """A challenge interstitial shows almost nothing; a recovered page does not."""
+    visible = body_text.strip() or visible_markup
+    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and bool(title.strip())
 
 
 async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:

@@ -251,11 +251,16 @@ export async function commitIncreaseBudget(
     treeCostCents: agent.treeCostCents,
   });
 
-  // Update the agent's price limit
-  await prisma.agent.update({
+  // Increment atomically. Two overlapping supervisor runs for the same agent
+  // both read the same `agent.priceLimitCents` above, so writing the absolute
+  // value would silently drop one increase. The bound check stays on the
+  // pre-read value; `updated` carries what the database actually holds.
+  const updated = await prisma.agent.update({
     where: { id: agent.id },
-    data: { priceLimitCents: newLimitCents },
+    data: { priceLimitCents: { increment: addCents } },
+    select: { priceLimitCents: true },
   });
+  const persistedLimitCents = updated.priceLimitCents;
 
   // If agent was cost-limited, signal workflow to resume
   let signalDelivered = true;
@@ -264,12 +269,12 @@ export async function commitIncreaseBudget(
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('price_limit_increased', {
-        new_limit_cents: newLimitCents,
+        new_limit_cents: persistedLimitCents,
       });
       log.info('Signaled price_limit_increased', {
         phase: 'budget',
         workflowId: agent.temporalWorkflowId,
-        newLimitCents,
+        newLimitCents: persistedLimitCents,
       });
     } catch (error) {
       signalDelivered = false;
@@ -294,7 +299,7 @@ export async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${resumeNote}`,
+    result: `Budget increased to $${(persistedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${resumeNote}`,
   };
 }
 
@@ -383,7 +388,11 @@ export async function commitStartNewAgent(
     throw error;
   }
 
-  // Start Temporal workflow
+  // Start Temporal workflow.
+  // `startedWorkflowId` lives OUTSIDE the try: if the persistence step below
+  // fails, the workflow is already running and spending, and nothing would
+  // record its id -- so the catch could never terminate it.
+  let startedWorkflowId: string | undefined;
   try {
     const workflowId = await startAgentWorkflow({
       agentId: agent.id,
@@ -396,6 +405,8 @@ export async function commitStartNewAgent(
       },
       priceLimitCents,
     });
+
+    startedWorkflowId = workflowId;
 
     await prisma.agent.update({
       where: { id: agent.id },
@@ -415,6 +426,29 @@ export async function commitStartNewAgent(
       agentId: agent.id,
       error: errorMsg,
     });
+
+    // The workflow started but we could not record its id. Terminate it, or it
+    // runs unreferenced and keeps spending with nothing able to stop it.
+    if (startedWorkflowId !== undefined) {
+      try {
+        const client = await getTemporalClient();
+        await client.workflow
+          .getHandle(startedWorkflowId)
+          .terminate('agent row persistence failed');
+        log.warn('Terminated orphaned workflow after failed persistence', {
+          phase: 'start',
+          agentId: agent.id,
+          workflowId: startedWorkflowId,
+        });
+      } catch (terminateError) {
+        log.error('Could not terminate orphaned workflow', {
+          phase: 'start',
+          agentId: agent.id,
+          workflowId: startedWorkflowId,
+          error: terminateError instanceof Error ? terminateError.message : String(terminateError),
+        });
+      }
+    }
 
     await prisma.agent.update({
       where: { id: agent.id },

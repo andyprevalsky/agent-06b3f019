@@ -37,6 +37,13 @@ def validate_product_detail_url(value: Any) -> str:
     text = str(value or "").strip()
     if any(character.isspace() for character in text) or "<" in text or ">" in text:
         raise ValueError("product_url must not contain whitespace or markup")
+    # urlparse treats "\" as an ordinary character, so
+    # https://attacker.example\@merchant.example/item parses with hostname
+    # merchant.example while a browser normalizes "\" to "/" and navigates to
+    # attacker.example. That mismatch defeats the trusted-host check below, so
+    # reject the character outright rather than trying to canonicalize it.
+    if "\\" in text:
+        raise ValueError("product_url must not contain a backslash")
     parsed = urlparse(text)
     try:
         # urlparse defers malformed-port validation until this attribute is read.
