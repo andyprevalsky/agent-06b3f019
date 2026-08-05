@@ -18,10 +18,9 @@ tags:
   - descend-antibot
 sources:
   - agent 20521b60-f2b6-485e-92a4-3a5555fc9db4
-  - run 20260803-151006-65014
   - commit dca15b91e680deb188e88ca5db1d6c1baed5af22
 repro: agents/tests/blackbox/benchmark.blackbox.py::test_toast_nopa_benchmark_uses_semantic_outcome_validation
-status: resolved
+status: fixed
 ---
 
 ## Problem

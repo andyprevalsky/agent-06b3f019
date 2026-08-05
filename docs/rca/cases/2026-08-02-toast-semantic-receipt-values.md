@@ -77,6 +77,10 @@ task budget. The run failed with no `payment_approval`, and its archived
 this is a separate pre-checkout product-navigation failure, not evidence that
 literal receipt validation remains.
 
+## Human feedback
+
+None recorded.
+
 ## Reusable lesson
 
 Do not duplicate a production tool's schema validation in a task-specific
