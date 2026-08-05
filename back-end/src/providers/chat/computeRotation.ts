@@ -122,7 +122,7 @@ export async function callWithChatComputeRotation<T>(params: {
         throw error;
       }
 
-      await markToken(failedToken, reason);
+      await markToken(failedToken, reason, computeTokenRateLimitedUntil(error));
       if (failedToken.source === 'pool' && failedToken.poolTokenId) {
         excludePoolTokenIds.push(failedToken.poolTokenId);
       }
@@ -186,4 +186,13 @@ function computeTokenFailureReason(error: unknown): ComputeTokenFailureReason | 
   if (error instanceof RoseAuthError) return 'auth_error';
   if (error instanceof RoseRateLimitError) return 'rate_limit';
   return null;
+}
+
+/**
+ * The provider's own reset time for the failed credential, when it gave one.
+ * Undefined means the provider said nothing and the cooldown falls back to a
+ * synthetic default — never let that default overwrite a real window.
+ */
+function computeTokenRateLimitedUntil(error: unknown): string | undefined {
+  return error instanceof RoseRateLimitError ? error.rateLimitedUntil : undefined;
 }

@@ -524,11 +524,24 @@ export async function releaseComputeTokenLineage(lineageKey: string) {
   return { ok: result.count > 0, updated: result.count };
 }
 
+/**
+ * Back a compute token off after a failure.
+ *
+ * `rateLimitedUntil` is the PROVIDER's own reset time (from
+ * `anthropic-ratelimit-*-reset` / `retry-after` / the error body). Pass it
+ * whenever the provider supplied one: omitting it makes the cooldown fall back
+ * to a synthetic 5-minute default, which is exactly how a real usage window got
+ * destroyed in prod on 2026-07-28 — a header-derived `2026-07-30T22:00Z` was
+ * overwritten 15s later by an uninformed `+5m` from this path. The synthetic
+ * default is only correct when the provider genuinely told us nothing.
+ */
 export async function markComputeTokenUnavailable(
   token: ComputeCodeCredentialResult,
-  reason: 'auth_error' | 'rate_limit'
+  reason: 'auth_error' | 'rate_limit',
+  rateLimitedUntil?: string
 ): Promise<void> {
   const failureReason = reason === 'auth_error' ? 'auth_error' : undefined;
+  const options = { failureReason, rateLimitedUntil };
 
   if (token.source === 'pool') {
     if (!token.poolTokenId) {
@@ -540,18 +553,18 @@ export async function markComputeTokenUnavailable(
       return;
     }
     if (token.type === 'claude') {
-      await markPoolTokenRateLimited(token.poolTokenId, { failureReason });
+      await markPoolTokenRateLimited(token.poolTokenId, options);
       return;
     }
-    await markGptPoolTokenRateLimited(token.poolTokenId, { failureReason });
+    await markGptPoolTokenRateLimited(token.poolTokenId, options);
     return;
   }
 
   if (token.type === 'claude') {
-    await markUserTokenRateLimited(token.userId, { failureReason });
+    await markUserTokenRateLimited(token.userId, options);
     return;
   }
-  await markGptUserTokenRateLimited(token.userId, { failureReason });
+  await markGptUserTokenRateLimited(token.userId, options);
 }
 
 // ── Shared Anthropic API-key cooldown ──────────────────────────────────────
