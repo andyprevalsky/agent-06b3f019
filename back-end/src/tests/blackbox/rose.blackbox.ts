@@ -52,8 +52,7 @@ import {
   responseModel,
   type CompletionChunk,
 } from '../../providers/rose';
-import { claudeAuthComplete } from '../../providers/rose/claudeAuth';
-import { buildAnthropicBody } from '../../providers/rose/claudeAuth';
+import { buildAnthropicBody, claudeAuthComplete } from '../../providers/rose/claudeAuth';
 import { buildCerebrasChatBody } from '../../providers/rose/cerebrasRoute';
 import { buildOpenRouterCerebrasBody } from '../../providers/rose/openrouterCerebrasRoute';
 import { buildOpenRouterFastChatBody } from '../../providers/rose/openrouterFastRoute';
