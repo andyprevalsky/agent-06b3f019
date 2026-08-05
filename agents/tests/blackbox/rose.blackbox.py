@@ -3628,7 +3628,7 @@ async def test_client_collect_waterfall_only_path():
         call_site="test-collect",
     )
     assert resp.content == "hello"
-    assert resp.actual_model == "google/gemini-3.5-flash"
+    assert resp.actual_model == get_pool("rose-1-lite").waterfall[0]
     assert resp.usage.get("total_tokens") == 6
 
 
