@@ -958,6 +958,40 @@ def test_transform_messages_for_openai_strips_boundary_from_later_system_message
     assert SYSTEM_PROMPT_DYNAMIC_BOUNDARY not in json.dumps(out)
 
 
+def test_transform_messages_for_openai_normalizes_tool_result_name():
+    """Tool results must use the assistant-declared name for Gemini/OpenRouter.
+
+    Internal metadata can retain a concrete executor name such as
+    ``spawn_browser_agent`` even when the model declared the generic
+    ``spawn_agent`` tool. Gemini rejects that mismatched pair as an invalid
+    request despite the matching tool-call ID.
+    """
+    msgs = [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "spawn-1",
+                    "type": "function",
+                    "function": {"name": "spawn_agent", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "spawn-1",
+            "name": "spawn_browser_agent",
+            "content": "Browser task complete",
+        },
+    ]
+
+    out = transform_messages_for_openai(msgs)
+
+    assert out[1]["name"] == "spawn_agent"
+    assert msgs[1]["name"] == "spawn_browser_agent"
+
+
 # =====================================================================
 # claude_auth — body assembly
 # =====================================================================
@@ -2742,6 +2776,159 @@ def test_build_openrouter_body_includes_optionals():
     assert body["max_tokens"] == 42
     assert body["seed"] == 7
 
+
+TOOL_HISTORY_MESSAGES = [
+    {"role": "system", "content": "you are helpful"},
+    {"role": "user", "content": "open example.com"},
+    {
+        "role": "assistant",
+        "content": "working on it",
+        "tool_calls": [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "spawn_agent", "arguments": '{"goal":"open it"}'},
+            }
+        ],
+    },
+    {"role": "tool", "tool_call_id": "call_1", "content": '{"main_heading_text":"Example Domain"}'},
+]
+
+
+def test_openrouter_body_without_tools_flattens_tool_history():
+    """Regression: Google 400s on functionCall/functionResponse with no functionDeclarations.
+
+    client.py sends `response_format=None if tools else response_format`, so a
+    structured-output waterfall step drops `tools` while the conversation still
+    carries assistant tool_calls + role:"tool". Reproduced in benchmark agent
+    64fe48c1 (browser-smoke): the identical request passed on Gemini at 5
+    system/user messages, then failed 10/10 at 8 messages with tool history.
+    """
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=TOOL_HISTORY_MESSAGES,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert "tools" not in body, "precondition: this request declares no tools"
+
+    roles = [m.get("role") for m in body["messages"]]
+    assert "tool" not in roles, f"role:'tool' survived without declared tools: {roles}"
+    for m in body["messages"]:
+        assert "tool_calls" not in m, f"tool_calls survived without declared tools: {m}"
+
+    # The tool result must be preserved as readable text, not dropped.
+    blob = json.dumps(body["messages"])
+    assert "Example Domain" in blob, "tool result content was lost"
+    assert "spawn_agent" in blob, "tool call name was lost"
+
+
+def test_openrouter_body_without_tools_preserves_structured_tool_result_blocks():
+    """Non-text content blocks remain meaningful after tool history is flattened."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_structured",
+                    "type": "function",
+                    "function": {"name": "inspect_page", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_structured",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "content": {"main_heading_text": "Structured Example Domain"},
+                },
+                {"type": "image", "source": {"url": "https://example.com/screenshot.png"}},
+            ],
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    blob = json.dumps(body["messages"])
+    assert "Structured Example Domain" in blob, "structured tool-result content was dropped"
+    assert "screenshot.png" in blob, "unsupported provider content block was dropped"
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert result["content"] != "[Result of inspect_page]", "tool result became an empty user message"
+
+
+def test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result():
+    """Direct structured results must not block a no-tools retry when JSON encoding fails."""
+
+    class ProviderValue:
+        def __str__(self) -> str:
+            return "provider-specific-value"
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_provider_value",
+                    "type": "function",
+                    "function": {"name": "inspect_provider", "arguments": "{}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_provider_value",
+            "content": {"z": ProviderValue(), "a": "first"},
+        },
+    ]
+
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=messages,
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": {"name": "s", "schema": {}}},
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+
+    result = next(message for message in body["messages"] if message.get("role") == "user")
+    assert "provider-specific-value" in result["content"]
+    assert result["content"].index('"a"') < result["content"].index('"z"')
+
+
+def test_openrouter_body_with_tools_preserves_tool_history():
+    """The flattening must apply ONLY when no tools are declared."""
+    body = build_openrouter_body(
+        model="google/gemini-3.1-pro-preview",
+        messages=TOOL_HISTORY_MESSAGES,
+        tools=[{"type": "function", "function": {"name": "spawn_agent"}}],
+        tool_choice="auto",
+        response_format=None,
+        temperature=None,
+        max_tokens=None,
+        seed=None,
+    )
+    assert "tools" in body, "precondition: this request declares tools"
+    roles = [m.get("role") for m in body["messages"]]
+    assert "tool" in roles, "native tool history must be preserved when tools are declared"
+    assert any("tool_calls" in m for m in body["messages"]), "assistant tool_calls must survive"
 
 def test_named_tool_choice_degrades_only_for_google_routes():
     """Google AI Studio 400s on the OpenAI named-function `tool_choice` form.
@@ -5571,6 +5758,10 @@ async def run_all_tests():
         "openai_messages_later_system_boundary_stripped",
         test_transform_messages_for_openai_strips_boundary_from_later_system_messages,
     )
+    r.record(
+        "openai_messages_normalize_tool_result_name",
+        test_transform_messages_for_openai_normalizes_tool_result_name,
+    )
 
     r.record("anthropic_body_identity_cache", test_build_anthropic_body_identity_and_cache_block)
     r.record("anthropic_body_static_dynamic_split", test_build_anthropic_body_static_dynamic_split)
@@ -5661,6 +5852,22 @@ async def run_all_tests():
     )
     r.record("openrouter_body_provider_fast_mode", test_build_openrouter_body_provider_fast_mode)
     r.record("openrouter_body_minimal", test_build_openrouter_body_minimal_omits_optionals)
+    r.record(
+        "openrouter_body_no_tools_flattens_tool_history",
+        test_openrouter_body_without_tools_flattens_tool_history,
+    )
+    r.record(
+        "openrouter_body_no_tools_preserves_structured_tool_results",
+        test_openrouter_body_without_tools_preserves_structured_tool_result_blocks,
+    )
+    r.record(
+        "openrouter_body_no_tools_stringifies_non_json_structured_result",
+        test_openrouter_body_without_tools_stringifies_non_json_structured_tool_result,
+    )
+    r.record(
+        "openrouter_body_with_tools_keeps_tool_history",
+        test_openrouter_body_with_tools_preserves_tool_history,
+    )
     await r.record_async("waterfall_falls_through_succeeds", test_waterfall_falls_through_then_succeeds)
     await r.record_async(
         "waterfall_skips_anthropic_response_format", test_waterfall_skips_anthropic_for_response_format

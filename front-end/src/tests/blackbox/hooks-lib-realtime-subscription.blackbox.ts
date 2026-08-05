@@ -252,6 +252,29 @@ describe('useRealtimeSubscription', () => {
     errSpy.mockRestore();
   });
 
+  it('does not schedule reconnect when subscribe rejects after unmount', async () => {
+    let rejectSubscription!: (error: Error) => void;
+    vi.mocked(RealtimeMod.subscribeToAgent).mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectSubscription = reject;
+        }),
+    );
+    const deps = makeDeps();
+    const { unmount } = renderHook(() => useRealtimeSubscription(deps));
+    expect(RealtimeMod.subscribeToAgent).toHaveBeenCalledTimes(1);
+
+    unmount();
+    await act(async () => {
+      rejectSubscription(new Error('late subscribe failure'));
+      await Promise.resolve();
+    });
+
+    expect(deps.reconnectAttemptRef.current).toBe(0);
+    expect(deps.reconnectTimeoutRef.current).toBeNull();
+    expect(deps.setForceResubscribeCounter).not.toHaveBeenCalled();
+  });
+
   it('reconnection refetches agent detail and merges messages', async () => {
     server.use(
       http.get(`${API_BASE}/agents/agent-1`, () =>

@@ -112,13 +112,19 @@ def build_openrouter_body(
     Deterministic in its inputs — the same call shape is reused for every
     step of the waterfall, only `model` changes.
     """
+    # Resolve tools BEFORE building messages, so the message transform knows
+    # whether this request will actually declare any. Without that, tool-call
+    # history reaches a provider with no functionDeclarations — a deterministic
+    # 400 on Google (see flatten_tool_history_to_text).
+    openrouter_tools = _openrouter_tools(tools)
     body: Dict[str, Any] = {
         "model": model,
-        "messages": transform_messages_for_openai(messages),
+        "messages": transform_messages_for_openai(
+            messages, tools_declared=bool(openrouter_tools)
+        ),
         "stream": True,
         "stream_options": {"include_usage": True},
     }
-    openrouter_tools = _openrouter_tools(tools)
     if openrouter_tools:
         body["tools"] = openrouter_tools
     if tool_choice is not None and openrouter_tools:

@@ -402,4 +402,25 @@ fi
 kill_pid_tree "$controller_pid"
 [ -n "$isolated_runsh_pid" ] && kill_pid_tree "$isolated_runsh_pid"
 
+# The protection walk must not stop before classifying PID 1. On a Fly cloudbench
+# guest the boot command IS PID 1, so it can genuinely be this script's ancestor;
+# bailing at ppid == 1 left it unprotected (CLAUDE.md rule 27). is_self_ancestor
+# must terminate only on an absent/zero/self parent. The kill-target walk in
+# add_pid_with_tree_and_ancestors deliberately KEEPS its ppid == 1 stop, since
+# climbing there could make PID 1 itself a target rather than merely classify it.
+protection_walk_source=$(awk '/^is_self_ancestor\(\)/,/^\}/' "$ROOT_DIR/scripts/kill-services.sh")
+if [[ -z "$protection_walk_source" ]]; then
+    echo "FAIL: could not read is_self_ancestor" >&2
+    exit 1
+fi
+if grep -q '"\$ppid" = "1"' <<<"$protection_walk_source"; then
+    echo "FAIL: is_self_ancestor still stops on PID 1; a controller at PID 1 would be unprotected" >&2
+    exit 1
+fi
+if ! grep -q '"\$ppid" = "\$current"' <<<"$protection_walk_source"; then
+    echo "FAIL: is_self_ancestor must guard against a self-parent loop once PID 1 is reachable" >&2
+    exit 1
+fi
+echo "PASS: is_self_ancestor classifies PID 1 instead of bailing before it"
+
 echo "All kill-services tests passed."

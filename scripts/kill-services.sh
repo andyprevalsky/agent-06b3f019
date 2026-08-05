@@ -187,7 +187,16 @@ is_self_ancestor() {
     while true; do
         local ppid
         ppid=$(ps -p "$current" -o ppid= 2>/dev/null | tr -d ' ') || return 1
-        [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "1" ] && return 1
+        # Stop only when the walk runs out of parents. PID 1 must still be
+        # COMPARED against the candidate: on a Fly cloudbench guest the boot
+        # command is PID 1, so it can genuinely be our ancestor, and bailing
+        # early left it unprotected. Walking onto PID 1 terminates safely
+        # because its own parent is 0. The kill-target walk below deliberately
+        # keeps its `ppid == 1` stop, since climbing there could make PID 1 a
+        # target rather than merely classify it.
+        if [ -z "$ppid" ] || [ "$ppid" = "0" ] || [ "$ppid" = "$current" ]; then
+            return 1
+        fi
         [ "$ppid" = "$candidate" ] && return 0
         current="$ppid"
     done
