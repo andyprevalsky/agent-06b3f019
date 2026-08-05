@@ -515,6 +515,8 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
     if database.get("use_system_postgres") or not database.get("owned_by_run_sh"):
         return
     container = database.get("container")
+    if shutil.which("docker") is None:
+        return
     if isinstance(container, str) and container:
         subprocess.run(["docker", "rm", "-f", container], cwd=REPO_ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     volume = database.get("volume")
@@ -528,6 +530,8 @@ def _stop_owned_db_from_manifest(stack: ServiceStack) -> None:
 def _stop_owned_db_from_stack_identity(stack: ServiceStack) -> None:
     """Remove the exact isolated DB when startup failed before its manifest."""
     if not stack.isolated or not stack.workspace_name:
+        return
+    if shutil.which("docker") is None:
         return
     container = f"victoria-db-{stack.workspace_name}"
     volume = f"victoria-pgdata-{stack.workspace_name}"

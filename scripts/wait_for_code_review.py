@@ -84,21 +84,79 @@ def normalize_status(entry: dict[str, object]) -> ReviewStatus:
     return ReviewStatus(normalized, False, False, kind, entry)
 
 
+def _gh_json(command: list[str]) -> object:
+    completed = subprocess.run(command, check=False, capture_output=True, text=True)
+    if completed.returncode != 0:
+        raise ReviewWaitError(completed.stderr.strip() or "gh command failed")
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        raise ReviewWaitError("gh command returned invalid JSON") from error
+
+
+def _repo_slug(repo: str | None) -> str:
+    if repo:
+        return repo
+    payload = _gh_json(["gh", "repo", "view", "--json", "nameWithOwner"])
+    if not isinstance(payload, dict) or not isinstance(payload.get("nameWithOwner"), str):
+        raise ReviewWaitError("could not resolve OWNER/REPO for REST status fallback")
+    return payload["nameWithOwner"]
+
+
+def _rest_status_payload(pr: str, repo: str | None, expected_hint: str | None = None) -> dict[str, object]:
+    """Build a statusCheckRollup-shaped payload from the REST commit status API.
+
+    Fine-grained tokens often can read REST statuses but not GraphQL
+    ``statusCheckRollup`` (the field ``gh pr view --json statusCheckRollup``
+    queries). Prefer GraphQL; fall back here so cloud deploys are not blocked.
+    """
+    pr_payload = _gh_json(
+        (["gh", "pr", "view", pr, "--repo", repo] if repo else ["gh", "pr", "view", pr])
+        + ["--json", "headRefOid"]
+    )
+    if not isinstance(pr_payload, dict):
+        raise ReviewWaitError("gh pr view returned a non-object payload")
+    head = str(pr_payload.get("headRefOid") or "")
+    if not head:
+        raise ReviewWaitError("gh pr view returned no headRefOid")
+    slug = _repo_slug(repo)
+    status_payload = _gh_json(["gh", "api", f"repos/{slug}/commits/{head}/status"])
+    if not isinstance(status_payload, dict):
+        raise ReviewWaitError("REST commit status returned a non-object payload")
+    rollup: list[dict[str, object]] = []
+    for entry in status_payload.get("statuses") or []:
+        if not isinstance(entry, dict):
+            continue
+        rollup.append(
+            {
+                "__typename": "StatusContext",
+                "context": entry.get("context"),
+                "state": str(entry.get("state") or "").upper(),
+                "description": entry.get("description"),
+            }
+        )
+    return {"headRefOid": head, "statusCheckRollup": rollup}
+
+
 def gh_payload(pr: str, repo: str | None = None) -> dict[str, object]:
     command = ["gh", "pr", "view", pr]
     if repo:
         command.extend(["--repo", repo])
     command.extend(["--json", "headRefOid,statusCheckRollup"])
     completed = subprocess.run(command, check=False, capture_output=True, text=True)
-    if completed.returncode != 0:
-        raise ReviewWaitError(completed.stderr.strip() or "gh pr view failed")
-    try:
-        payload = json.loads(completed.stdout)
-    except json.JSONDecodeError as error:
-        raise ReviewWaitError("gh pr view returned invalid JSON") from error
-    if not isinstance(payload, dict):
-        raise ReviewWaitError("gh pr view returned a non-object payload")
-    return payload
+    if completed.returncode == 0:
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise ReviewWaitError("gh pr view returned invalid JSON") from error
+        if not isinstance(payload, dict):
+            raise ReviewWaitError("gh pr view returned a non-object payload")
+        return payload
+    err = completed.stderr.strip() or "gh pr view failed"
+    # GraphQL statusCheckRollup is frequently inaccessible to fine-grained PATs.
+    if "statusCheckRollup" in err or "Resource not accessible" in err:
+        return _rest_status_payload(pr, repo)
+    raise ReviewWaitError(err)
 
 
 def wait_for_review(
