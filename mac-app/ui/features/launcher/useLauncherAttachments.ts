@@ -16,7 +16,7 @@ import { useCallback, useRef, useState, type DragEvent as ReactDragEvent } from 
 import type { QuickQueryAttachment } from '../../../shared/types/ipc';
 import { setQuickQueryFileDrag } from './api';
 import { LAUNCHER_MAX_FILE_SIZE, LAUNCHER_MAX_TOTAL_ATTACHMENTS_SIZE } from './config';
-import { looksLikeFileDrag } from './fileDrag';
+import { extractDroppedFilesAsync, looksLikeFileDrag } from './fileDrag';
 import type { LauncherLocalAttachment } from './types';
 
 export interface LauncherAttachmentsHandle {
@@ -149,7 +149,12 @@ function useFileDragHandlers(
       e.stopPropagation();
       setIsDragOver(false);
       void setQuickQueryFileDrag(false);
-      if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
+      // Screenshot thumbnails often leave files[] empty and only fill items /
+      // uri-list — extractDroppedFilesAsync covers all three surfaces.
+      const dataTransfer = e.dataTransfer;
+      void extractDroppedFilesAsync(dataTransfer).then((files) => {
+        if (files.length > 0) addFiles(files);
+      });
     },
     [addFiles, setIsDragOver]
   );
