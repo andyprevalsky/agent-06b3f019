@@ -305,6 +305,54 @@ else
     FAIL=$((FAIL+1)); echo "  ❌ failed publication corrupted state or leaked lock/temp files"
 fi
 
+# System-Postgres materialize path (Cloud: ROSE_USE_SYSTEM_PG / Docker overlay
+# mount failures). Must dump via host pg_dump, not docker exec.
+rm -f "$EXPECTED_PATH" "${EXPECTED_PATH}.schemahash"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$SEED_DUMP_TEST_LOG"' \
+    'printf "seed-dump-from-system-pg\n"' \
+    > "$FAKE_BIN/pg_dump"
+chmod +x "$FAKE_BIN/pg_dump"
+: > "${SEED_DUMP_TEST_LOG:=$TMP/system-pg-dump.log}"
+export SEED_DUMP_TEST_LOG
+set +e
+SYSTEM_MATERIALIZED_PATH="$(
+    PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" system 20260723
+)"
+SYSTEM_MATERIALIZE_STATUS=$?
+set -e
+if [ "$SYSTEM_MATERIALIZE_STATUS" -eq 0 ] \
+   && [ "$SYSTEM_MATERIALIZED_PATH" = "$EXPECTED_PATH" ] \
+   && [ "$(cat "$EXPECTED_PATH" 2>/dev/null)" = "seed-dump-from-system-pg" ] \
+   && grep -q -- '-h localhost -p 5432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"; then
+    PASS=$((PASS+1)); echo "  ✅ system token materializes via host pg_dump (no Docker)"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"
+fi
+
+# setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
+SETUP_DB="$ROOT_DIR/scripts/setup-db.sh"
+if grep -q 'ROSE_USE_SYSTEM_PG' "$SETUP_DB" \
+   && grep -q 'SEED_DUMP_SOURCE="system"' "$SETUP_DB" \
+   && grep -q 'use_system_postgres' "$SETUP_DB"; then
+    PASS=$((PASS+1)); echo "  ✅ setup-db.sh owns the system-Postgres sync path"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ setup-db.sh missing ROSE_USE_SYSTEM_PG / system seed source wiring"
+fi
+
+# Fleet must fail closed before provisioning when the cloud-guest (pg15)
+# canonical seed dump is missing — otherwise every clone dies at the barrier.
+FLEET="$ROOT_DIR/scripts/run-bench-fleet"
+if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
+   && grep -q 'Missing canonical base fixture for cloud guests' "$FLEET" \
+   && grep -q 'seed-dump-cache.ts get' "$FLEET"; then
+    PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"
+fi
+
 echo "RESULTS: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 echo "PASS: seed-cache decision routes stale/absent dumps to the shared cache; valid dumps restore locally"

@@ -3302,6 +3302,34 @@ if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
     exit 1
 fi
 
+# Fail closed BEFORE provisioning N clones when the immutable seed dump for the
+# cloud-guest Postgres major is missing from R2. Guests run system Postgres 15
+# (`cloudbench-run.sh`); a host that only published pg16 leaves every stack
+# failing at the start barrier after machines are already billed.
+# Observed 2026-08-06: 49/49 daily benches excluded for
+# `canonical base fixture is unavailable` on token `…-pg15-victoria-prod-sync-v1-whatsapp-v2`
+# while `…-pg16-…` existed.
+CLOUDBENCH_GUEST_PG_MAJOR="${CLOUDBENCH_GUEST_PG_MAJOR:-15}"
+echo "🔎 Verifying canonical seed dump for cloud-guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}..."
+_SEED_GUEST_TOKEN="$(
+    python3 "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" --cache-token \
+        --pg-major "$CLOUDBENCH_GUEST_PG_MAJOR" \
+        "$ROOT_DIR/back-end/prisma/schema.prisma"
+)"
+_SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
+if ! (
+        cd "$ROOT_DIR/back-end" &&
+            npx tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+    ) || [ ! -s "$_SEED_GUEST_PROBE" ]; then
+    rm -f "$_SEED_GUEST_PROBE"
+    echo "❌ Missing canonical base fixture for cloud guests: $_SEED_GUEST_TOKEN" >&2
+    echo "   Publish a dump produced by a pg${CLOUDBENCH_GUEST_PG_MAJOR} client before provisioning." >&2
+    echo "   (Host-only pg16 publications are not readable by Fly guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}.)" >&2
+    exit 1
+fi
+rm -f "$_SEED_GUEST_PROBE"
+echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: $_SEED_GUEST_TOKEN"
+
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
 warm_pair="$(printf '%s' "$warm_json" | MN="$MACHINE_NAME" python3 -c '

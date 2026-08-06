@@ -46,6 +46,15 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'math.ceil(peaks[-1] * 1.2)' \
     "suggested budget must round 20% headroom up"
+require_text "$MEASUREMENT" \
+    'ROSE_USE_SYSTEM_PG' \
+    "measurement must support system Postgres when Docker overlay mounts fail"
+require_text "$MEASUREMENT" \
+    'victoria_seedmem_src_' \
+    "system Postgres path must isolate source databases per measurement PID"
+require_text "$MEASUREMENT" \
+    'TIME_BIN' \
+    "measurement must resolve an external time binary (not the shell builtin)"
 require_text "$BUDGET" \
     'SEED_PEAK_RSS_BUDGET_MB = 230' \
     "budget must remain cemented to ceil(191MB * 1.20)"
