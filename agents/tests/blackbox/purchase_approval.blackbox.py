@@ -51,6 +51,11 @@ def test_non_urls_are_still_rejected():
         "example.com/p/1",
         "ftp://example.com/p/1",
         "javascript:alert(1)",
+        # Non-empty netloc and a VALID port, but no hostname. A netloc-only
+        # check accepts these, and the approval then carries a product link
+        # the user cannot navigate to.
+        "https://:443/item",
+        "http://:80/item",
         "",
         None,
     ):

@@ -50,7 +50,10 @@ def validate_product_detail_url(value: Any) -> str:
         parsed.port
     except ValueError as error:
         raise ValueError("product_url must be an absolute http(s) URL") from error
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    # `netloc` alone is not enough: "https://:443/item" has a non-empty netloc
+    # and a valid port but no hostname, so it would pass as a "trusted page" and
+    # put a non-navigable link in the approval. Require an actual host.
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
         raise ValueError("product_url must be an absolute http(s) URL")
     return text
 
