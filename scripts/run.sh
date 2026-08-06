@@ -486,9 +486,15 @@ PYEOF
     # here would return "not owned" and let cleanup kill a just-started run
     # before it publishes services.json — fail toward preserving the stack.
     grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
-    case "$grace" in
-        '' | *[!0-9]*) grace=90 ;;
-    esac
+    # Bound before ANY numeric use. An all-digits string still breaks this
+    # function two ways: a leading-zero value ("0000000008") is invalid octal to
+    # the $(( )) below, and a value near the integer ceiling overflows
+    # `grace + 59`. Either one disables the young-process guard that stops
+    # cleanup from killing a benchmark which has not yet published
+    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
     [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
 
     # Young alone is not enough. An unqualified age check ALSO preserves a

@@ -667,6 +667,11 @@ def build_browser_task_prompt(goal: str) -> str:
 # USAGE CALCULATION
 # ========================================
 
+# Internal-only suffix that splits a model's Fast-Mode replays from its paid
+# calls in the usage ledger. It contains NUL so it can never collide with a real
+# model name, and it must NEVER escape into an emitted usage row.
+_FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+
 
 def accumulate_model_usage(
     usage_by_model: Dict[str, Dict[str, int]],
@@ -698,7 +703,7 @@ def accumulate_model_usage(
     model = str(actual_model or "")
     # NUL can never occur in a model name, so this cannot collide with a real
     # model whose name happens to end in the marker text.
-    key = f"{model}\x00fast_cache" if from_fast_cache else model
+    key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
     bucket = usage_by_model.setdefault(
         key,
         {
@@ -748,9 +753,18 @@ def build_browser_llm_usage_items(
         input_tokens = int((usage or {}).get("input_tokens") or 0)
         output_tokens = int((usage or {}).get("output_tokens") or 0)
         # The ledger key is (model, from_fast_cache); the bucket carries the
-        # plain model. Callers that hand-build a ledger omit it, so fall back to
-        # the key, which for them IS the model name.
-        model = str((usage or {}).get("model") or ledger_key)
+        # plain model. Test on PRESENCE, not truthiness: a Fast-Mode replay with
+        # no `actual_model` has an empty-but-present `model`, and falling back on
+        # falsiness emitted the raw key — a NUL-bearing "\x00fast_cache" string
+        # that is truthy, so it also defeated the pricing-pool fallback below and
+        # rode into `_track_usage` and the stored usage records.
+        raw_model = (usage or {}).get("model")
+        if raw_model is None:
+            # Hand-built ledger (no `model` key): the key IS the model name.
+            # Strip the marker defensively so it can never reach a usage row.
+            model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+        else:
+            model = str(raw_model)
         items.append(
             {
                 "type": "llm",

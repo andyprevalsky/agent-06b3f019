@@ -6555,6 +6555,45 @@ def test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool():
         assert llm_rows[0]["input_tokens"] == 1_000
         assert llm_rows[0]["output_tokens"] == 200
 
+def test_browser_usage_rows_never_leak_the_internal_fast_cache_marker():
+    """The ledger's internal fast-cache key must never surface as a model name.
+
+    The ledger keys Fast-Mode replays as `f"{model}\\x00fast_cache"` so a replay
+    cannot merge into the model's paid bucket. When `actual_model` is missing —
+    a plausible state for a cached replay — that key is `"\\x00fast_cache"` and
+    the bucket's `model` is `""`. Resolving the emitted model by truthiness fell
+    back to the raw key, so a NUL-bearing string became the row's `model`: it is
+    truthy, so it also defeated the pricing-pool fallback, and it rode straight
+    into `_track_usage` and the stored usage records.
+    """
+    from domains.spawn_browser_agent_v3.config import BROWSER_USE_PRICING_POOL
+    from domains.spawn_browser_agent_v3.service import (
+        accumulate_model_usage,
+        build_browser_llm_usage_items,
+    )
+
+    usage_by_model: dict = {}
+    accumulate_model_usage(usage_by_model, None, 90, 12, from_fast_cache=True)
+
+    rows = build_browser_llm_usage_items(
+        0, 0, {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}, usage_by_model
+    )
+
+    assert len(rows) == 1
+    emitted_model = rows[0]["model"]
+    assert "\x00" not in emitted_model, f"internal ledger marker leaked into model: {emitted_model!r}"
+    assert "fast_cache" not in emitted_model, f"internal marker leaked: {emitted_model!r}"
+    # An unattributed model must still price at the browser pool, never fall
+    # through to the parent agent's cheaper pool.
+    assert emitted_model == BROWSER_USE_PRICING_POOL
+    assert rows[0]["from_fast_cache"] is True
+
+    # A hand-built ledger (no `model` key) still resolves its key as the name.
+    legacy_rows = build_browser_llm_usage_items(
+        0, 0, {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}, {"gemini-3-pro": {"input_tokens": 5}}
+    )
+    assert legacy_rows[0]["model"] == "gemini-3-pro"
+
 def test_browser_usage_rows_carry_cache_metadata_for_the_workflow_discount():
     """Cached browser input must reach `_track_usage`, not be re-billed as fresh.
 
@@ -14603,6 +14642,10 @@ async def run_all_tests():
     r.record(
         "build_usage_items_unattributed_fall_back_to_browser_pool",
         test_build_usage_items_unattributed_tokens_fall_back_to_browser_pool,
+    )
+    r.record(
+        "browser_usage_rows_never_leak_the_internal_fast_cache_marker",
+        test_browser_usage_rows_never_leak_the_internal_fast_cache_marker,
     )
     r.record(
         "browser_usage_rows_carry_cache_metadata_for_the_workflow_discount",

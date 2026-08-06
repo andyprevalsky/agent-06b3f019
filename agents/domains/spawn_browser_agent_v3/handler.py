@@ -1284,13 +1284,19 @@ async def _reconnect_browser_stack_after_rotation(
             with contextlib.suppress(Exception):
                 await apply_fingerprint_injection(pw_page, fingerprint_injection)
     except BaseException:
-        await _stop_playwright_resources(
-            pw_browser,
-            pw_instance,
-            agent_id,
-            close_browser=False,
-            driver_pid=driver_pid,
-        )
+        # Best-effort, like the disconnect below. Unsuppressed, a failure here
+        # replaces the original attach error (so the caller never learns why the
+        # reconnect failed) AND skips the disconnect, leaking the CDP
+        # connection. `Exception` rather than `BaseException` so cancellation
+        # still propagates.
+        with contextlib.suppress(Exception):
+            await _stop_playwright_resources(
+                pw_browser,
+                pw_instance,
+                agent_id,
+                close_browser=False,
+                driver_pid=driver_pid,
+            )
         with contextlib.suppress(Exception):
             await dom_service.disconnect()
         raise
