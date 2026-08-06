@@ -301,6 +301,19 @@ async function validateReplyToAgent(
       error: 'Current SMS does not identify this agent task or a matching pending request',
     };
   }
+  // A rejection is only expressible as a resolved attention request: without an
+  // `attention_request_id` the commit signals the bare `message`, which
+  // `receive_user_response` reads as ordinary feedback. Accepting this pair
+  // would silently downgrade a "no" into a "here's a comment" and let the
+  // blocked tool proceed as if it had never been refused.
+  if (args.reject === true && args.attention_request_id === undefined) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'Rejecting requires the attention_request_id of the request being rejected',
+    };
+  }
   pendingWrites.push({ kind: 'reply_to_agent', args, agentId: agent.id });
   const verb = args.attention_request_id
     ? args.reject

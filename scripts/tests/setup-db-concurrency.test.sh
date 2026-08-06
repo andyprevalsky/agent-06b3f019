@@ -183,4 +183,38 @@ rc="$(cat "$TMP/C.rc" 2>/dev/null || echo missing)"
 $(cat "$TMP/C.out" 2>/dev/null)"
 grep -q ' C SEED_END$' "$EVENTS" || fail "case 3: setup-db.sh never completed its seed after breaking a stale lock"
 
+# ── Case 4: a LIVE holder must make the waiter time out, not wait forever ────
+# The wait budget exists so a blocked workspace setup fails loudly instead of
+# hanging indefinitely. Case 3 covers the dead-holder break; this covers the
+# opposite branch, which nothing exercised: the holder is ALIVE, so the lock is
+# never broken and the loop must terminate at the configured budget.
+mkdir -p "$TMP/locks"
+sleep 120 &
+live_holder=$!
+printf '%s\n' "$live_holder" > "$TMP/locks/victoria-db-live-ws.lock"
+
+timeout_start="$(date +%s)"
+set +e
+ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+  ROSE_WORKSPACE_DB_LOCK_WAIT_SECONDS=4 \
+  ROSE_WORKSPACE_DB_LOCK_POLL_SECONDS=1 \
+  bash -c '. "$1/lib/workspace-db-lock.sh"; acquire_workspace_db_lock victoria-db-live-ws' \
+  _ "$ROOT_DIR/scripts" >"$TMP/D.out" 2>&1
+timeout_rc=$?
+set -e
+timeout_elapsed=$(( $(date +%s) - timeout_start ))
+kill "$live_holder" 2>/dev/null || true
+wait "$live_holder" 2>/dev/null || true
+
+[ "$timeout_rc" != "0" ] || fail "case 4: acquiring a lock held by a LIVE pid succeeded; the budget never applied
+--- D output ---
+$(cat "$TMP/D.out" 2>/dev/null)"
+grep -q 'Timed out (4s)' "$TMP/D.out" || fail "case 4: no timeout diagnostic naming the budget
+--- D output ---
+$(cat "$TMP/D.out" 2>/dev/null)"
+# Bounded above so a regression that ignores the budget and falls back to the
+# 1800s default cannot pass by eventually failing for some unrelated reason.
+[ "$timeout_elapsed" -lt 30 ] || fail \
+  "case 4: waiter took ${timeout_elapsed}s to honor a 4s budget"
+
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"

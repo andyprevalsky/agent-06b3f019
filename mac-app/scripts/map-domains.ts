@@ -85,6 +85,13 @@ function parseLocalImports(filePath: string): string[] {
   for (const regex of [staticRegex, dynamicRegex]) {
     let match;
     while ((match = regex.exec(content)) !== null) {
+      // Statement-level `import type ... from 'x'` / `export type ... from 'x'`
+      // are erased by the compiler and load nothing at runtime, so tracing them
+      // inflates a domain's closure with modules it never executes — one
+      // `import type` of a service barrel dragged every reader implementation
+      // into browser-state-sync. Inline specifiers (`import { type T, fn }`)
+      // still emit a real import and are deliberately still traced.
+      if (/^(?:import|export)\s+type\s/.test(match[0])) continue;
       const resolved = resolveImportPath(match[1], dirname(filePath));
       if (resolved && resolved.startsWith(MAC_APP)) {
         imports.push(resolved);

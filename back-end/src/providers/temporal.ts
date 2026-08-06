@@ -529,12 +529,17 @@ export type WorkflowReconciliation =
 
 const LIVE_WORKFLOW_STATUSES = new Set(['RUNNING', 'CONTINUED_AS_NEW']);
 
-export async function reconcileWorkflowStart(
-  workflowId: string
-): Promise<WorkflowReconciliation> {
+export async function reconcileWorkflowStart(workflowId: string): Promise<WorkflowReconciliation> {
   try {
     const client = await getTemporalClient();
-    const description = await client.workflow.getHandle(workflowId).describe();
+    // Bounded like every other control-plane RPC in this file. This runs on the
+    // SMS supervisor commit path, so an unbounded describe() against a wedged
+    // Temporal frontend would hang the user's reply rather than degrade. A
+    // deadline error falls through to `lookup_failed` below, which callers
+    // already treat as "unknown — do not mark the agent FAILED".
+    const description = await withTemporalControlDeadline(client, () =>
+      client.workflow.getHandle(workflowId).describe()
+    );
     const status = description.status.name;
     return LIVE_WORKFLOW_STATUSES.has(status)
       ? { kind: 'live', status, runId: description.runId }
