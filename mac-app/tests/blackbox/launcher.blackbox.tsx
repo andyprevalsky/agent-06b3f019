@@ -456,6 +456,29 @@ describe('launcher blackbox', () => {
     expect(screen.queryByTestId('launcher-drag-overlay')).not.toBeInTheDocument();
   });
 
+  it('attaches screenshot drops that only expose File via items.getAsFile', async () => {
+    // Repro: files[] empty on drop; only DataTransferItem.getAsFile() returns
+    // the Screen Shot.png. Old handler ignored the drop entirely.
+    installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const shot = makeDropFile('Screen Shot.png', 'png-bytes', 'image/png');
+    const target = screen.getByTestId('launcher-drop-target');
+    fireEvent.drop(target, {
+      dataTransfer: {
+        types: ['text/uri-list'],
+        files: [],
+        items: [{ kind: 'file', type: shot.type, getAsFile: () => shot }],
+        getData: () => '',
+      },
+    });
+
+    expect(await screen.findByTestId('launcher-attachment-chip')).toHaveTextContent(
+      'Screen Shot.png'
+    );
+  });
+
   it('keeps a hittable window surface so transparent pixels do not pass OS drags through', async () => {
     installLauncherIpc();
     const tree = await loadLauncherTree();
