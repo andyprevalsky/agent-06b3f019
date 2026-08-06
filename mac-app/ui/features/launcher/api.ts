@@ -72,3 +72,13 @@ export const resizeQuickQuery = async (
 ): Promise<{ success: boolean }> => {
   return window.api.resizeQuickQuery(payload);
 };
+
+/**
+ * Tell main whether an OS file-drag is over the launcher.
+ *
+ * Starting a Finder/screenshot drag blurs the launcher; main defers blur-hide
+ * and cancels it while this is true so the drop does not land on apps behind.
+ */
+export const setQuickQueryFileDrag = async (active: boolean): Promise<{ success: boolean }> => {
+  return window.api.setQuickQueryFileDrag({ active });
+};

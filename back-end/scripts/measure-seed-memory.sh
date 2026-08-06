@@ -84,10 +84,13 @@ done
 echo "   restoring source…" | tee -a "$SUMMARY"
 docker exec -i "$SRC_CONTAINER" pg_restore -U postgres -d postgres --no-owner --no-acl \
     < "$DUMP" >/dev/null 2>&1 || true   # non-fatal: dumps carry role/ext noise
+# Cookie is the fidelity-critical table the gate fingerprints below. Canonical
+# base dumps can have empty MessageRecord (messages still live in Message), so
+# Cookie (for the seeded DEV user) is the durable "dump is non-empty" probe.
 SRC_ROWS="$(docker exec "$SRC_CONTAINER" psql -U postgres -tAc \
-    'SELECT COUNT(*) FROM "MessageRecord"' 2>/dev/null | tr -d " ")"
-echo "   source MessageRecord rows: ${SRC_ROWS:-0}" | tee -a "$SUMMARY"
-[ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no MessageRecord rows — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
+    "SELECT COUNT(*) FROM \"Cookie\" WHERE \"userId\" = '$DEV_USER_ID'" 2>/dev/null | tr -d " ")"
+echo "   source Cookie rows (userId=$DEV_USER_ID): ${SRC_ROWS:-0}" | tee -a "$SUMMARY"
+[ "${SRC_ROWS:-0}" -gt 0 ] || { echo "❌ source restore produced no Cookie rows for seed user — measurement would be meaningless" | tee -a "$SUMMARY"; exit 1; }
 export SEED_REMOTE_DATABASE_URL="postgresql://postgres:postgres@localhost:$SRC_PORT/postgres"
 
 origin_fingerprint() {
@@ -182,11 +185,31 @@ for i in $(seq 1 "$RUNS"); do
 
     report="$OUT_DIR/run-$i.json"
     log="$OUT_DIR/run-$i.log"
-    # /usr/bin/time -l reports "maximum resident set size" in BYTES on macOS —
-    # an OS-level number that does not depend on Node self-reporting correctly.
-    SEED_PEAK_RSS_REPORT="$report" \
-        /usr/bin/time -l npx tsx scripts/seed-local.ts > "$log" 2>&1
-    rc=$?
+    # OS-level peak RSS (not Node self-reporting). BSD `time -l` prints bytes;
+    # GNU `time -v` prints kilobytes. Both land in $log stderr-merged.
+    if [ "$(uname -s)" = "Darwin" ]; then
+        SEED_PEAK_RSS_REPORT="$report" \
+            /usr/bin/time -l npx tsx scripts/seed-local.ts > "$log" 2>&1
+        rc=$?
+        os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
+    else
+        SEED_PEAK_RSS_REPORT="$report" \
+            /usr/bin/time -v npx tsx scripts/seed-local.ts > "$log" 2>&1
+        rc=$?
+        os_peak_kb="$(grep -oE 'Maximum resident set size \(kbytes\):[[:space:]]*[0-9]+' "$log" | grep -oE '[0-9]+$' | tail -1)"
+        if [ -n "${os_peak_kb:-}" ]; then
+            os_peak_bytes=$(( os_peak_kb * 1024 ))
+        else
+            os_peak_bytes=""
+        fi
+    fi
+    # A successful seed with no parseable OS RSS is a measurement defect, not a
+    # 0MB win — fail the run instead of defaulting missing output to zero.
+    if [ "$rc" = 0 ] && { [ -z "${os_peak_bytes:-}" ] || [ "$os_peak_bytes" = 0 ]; }; then
+        echo "❌ run $i: could not parse OS peak RSS from time output" | tee -a "$SUMMARY"
+        printf 'could not parse OS peak RSS from time output\n' >> "$log"
+        rc=87
+    fi
     fidelity="not-run"
     if [ "$rc" = 0 ]; then
         fidelity_output="$(verify_seed_fidelity)"
@@ -199,7 +222,6 @@ for i in $(seq 1 "$RUNS"); do
         fi
     fi
 
-    os_peak_bytes="$(grep -oE '[0-9]+ +maximum resident set size' "$log" | grep -oE '^[0-9]+' | tail -1)"
     os_peak_mb=$(( ${os_peak_bytes:-0} / 1024 / 1024 ))
     node_peak_mb="$(python3 -c "
 import json,sys

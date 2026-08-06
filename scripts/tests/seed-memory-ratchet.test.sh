@@ -29,6 +29,15 @@ require_text "$MEASUREMENT" \
     'budget enforcement requires exactly five cold runs' \
     "measurement enforcement must reject a smaller favorable sample"
 require_text "$MEASUREMENT" \
+    'source Cookie rows (userId=' \
+    "preflight must probe Cookie for the seed DEV_USER_ID, not empty MessageRecord dumps"
+require_text "$MEASUREMENT" \
+    'could not parse OS peak RSS from time output' \
+    "missing RSS parse must fail the run instead of reporting 0MB"
+require_text "$MEASUREMENT" \
+    'Maximum resident set size' \
+    "Linux GNU time -v RSS parsing must stay wired alongside BSD time -l"
+require_text "$MEASUREMENT" \
     'fidelity="verified"' \
     "measurement must distinguish fidelity-verified runs"
 require_text "$MEASUREMENT" \

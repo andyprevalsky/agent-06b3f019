@@ -14,7 +14,9 @@
 
 import { useCallback, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
 import type { QuickQueryAttachment } from '../../../shared/types/ipc';
+import { setQuickQueryFileDrag } from './api';
 import { LAUNCHER_MAX_FILE_SIZE, LAUNCHER_MAX_TOTAL_ATTACHMENTS_SIZE } from './config';
+import { looksLikeFileDrag } from './fileDrag';
 import type { LauncherLocalAttachment } from './types';
 
 export interface LauncherAttachmentsHandle {
@@ -111,9 +113,19 @@ function useFileDragHandlers(
 ): LauncherAttachmentsHandle['dragHandlers'] {
   const onDragOver = useCallback(
     (e: ReactDragEvent) => {
-      if (!hasFileDrag(e)) return;
+      // Always claim the drag on the launcher surface. Gating preventDefault
+      // on type==='Files' lets macOS screenshot/Finder drags fall through the
+      // transparent always-on-top window onto apps behind.
       e.preventDefault();
       e.stopPropagation();
+      if (e.dataTransfer !== null && e.dataTransfer !== undefined) {
+        e.dataTransfer.dropEffect = 'copy';
+      }
+      // Tell main to cancel blur-hide on ANY claimed dragover. Screenshot
+      // pasteboard types are often empty/unknown until drop; gating this on
+      // looksLikeFileDrag left fileDragActive=false and the pill still hid.
+      void setQuickQueryFileDrag(true);
+      if (!looksLikeFileDrag(e.dataTransfer)) return;
       setIsDragOver(true);
     },
     [setIsDragOver]
@@ -123,7 +135,10 @@ function useFileDragHandlers(
     (e: ReactDragEvent) => {
       e.preventDefault();
       e.stopPropagation();
+      const next = e.relatedTarget as Node | null;
+      if (next !== null && next !== undefined && e.currentTarget.contains(next)) return;
       setIsDragOver(false);
+      void setQuickQueryFileDrag(false);
     },
     [setIsDragOver]
   );
@@ -133,18 +148,13 @@ function useFileDragHandlers(
       e.preventDefault();
       e.stopPropagation();
       setIsDragOver(false);
+      void setQuickQueryFileDrag(false);
       if (e.dataTransfer.files.length > 0) addFiles(e.dataTransfer.files);
     },
     [addFiles, setIsDragOver]
   );
 
   return { onDragOver, onDragLeave, onDrop };
-}
-
-function hasFileDrag(e: ReactDragEvent): boolean {
-  const types = e.dataTransfer?.types;
-  if (types === undefined) return false;
-  return Array.from(types).includes('Files');
 }
 
 /** jsdom's File lacks `arrayBuffer()`; FileReader covers that path in tests + older engines. */

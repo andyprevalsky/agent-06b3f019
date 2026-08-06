@@ -353,12 +353,20 @@ describe('blackbox: electron-main (main-wiring)', () => {
       'quick-query:submit',
       'quick-query:hide',
       'quick-query:resize',
+      'quick-query:file-drag',
       'shortcut:enable',
       'shortcut:disable',
       'shortcut:isEnabled',
     ]) {
       expect(channels, `ipcMain.handle should register '${ch}'`).toContain(ch);
     }
+
+    const quickQueryOptions = BrowserWindow.mock.calls[1]?.[0] as {
+      acceptFirstMouse?: boolean;
+      transparent?: boolean;
+    };
+    expect(quickQueryOptions.acceptFirstMouse).toBe(true);
+    expect(quickQueryOptions.transparent).toBe(true);
 
     expect(registerUpdateIpcMock).toHaveBeenCalledTimes(1);
     expect(initAutoUpdaterMock).toHaveBeenCalledTimes(1);

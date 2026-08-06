@@ -44,6 +44,7 @@ export function makeBrowserWindowStub(): Record<string, unknown> {
     },
     on: vi.fn(),
     show: vi.fn(),
+    showInactive: vi.fn(),
     hide: vi.fn(),
     close: vi.fn(),
     focus: vi.fn(),

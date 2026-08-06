@@ -134,6 +134,8 @@ export interface IPC {
   submitQuickQuery: (payload: string | QuickQueryPayload) => Promise<{ success: boolean }>;
   hideQuickQuery: () => Promise<{ success: boolean }>;
   resizeQuickQuery: (payload: QuickQueryResizePayload) => Promise<{ success: boolean }>;
+  /** Keep the launcher visible while an OS file-drag is over it (cancels blur-hide). */
+  setQuickQueryFileDrag: (payload: { active: boolean }) => Promise<{ success: boolean }>;
   checkForUpdates: () => Promise<{ success: boolean }>;
   downloadUpdate: () => Promise<{ success: boolean }>;
   restartToUpdate: () => Promise<{ success: boolean }>;

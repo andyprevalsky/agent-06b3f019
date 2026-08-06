@@ -915,7 +915,10 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # than clobber each other.
 _SEED_DUMP_CLIENT_MAJOR="$(
     if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
-        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+        # Anchor at the first X.Y in the string. The Ubuntu package suffix
+        # (e.g. "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)") contains a later
+        # "24.04" that a greedy "last X.Y" sed mistakenly treats as the major.
+        pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/'
     else
         echo 16 # the pinned postgres:16-alpine container below writes the archive
     fi
