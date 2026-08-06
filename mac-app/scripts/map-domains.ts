@@ -207,7 +207,19 @@ function discoverDomains(): DomainInfo[] {
       // Skip pure interface files (IMessageQueueService is an interface, still a domain)
       const domainName = toKebab(name);
       const entryPath = resolve(SERVICES_DIR, file);
-      const files = traceImports(entryPath).map((f) => relative(MAC_APP, f));
+      // Several `services/<name>.ts` files are re-export shims exposing only
+      // part of their domain (passkeyEnroll re-exports config + repo but NOT
+      // the enrollment service, which handlers import directly). Tracing the
+      // shim alone silently truncates the closure and lets a domain-scoped gate
+      // skip the real code path, so union in the matching domain service when
+      // one exists.
+      const domainServicePath = resolve(MAIN, 'domains', domainName, 'service.ts');
+      const entryPoints = existsSync(domainServicePath)
+        ? [entryPath, domainServicePath]
+        : [entryPath];
+      const files = [...new Set(entryPoints.flatMap((entry) => traceImports(entry)))]
+        .map((f) => relative(MAC_APP, f))
+        .sort();
       domains.push({
         domain: domainName,
         type: 'main-service',

@@ -470,6 +470,12 @@ async function commitReplyToAgent(
     };
   }
 
+  // ONE canonical response for both sinks. These used to diverge: the signal
+  // sent a bare empty `message` while the row persisted the 'Approved' default,
+  // so on an empty approval the database recorded a decision the workflow never
+  // received.
+  const canonicalUserResponse = reject ? '__REJECTED__' : message || 'Approved';
+
   // 2. Signal the workflow to unblock any waiting tool
   if (agent.temporalWorkflowId) {
     try {
@@ -478,7 +484,7 @@ async function commitReplyToAgent(
       const signalValue = attention_request_id
         ? JSON.stringify({
             request_id: attention_request_id,
-            response: reject ? '__REJECTED__' : message,
+            response: canonicalUserResponse,
           })
         : message;
       await handle.signal('receive_user_response', signalValue);
@@ -503,7 +509,7 @@ async function commitReplyToAgent(
   let attentionResolved = false;
   if (attention_request_id) {
     try {
-      const userResponse = reject ? '__REJECTED__' : message || 'Approved';
+      const userResponse = canonicalUserResponse;
       // Scope by agent AND user, not request id alone. validateReplyToAgent
       // accepts any attention_request_id when currentSmsMatches is true, so an
       // id belonging to another agent or user would otherwise be written here.

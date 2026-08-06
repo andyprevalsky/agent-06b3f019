@@ -4,7 +4,7 @@
  */
 
 import { prisma, runTransactionWithRetry } from '../database';
-import { getWorkflowStatus, startAgentWorkflow } from '../temporal';
+import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 
@@ -175,8 +175,8 @@ export async function commitStartNewAgent(
     // follow-up row write failed). The workflow id IS the agent id, so ask
     // Temporal before declaring failure — otherwise a live workflow keeps
     // running against an agent row marked FAILED.
-    const reconciled = await getWorkflowStatus(startedAgent.id);
-    if (reconciled !== null && ['RUNNING', 'CONTINUED_AS_NEW'].includes(reconciled.status)) {
+    const reconciled = await reconcileWorkflowStart(startedAgent.id);
+    if (reconciled.kind === 'live') {
       log.warn('Workflow start reported an error but the workflow is live; adopting it', {
         phase: 'start',
         agentId: startedAgent.id,
@@ -191,6 +191,28 @@ export async function commitStartNewAgent(
         tool: 'start_new_agent',
         success: true,
         result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
+      };
+    }
+
+    // A failed LOOKUP is not evidence of absence. Writing FAILED here would
+    // bury a workflow that is actually running behind a transient Temporal
+    // error, which is the same orphan this reconciliation exists to prevent.
+    // Leave the agent's status untouched so startup stays retryable.
+    if (reconciled.kind === 'lookup_failed') {
+      log.error('Workflow start outcome is indeterminate; leaving agent status unchanged', {
+        phase: 'start',
+        agentId: startedAgent.id,
+        startError: errorMsg,
+        lookupError: reconciled.error,
+      });
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error:
+          `Could not confirm whether agent [${agent.id.substring(0, 6)}] started ` +
+          `(Temporal lookup failed: ${reconciled.error}). Left pending rather than ` +
+          `marked failed; check its status before retrying.`,
       };
     }
 

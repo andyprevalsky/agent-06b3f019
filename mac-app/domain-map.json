@@ -16,6 +16,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -137,6 +138,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -169,7 +171,17 @@
         "main/domains/user-data-sync/runtime.ts",
         "main/domains/user-data-sync/service.ts",
         "main/domains/user-data-sync/types.ts",
+        "main/handlers/auth.ts",
+        "main/handlers/browser.ts",
+        "main/handlers/credentials.ts",
+        "main/handlers/imessage.ts",
+        "main/handlers/machine-session.ts",
+        "main/handlers/preferences.ts",
         "main/handlers/registry.ts",
+        "main/handlers/state.ts",
+        "main/handlers/system.ts",
+        "main/handlers/telegram.ts",
+        "main/handlers/whatsapp.ts",
         "main/services/IMessageQueueService.ts",
         "main/services/atlasCredentialStore.ts",
         "main/services/auth.ts",
@@ -207,7 +219,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/ipc-registry.blackbox.ts",
-      "fileCount": 200
+      "fileCount": 212
     },
     {
       "domain": "i-message-queue-service",
@@ -217,6 +229,7 @@
         "main/base/config.ts",
         "main/base/logger.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -238,7 +251,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/i-message-queue-service.blackbox.ts",
-      "fileCount": 22
+      "fileCount": 23
     },
     {
       "domain": "atlas-credential-store",
@@ -263,6 +276,7 @@
       "files": [
         "main/base/config.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -271,7 +285,7 @@
         "shared/types/ipc.ts"
       ],
       "testFile": "tests/blackbox/auth.blackbox.ts",
-      "fileCount": 8
+      "fileCount": 9
     },
     {
       "domain": "auto-updater",
@@ -280,6 +294,7 @@
       "files": [
         "main/base/config.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -296,7 +311,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/auto-updater.blackbox.ts",
-      "fileCount": 16
+      "fileCount": 17
     },
     {
       "domain": "batch-uploader",
@@ -305,6 +320,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/batch-uploader/repo.ts",
         "main/domains/batch-uploader/runtime.ts",
         "main/domains/batch-uploader/service.ts",
@@ -320,7 +336,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/batch-uploader.blackbox.ts",
-      "fileCount": 15
+      "fileCount": 16
     },
     {
       "domain": "browser-cookie-reader",
@@ -440,6 +456,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -546,6 +563,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -599,7 +617,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/browser-state-sync.blackbox.ts",
-      "fileCount": 168
+      "fileCount": 170
     },
     {
       "domain": "cache-storage-reader",
@@ -653,6 +671,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -759,6 +778,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -812,7 +832,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/claude-credential-sync.blackbox.ts",
-      "fileCount": 168
+      "fileCount": 170
     },
     {
       "domain": "contacts-reader-native",
@@ -884,6 +904,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -990,6 +1011,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -1043,7 +1065,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/gpt-credential-sync.blackbox.ts",
-      "fileCount": 168
+      "fileCount": 170
     },
     {
       "domain": "i-message-reader",
@@ -1102,6 +1124,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1208,6 +1231,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -1261,7 +1285,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/i-message-sync.blackbox.ts",
-      "fileCount": 168
+      "fileCount": 170
     },
     {
       "domain": "indexed-db-reader",
@@ -1317,11 +1341,14 @@
         "main/base/config.ts",
         "main/base/crypto.ts",
         "main/domains/passkey-enroll/config.ts",
+        "main/domains/passkey-enroll/inject-script.ts",
         "main/domains/passkey-enroll/repo.ts",
-        "main/services/passkeyEnroll.ts"
+        "main/domains/passkey-enroll/service.ts",
+        "main/services/passkeyEnroll.ts",
+        "shared/utils/error.ts"
       ],
       "testFile": null,
-      "fileCount": 5
+      "fileCount": 8
     },
     {
       "domain": "permission-reader",
@@ -1351,6 +1378,7 @@
       "files": [
         "main/base/config.ts",
         "main/base/crypto.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/uploader/config.ts",
         "main/domains/uploader/repo.ts",
         "main/domains/uploader/runtime.ts",
@@ -1361,7 +1389,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/uploader.blackbox.ts",
-      "fileCount": 10
+      "fileCount": 11
     },
     {
       "domain": "user-data-sync",
@@ -1370,6 +1398,7 @@
       "files": [
         "main/base/config.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1385,7 +1414,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/user-data-sync.blackbox.ts",
-      "fileCount": 15
+      "fileCount": 16
     },
     {
       "domain": "messaging-imessage",
@@ -1422,6 +1451,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1528,6 +1558,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -1584,7 +1615,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/messaging-telegram.blackbox.ts",
-      "fileCount": 171
+      "fileCount": 173
     },
     {
       "domain": "messaging-whatsapp",
@@ -1602,6 +1633,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1708,6 +1740,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -1763,7 +1796,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/messaging-whatsapp.blackbox.ts",
-      "fileCount": 170
+      "fileCount": 172
     },
     {
       "domain": "messaging-core",
@@ -1781,6 +1814,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -1889,6 +1923,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -1949,7 +1984,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/messaging-core.blackbox.ts",
-      "fileCount": 177
+      "fileCount": 179
     },
     {
       "domain": "sync-manager",
@@ -1967,6 +2002,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -2083,6 +2119,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -2142,7 +2179,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/sync-manager.blackbox.ts",
-      "fileCount": 184
+      "fileCount": 186
     },
     {
       "domain": "electron-main",
@@ -2154,6 +2191,9 @@
         "main/app/mainWindow.ts",
         "main/app/packagedPaths.ts",
         "main/app/quickQuery.ts",
+        "main/app/quickQueryFocus.ts",
+        "main/app/quickQueryGeometry.ts",
+        "main/app/quickQueryPayload.ts",
         "main/app/windowState.ts",
         "main/base/config.ts",
         "main/base/credentialEncryption.ts",
@@ -2166,6 +2206,7 @@
         "main/domains/atlas-credential-store/service.ts",
         "main/domains/atlas-credential-store/types.ts",
         "main/domains/auth/config.ts",
+        "main/domains/auth/impersonation.ts",
         "main/domains/auth/repo.ts",
         "main/domains/auth/runtime.ts",
         "main/domains/auth/service.ts",
@@ -2293,6 +2334,7 @@
         "main/domains/messaging-whatsapp/config.ts",
         "main/domains/messaging-whatsapp/history.ts",
         "main/domains/messaging-whatsapp/normalize.ts",
+        "main/domains/messaging-whatsapp/policy.ts",
         "main/domains/messaging-whatsapp/repo.ts",
         "main/domains/messaging-whatsapp/runtime.ts",
         "main/domains/messaging-whatsapp/service.ts",
@@ -2325,7 +2367,17 @@
         "main/domains/user-data-sync/runtime.ts",
         "main/domains/user-data-sync/service.ts",
         "main/domains/user-data-sync/types.ts",
+        "main/handlers/auth.ts",
+        "main/handlers/browser.ts",
+        "main/handlers/credentials.ts",
+        "main/handlers/imessage.ts",
+        "main/handlers/machine-session.ts",
+        "main/handlers/preferences.ts",
         "main/handlers/registry.ts",
+        "main/handlers/state.ts",
+        "main/handlers/system.ts",
+        "main/handlers/telegram.ts",
+        "main/handlers/whatsapp.ts",
         "main/index.ts",
         "main/services/IMessageQueueService.ts",
         "main/services/atlasCredentialStore.ts",
@@ -2365,7 +2417,7 @@
         "shared/utils/error.ts"
       ],
       "testFile": "tests/blackbox/electron-main.blackbox.ts",
-      "fileCount": 214
+      "fileCount": 229
     },
     {
       "domain": "electron-preload",
@@ -2553,18 +2605,23 @@
       "files": [
         "shared/types/ipc.ts",
         "ui/features/launcher/api.ts",
+        "ui/features/launcher/components/AttachmentChips.tsx",
         "ui/features/launcher/components/Launcher.tsx",
+        "ui/features/launcher/components/LauncherShell.tsx",
         "ui/features/launcher/components/QueryForm.tsx",
+        "ui/features/launcher/components/QueryFormMiddle.tsx",
         "ui/features/launcher/components/ShaderTile.tsx",
         "ui/features/launcher/config.ts",
+        "ui/features/launcher/fileDrag.ts",
         "ui/features/launcher/hooks.ts",
         "ui/features/launcher/index.ts",
         "ui/features/launcher/types.ts",
+        "ui/features/launcher/useLauncherAttachments.ts",
         "ui/launcher/main.tsx",
         "ui/lib/viewport-scale.ts"
       ],
       "testFile": "tests/blackbox/launcher.blackbox.tsx",
-      "fileCount": 11
+      "fileCount": 16
     },
     {
       "domain": "apple-passwords-modal",
@@ -2778,7 +2835,7 @@
       {
         "file": "shared/utils/error.ts",
         "category": "shared/other",
-        "usedByCount": 26,
+        "usedByCount": 27,
         "testFile": null
       }
     ],
@@ -2789,6 +2846,9 @@
       "main/app/mainWindow.ts": "electron-main",
       "main/app/packagedPaths.ts": "electron-main",
       "main/app/quickQuery.ts": "electron-main",
+      "main/app/quickQueryFocus.ts": "electron-main",
+      "main/app/quickQueryGeometry.ts": "electron-main",
+      "main/app/quickQueryPayload.ts": "electron-main",
       "main/app/windowState.ts": "electron-main",
       "main/domains/electron-preload/config.ts": "electron-preload",
       "main/domains/electron-preload/runtime.ts": "electron-preload",
@@ -2814,13 +2874,18 @@
       "ui/features/apple-passwords-modal/index.ts": "apple-passwords-modal",
       "ui/features/apple-passwords-modal/types.ts": "apple-passwords-modal",
       "ui/features/launcher/api.ts": "launcher",
+      "ui/features/launcher/components/AttachmentChips.tsx": "launcher",
       "ui/features/launcher/components/Launcher.tsx": "launcher",
+      "ui/features/launcher/components/LauncherShell.tsx": "launcher",
       "ui/features/launcher/components/QueryForm.tsx": "launcher",
+      "ui/features/launcher/components/QueryFormMiddle.tsx": "launcher",
       "ui/features/launcher/components/ShaderTile.tsx": "launcher",
       "ui/features/launcher/config.ts": "launcher",
+      "ui/features/launcher/fileDrag.ts": "launcher",
       "ui/features/launcher/hooks.ts": "launcher",
       "ui/features/launcher/index.ts": "launcher",
       "ui/features/launcher/types.ts": "launcher",
+      "ui/features/launcher/useLauncherAttachments.ts": "launcher",
       "ui/features/quick-query-listener.tsx": "renderer-main",
       "ui/launcher/main.tsx": "launcher",
       "ui/onboarding/OnboardingAuth.tsx": "onboarding"
