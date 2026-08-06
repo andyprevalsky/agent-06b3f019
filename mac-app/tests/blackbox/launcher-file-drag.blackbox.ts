@@ -126,8 +126,7 @@ describe('extractDroppedFilesAsync', () => {
       dt({
         types: ['text/uri-list'],
         files: [],
-        getData: (type) =>
-          type === 'text/uri-list' ? 'file:///tmp/Screen%20Shot.png\n' : '',
+        getData: (type) => (type === 'text/uri-list' ? 'file:///tmp/Screen%20Shot.png\n' : ''),
       })
     );
 
