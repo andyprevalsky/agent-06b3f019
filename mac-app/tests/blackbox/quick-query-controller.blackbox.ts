@@ -106,6 +106,12 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
     expect(win.hide).not.toHaveBeenCalled();
   });
 
+  it('keeps a multi-second blur grace so screenshot corner→launcher drags can land', () => {
+    // Screenshot thumbnails spawn at a screen edge; 500ms was shorter than a
+    // typical human drag to the bottom-center pill.
+    expect(QUICK_QUERY_BLUR_HIDE_DELAY_MS).toBeGreaterThanOrEqual(5_000);
+  });
+
   it('hides on blur after the deferral when no file-drag arrives', async () => {
     const electron = await import('electron');
     vi.mocked(electron.BrowserWindow).mockImplementation(
