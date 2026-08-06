@@ -179,6 +179,14 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     stripped_html = re.sub(
         r"<(script|style|noscript)\b[^>]*>.*?</\1>", " ", normalized_html, flags=re.S
     )
+    # `_wait_for_clean_page` truncates to 100k chars, which can cut a large
+    # interstitial mid-script. The opening tag then has no closing match, the
+    # pattern above leaves it intact, and the raw script text counts as visible
+    # content — clearing the substantive-content bar so a still-challenged page
+    # reads as clean. Drop any unterminated block through end-of-input.
+    stripped_html = re.sub(
+        r"<(script|style|noscript)\b[^>]*>.*\Z", " ", stripped_html, flags=re.S
+    )
     visible_markup = re.sub(r"<[^>]+>", "", stripped_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True

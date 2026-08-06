@@ -83,7 +83,9 @@ def _host_is_trusted(candidate: str, trusted_hosts: set[str]) -> bool:
     return any(
         candidate == trusted or candidate.endswith(f".{trusted}") or trusted.endswith(f".{candidate}")
         for trusted in trusted_hosts
-        if trusted
+        # A single-label host ("com", "localhost") is never a usable trust
+        # anchor: expanding subdomains from it would authorize the entire TLD.
+        if trusted and "." in trusted
     )
 
 

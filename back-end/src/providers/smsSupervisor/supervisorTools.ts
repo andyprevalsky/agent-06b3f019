@@ -507,8 +507,11 @@ async function commitReplyToAgent(
       // Scope by agent AND user, not request id alone. validateReplyToAgent
       // accepts any attention_request_id when currentSmsMatches is true, so an
       // id belonging to another agent or user would otherwise be written here.
+      // `userResponse: null` keeps this single-shot. Without it a repeated
+      // reply overwrites an existing decision and reports a fresh
+      // approval/rejection for a request that was already resolved.
       const resolved = await prisma.agentAttentionRequest.updateMany({
-        where: { id: attention_request_id, agentId: agent.id, userId },
+        where: { id: attention_request_id, agentId: agent.id, userId, userResponse: null },
         data: { userResponse },
       });
       attentionResolved = resolved.count > 0;

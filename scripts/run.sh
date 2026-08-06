@@ -489,9 +489,23 @@ PYEOF
     case "$grace" in
         '' | *[!0-9]*) grace=90 ;;
     esac
-    if [ -n "$age" ] && [ "$age" -lt "$grace" ]; then
+    [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
+
+    # Young alone is not enough. An unqualified age check ALSO preserves a
+    # non-isolated benchmark that has no manifest and never will, so the next
+    # run inherits its workers and dies on occupied ports. Require evidence of
+    # a real in-flight isolated bootstrap: a run directory that exists but has
+    # not published services.json yet. `-mmin` is portable across BSD/GNU find;
+    # round the grace up to whole minutes.
+    local grace_min rundir
+    grace_min=$(( (grace + 59) / 60 ))
+    while IFS= read -r rundir; do
+        [ -n "$rundir" ] || continue
+        [ -f "$rundir/services.json" ] && continue
         return 0
-    fi
+    done <<EOF
+$(find "$PWD/.context/benchmarks" -maxdepth 1 -mindepth 1 -type d -mmin "-$grace_min" 2>/dev/null)
+EOF
     return 1
 }
 

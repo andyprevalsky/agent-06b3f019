@@ -4,7 +4,7 @@
  */
 
 import { prisma, runTransactionWithRetry } from '../database';
-import { startAgentWorkflow } from '../temporal';
+import { getWorkflowStatus, startAgentWorkflow } from '../temporal';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 
@@ -169,6 +169,30 @@ export async function commitStartNewAgent(
       agentId: startedAgent.id,
       error: errorMsg,
     });
+
+    // The start is AMBIGUOUS, not necessarily failed: Temporal may have accepted
+    // the workflow and the throw happened afterwards (response lost, or the
+    // follow-up row write failed). The workflow id IS the agent id, so ask
+    // Temporal before declaring failure — otherwise a live workflow keeps
+    // running against an agent row marked FAILED.
+    const reconciled = await getWorkflowStatus(startedAgent.id);
+    if (reconciled !== null && ['RUNNING', 'CONTINUED_AS_NEW'].includes(reconciled.status)) {
+      log.warn('Workflow start reported an error but the workflow is live; adopting it', {
+        phase: 'start',
+        agentId: startedAgent.id,
+        workflowStatus: reconciled.status,
+        error: errorMsg,
+      });
+      await prisma.agent.update({
+        where: { id: startedAgent.id },
+        data: { temporalWorkflowId: startedAgent.id },
+      });
+      return {
+        tool: 'start_new_agent',
+        success: true,
+        result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
+      };
+    }
 
     await prisma.agent.update({
       where: { id: agent.id },
