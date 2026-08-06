@@ -90,7 +90,10 @@ export async function extractDroppedFilesAsync(
 }
 
 function readUriList(dataTransfer: DataTransfer): string[] {
-  const raw = [safeGetData(dataTransfer, 'text/uri-list'), safeGetData(dataTransfer, 'public.file-url')]
+  const raw = [
+    safeGetData(dataTransfer, 'text/uri-list'),
+    safeGetData(dataTransfer, 'public.file-url'),
+  ]
     .filter((value) => value.length > 0)
     .join('\n');
   return raw
