@@ -121,9 +121,12 @@ function useFileDragHandlers(
       if (e.dataTransfer !== null && e.dataTransfer !== undefined) {
         e.dataTransfer.dropEffect = 'copy';
       }
+      // Tell main to cancel blur-hide on ANY claimed dragover. Screenshot
+      // pasteboard types are often empty/unknown until drop; gating this on
+      // looksLikeFileDrag left fileDragActive=false and the pill still hid.
+      void setQuickQueryFileDrag(true);
       if (!looksLikeFileDrag(e.dataTransfer)) return;
       setIsDragOver(true);
-      void setQuickQueryFileDrag(true);
     },
     [setIsDragOver]
   );
