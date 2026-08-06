@@ -246,10 +246,21 @@ def test_cloudbench_shell_controllers_require_fresh_identity_and_child_success()
     assert 'BENCHMARK_IMESSAGE_API_KEY="$CLOUDBENCH_API_KEY"' in controller
     assert "bridge heartbeat established" in controller
     assert "IMESSAGE_RELAY_OK" in controller
+    # Live message-person requires a macOS Apple Messages relay; Linux controllers
+    # must fail closed before provisioning (epoch-2 daily INFRA on Cloud).
+    assert 'uname -s)" != "Darwin"' in controller
+    assert "requires a macOS controller for Apple Messages" in controller
     assert ".vm.${APP}.internal" in controller
     assert "cat '$REMOTE_REPO/.context/cloudbench/run.json'" in controller
     assert "BENCH_EXIT:-1" in controller
     assert 'RUN_PASS_OK" = "1' in controller
+    # Claude Code credential SKIPs must not count as fleet/cloud PASS.
+    cloud_validation = controller.split(
+        '"$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT"', 1
+    )[1].split("then", 1)[0]
+    assert "--require-pass" in cloud_validation
+    assert "--allow-claude-code-credential-skip" not in cloud_validation
+    assert '"--allow-claude-code-credential-skip"' not in fleet
     assert "CHILD_EXIT_CODES" in fleet
     assert "declare -A" not in fleet
     assert "scripts/cloudbench_result.py" in fleet

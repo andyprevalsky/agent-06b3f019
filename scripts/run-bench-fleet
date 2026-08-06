@@ -5524,6 +5524,7 @@ p=os.environ["RUN_JSON_PATH"]
 expected=os.environ["EXPECTED_TASK"]
 child_rc=int(os.environ["CHILD_RC"])
 try:
+    # Strict pass only: Claude Code credential SKIPs must not count as PASS.
     check=subprocess.run(
         [
             sys.executable,
@@ -5532,7 +5533,6 @@ try:
             "--expected-task",
             expected,
             "--require-pass",
-            "--allow-claude-code-credential-skip",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

@@ -3168,7 +3168,9 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
     for task_name in "${BENCH_TASKS[@]}"; do
         validation_args+=(--expected-task "$task_name")
     done
-    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass --allow-claude-code-credential-skip; then
+    # Strict pass only: Claude Code credential SKIPs must not count as PASS.
+    # (epoch-2 daily masked image-handling / files-in-sub-agents that way.)
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
         RUN_PASS_OK="1"
     fi
 fi
