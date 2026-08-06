@@ -476,12 +476,15 @@ resolve_prod_backend_browser_provider() {
 }
 
 resolve_prod_worker_browser_provider() {
-    local machines
-    machines="$(FLY machines list -a "$PROD_APP" --json)" || {
-        echo "FATAL: could not read production Fly worker configuration" >&2
-        return 1
-    }
-    printf '%s' "$machines" | python3 -c '
+    local machines err
+    # Bench-scoped Fly tokens (Cursor Cloud) can list [REDACTED]-bench but not
+    # the production worker app. Fall back to the local contract provider so
+    # --refresh-secrets can still stage AgentCard OAuth into BACKEND_ENV_B64
+    # (epoch-3 daily: stale B64 missing ORG_OAUTH blocked payment tasks).
+    err="$(mktemp)"
+    if machines="$(FLY machines list -a "$PROD_APP" --json 2>"$err")"; then
+        rm -f "$err"
+        printf '%s' "$machines" | python3 -c '
 import json, sys
 machines = json.load(sys.stdin) or []
 values = [
@@ -495,6 +498,24 @@ if len(providers) != 1:
     raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
 print(next(iter(providers)))
 '
+        return
+    fi
+    if grep -Eiq 'unauthorized|403|401|not found|could not find app' "$err" 2>/dev/null; then
+        local fallback
+        fallback="$(cloudbench_env_value back-end/.env BROWSER_PROVIDER)"
+        case "$fallback" in
+            kernel|steel)
+                echo "⚠️  production Fly worker list unauthorized for $PROD_APP; using local back-end/.env BROWSER_PROVIDER=$fallback" >&2
+                rm -f "$err"
+                printf '%s\n' "$fallback"
+                return 0
+                ;;
+        esac
+    fi
+    cat "$err" >&2 || true
+    rm -f "$err"
+    echo "FATAL: could not read production Fly worker configuration" >&2
+    return 1
 }
 
 validate_environment_contract() {
@@ -503,6 +524,8 @@ validate_environment_contract() {
     prod_worker="$(resolve_prod_worker_browser_provider)" || exit 1
     cloudbench_validate_browser_provider_contract \
         agents/.env back-end/.env "$prod_backend" "$prod_worker" || exit 1
+    # Refuse to stage a BACKEND_ENV_B64 that cannot run AgentCard payment tasks.
+    cloudbench_require_agentcard_org_oauth back-end/.env || exit 1
     CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
     export CLOUDBENCH_PROD_BROWSER_PROVIDER
 }
