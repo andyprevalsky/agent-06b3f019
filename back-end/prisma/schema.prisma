@@ -329,6 +329,10 @@ model Subscription {
   subscriptionTier     Int
   stripeSubscriptionId String   @unique
   stripeCustomerId     String
+  /// Which Stripe account minted this customer/subscription. Existing rows are
+  /// sandbox (false); live Rose Labs Pro checkouts persist true so the billing
+  /// portal can open against the matching account.
+  stripeLivemode       Boolean  @default(false)
   currentPeriodEnd     DateTime
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt

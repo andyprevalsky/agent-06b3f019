@@ -66,6 +66,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
     subscriptionTier: tier,
     stripeSubscriptionId: subscription.id,
     stripeCustomerId: subscription.customer as string,
+    stripeLivemode: invoice.livemode === true,
     currentPeriodEnd,
   });
 
@@ -78,6 +79,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
   log.info('Added credit for user', {
     user_id: userId,
     tier_dollars: tier,
+    livemode: invoice.livemode === true,
     expires: currentPeriodEnd.toISOString(),
   });
 
@@ -251,6 +253,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     subscriptionTier: tier,
     stripeSubscriptionId: subscription.id,
     stripeCustomerId: subscription.customer as string,
+    stripeLivemode: subscription.livemode === true,
     currentPeriodEnd: new Date(subscription.current_period_end * 1000),
   });
 

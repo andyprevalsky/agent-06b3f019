@@ -1,4 +1,9 @@
-import { stripe, getStripeClientForSecretKey, type Stripe } from '../../providers/stripe';
+import {
+  stripe,
+  getStripeClientForSecretKey,
+  getStripeClientForLivemode,
+  type Stripe,
+} from '../../providers/stripe';
 import * as repo from './repo';
 import {
   IS_PRODUCTION,
@@ -26,8 +31,9 @@ export async function createPortalSession(userId: string): Promise<{ url: string
   // Determine return URL based on environment
   const returnUrl = IS_PRODUCTION ? RETURN_URL_PRODUCTION : RETURN_URL_DEVELOPMENT;
 
-  // Create a billing portal session
-  const portalSession = await stripe.billingPortal.sessions.create({
+  // Match the Stripe account that owns this customer (sandbox vs live Rose Labs).
+  const portalStripe = getStripeClientForLivemode(subscription.stripeLivemode === true);
+  const portalSession = await portalStripe.billingPortal.sessions.create({
     customer: subscription.stripeCustomerId,
     return_url: returnUrl,
   });
