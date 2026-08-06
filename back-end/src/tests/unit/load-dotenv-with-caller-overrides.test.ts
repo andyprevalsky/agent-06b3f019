@@ -23,6 +23,8 @@ function main(): void {
   assert.deepEqual([...AGENTCARD_ENV_OVERRIDE_KEYS], [
     'BENCHMARK_AGENTCARD_ORG_ID',
     'BENCHMARK_AGENTCARD_CARDHOLDER_ID',
+    'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+    'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
   ]);
 
   assert.equal(
@@ -32,6 +34,24 @@ function main(): void {
       'cmqr3fkkkkkkkkkkkkkkkiu0z'
     ),
     true
+  );
+  assert.equal(
+    shouldKeepDotenvAgentCardValue(
+      'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+      '',
+      '3a439f50-aaaa-bbbb-cccc-dddddddddddd'
+    ),
+    true,
+    'blank injected OAuth client id must yield to .env'
+  );
+  assert.equal(
+    shouldKeepDotenvAgentCardValue(
+      'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+      '',
+      'acs_hOSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    ),
+    true,
+    'blank injected OAuth client secret must yield to .env'
   );
   assert.equal(
     shouldKeepDotenvAgentCardValue('PORT', '3201', '3001'),
@@ -86,6 +106,30 @@ function main(): void {
     assert.equal(env.BENCHMARK_AGENTCARD_ORG_ID, 'cmqr3fkkkkkkkkkkkkkkkiu0z');
     assert.equal(env.BENCHMARK_AGENTCARD_CARDHOLDER_ID, 'cmrfpzzzzzzzzzzzzzzzzzgfto');
     assert.equal(env.OTHER, 'keep-me');
+  }
+
+  {
+    // Blank injected OAuth credentials must not clobber decoded .env values —
+    // epoch-2 daily cloudbench guests failed AgentCard setup with
+    // "Missing AGENTCARD_ORG_OAUTH_CLIENT_ID" despite a verified back-end/.env.
+    const env: NodeJS.ProcessEnv = {
+      PORT: '3201',
+      AGENTCARD_ORG_OAUTH_CLIENT_ID: '',
+      AGENTCARD_ORG_OAUTH_CLIENT_SECRET: '',
+      AMPLITUDE_API_KEY: '',
+    };
+    const preserved = captureCallerOwnedRuntimeEnv(env);
+    env.AGENTCARD_ORG_OAUTH_CLIENT_ID = '3a439f50-aaaa-bbbb-cccc-dddddddddddd';
+    env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET = 'acs_hOSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx';
+    env.AMPLITUDE_API_KEY = 'real-amplitude-from-dotenv';
+    restoreCallerOwnedRuntimeEnv(env, preserved);
+    assert.equal(env.AGENTCARD_ORG_OAUTH_CLIENT_ID, '3a439f50-aaaa-bbbb-cccc-dddddddddddd');
+    assert.equal(
+      env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET,
+      'acs_hOSyxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+    );
+    assert.equal(env.AMPLITUDE_API_KEY, '', 'intentional empty AMPLITUDE_* still restored');
+    assert.equal(env.PORT, '3201');
   }
 
   {
