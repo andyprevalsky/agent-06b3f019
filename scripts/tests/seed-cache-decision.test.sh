@@ -89,6 +89,23 @@ if grep -q 'BENCHMARK_PUBLISH_SEED_DUMP' "$ROOT_DIR/scripts/run.sh"; then
 else
     FAIL=$((FAIL+1)); echo "  ❌ canonical base publication is not explicitly gated"
 fi
+# Ubuntu's `pg_dump --version` ends with "...24.04.1)"; a greedy "last X.Y" sed
+# extracts 04 and looks up a nonexistent pg04 cache token. Anchor at the first
+# version number so system-PG hosts keep matching the pg16 (or real major) artifact.
+_PG_MAJOR_SED="$(printf '%s\n' 'pg_dump (PostgreSQL) 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)' \
+  | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+if [ "$_PG_MAJOR_SED" = "16" ] \
+  && grep -q "s/^\\[^0-9\\]*(\\([0-9]\\+\\))\\\\..*/\\\\1/" "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+else
+    # Prefer the literal sed source form used in run.sh.
+    if [ "$_PG_MAJOR_SED" = "16" ] \
+      && grep -F "s/^[^0-9]*([0-9]+)\\..*/\\1/" "$ROOT_DIR/scripts/run.sh"; then
+      PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+    else
+      FAIL=$((FAIL+1)); echo "  ❌ system pg_dump major parsing still vulnerable to Ubuntu package suffix (got '${_PG_MAJOR_SED}')"
+    fi
+fi
 
 echo
 echo "backend_ready_budget — warm-restored boxes must get the same startup budget"

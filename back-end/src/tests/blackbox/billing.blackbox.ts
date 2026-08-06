@@ -395,10 +395,10 @@ async function testUsage_freeUserUpgradeOptions() {
   });
   assertStatus(res.status, 200, res.data);
   const body = assertSchema(UsageResponse, res.data, 'GET /usage upgradeOptions');
-  // Free tier (null) should show tiers 20, 50, 100
+  // Free tier (null) should show tiers 30, 50, 100 (base plan is $30/mo)
   assert(body.tier === null, `Expected null tier for free user, got ${body.tier}`);
   const tiers = body.upgradeOptions.map((o) => o.tier);
-  assert(tiers.includes(20), `Expected upgradeOptions to include tier 20, got [${tiers}]`);
+  assert(tiers.includes(30), `Expected upgradeOptions to include tier 30, got [${tiers}]`);
   assert(tiers.includes(50), `Expected upgradeOptions to include tier 50, got [${tiers}]`);
   assert(tiers.includes(100), `Expected upgradeOptions to include tier 100, got [${tiers}]`);
 }
