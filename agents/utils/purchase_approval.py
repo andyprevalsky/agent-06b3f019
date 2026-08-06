@@ -61,6 +61,9 @@ def _registrable_host(url: Any) -> str:
         host = (urlparse(str(url or "")).hostname or "").lower()
     except ValueError:
         return ""
+    # `urlparse` keeps the trailing DNS root label, so `merchant.example.` and
+    # `merchant.example` would otherwise compare unequal and fail the trust check.
+    host = host[:-1] if host.endswith(".") else host
     return host[4:] if host.startswith("www.") else host
 
 

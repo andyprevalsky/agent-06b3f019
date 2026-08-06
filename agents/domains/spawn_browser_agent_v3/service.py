@@ -686,18 +686,28 @@ def accumulate_model_usage(
 
     Cached input is tracked in its own buckets because `_track_usage` prices
     cache reads/writes separately from uncached input; dropping them here bills
-    every cache hit at the full input rate. `from_fast_cache` is sticky per
-    model: once any step for a model was replayed by Fast Mode without a
-    provider call, the emitted row must say so or the replay is billed as paid.
+    every cache hit at the full input rate.
+
+    Fast-Mode replays are a SEPARATE bucket from paid calls on the same model,
+    never a sticky flag on a shared one: `_track_usage` zero-prices any row
+    marked `from_fast_cache` and skips pricing entirely, so merging one replay
+    into a model's paid bucket would make every paid token on that model free.
+    The ledger key is therefore (actual_model, from_fast_cache); each bucket
+    carries its own `model` so the emitted row still reports the plain name.
     """
+    model = str(actual_model or "")
+    # NUL can never occur in a model name, so this cannot collide with a real
+    # model whose name happens to end in the marker text.
+    key = f"{model}\x00fast_cache" if from_fast_cache else model
     bucket = usage_by_model.setdefault(
-        str(actual_model or ""),
+        key,
         {
+            "model": model,
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_input_tokens": 0,
             "cache_creation_input_tokens": 0,
-            "from_fast_cache": 0,
+            "from_fast_cache": 1 if from_fast_cache else 0,
         },
     )
     bucket["input_tokens"] += int(input_tokens or 0)
@@ -708,8 +718,6 @@ def accumulate_model_usage(
     bucket["cache_creation_input_tokens"] = int(bucket.get("cache_creation_input_tokens") or 0) + int(
         cache_creation_input_tokens or 0
     )
-    if from_fast_cache:
-        bucket["from_fast_cache"] = 1
 
 
 def build_browser_llm_usage_items(
@@ -736,9 +744,13 @@ def build_browser_llm_usage_items(
     """
     model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
     items: List[Dict[str, Any]] = []
-    for model, usage in model_rows.items():
+    for ledger_key, usage in model_rows.items():
         input_tokens = int((usage or {}).get("input_tokens") or 0)
         output_tokens = int((usage or {}).get("output_tokens") or 0)
+        # The ledger key is (model, from_fast_cache); the bucket carries the
+        # plain model. Callers that hand-build a ledger omit it, so fall back to
+        # the key, which for them IS the model name.
+        model = str((usage or {}).get("model") or ledger_key)
         items.append(
             {
                 "type": "llm",

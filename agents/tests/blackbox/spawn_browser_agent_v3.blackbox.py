@@ -6572,25 +6572,32 @@ def test_browser_usage_rows_carry_cache_metadata_for_the_workflow_discount():
     usage_by_model: dict = {}
     accumulate_model_usage(usage_by_model, "claude-sonnet-4-6", 100, 20, 900, 50)
     accumulate_model_usage(usage_by_model, "claude-sonnet-4-6", 40, 10, 100, 0)
-    accumulate_model_usage(usage_by_model, "gemini-3-pro", 70, 5, 0, 0, from_fast_cache=True)
+    # Same model, but a Fast-Mode replay: MUST NOT merge into the paid bucket.
+    accumulate_model_usage(usage_by_model, "claude-sonnet-4-6", 70, 5, 0, 0, from_fast_cache=True)
 
-    rows = {
-        r["model"]: r
-        for r in build_browser_llm_usage_items(
-            0, 0, {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}, usage_by_model
-        )
-    }
+    rows = build_browser_llm_usage_items(
+        0, 0, {"input_cents_per_1k": 0.5, "output_cents_per_1k": 2.75}, usage_by_model
+    )
+    paid = [r for r in rows if r["model"] == "claude-sonnet-4-6" and not r["from_fast_cache"]]
+    replay = [r for r in rows if r["model"] == "claude-sonnet-4-6" and r["from_fast_cache"]]
+    assert len(paid) == 1 and len(replay) == 1, f"paid and replay must be separate rows: {rows}"
 
-    # Cache counters aggregate across every step billed to the same model.
-    assert rows["claude-sonnet-4-6"]["cache_read_input_tokens"] == 1_000
-    assert rows["claude-sonnet-4-6"]["cache_creation_input_tokens"] == 50
+    # Cache counters aggregate across every PAID step billed to the same model.
+    assert paid[0]["cache_read_input_tokens"] == 1_000
+    assert paid[0]["cache_creation_input_tokens"] == 50
     # Uncached input stays separate — cache tokens must not inflate it.
-    assert rows["claude-sonnet-4-6"]["input_tokens"] == 140
+    assert paid[0]["input_tokens"] == 140
 
-    # `from_fast_cache` is sticky per model and must survive as a real bool,
-    # since `_track_usage` branches on it to bill the replay at $0.
-    assert rows["gemini-3-pro"]["from_fast_cache"] is True
-    assert rows["claude-sonnet-4-6"]["from_fast_cache"] is False
+    # The regression this guards: `_track_usage` zero-prices any row flagged
+    # `from_fast_cache` and returns early, so if the replay were merged into the
+    # paid bucket all 210 paid input tokens would be billed at $0.
+    assert paid[0]["from_fast_cache"] is False
+    assert replay[0]["from_fast_cache"] is True
+    assert replay[0]["input_tokens"] == 70
+
+    # Token conservation across the split: nothing is dropped or double-counted.
+    assert sum(r["input_tokens"] for r in rows) == 210
+    assert sum(r["output_tokens"] for r in rows) == 35
 
 def test_real_browser_path_attributes_every_token_to_its_actual_model():
     """The REAL activity must never bill tokens it did not attribute to a model.

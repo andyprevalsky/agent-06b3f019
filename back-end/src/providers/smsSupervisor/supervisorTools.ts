@@ -632,19 +632,32 @@ async function commitIncreaseBudget(
   // two commits read the same priceLimitCents and the last update overwrites the
   // other. `commitPendingWrites` only serializes within one invocation, so the
   // ceiling check and the increment must happen in the same database write.
+  // `deletedAt: null` must be re-asserted here, not just in the lookup above: a
+  // delete landing between the two would otherwise raise a deleted agent's
+  // budget and report success.
   const bumped = await prisma.agent.updateMany({
     where: {
       id: agent.id,
+      deletedAt: null,
       priceLimitCents: { lte: MAX_PRICE_LIMIT_CENTS - addCents },
     },
     data: { priceLimitCents: { increment: addCents } },
   });
   if (bumped.count === 0) {
+    // Zero rows means the ceiling predicate OR the liveness predicate failed;
+    // re-read to report the accurate reason instead of always blaming the cap.
+    const current = await prisma.agent.findFirst({
+      where: { id: agent.id, deletedAt: null },
+      select: { id: true },
+    });
     return {
       tool: 'increase_budget',
       success: false,
       result: '',
-      error: `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+      error:
+        current === null
+          ? 'Agent no longer exists'
+          : `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
     };
   }
 

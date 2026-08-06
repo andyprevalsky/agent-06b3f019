@@ -480,9 +480,16 @@ PYEOF
     # Publication race: the isolated runner execs run.sh BEFORE it writes
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
-    local age
+    local age grace
     age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
-    if [ -n "$age" ] && [ "$age" -lt "${BENCHMARK_STARTUP_GRACE_SECONDS:-90}" ]; then
+    # Fall back to the default on any non-integer override. An arithmetic error
+    # here would return "not owned" and let cleanup kill a just-started run
+    # before it publishes services.json — fail toward preserving the stack.
+    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    case "$grace" in
+        '' | *[!0-9]*) grace=90 ;;
+    esac
+    if [ -n "$age" ] && [ "$age" -lt "$grace" ]; then
         return 0
     fi
     return 1
