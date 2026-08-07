@@ -5841,6 +5841,7 @@ async def test_local_compute_refresh_accepts_healthy_anthropic_api_key_fallback(
         {
             "tolerate_gpt_code_unavailable": True,
             "tolerate_claude_code_unavailable": True,
+            "required_token_types": None,
         }
     ]
     assert http_calls == [
@@ -5877,6 +5878,7 @@ async def test_local_compute_refresh_rehydrates_tokens_after_base_restore():
     sync.assert_called_once_with(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=False,
+        required_token_types=None,
     )
 
 
