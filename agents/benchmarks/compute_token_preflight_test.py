@@ -505,6 +505,20 @@ def test_claude_code_required_preflight_fails_closed_when_sync_fails():
             assert "compute tokens" in str(exc).lower()
 
 
+def test_deploy_smoke_may_opt_into_claude_code_credential_skip():
+    """Infra-fix /deploy smoke sets the skip flag; fleet/cloud must not."""
+    predeploy = (Path(__file__).resolve().parents[2] / "scripts" / "run-predeploy-local").read_text()
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" in predeploy
+    cloud = (Path(__file__).resolve().parents[2] / "scripts" / "run-bench-cloud").read_text()
+    fleet = (Path(__file__).resolve().parents[2] / "scripts" / "run-bench-fleet").read_text()
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" not in cloud
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" not in fleet
+    source = Path(rb.__file__).read_text()
+    assert 'os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP"' in source
+    assert "Claude Code credentials unavailable — skipping:" in source
+    assert "Claude Code credentials unavailable after compute-token refresh:" in source
+
+
 def test_keychain_refresh_targets_only_the_isolated_database():
     seen: dict[str, object] = {}
 

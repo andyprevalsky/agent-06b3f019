@@ -9476,25 +9476,47 @@ async def main_async(args):
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
         claude_code_tasks_for_refresh = [t for t in tasks if t.requires_claude_code]
+        # Deploy smoke may opt into credential SKIP for Claude Code tasks when
+        # the pool is rate-limited/missing (BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP).
+        # Fleet/cloud require-pass stays fail-closed and must not set that flag.
+        allow_claude_code_credential_skip = (
+            os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+        )
         await _refresh_local_compute_tokens_for_run(
             base_url,
-            require_claude_code=bool(claude_code_tasks_for_refresh),
+            require_claude_code=bool(claude_code_tasks_for_refresh)
+            and not allow_claude_code_credential_skip,
         )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
-    # Missing Claude Code credentials after a required refresh is a hard failure —
-    # never SKIP+PASS via --allow-claude-code-credential-skip (epoch-2 daily
-    # masked image-handling / files-in-sub-agents that way).
+    # Default (fleet/cloud): missing Claude Code credentials after a required
+    # refresh is a hard failure — never SKIP+PASS via cloudbench_result's
+    # --allow-claude-code-credential-skip (epoch-2 daily masked
+    # image-handling / files-in-sub-agents that way).
+    # Deploy smoke sets BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 so
+    # infra-fix deploys are not blocked on Anthropic pool cooldowns; the
+    # Claude Code tasks become the deploy-approved loud SKIP.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
+    allow_claude_code_credential_skip = (
+        os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+    )
     if claude_code_tasks:
         has_claude_creds = await _check_claude_code_credentials(base_url)
         if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            raise RuntimeError(
-                "Claude Code credentials unavailable after compute-token refresh: "
-                + ", ".join(skipped_names)
-            )
+            if allow_claude_code_credential_skip:
+                print(
+                    "  ⚠ Claude Code credentials unavailable — skipping: "
+                    + ", ".join(skipped_names)
+                )
+                skipped_claude_tasks = claude_code_tasks
+                tasks = [t for t in tasks if not t.requires_claude_code]
+            else:
+                raise RuntimeError(
+                    "Claude Code credentials unavailable after compute-token refresh: "
+                    + ", ".join(skipped_names)
+                )
 
     await _update_world_model_before_simulation(args)
 
