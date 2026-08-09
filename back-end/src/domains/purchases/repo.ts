@@ -31,11 +31,13 @@ function legacyFingerprintWhere(
 
 export async function findMostRecentPurchaseByUserAndFingerprint(
   userId: string,
-  fingerprint: string
+  fingerprint: string,
+  agentId?: string
 ) {
   return prisma.purchaseSpend.findFirst({
     where: {
       userId,
+      ...(agentId !== undefined && agentId.trim() !== '' ? { agentId } : {}),
       OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }],
     },
     orderBy: { createdAt: 'desc' },

@@ -1882,7 +1882,19 @@ async def _wait_for_expected_payment_lifecycle(
             and isinstance(wallet_funding, dict)
             and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if status not in retryable_statuses and not compensation_pending:
+        # When the task expects a purchase but abandon returned an empty lifecycle (e.g. mint
+        # reused another agent's HELD row), keep polling until timeout instead of treating the
+        # empty snapshot as a successful terminal state.
+        expected_lifecycle = task.expected_payment_lifecycle or {}
+        expected_purchase = expected_lifecycle.get("purchase")
+        missing_expected_purchase = (
+            isinstance(expected_purchase, dict) and not isinstance(purchase, dict)
+        )
+        if (
+            status not in retryable_statuses
+            and not compensation_pending
+            and not missing_expected_purchase
+        ):
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:

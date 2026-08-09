@@ -37,10 +37,16 @@ export async function createPendingPurchaseWithLock(data: {
       )
       SELECT 1 AS locked FROM acquired
     `;
+    // Active rows are agent-scoped: the same cart fingerprint can legitimately be minted by two
+    // concurrent agents for one user (benchmarks + multi-agent checkout). Reusing another agent's
+    // HELD purchase makes abandon/lifecycle look at the wrong agentId and returns purchaseCount=0.
     const existing = await transaction.purchaseSpend.findFirst({
       where: {
         userId: data.userId,
         status: { in: ACTIVE_PURCHASE_STATUSES },
+        ...(data.agentId !== undefined && data.agentId.trim() !== ''
+          ? { agentId: data.agentId }
+          : {}),
         OR: [
           { fingerprint: data.fingerprint },
           { canonicalFingerprint: data.canonicalFingerprint },

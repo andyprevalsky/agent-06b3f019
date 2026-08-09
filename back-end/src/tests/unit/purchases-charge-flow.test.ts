@@ -299,6 +299,60 @@ async function main(): Promise<void> {
     assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.FAILED);
   });
 
+  await test('mintPurchaseCard does not reuse another agent HELD fingerprint', async () => {
+    const userId = await seedSubscribedUser();
+    const fingerprint = `fp-${randomUUID()}`;
+    const orphanAgent = await prisma.agent.create({
+      data: { userId, goal: 'orphaned held purchase agent' },
+    });
+    const nextAgent = await prisma.agent.create({
+      data: { userId, goal: 'fresh mint agent' },
+    });
+    const orphan = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        agentId: orphanAgent.id,
+        fingerprint,
+        canonicalFingerprint: fingerprint,
+        merchant: 'Rose Labs Test Payment',
+        lineItemsJson: {
+          fees: [],
+          currency: 'USD',
+          lineItems: [{ name: 'Agent Card Lifecycle Probe', quantity: 1, unitPriceCents: 100 }],
+          totalCents: 100,
+          subtotalCents: 100,
+        },
+        totalCents: 100,
+        status: PurchaseSpendStatus.HELD,
+        cardId: `card-${randomUUID()}`,
+        provider: 'agentcard',
+      },
+    });
+    const provider = new FakeCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId, {
+      agentId: nextAgent.id,
+      fingerprint,
+      merchant: 'Rose Labs Test Payment',
+      lineItems: [{ label: 'Agent Card Lifecycle Probe', amountCents: 100 }],
+      fees: [],
+      subtotalCents: 100,
+      totalCents: 100,
+    });
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.notEqual(result.purchaseId, orphan.id, 'must open a fresh purchase for the new agent');
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    const nextPurchase = await prisma.purchaseSpend.findUnique({
+      where: { id: result.purchaseId },
+    });
+    assert.equal(nextPurchase?.agentId, nextAgent.id);
+    assert.equal(
+      (await prisma.purchaseSpend.findUnique({ where: { id: orphan.id } }))?.status,
+      PurchaseSpendStatus.HELD,
+      'orphan HELD row must remain untouched'
+    );
+  });
+
   await test('mintPurchaseCard validates its inputs before touching Stripe', async () => {
     const userId = await seedSubscribedUser();
     await assert.rejects(

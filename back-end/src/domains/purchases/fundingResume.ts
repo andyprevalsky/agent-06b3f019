@@ -145,6 +145,18 @@ export async function classifyFundingResumeFailure(
 }
 
 function assertFundingResumeMatchesInput(purchase: PurchaseSpend, input: MintPurchaseInput): void {
+  if (
+    input.agentId !== undefined &&
+    input.agentId.trim() !== '' &&
+    purchase.agentId !== null &&
+    purchase.agentId !== input.agentId
+  ) {
+    throw new PurchaseError(
+      'The retry payload does not match the purchase whose funding is in progress',
+      409,
+      'purchase_funding_resume_mismatch'
+    );
+  }
   const storedCanonicalFingerprint =
     purchase.canonicalFingerprint ??
     canonicalStoredPurchaseFingerprint({
