@@ -1,5 +1,5 @@
 import { PurchaseSpendStatus, type Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { runTransactionWithRetry } from '../../providers/database';
 
 const PURCHASE_OPEN_LOCK_SEED = 4_951_887;
 const ACTIVE_PURCHASE_STATUSES = [
@@ -27,7 +27,7 @@ export async function createPendingPurchaseWithLock(data: {
   lineItemsJson: unknown;
   totalCents: number;
 }) {
-  return prisma.$transaction(async (transaction) => {
+  return runTransactionWithRetry(async (transaction) => {
     const lockKey = `${data.userId}:${data.canonicalFingerprint}`;
     await transaction.$queryRaw`
       WITH acquired AS MATERIALIZED (
