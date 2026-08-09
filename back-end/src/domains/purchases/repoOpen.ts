@@ -27,6 +27,8 @@ export async function createPendingPurchaseWithLock(data: {
   lineItemsJson: unknown;
   totalCents: number;
 }) {
+  const agentId =
+    data.agentId !== undefined && data.agentId.trim() !== '' ? data.agentId.trim() : undefined;
   return runTransactionWithRetry(async (transaction) => {
     const lockKey = `${data.userId}:${data.canonicalFingerprint}`;
     await transaction.$queryRaw`
@@ -37,19 +39,20 @@ export async function createPendingPurchaseWithLock(data: {
       )
       SELECT 1 AS locked FROM acquired
     `;
-    // Active rows are agent-scoped: the same cart fingerprint can legitimately be minted by two
-    // concurrent agents for one user (benchmarks + multi-agent checkout). Reusing another agent's
-    // HELD purchase makes abandon/lifecycle look at the wrong agentId and returns purchaseCount=0.
+    // Active rows are agent-scoped, but legacy null-agent rows still count for this cart so we do
+    // not mint a second live card. Another agent's HELD/PENDING row stays excluded.
     const existing = await transaction.purchaseSpend.findFirst({
       where: {
         userId: data.userId,
         status: { in: ACTIVE_PURCHASE_STATUSES },
-        ...(data.agentId !== undefined && data.agentId.trim() !== ''
-          ? { agentId: data.agentId }
-          : {}),
-        OR: [
-          { fingerprint: data.fingerprint },
-          { canonicalFingerprint: data.canonicalFingerprint },
+        AND: [
+          {
+            OR: [
+              { fingerprint: data.fingerprint },
+              { canonicalFingerprint: data.canonicalFingerprint },
+            ],
+          },
+          ...(agentId !== undefined ? [{ OR: [{ agentId }, { agentId: null }] }] : []),
         ],
       },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -58,7 +61,7 @@ export async function createPendingPurchaseWithLock(data: {
     const purchase = await transaction.purchaseSpend.create({
       data: {
         userId: data.userId,
-        agentId: data.agentId,
+        agentId,
         fingerprint: data.fingerprint,
         canonicalFingerprint: data.canonicalFingerprint,
         merchant: data.merchant,

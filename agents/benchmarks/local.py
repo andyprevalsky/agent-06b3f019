@@ -134,6 +134,23 @@ def slugify(value: str) -> str:
     return slug or "bench"
 
 
+def isolated_workspace_name(base_name: str, run_id: str, max_len: int = 60) -> str:
+    """Build a CONDUCTOR_WORKSPACE_NAME that stays unique under the length cap.
+
+    Naive ``slugify(f"{base}-{run_id}")[:60]`` truncates the uniqueness suffix, so
+    two isolated stacks started in the same second (e.g. /deploy smoke + AgentCard)
+    can collapse onto one Temporal task queue and steal each other's workflows.
+    Keep the ``bench-<run_id>`` suffix intact and truncate only the human prefix.
+    """
+    suffix = slugify(f"bench-{run_id}")
+    if len(suffix) >= max_len:
+        digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
+        suffix = f"b{digest}"
+    prefix_budget = max_len - len(suffix) - 1
+    prefix = slugify(base_name)[: max(1, prefix_budget)].strip("-") or "ws"
+    return f"{prefix}-{suffix}"
+
+
 def make_run_id(explicit: str | None = None) -> str:
     if explicit:
         return slugify(explicit)
@@ -246,7 +263,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         )
     context_dir = BENCHMARK_CONTEXT_ROOT / run_id
     base_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME") or REPO_ROOT.name
-    workspace_name = slugify(f"{base_name}-bench-{run_id}")[:60].strip("-")
+    workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
         env_base = os.environ.get("CONDUCTOR_PORT")

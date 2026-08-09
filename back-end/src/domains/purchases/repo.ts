@@ -34,11 +34,18 @@ export async function findMostRecentPurchaseByUserAndFingerprint(
   fingerprint: string,
   agentId?: string
 ) {
+  // When scoped to an agent, still surface legacy null-agent rows so in-flight / HELD carts
+  // keep the double-charge guard. Other agents' rows stay excluded.
+  const scopedAgentId = agentId !== undefined && agentId.trim() !== '' ? agentId.trim() : undefined;
   return prisma.purchaseSpend.findFirst({
     where: {
       userId,
-      ...(agentId !== undefined && agentId.trim() !== '' ? { agentId } : {}),
-      OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }],
+      AND: [
+        { OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }] },
+        ...(scopedAgentId !== undefined
+          ? [{ OR: [{ agentId: scopedAgentId }, { agentId: null }] }]
+          : []),
+      ],
     },
     orderBy: { createdAt: 'desc' },
   });
