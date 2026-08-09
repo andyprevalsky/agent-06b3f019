@@ -20,7 +20,7 @@ def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
     previous = os.environ.get("STEEL_API_KEY")
     os.environ["STEEL_API_KEY"] = "worker-steel-secret"
     try:
-        public_url = "wss://connect.steelbrowser.com?sessionId=session-1"
+        public_url = "wss://connect.steel.dev?sessionId=session-1"
         connected = steel_cdp_connection_url(public_url)
         query = parse_qs(urlsplit(connected).query)
         assert query == {"sessionId": ["session-1"], "apiKey": ["worker-steel-secret"]}

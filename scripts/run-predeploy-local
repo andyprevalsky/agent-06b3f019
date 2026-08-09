@@ -203,9 +203,14 @@ trap 'forward_signal TERM 143' TERM
 # cache override—or run.sh's shared-cache default—turn startup into a production
 # pooler dependency. run.sh creates the same cache schema in this run's local DB.
 unset FAST_MODE_CACHE_DATABASE_URL
+# Infra-fix /deploy must not hard-require a usable Claude Code pool token:
+# when the sole pooled OAuth credential is rate-limited, Claude Code smoke
+# tasks become the deploy-approved loud SKIP instead of failing the whole
+# compute-token sync / preflight. Fleet/cloud require-pass does NOT set this.
 FAST_MODE_CACHE_USE_LOCAL=1 \
 BENCHMARK_SKIP_WMH_BUILD=1 \
 BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1 \
+BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 \
 BENCHMARK_COMPUTE_TOKEN_TYPE=claude \
 python3 "$LOGGED_COMMAND" "$RUNNER_LOG" -- \
     bash "$ROOT_DIR/scripts/run-bench" --local "${SCHEDULED_TASKS[@]}" \

@@ -80,7 +80,26 @@ export async function runCrossProviderRotationLadder(
     retrieveSteelBrowser,
   } = options;
 
-  const switched = await post('/rotate-proxy', {
+  // Steel create is flaky under parallel blackbox load; retry the Kernel→Steel
+  // switch on transient connection failures (server already retries create).
+  const postWithSteelConnectionRetry = async (
+    path: string,
+    body?: unknown
+  ): Promise<RotationResponse> =>
+    retryWithBackoff(() => post(path, body), {
+      maxRetries: 3,
+      fixedDelays: [1_000, 2_000],
+      isRetryable: (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return (
+          message.includes('Failed to create Steel replacement') ||
+          message.includes('Connection error')
+        );
+      },
+      component: 'browser-provider:steel-switch',
+    });
+
+  const switched = await postWithSteelConnectionRetry('/rotate-proxy', {
     task_id: taskId,
     current_url: 'https://example.com/provider-switch-check',
   });

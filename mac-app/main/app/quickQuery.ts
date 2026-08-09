@@ -209,6 +209,9 @@ export class QuickQueryController {
     if (!active) return;
 
     this.cancelBlurHide();
+    // Stop focus steals mid-drag — synthetic center-clicks can hit the
+    // paperclip and open Finder while the screenshot thumbnail is in flight.
+    this.clearFocusTimeouts();
     const quickWindow = this.quickQueryWindow;
     if (quickWindow === null || quickWindow.isDestroyed()) return;
 

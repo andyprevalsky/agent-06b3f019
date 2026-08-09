@@ -1068,13 +1068,20 @@ def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path:
     assert "task results are not all passing" in rejected_wrong_reason.stderr
 
 
-def test_cloudbench_wrappers_accept_approved_claude_credential_skip() -> None:
+def test_cloudbench_wrappers_require_strict_pass_without_claude_credential_skip() -> None:
+    """Fleet/cloud must not count Claude Code credential SKIPs as PASS.
+
+    The opt-in flag remains on cloudbench_result.py for explicit callers, but
+    the daily/cloud wrappers must stay strict so missing Claude Code tokens
+    surface as failures (INFRA), not green SKIPs.
+    """
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
     cloud_validation = cloud.split('"$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT"', 1)[1].split("then", 1)[0]
-    assert "--require-pass --allow-claude-code-credential-skip" in cloud_validation
-    assert '"--allow-claude-code-credential-skip"' in fleet
+    assert "--require-pass" in cloud_validation
+    assert "--allow-claude-code-credential-skip" not in cloud_validation
+    assert '"--allow-claude-code-credential-skip"' not in fleet
 
 
 def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:

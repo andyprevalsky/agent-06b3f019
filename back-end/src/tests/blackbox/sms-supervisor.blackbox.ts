@@ -209,6 +209,8 @@ const SMS_SUPERVISOR_INFRA_HOSTS = [
   'stripe.com',
   'parallel.ai',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
   'perplexity.ai',
   'exa.ai',
   'vapi.ai',

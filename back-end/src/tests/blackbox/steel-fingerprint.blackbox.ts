@@ -19,6 +19,7 @@ import {
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
+import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
 import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 
 function makeFingerprint(): FingerprintData {
@@ -344,6 +345,7 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       createInputs.length === 2,
       `expected two Steel create attempts, got ${createInputs.length}`
     );
+
     const firstGeo = (createInputs[0]?.useProxy as { geolocation?: Record<string, string> })
       ?.geolocation;
     const secondGeo = (createInputs[1]?.useProxy as { geolocation?: Record<string, string> })
@@ -569,7 +571,7 @@ async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
   };
 
   await navigateToSavedUrl(
-    'wss://connect.steelbrowser.com?sessionId=session-1',
+    'wss://connect.steel.dev?sessionId=session-1',
     'https://example.com/saved',
     async () => browser as unknown as import('playwright').Browser
   );
@@ -613,6 +615,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries rejected cities and stops after cleanup failure',
       fn: testReplacementRetryDropsRejectedCity,
+    },
+    {
+      name: 'Steel replacement retries transient Connection error',
+      fn: testConnectionErrorRetriesOnReplacement,
     },
     {
       name: 'saved URL navigation closes its browser after failure',

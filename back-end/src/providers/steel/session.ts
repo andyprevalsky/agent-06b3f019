@@ -21,6 +21,7 @@ import {
   resolveSteelProfileForSession,
   shouldWriteSteelProfileToBrowserContext,
 } from './profileBinding';
+import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 export { resumeSession } from './sessionResume';
 export {
   envEnabled,
@@ -38,14 +39,12 @@ export {
   steelSessionFileUrl,
   steelPublicCdpUrl,
 } from './urls';
+export { MAX_SESSION_RETRIES } from './sessionRetry';
 
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
   baseURL: STEEL_API_BASE_URL,
 });
-
-// Max retries when session validation fails
-export const MAX_SESSION_RETRIES = 3;
 
 export class SteelSessionCleanupError extends Error {
   constructor(sessionId: string, cause: unknown) {
@@ -396,6 +395,9 @@ export async function createSessionWithContext(
           throw new SteelSessionCleanupError(session.id, releaseErr);
         }
         lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        if (attempt < MAX_SESSION_RETRIES) {
+          await sleepBeforeSteelRetry(attempt);
+        }
         continue; // Retry
       }
 
@@ -432,6 +434,9 @@ export async function createSessionWithContext(
             lastError = new Error(
               'Concurrent Steel profile initialization; retrying with persisted profile'
             );
+            if (attempt < MAX_SESSION_RETRIES) {
+              await sleepBeforeSteelRetry(attempt);
+            }
             continue;
           }
         } else {
@@ -511,6 +516,9 @@ export async function createSessionWithContext(
         dropProxyCity = true;
         rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
+      }
+      if (attempt < MAX_SESSION_RETRIES) {
+        await sleepBeforeSteelRetry(attempt);
       }
     }
   }

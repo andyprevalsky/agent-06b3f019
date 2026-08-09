@@ -69,9 +69,25 @@ cp -R "$ROOT_DIR/agents/benchmarks/fleet_startup_phase.py" "$SANDBOX/scripts/" 2
 # Keep the synthetic worktrees dependency-fingerprintable. Pool compatibility is
 # now a fail-closed production contract, so an intentionally minimal fake repo
 # still needs real (minimal) manifests rather than relying on an absent proof.
-mkdir -p "$SANDBOX/back-end" "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
+mkdir -p "$SANDBOX/back-end/scripts" "$SANDBOX/back-end/prisma" \
+  "$SANDBOX/front-end" "$SANDBOX/agents/benchmarks"
 printf '.context/\n**/.env\n' > "$SANDBOX/.gitignore"
 cp "$ROOT_DIR/agents/benchmarks/hub_upload.py" "$SANDBOX/agents/benchmarks/hub_upload.py"
+# run-bench-fleet preflights the guest-pg canonical seed dump before clone.
+# Keep the synthetic worktrees hermetic: real token helper + stub R2 get.
+cp "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" "$SANDBOX/agents/benchmarks/seed_cache_path.py"
+printf '// cloudbench-multi seed-token fixture\n' > "$SANDBOX/back-end/prisma/schema.prisma"
+cat > "$SANDBOX/back-end/scripts/seed-dump-cache.ts" <<'SEEDSTUB'
+import { writeFileSync } from "node:fs";
+
+const [, , cmd, , file] = process.argv;
+if (cmd === "get" && typeof file === "string" && file.length > 0) {
+  writeFileSync(file, "cloudbench-multi-stub-seed-dump\n");
+  process.exit(0);
+}
+console.error("usage: seed-dump-cache.ts <get|put> <token> <file>");
+process.exit(2);
+SEEDSTUB
 printf '{}\n' > "$SANDBOX/package.json"
 printf '{}\n' > "$SANDBOX/back-end/package.json"
 printf '{}\n' > "$SANDBOX/front-end/package.json"

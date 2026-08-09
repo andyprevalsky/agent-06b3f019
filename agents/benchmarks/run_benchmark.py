@@ -2123,7 +2123,19 @@ async def _wait_for_expected_payment_lifecycle(
             and isinstance(wallet_funding, dict)
             and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if status not in retryable_statuses and not compensation_pending:
+        # When the task expects a purchase but abandon returned an empty lifecycle (e.g. mint
+        # reused another agent's HELD row), keep polling until timeout instead of treating the
+        # empty snapshot as a successful terminal state.
+        expected_lifecycle = task.expected_payment_lifecycle or {}
+        expected_purchase = expected_lifecycle.get("purchase")
+        missing_expected_purchase = (
+            isinstance(expected_purchase, dict) and not isinstance(purchase, dict)
+        )
+        if (
+            status not in retryable_statuses
+            and not compensation_pending
+            and not missing_expected_purchase
+        ):
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
@@ -5601,12 +5613,23 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+async def _refresh_local_compute_tokens_for_run(
+    base_url: str,
+    *,
+    require_claude_code: bool = False,
+) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     Real local tasks refresh from the verified shared workspace. Simulated cloud
     stacks already restore the canonical base fixture and deliberately have no
     second source DB endpoint, so they use that restored credential state.
+
+    When ``require_claude_code`` is set (the run includes tasks with
+    ``requires_claude_code``), never tolerate a missing claude_code sync just
+    because the shared Anthropic API-key fallback looks healthy — that path
+    made cloud guests print "Refreshed compute tokens" then skip
+    image-handling / files-in-sub-agents, which fleet then counted as PASS via
+    ``--allow-claude-code-credential-skip``.
     """
     if not _is_local_base_url(base_url):
         return
@@ -5614,6 +5637,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     if _anthropic_family_excluded():
+        if require_claude_code:
+            raise RuntimeError(
+                "Claude Code tasks cannot run when ROSE_EXCLUDE_ANTHROPIC_FAMILY is set"
+            )
         if not _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
             required_token_types=("gpt",),
@@ -5638,25 +5665,18 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    # claude_code is a COMPUTE TOKEN, not a capability: it routes inference to
-    # Anthropic at $0 via the user's subscription instead of the paid waterfall.
-    # Nothing in a browser/payment task needs Claude specifically -- the Rose
-    # pools race OpenRouter models perfectly well without it. Gating the whole
-    # run on it is the same FALSE infra failure already documented for gpt_code
-    # above: it drops every live task before an agent is ever created, so the
-    # slice cannot produce a verdict at all. Tasks that genuinely require
-    # claudeAuth keep their own strict gates downstream.
-    # Always tolerate. Deriving this from a funded Anthropic key is the
-    # fail-closed form that killed epoch 4 of the ecommerce descent: the dev
-    # claude_code row was EXPIRED and the rest rate-limited, so three tasks
-    # died on 'No usable claude_code integrations after sync' at $0.00,
-    # before an agent existed. claude_code only routes inference to Anthropic
-    # at $0 instead of the paid waterfall; the Rose pools race OpenRouter
-    # without it. Cost degradation is announced below instead.
-    tolerate_missing_claude = True
+    # Claude-Code-required tasks must not inherit the Anthropic API-key
+    # tolerance — spawn_claude_code_agent cannot use that fallback.
+    tolerate_missing_claude = False
+    required_token_types: tuple[str, ...] | None = None
+    if require_claude_code:
+        required_token_types = ("claude",)
+    else:
+        tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
+        required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
     if not await _has_usable_anthropic_api_key_fallback(base_url):
@@ -9978,18 +9998,48 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
-        await _refresh_local_compute_tokens_for_run(base_url)
+        claude_code_tasks_for_refresh = [t for t in tasks if t.requires_claude_code]
+        # Deploy smoke may opt into credential SKIP for Claude Code tasks when
+        # the pool is rate-limited/missing (BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP).
+        # Fleet/cloud require-pass stays fail-closed and must not set that flag.
+        allow_claude_code_credential_skip = (
+            os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+        )
+        await _refresh_local_compute_tokens_for_run(
+            base_url,
+            require_claude_code=bool(claude_code_tasks_for_refresh)
+            and not allow_claude_code_credential_skip,
+        )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
+    # Default (fleet/cloud): missing Claude Code credentials after a required
+    # refresh is a hard failure — never SKIP+PASS via cloudbench_result's
+    # --allow-claude-code-credential-skip (epoch-2 daily masked
+    # image-handling / files-in-sub-agents that way).
+    # Deploy smoke sets BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 so
+    # infra-fix deploys are not blocked on Anthropic pool cooldowns; the
+    # Claude Code tasks become the deploy-approved loud SKIP.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
+    allow_claude_code_credential_skip = (
+        os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+    )
     if claude_code_tasks:
         has_claude_creds = await _check_claude_code_credentials(base_url)
         if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
-            skipped_claude_tasks = claude_code_tasks
-            tasks = [t for t in tasks if not t.requires_claude_code]
+            if allow_claude_code_credential_skip:
+                print(
+                    "  ⚠ Claude Code credentials unavailable — skipping: "
+                    + ", ".join(skipped_names)
+                )
+                skipped_claude_tasks = claude_code_tasks
+                tasks = [t for t in tasks if not t.requires_claude_code]
+            else:
+                raise RuntimeError(
+                    "Claude Code credentials unavailable after compute-token refresh: "
+                    + ", ".join(skipped_names)
+                )
 
     await _update_world_model_before_simulation(args)
 

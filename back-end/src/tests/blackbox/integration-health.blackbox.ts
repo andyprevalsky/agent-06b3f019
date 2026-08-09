@@ -118,7 +118,7 @@ async function checkE2B(): Promise<void> {
 async function checkSteel(): Promise<void> {
   const key = requireEnv('STEEL_API_KEY');
   const res = await fetchWithTimeout(
-    'https://connect.steelbrowser.com/v1/sessions?limit=1',
+    'https://api.steel.dev/v1/sessions?limit=1',
     {
       method: 'GET',
       headers: { 'Steel-Api-Key': key },

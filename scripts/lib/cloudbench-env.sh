@@ -132,6 +132,30 @@ cloudbench_verify_env_file() {
   echo "$label env digest verified: ${actual:0:12}"
 }
 
+# AgentCard Organization MCP cardholder resolution needs both OAuth client
+# credentials. Stale Fly BACKEND_ENV_B64 blobs (names-only verify) have shipped
+# without them and produced guest 502 Missing AGENTCARD_ORG_OAUTH_CLIENT_ID
+# during /descend daily (epoch-3). Fail closed as soon as the decoded .env is
+# written — refresh with: bash scripts/run-bench-cloud --refresh-secrets
+CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN=20
+cloudbench_require_agentcard_org_oauth() {
+  local backend_env="$1"
+  local client_id client_secret
+  client_id="$(cloudbench_env_value "$backend_env" AGENTCARD_ORG_OAUTH_CLIENT_ID)"
+  client_secret="$(cloudbench_env_value "$backend_env" AGENTCARD_ORG_OAUTH_CLIENT_SECRET)"
+  if [ "${#client_id}" -lt "$CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN" ]; then
+    echo "FATAL: back-end/.env missing AGENTCARD_ORG_OAUTH_CLIENT_ID (len=${#client_id})." >&2
+    echo "   Stale BACKEND_ENV_B64 will 502 AgentCard setup. Refresh: bash scripts/run-bench-cloud --refresh-secrets" >&2
+    return 1
+  fi
+  if [ "${#client_secret}" -lt "$CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN" ]; then
+    echo "FATAL: back-end/.env missing AGENTCARD_ORG_OAUTH_CLIENT_SECRET (len=${#client_secret})." >&2
+    echo "   Stale BACKEND_ENV_B64 will 502 AgentCard setup. Refresh: bash scripts/run-bench-cloud --refresh-secrets" >&2
+    return 1
+  fi
+  echo "agentcard org oauth verified: id_len=${#client_id} secret_len=${#client_secret}"
+}
+
 cloudbench_validate_browser_provider_contract() {
   local agents_env="$1" backend_env="$2" prod_backend="$3" prod_worker="$4"
   local agents_provider backend_provider

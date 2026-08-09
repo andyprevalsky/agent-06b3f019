@@ -5,18 +5,24 @@
  * `types` omits the literal `Files` string during dragover.
  */
 
-import { describe, it, expect } from 'vitest';
-import { looksLikeFileDrag } from '../../ui/features/launcher/fileDrag';
+import { describe, it, expect, vi } from 'vitest';
+import {
+  extractDroppedFiles,
+  extractDroppedFilesAsync,
+  looksLikeFileDrag,
+} from '../../ui/features/launcher/fileDrag';
 
 function dt(partial: {
   types?: string[];
   files?: File[];
-  items?: Array<{ kind: string; type: string }>;
+  items?: Array<{ kind: string; type: string; getAsFile?: () => File | null }>;
+  getData?: (type: string) => string;
 }): DataTransfer {
   return {
     types: partial.types ?? [],
     files: partial.files ?? ([] as unknown as FileList),
     items: (partial.items ?? []) as unknown as DataTransferItemList,
+    getData: partial.getData ?? (() => ''),
   } as DataTransfer;
 }
 
@@ -76,5 +82,57 @@ describe('looksLikeFileDrag', () => {
         items: undefined,
       } as unknown as DataTransfer)
     ).toBe(false);
+  });
+});
+
+describe('extractDroppedFiles', () => {
+  it('prefers dataTransfer.files when populated', () => {
+    const file = new File(['png'], 'Screen Shot.png', { type: 'image/png' });
+    expect(extractDroppedFiles(dt({ files: [file] }))).toEqual([file]);
+  });
+
+  it('falls back to items.getAsFile when files[] is empty (screenshot drop)', () => {
+    // Repro: macOS screenshot thumbnail drop often leaves FileList empty and
+    // only exposes the File through DataTransferItem.getAsFile().
+    const file = new File(['png'], 'Screen Shot 2026-08-06.png', { type: 'image/png' });
+    const extracted = extractDroppedFiles(
+      dt({
+        types: ['text/uri-list'],
+        files: [],
+        items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }],
+      })
+    );
+    expect(extracted).toEqual([file]);
+  });
+
+  it('returns empty when neither files nor file-items are present', () => {
+    expect(extractDroppedFiles(dt({ types: ['text/uri-list'], files: [] }))).toEqual([]);
+    expect(extractDroppedFiles(null)).toEqual([]);
+  });
+});
+
+describe('extractDroppedFilesAsync', () => {
+  it('resolves file:// uri-list entries when File objects are unavailable', async () => {
+    const bytes = new Uint8Array([1, 2, 3]);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        blob: async () => new Blob([bytes], { type: 'image/png' }),
+      }))
+    );
+
+    const files = await extractDroppedFilesAsync(
+      dt({
+        types: ['text/uri-list'],
+        files: [],
+        getData: (type) => (type === 'text/uri-list' ? 'file:///tmp/Screen%20Shot.png\n' : ''),
+      })
+    );
+
+    expect(files).toHaveLength(1);
+    expect(files[0]?.name).toBe('Screen Shot.png');
+    expect(files[0]?.type).toBe('image/png');
+    vi.unstubAllGlobals();
   });
 });

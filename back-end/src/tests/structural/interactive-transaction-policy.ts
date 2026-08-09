@@ -66,12 +66,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'explicit 30-second advisory-lock policy',
   },
   {
-    file: 'domains/purchases/repoOpen.ts',
-    scope: 'createPendingPurchaseWithLock',
-    fingerprint: 'e7ec887248397de7',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/purchases/repoSettlement.ts',
     scope: 'settlePurchaseAfterTransactionCleared',
     fingerprint: 'cd1cd0ea80d5cefb',

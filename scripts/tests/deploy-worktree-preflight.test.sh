@@ -9,6 +9,10 @@ DEPLOY_COMMAND="$ROOT_DIR/.claude/commands/deploy.md"
 TMP_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TMP_ROOT"' EXIT
 
+# Docker ownership cases must not inherit Cloud ROSE_USE_SYSTEM_PG=true.
+# System-Postgres behavior is covered explicitly later in this suite.
+unset ROSE_USE_SYSTEM_PG || true
+
 fail() {
   echo "FAIL: $1" >&2
   exit 1
@@ -36,6 +40,7 @@ require_text() {
 controller="$TMP_ROOT/controller"
 deploy_one="$TMP_ROOT/descend-I99-one"
 deploy_two="$TMP_ROOT/sibling/descend-I99-one"
+deploy_system="$TMP_ROOT/descend-I99-system"
 registry="$TMP_ROOT/ports"
 fake_bin="$TMP_ROOT/bin"
 fake_docker_state="$TMP_ROOT/fake-docker"
@@ -102,9 +107,11 @@ git -C "$controller" add README.md
 git -C "$controller" commit -qm init
 git -C "$controller" worktree add -q -b deploy-one "$deploy_one"
 git -C "$controller" worktree add -q -b deploy-two "$deploy_two"
+git -C "$controller" worktree add -q -b deploy-system "$deploy_system"
 controller="$(cd "$controller" && pwd -P)"
 deploy_one="$(cd "$deploy_one" && pwd -P)"
 deploy_two="$(cd "$deploy_two" && pwd -P)"
+deploy_system="$(cd "$deploy_system" && pwd -P)"
 
 for relative in back-end/.env agents/.env front-end/.env mac-app/.env; do
   mkdir -p "$controller/$(dirname "$relative")"
@@ -304,5 +311,66 @@ require_text "$DESCEND_COMMAND" 'bash scripts/prepare-deploy-worktree.sh' "/desc
 require_text "$DEPLOY_COMMAND" 'bash scripts/prepare-deploy-worktree.sh --check' "/deploy must fail closed when isolated-worktree preparation is incomplete"
 require_text "$DEPLOY_COMMAND" 'bash scripts/tests/deploy-worktree-preflight.test.sh' "/deploy structural gates must cement deploy-worktree preparation"
 require_text "$PREFLIGHT" 'if [ ! -d node_modules ]; then' "dependency hydration must not borrow the controller's node_modules through parent resolution"
+require_text "$PREFLIGHT" 'ROSE_USE_SYSTEM_PG' "deploy-worktree prep must support system Postgres when Docker overlay mounts fail"
+require_text "$PREFLIGHT" 'system_deploy_db_name' "deploy-worktree prep must isolate system Postgres databases per worktree"
+require_text "$PREFLIGHT" 'persist_system_pg_mode' "system Postgres mode must persist into deploy-worktree.env for clean-shell --check"
+require_text "$PREFLIGHT" 'hydrate_seed_cache' "deploy-worktree prep must hydrate seed-cache for the seed-memory ratchet"
+
+# System Postgres path: durable marker + env so --check works without ambient flag.
+mkdir -p "$deploy_system/node_modules" "$deploy_system/agents/venv/bin"
+printf '#!/usr/bin/env bash\nexit 0\n' >"$deploy_system/agents/venv/bin/python"
+chmod +x "$deploy_system/agents/venv/bin/python"
+if ! command -v pg_isready >/dev/null 2>&1 || ! pg_isready -h localhost -p 5432 -U postgres -q 2>/dev/null; then
+  fail "system Postgres on localhost:5432 is required to cement ROSE_USE_SYSTEM_PG deploy-worktree prep"
+fi
+ROSE_USE_SYSTEM_PG=true PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+  bash "$PREFLIGHT" \
+    --worktree "$deploy_system" \
+    --source "$controller" \
+    --port-registry "$registry" \
+    --skip-dependencies
+system_name="$(
+  # shellcheck disable=SC1091
+  . "$deploy_system/.context/deploy-worktree.env"
+  printf '%s' "$CONDUCTOR_WORKSPACE_NAME"
+)"
+system_db="victoria_deploy_$(printf '%s' "$system_name" | tr -c '[:alnum:]' '_' | cut -c1-48)"
+trap 'PGPASSWORD=postgres dropdb -h localhost -p 5432 -U postgres --if-exists "$system_db" >/dev/null 2>&1 || true; rm -rf "$TMP_ROOT"' EXIT
+grep -Eq '^export ROSE_USE_SYSTEM_PG=true[[:space:]]*$' \
+  "$deploy_system/.context/deploy-worktree.env" \
+  || fail "system Postgres prepare must persist ROSE_USE_SYSTEM_PG into deploy-worktree.env"
+expect_eq "$(cat "$deploy_system/.context/deploy-system-pg.db")" "$system_db" \
+  "system Postgres prepare writes the isolated database marker"
+PGPASSWORD=postgres psql -h localhost -p 5432 -U postgres -d postgres -tAc \
+  "SELECT 1 FROM pg_database WHERE datname = '$system_db'" | grep -q '^1$' \
+  || fail "system Postgres prepare must create the isolated database"
+# Clean-shell --check: only the persisted env file, no ambient ROSE_USE_SYSTEM_PG.
+env -u ROSE_USE_SYSTEM_PG \
+  PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+  bash -c "
+    cd \"$deploy_system\"
+    # shellcheck disable=SC1091
+    . .context/deploy-worktree.env
+    bash \"$PREFLIGHT\" --check
+  " >/dev/null
+echo "PASS: system Postgres --check succeeds from persisted deploy-worktree.env alone"
+rm -f "$deploy_system/.context/deploy-system-pg.db"
+set +e
+missing_marker_output="$(
+  env -u ROSE_USE_SYSTEM_PG \
+    PATH="$fake_bin:$PATH" FAKE_DOCKER_STATE="$fake_docker_state" \
+    bash -c "
+      cd \"$deploy_system\"
+      # shellcheck disable=SC1091
+      . .context/deploy-worktree.env
+      bash \"$PREFLIGHT\" --check
+    " 2>&1
+)"
+missing_marker_status=$?
+set -e
+[ "$missing_marker_status" -ne 0 ] || fail "system Postgres --check must reject a missing marker"
+[[ "$missing_marker_output" == *"marker missing or mismatched"* ]] \
+  || fail "system Postgres missing-marker failure must be explicit"
+echo "PASS: system Postgres missing marker fails the deploy preflight"
 
 echo "All deploy-worktree preflight tests passed."

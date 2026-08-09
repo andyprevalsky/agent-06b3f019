@@ -17,6 +17,48 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+async function assertCustomSteelApiKeepsDebugHostWithoutLiveView(): Promise<void> {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { fileURLToPath, pathToFileURL } = await import('node:url');
+  const urlsAbs = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../providers/steel/urls.ts'
+  );
+  const dir = mkdtempSync(path.join(tmpdir(), 'steel-url-'));
+  const scriptPath = path.join(dir, 'check.mts');
+  writeFileSync(
+    scriptPath,
+    `
+process.env.STEEL_BASE_URL = 'https://staging-steel.internal';
+delete process.env.STEEL_LIVE_VIEW_BASE_URL;
+const mod = await import(${JSON.stringify(pathToFileURL(urlsAbs).href)});
+const url = new URL(mod.steelDebugUrl('https://staging-steel.internal/v1/sessions/s1/player?token=x'));
+if (url.hostname !== 'staging-steel.internal') {
+  throw new Error('custom API debug URL rewrote to ' + url.hostname);
+}
+if (url.searchParams.get('interactive') !== 'false') {
+  throw new Error('interactive=false missing on custom debug URL');
+}
+`
+  );
+  try {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', scriptPath], {
+      encoding: 'utf8',
+      env: process.env,
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `custom Steel API live-view contract failed: ${result.stderr || result.stdout || result.error}`
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function assertReleaseRetriesAreBounded(): Promise<void> {
   const sessions = steel.sessions as unknown as {
     release: (sessionId: string) => Promise<unknown>;
@@ -117,18 +159,40 @@ function assertConcurrentProfileCleanupUsesBoundedRelease(): void {
   );
 }
 
+function assertRetryContinuesBackoffBeforeContinue(): void {
+  const source = readFileSync(new URL('../../providers/steel/session.ts', import.meta.url), 'utf8');
+  const validationFailure = source.indexOf('Session validation failed on attempt ${attempt}');
+  const concurrentRetry = source.indexOf(
+    'Concurrent Steel profile initialization; retrying with persisted profile'
+  );
+  const catchBackoff = source.indexOf('await sleepBeforeSteelRetry(attempt)');
+  assert(validationFailure >= 0, 'validation-failure retry branch was not found');
+  assert(concurrentRetry >= 0, 'concurrent-profile retry branch was not found');
+  assert(catchBackoff >= 0, 'catch-path Steel retry backoff was not found');
+
+  const validationBlock = source.slice(validationFailure, validationFailure + 220);
+  const concurrentBlock = source.slice(concurrentRetry, concurrentRetry + 280);
+  assert(
+    validationBlock.includes('await sleepBeforeSteelRetry(attempt)'),
+    'validation-failure continue skipped sleepBeforeSteelRetry backoff'
+  );
+  assert(
+    concurrentBlock.includes('await sleepBeforeSteelRetry(attempt)'),
+    'concurrent-profile continue skipped sleepBeforeSteelRetry backoff'
+  );
+}
+
 async function main(): Promise<void> {
   const previous = process.env.STEEL_API_KEY;
   process.env.STEEL_API_KEY = 'steel-test-key';
   try {
     assert(
-      steelApiUrl('/v1/sessions/session-1') ===
-        'https://connect.steelbrowser.com/v1/sessions/session-1',
+      steelApiUrl('/v1/sessions/session-1') === 'https://api.steel.dev/v1/sessions/session-1',
       'Steel HTTP helper used a stale origin'
     );
     const cdpUrl = new URL(steelCdpUrl('session-1'));
     assert(cdpUrl.protocol === 'wss:', 'Steel CDP helper did not use WebSocket TLS');
-    assert(cdpUrl.hostname === 'connect.steelbrowser.com', 'Steel CDP helper used a stale origin');
+    assert(cdpUrl.hostname === 'connect.steel.dev', 'Steel CDP helper used a stale origin');
     assert(cdpUrl.searchParams.get('apiKey') === null, 'persisted Steel CDP URL leaked its key');
     assert(cdpUrl.searchParams.get('sessionId') === 'session-1', 'Steel session ID missing');
     const connectionUrl = new URL(steelCdpConnectionUrl(cdpUrl.toString()));
@@ -150,7 +214,7 @@ async function main(): Promise<void> {
     const debugUrl = new URL(
       steelDebugUrl('https://api.steel.dev/v1/sessions/session-1/player?legacy=true')
     );
-    assert(debugUrl.hostname === 'connect.steelbrowser.com', 'Steel live view used a stale origin');
+    assert(debugUrl.hostname === 'connect.steel.dev', 'Steel live view used a stale origin');
     assert(
       debugUrl.searchParams.get('legacy') === 'true',
       'Steel live-view query parameters were lost'
@@ -159,14 +223,16 @@ async function main(): Promise<void> {
       debugUrl.searchParams.get('interactive') === 'false',
       'Steel live view was not read-only'
     );
+    await assertCustomSteelApiKeepsDebugHostWithoutLiveView();
     assert(
       steelSessionFileUrl('session/one', 'reports/a?b#c.txt') ===
-        'https://connect.steelbrowser.com/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',
+        'https://api.steel.dev/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',
       'Steel file URL did not encode session IDs and reserved path characters'
     );
     await assertReleaseRetriesAreBounded();
     await assertSupersededProviderCleanupIsExplicit();
     assertConcurrentProfileCleanupUsesBoundedRelease();
+    assertRetryContinuesBackoffBeforeContinue();
     console.log('PASS Steel URLs keep API keys local to the CDP connection boundary');
   } finally {
     if (previous === undefined) delete process.env.STEEL_API_KEY;
