@@ -186,6 +186,36 @@ describe('Integrations page', () => {
       });
     });
 
+    it('shows WhatsApp as Synced when a connected whatsapp integration exists', async () => {
+      const user = userEvent.setup();
+      server.use(
+        integrationsHandler([
+          { id: 'int-wa', name: 'whatsapp', status: 'CONNECTED', isActive: true },
+        ]),
+      );
+
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Messages')).toBeInTheDocument();
+      });
+
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const toggleButton = within(messagesSection).getAllByRole('button')[0];
+      await user.click(toggleButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('WhatsApp')).toBeInTheDocument();
+      });
+
+      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      expect(within(whatsAppRow as HTMLElement).getByText('Synced')).toBeInTheDocument();
+      // Connected state replaces the Desktop-Only download affordance.
+      expect(
+        within(whatsAppRow as HTMLElement).queryByText('Download for Mac'),
+      ).not.toBeInTheDocument();
+    });
+
     it('renders Safari browser rows with a first-class icon from the Mac handler', async () => {
       const user = userEvent.setup();
       const handlers: IntegrationHandlers = {
@@ -324,7 +354,7 @@ describe('Integrations page', () => {
       expect(screen.queryByText('Apple Passwords & Passkeys')).not.toBeInTheDocument();
     });
 
-    it('shows "Coming Soon" badges for WhatsApp, Telegram, and Messenger', async () => {
+    it('shows "Coming Soon" badges for Telegram and Messenger (not WhatsApp)', async () => {
       const user = userEvent.setup();
       renderWithProviders(<Integrations />);
 
@@ -340,9 +370,32 @@ describe('Integrations page', () => {
         expect(screen.getByText('WhatsApp')).toBeInTheDocument();
       });
 
-      // Should have "Coming Soon" badges
+      // Telegram + Messenger are still Coming Soon; WhatsApp is now a real
+      // connectable row (Desktop Only on web), so it must NOT be Coming Soon.
       const comingSoonBadges = screen.getAllByText('Coming Soon');
-      expect(comingSoonBadges.length).toBeGreaterThanOrEqual(3);
+      expect(comingSoonBadges.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('shows WhatsApp as "Desktop Only" with a Download link when not connected', async () => {
+      const user = userEvent.setup();
+      renderWithProviders(<Integrations />);
+
+      await waitFor(() => {
+        expect(screen.getByText('Messages')).toBeInTheDocument();
+      });
+
+      const messagesSection = screen.getByText('Messages').closest('.rounded-lg')!;
+      const toggleButton = within(messagesSection).getAllByRole('button')[0];
+      await user.click(toggleButton);
+
+      await waitFor(() => {
+        expect(screen.getByText('WhatsApp')).toBeInTheDocument();
+      });
+
+      // WhatsApp pairs only in the Mac app, so on web it reads "Desktop Only".
+      const whatsAppRow = screen.getByText('WhatsApp').closest('div.px-4')!;
+      expect(within(whatsAppRow as HTMLElement).getByText('Desktop Only')).toBeInTheDocument();
+      expect(within(whatsAppRow as HTMLElement).getByText('Download for Mac')).toBeInTheDocument();
     });
 
     it('shows "Coming Soon" badges for X and Instagram in Socials', async () => {

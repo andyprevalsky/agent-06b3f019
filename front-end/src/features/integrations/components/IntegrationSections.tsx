@@ -131,6 +131,7 @@ export default function IntegrationSections({
         onToggle={() => accordion.toggleSection('messagesSync')}
         isIMessageAvailable={isIMessageAvailable}
         iMessageSynced={data.iMessageSynced}
+        whatsAppConnected={data.whatsAppConnected}
         messageSyncLoading={messages.messageSyncLoading}
         onIMessageSync={() => void actions.onIMessageSync()}
         connectedIntegrations={data.connectedIntegrations}

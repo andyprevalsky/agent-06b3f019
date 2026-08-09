@@ -10,10 +10,11 @@ grep -q 'BENCHMARK_ISOLATED_RUN" != "true"' "$RUN_SH" || {
 }
 
 # Ensure the gate wraps the worker.py pattern loop specifically.
-python3 - <<'PY'
+RUN_SH="$RUN_SH" python3 - <<'PY'
+import os
 from pathlib import Path
 
-text = Path("/workspace/scripts/run.sh").read_text()
+text = Path(os.environ["RUN_SH"]).read_text()
 idx = text.find('for pattern in "worker\\.py"')
 if idx < 0:
     raise SystemExit("FAIL: worker.py cloud kill pattern missing")

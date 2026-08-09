@@ -15,7 +15,7 @@
 
 import { prisma } from '../database';
 import { CompletionMessage, ContentBlock, markCacheable } from '../rose';
-import { sendSms } from '../smsQueue';
+import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
 import { processInboundAttachments, type SurgeAttachment } from './inboundMedia';
 import {
   commitPendingWrites,
@@ -168,8 +168,16 @@ export async function handleSmsSupervisorMessage(config: {
   attachments?: SurgeAttachment[];
   abortSignal?: AbortSignal;
   commitGuard?: () => Promise<boolean>;
+  /**
+   * Which conversational surface this run came in on. Controls the reply
+   * sender (Surge SMS vs WhatsApp Cloud API) and the `source` stamped on any
+   * agent this run spawns. Defaults to SMS so every existing caller is
+   * byte-identical.
+   */
+  channel?: SupervisorChannel;
 }): Promise<SmsSupervisorResult> {
   const { userId, phoneNumber, inboundMessage, mySeq, abortSignal, commitGuard } = config;
+  const channel: SupervisorChannel = config.channel ?? 'SMS';
   const inboundAlreadyPersisted = config.inboundAlreadyPersisted ?? false;
   const attachments = config.attachments ?? [];
   const overallStart = Date.now();
@@ -293,7 +301,7 @@ export async function handleSmsSupervisorMessage(config: {
         return [superseded];
       }
       const queued = pendingWrites.splice(0, pendingWrites.length);
-      const results = await commitPendingWrites(queued, userId);
+      const results = await commitPendingWrites(queued, userId, channel);
       results.forEach((result, index) => {
         const operation = queued[index];
         recordToolTrace(
@@ -320,13 +328,13 @@ export async function handleSmsSupervisorMessage(config: {
           error: 'A newer inbound SMS superseded this run',
         };
       }
-      const smsResult = await sendSms(phoneNumber, message);
+      const smsResult = await sendOnChannel(channel, phoneNumber, message);
       if (!smsResult.success) {
         return {
           tool: 'send_user_message',
           success: false,
           result: '',
-          error: smsResult.error ?? 'SMS delivery failed',
+          error: smsResult.error ?? 'Message delivery failed',
         };
       }
       // The reply is now DELIVERED. Persistence is best-effort: a throw here must

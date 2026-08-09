@@ -1277,6 +1277,7 @@ enum AgentSource {
   WEB
   MAC_APP
   SMS
+  WHATSAPP
 }
 
 enum VerifierType {

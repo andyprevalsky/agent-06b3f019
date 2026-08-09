@@ -19,6 +19,7 @@ import {
 } from '../../providers/smsSupervisor/outboundEvents';
 import * as repo from './repo';
 import type { NotifyInput } from './types';
+import type { SupervisorChannel } from '../../providers/smsSupervisor/channelDelivery';
 
 const log = createLogger('SendSMS');
 const COMPLETION_SMS_OPERATION_TYPE = 'lifecycle-sms.completion';
@@ -187,11 +188,16 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
     return { success: true, skipped: true, reason: 'benchmark_agent', messagePreview };
   }
 
+  // A WhatsApp-sourced agent's lifecycle notifications must go back over
+  // WhatsApp, not SMS (its number may not be an SMS line at all). Every other
+  // source notifies via SMS exactly as before.
+  const channel: SupervisorChannel = agent.source === 'WHATSAPP' ? 'WHATSAPP' : 'SMS';
+
   if (data.event_type === 'completion') {
-    return dispatchCompletionOnce(data, payload);
+    return dispatchCompletionOnce(data, payload, channel);
   }
 
-  await dispatchByEventType(data, payload, agent.goal);
+  await dispatchByEventType(data, payload, agent.goal, channel);
 
   log.info('SMS Notify processed', {
     eventType: data.event_type,
@@ -204,7 +210,8 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
 
 async function dispatchCompletionOnce(
   data: NotifyInput,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  channel: SupervisorChannel
 ): Promise<NotifyResult> {
   const operationKey = `${COMPLETION_SMS_OPERATION_TYPE}:${data.agent_id}`;
   const claim = await claimToolSideEffect({
@@ -228,7 +235,8 @@ async function dispatchCompletionOnce(
     data.user_id,
     { id: data.agent_id },
     (payload.summary as string | undefined) ?? '',
-    payload.outputs
+    payload.outputs,
+    channel
   );
   if (!delivery.success) {
     if (delivery.definitiveFailure === true) {
@@ -253,18 +261,23 @@ async function dispatchCompletionOnce(
 async function dispatchByEventType(
   data: NotifyInput,
   payload: Record<string, unknown>,
-  agentGoal: string
+  agentGoal: string,
+  channel: SupervisorChannel
 ): Promise<void> {
   switch (data.event_type) {
     case 'agent_started':
-      await notifyAgentStarted(data.user_id, {
-        id: data.agent_id,
-        // Prefer the payload's goal (the worker may have refined it), but fall
-        // back to the goal already read off the Agent row rather than to the
-        // literal string "Unknown goal" — a caller that omits `goal` otherwise
-        // texts the user `Started: "Unknown goal"` about their own request.
-        goal: (payload.goal as string | undefined) ?? agentGoal,
-      });
+      await notifyAgentStarted(
+        data.user_id,
+        {
+          id: data.agent_id,
+          // Prefer the payload's goal (the worker may have refined it), but fall
+          // back to the goal already read off the Agent row rather than to the
+          // literal string "Unknown goal" — a caller that omits `goal` otherwise
+          // texts the user `Started: "Unknown goal"` about their own request.
+          goal: (payload.goal as string | undefined) ?? agentGoal,
+        },
+        channel
+      );
       break;
 
     case 'planner_message':
@@ -272,7 +285,8 @@ async function dispatchByEventType(
         data.user_id,
         { id: data.agent_id },
         (payload.message as string | undefined) ?? '',
-        (payload.is_question as boolean | undefined) ?? false
+        (payload.is_question as boolean | undefined) ?? false,
+        channel
       );
       break;
 
@@ -283,7 +297,8 @@ async function dispatchByEventType(
         (payload.question as string | undefined) ?? '',
         (payload.attention_request_id as string | undefined) ?? '',
         (payload.workflow_id as string | undefined) ?? '',
-        payload.metadata
+        payload.metadata,
+        channel
       );
       break;
 
@@ -298,17 +313,21 @@ async function dispatchByEventType(
         });
         break;
       }
-      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl);
+      await notifyAgentCardSetup(data.user_id, { id: data.agent_id }, setupUrl, channel);
       break;
     }
 
     case 'cost_limit':
-      await notifyCostLimit(data.user_id, {
-        id: data.agent_id,
-        goal: agentGoal,
-        treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
-        priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
-      });
+      await notifyCostLimit(
+        data.user_id,
+        {
+          id: data.agent_id,
+          goal: agentGoal,
+          treeCostCents: (payload.tree_cost_cents as number | undefined) ?? 0,
+          priceLimitCents: (payload.price_limit_cents as number | undefined) ?? 0,
+        },
+        channel
+      );
       break;
 
     default:
