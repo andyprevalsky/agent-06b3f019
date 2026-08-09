@@ -21,6 +21,7 @@ import {
   resolveSteelProfileForSession,
   shouldWriteSteelProfileToBrowserContext,
 } from './profileBinding';
+import { MAX_SESSION_RETRIES, sleepBeforeSteelRetry } from './sessionRetry';
 export { resumeSession } from './sessionResume';
 export {
   envEnabled,
@@ -38,20 +39,12 @@ export {
   steelSessionFileUrl,
   steelPublicCdpUrl,
 } from './urls';
+export { MAX_SESSION_RETRIES } from './sessionRetry';
 
 export const steel = new Steel({
   steelAPIKey: process.env.STEEL_API_KEY,
   baseURL: STEEL_API_BASE_URL,
 });
-
-// Max retries when session validation fails
-export const MAX_SESSION_RETRIES = 5;
-
-/** Backoff between Steel create attempts so transient connection flakes can clear. */
-function sleepBeforeSteelRetry(attempt: number): Promise<void> {
-  const delayMs = Math.min(2_000, 250 * 2 ** (attempt - 1));
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
 
 export class SteelSessionCleanupError extends Error {
   constructor(sessionId: string, cause: unknown) {

@@ -119,9 +119,7 @@ function assertConcurrentProfileCleanupUsesBoundedRelease(): void {
 
 function assertRetryContinuesBackoffBeforeContinue(): void {
   const source = readFileSync(new URL('../../providers/steel/session.ts', import.meta.url), 'utf8');
-  const validationFailure = source.indexOf(
-    'Session validation failed on attempt ${attempt}'
-  );
+  const validationFailure = source.indexOf('Session validation failed on attempt ${attempt}');
   const concurrentRetry = source.indexOf(
     'Concurrent Steel profile initialization; retrying with persisted profile'
   );

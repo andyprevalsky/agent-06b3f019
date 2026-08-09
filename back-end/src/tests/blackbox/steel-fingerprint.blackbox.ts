@@ -19,6 +19,7 @@ import {
 } from '../../providers/steel/session';
 import { navigateToSavedUrl, recreateSession } from '../../providers/steel/sessionResume';
 import type { FingerprintData } from '../../providers/steel/types';
+import { testConnectionErrorRetriesOnReplacement } from './steel-fingerprint.connection-retry.behavior';
 import { testFingerprintTimezoneFormatUsesUserLocation as runTimezoneFormatUsesUserLocation } from './steel-fingerprint.timezone.behavior';
 
 function makeFingerprint(): FingerprintData {
@@ -345,54 +346,6 @@ async function testReplacementRetryDropsRejectedCity(): Promise<void> {
       `expected two Steel create attempts, got ${createInputs.length}`
     );
 
-    // Transient Steel SDK "Connection error" must backoff-retry rather than
-    // fail the Kernel→Steel rotate ladder on the first flaky create.
-    const connectionInputs: Array<Record<string, unknown>> = [];
-    (
-      prisma.browserSession as unknown as { findUnique: typeof prisma.browserSession.findUnique }
-    ).findUnique = (async () => ({
-      id: 'replacement-connection-retry-task',
-      sessionId: 'steel-connection-old',
-      provider: 'kernel',
-      providerProfileId: 'kernel-profile',
-      providerProfileSource: 'kernel_session',
-      providerProfilePersist: true,
-      currentUrl: 'https://example.com/connection-retry',
-      startUrl: null,
-      agentId: 'replacement-city-retry-agent',
-      contextId: 'replacement-city-retry-context',
-      context: { userId: 'replacement-city-retry-user' },
-    })) as typeof prisma.browserSession.findUnique;
-    (
-      prisma.browserSession as unknown as { updateMany: typeof prisma.browserSession.updateMany }
-    ).updateMany = (async () => ({ count: 1 })) as typeof prisma.browserSession.updateMany;
-    const connectionResult = await recreateSession(
-      'replacement-connection-retry-task',
-      { forceManagedRotation: true },
-      {
-        createSession: async (input) => {
-          connectionInputs.push(input as unknown as Record<string, unknown>);
-          if (connectionInputs.length < 3) {
-            throw new Error('Connection error');
-          }
-          return {
-            id: 'steel-after-connection-retry',
-            debugUrl: 'https://steel.example/debug',
-            profileId: null,
-            proxySource: 'steel',
-          };
-        },
-        validateConnection: async () => true,
-      }
-    );
-    assert(
-      connectionResult.sessionId === 'steel-after-connection-retry',
-      'connection-error retry did not succeed'
-    );
-    assert(
-      connectionInputs.length === 3,
-      `expected three Steel create attempts after Connection error, got ${connectionInputs.length}`
-    );
     const firstGeo = (createInputs[0]?.useProxy as { geolocation?: Record<string, string> })
       ?.geolocation;
     const secondGeo = (createInputs[1]?.useProxy as { geolocation?: Record<string, string> })
@@ -620,6 +573,10 @@ async function main(): Promise<void> {
     {
       name: 'Steel replacement retries rejected cities and stops after cleanup failure',
       fn: testReplacementRetryDropsRejectedCity,
+    },
+    {
+      name: 'Steel replacement retries transient Connection error',
+      fn: testConnectionErrorRetriesOnReplacement,
     },
     {
       name: 'saved URL navigation closes its browser after failure',
