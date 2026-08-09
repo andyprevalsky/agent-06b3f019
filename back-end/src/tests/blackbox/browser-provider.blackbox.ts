@@ -155,8 +155,8 @@ const tests: Array<[string, () => void]> = [
     },
   ],
   [
-    'Steel API client uses the live steelbrowser.com origin',
-    () => assert(steelUrl === 'https://connect.steelbrowser.com', `stale Steel API: ${steelUrl}`),
+    'Steel API client uses the live api.steel.dev origin',
+    () => assert(steelUrl === 'https://api.steel.dev', `stale Steel API: ${steelUrl}`),
   ],
   [
     'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',

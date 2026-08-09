@@ -218,6 +218,8 @@ const INFRA_URL_PATTERNS = [
   'stripe.com',
   'parallel.ai',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
   'perplexity.ai',
   'exa.ai',
   'vapi.ai',

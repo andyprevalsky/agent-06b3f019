@@ -576,7 +576,7 @@ async function testSavedUrlNavigationAlwaysClosesBrowser(): Promise<void> {
   };
 
   await navigateToSavedUrl(
-    'wss://connect.steelbrowser.com?sessionId=session-1',
+    'wss://connect.steel.dev?sessionId=session-1',
     'https://example.com/saved',
     async () => browser as unknown as import('playwright').Browser
   );

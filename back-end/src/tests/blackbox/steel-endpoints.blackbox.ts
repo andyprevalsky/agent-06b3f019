@@ -122,13 +122,12 @@ async function main(): Promise<void> {
   process.env.STEEL_API_KEY = 'steel-test-key';
   try {
     assert(
-      steelApiUrl('/v1/sessions/session-1') ===
-        'https://connect.steelbrowser.com/v1/sessions/session-1',
+      steelApiUrl('/v1/sessions/session-1') === 'https://api.steel.dev/v1/sessions/session-1',
       'Steel HTTP helper used a stale origin'
     );
     const cdpUrl = new URL(steelCdpUrl('session-1'));
     assert(cdpUrl.protocol === 'wss:', 'Steel CDP helper did not use WebSocket TLS');
-    assert(cdpUrl.hostname === 'connect.steelbrowser.com', 'Steel CDP helper used a stale origin');
+    assert(cdpUrl.hostname === 'connect.steel.dev', 'Steel CDP helper used a stale origin');
     assert(cdpUrl.searchParams.get('apiKey') === null, 'persisted Steel CDP URL leaked its key');
     assert(cdpUrl.searchParams.get('sessionId') === 'session-1', 'Steel session ID missing');
     const connectionUrl = new URL(steelCdpConnectionUrl(cdpUrl.toString()));
@@ -150,7 +149,7 @@ async function main(): Promise<void> {
     const debugUrl = new URL(
       steelDebugUrl('https://api.steel.dev/v1/sessions/session-1/player?legacy=true')
     );
-    assert(debugUrl.hostname === 'connect.steelbrowser.com', 'Steel live view used a stale origin');
+    assert(debugUrl.hostname === 'connect.steel.dev', 'Steel live view used a stale origin');
     assert(
       debugUrl.searchParams.get('legacy') === 'true',
       'Steel live-view query parameters were lost'
@@ -161,7 +160,7 @@ async function main(): Promise<void> {
     );
     assert(
       steelSessionFileUrl('session/one', 'reports/a?b#c.txt') ===
-        'https://connect.steelbrowser.com/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',
+        'https://api.steel.dev/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',
       'Steel file URL did not encode session IDs and reserved path characters'
     );
     await assertReleaseRetriesAreBounded();
