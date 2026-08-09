@@ -12,6 +12,15 @@ export interface CardProviderMintResult {
   status: string;
   providerTransferId?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * When the provider already fetched live card secrets during mint (org MCP
+   * always does; user MCP may), callers must reuse these instead of issuing a
+   * second getDetails — a redundant get_card_details has hung mint for minutes
+   * while the purchase stayed CHARGING and blocked fingerprint retries with 409.
+   */
+  pan?: string;
+  cvv?: string;
+  balanceCents?: number;
 }
 
 export interface CardProviderDetailsResult {

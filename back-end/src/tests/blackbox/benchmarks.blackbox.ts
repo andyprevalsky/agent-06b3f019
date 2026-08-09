@@ -504,6 +504,8 @@ const INFRA_URL_PATTERNS = [
   'vapi.ai',
   'googleapis.com',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
 ];
 function filterInfraCalls<T extends { url: string }>(calls: T[]): T[] {
   return calls.filter((c) => !INFRA_URL_PATTERNS.some((p) => c.url.includes(p)));

@@ -108,6 +108,7 @@ chown "$APP_USER:$APP_USER" "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 chmod 600 "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env"
 cloudbench_verify_env_file "$APP_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || exit 1
 cloudbench_verify_env_file "$APP_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || exit 1
+cloudbench_require_agentcard_org_oauth "$APP_DIR/back-end/.env" || exit 1
 cloudbench_validate_browser_provider_contract \
     "$APP_DIR/agents/.env" "$APP_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || exit 1

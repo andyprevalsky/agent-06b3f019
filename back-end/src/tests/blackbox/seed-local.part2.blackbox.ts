@@ -236,6 +236,7 @@ test('missing-Codex bypass warning reports the usable Claude count', async () =>
 test('missing-Claude bypass requires the caller-validated Anthropic fallback opt-in', async () => {
   const source = readSeedLocalSource();
   const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const rateLimitedBypass = source.indexOf('rateLimitedClaudeCodeCount > 0', zeroClaude);
   const bypass = source.indexOf("process.env.SEED_ALLOW_MISSING_CLAUDE_CODE === '1'", zeroClaude);
   const keyValidation = source.indexOf('process.env.ANTHROPIC_API_KEY?.trim()', bypass);
   const emptyKeyFailure = source.indexOf(
@@ -250,6 +251,10 @@ test('missing-Claude bypass requires the caller-validated Anthropic fallback opt
   );
 
   assert(zeroClaude > 0, 'expected an explicit zero-Claude availability check');
+  assert(
+    rateLimitedBypass > zeroClaude && rateLimitedBypass < bypass,
+    'expected rate-limited Claude rows to proceed before the missing-Claude opt-in'
+  );
   assert(bypass > zeroClaude, 'expected an explicit missing-Claude opt-in');
   assert(keyValidation > bypass, 'expected the fallback to validate the Anthropic API key');
   assert(emptyKeyFailure > keyValidation, 'expected an empty Anthropic API key to fail closed');
@@ -258,6 +263,31 @@ test('missing-Claude bypass requires the caller-validated Anthropic fallback opt
   assert(
     strictFailure > fallback,
     'expected missing Claude OAuth to fail closed without the opt-in'
+  );
+});
+
+test('rate-limited Claude Code integrations do not hard-fail compute-token sync', async () => {
+  const source = readSeedLocalSource();
+  const inspector = source.indexOf('async function inspectClaudeCodeIntegrations');
+  const gptInspector = source.indexOf('async function inspectGptCodeIntegrations');
+  const zeroClaude = source.indexOf('if (usableClaudeCodeCount === 0)');
+  const rateLimitedBypass = source.indexOf('rateLimitedClaudeCodeCount > 0', zeroClaude);
+  const warning = source.indexOf(
+    'present but rate-limited by an external quota',
+    rateLimitedBypass
+  );
+  const strictFailure = source.indexOf(
+    "throw new Error('No usable claude_code integrations after sync')",
+    rateLimitedBypass
+  );
+
+  assert(inspector > 0, 'expected a Claude Code availability inspector');
+  assert(gptInspector > 0, 'expected the GPT inspector this mirrors');
+  assert(rateLimitedBypass > zeroClaude, 'expected an explicit rate-limited Claude bypass');
+  assert(warning > rateLimitedBypass, 'expected the rate-limited Claude path to warn loudly');
+  assert(
+    strictFailure > warning,
+    'expected genuinely missing Claude OAuth to stay fail-closed after the rate-limit bypass'
   );
 });
 

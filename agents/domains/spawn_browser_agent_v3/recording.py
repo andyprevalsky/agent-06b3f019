@@ -75,7 +75,7 @@ def _schedule_background_recording_archive(recorder: Any, *, cleanup_after: bool
 
 
 def steel_api_url(path: str) -> str:
-    base_url = os.getenv("STEEL_BASE_URL", "https://connect.steelbrowser.com").rstrip("/")
+    base_url = os.getenv("STEEL_BASE_URL", "https://api.steel.dev").rstrip("/")
     return f"{base_url}/{path.lstrip('/')}"
 
 

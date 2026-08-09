@@ -519,6 +519,8 @@ const MODELS_INFRA_HOSTS = [
   'vapi.ai',
   'googleapis.com',
   'connect.steelbrowser.com',
+  'connect.steel.dev',
+  'api.steel.dev',
 ];
 
 function filterInfra(captures: { url: string }[]): { url: string }[] {

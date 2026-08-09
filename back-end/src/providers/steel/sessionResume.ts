@@ -27,6 +27,12 @@ function hasValue(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
 }
 
+/** Backoff between Steel create attempts so transient "Connection error" flakes can clear. */
+function sleepBeforeSteelRetry(attempt: number): Promise<void> {
+  const delayMs = Math.min(2_000, 250 * 2 ** (attempt - 1));
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
 /**
  * The recorded provider profile id that Steel may legitimately reload.
  *
@@ -301,6 +307,9 @@ export async function recreateSession(
         dropProxyCity = true;
         rememberRejectedProxyCity(proxyGeo);
         log.info('  Dropping unsupported Steel proxy city during replacement retry');
+      }
+      if (attempt < MAX_SESSION_RETRIES) {
+        await sleepBeforeSteelRetry(attempt);
       }
     }
   }

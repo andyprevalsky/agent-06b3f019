@@ -51,6 +51,20 @@ if cloudbench_verify_env_file "$agents_env" "$backend_digest" agents >/dev/null 
   fail "a mismatched injected env digest must fail closed"
 fi
 
+# Stale BACKEND_ENV_B64 without AgentCard Organization OAuth must fail closed
+# before guests burn a full stack on 502 Missing AGENTCARD_ORG_OAUTH_CLIENT_ID.
+if cloudbench_require_agentcard_org_oauth "$backend_env" >/dev/null 2>&1; then
+  fail "backend env without AgentCard org OAuth must fail closed"
+fi
+printf 'AGENTCARD_ORG_OAUTH_CLIENT_ID=01234567890123456789\nAGENTCARD_ORG_OAUTH_CLIENT_SECRET=abcdefghijklmnopqrstuvwxyz012345\n' >> "$backend_env"
+cloudbench_require_agentcard_org_oauth "$backend_env" >/dev/null
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env"' \
+  "cloudbench-run must require AgentCard org OAuth after decoding BACKEND_ENV_B64"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_require_agentcard_org_oauth back-end/.env' \
+  "run-bench-cloud must refuse to stage a BACKEND_ENV_B64 without AgentCard org OAuth"
+
 retry_attempts=0
 fail_twice_then_succeed() {
   retry_attempts=$((retry_attempts + 1))

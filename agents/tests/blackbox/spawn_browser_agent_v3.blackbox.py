@@ -2132,7 +2132,7 @@ def test_browser_agent_recording_uses_live_steel_api_origin():
     previous_base_url = os.environ.pop("STEEL_BASE_URL", None)
     try:
         assert steel_api_url("/v1/sessions/session-1/hls") == (
-            "https://connect.steelbrowser.com/v1/sessions/session-1/hls"
+            "https://api.steel.dev/v1/sessions/session-1/hls"
         )
     finally:
         if previous_base_url is not None:
