@@ -30,7 +30,10 @@ function isTransientKernelConnectionError(error: unknown): boolean {
   return (
     message.includes('proxy connection failed') ||
     message.includes('context deadline exceeded') ||
-    message.includes('Client.Timeout exceeded')
+    message.includes('Client.Timeout exceeded') ||
+    // Steel create/replace flakes under parallel coverage load (SDK "Connection error").
+    message.includes('Failed to create Steel replacement') ||
+    message.includes('Connection error')
   );
 }
 

@@ -45,7 +45,13 @@ export const steel = new Steel({
 });
 
 // Max retries when session validation fails
-export const MAX_SESSION_RETRIES = 3;
+export const MAX_SESSION_RETRIES = 5;
+
+/** Backoff between Steel create attempts so transient connection flakes can clear. */
+function sleepBeforeSteelRetry(attempt: number): Promise<void> {
+  const delayMs = Math.min(2_000, 250 * 2 ** (attempt - 1));
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 export class SteelSessionCleanupError extends Error {
   constructor(sessionId: string, cause: unknown) {
@@ -511,6 +517,9 @@ export async function createSessionWithContext(
         dropProxyCity = true;
         rememberRejectedProxyCity(geolocation);
         log.info('  🌎 Dropping unsupported proxy city; retrying with country+state only');
+      }
+      if (attempt < MAX_SESSION_RETRIES) {
+        await sleepBeforeSteelRetry(attempt);
       }
     }
   }
