@@ -3442,15 +3442,20 @@ async def test_call_llm_verifier_fills_missing_output_from_structured_tool_respo
         "total_steps": 7,
     }
 
+    tool_result_payload = {
+        "tool_name": "attempt_completion",
+        "tool_call_id": "tool-collatz-1",
+        "result": "Structured Response: " + json.dumps(structured_response),
+    }
     with patch("temporalio.activity.heartbeat"):
         result, _usage = await _call_llm_verifier(
             messages=[
                 {"role": "system", "content": "verify"},
                 {
+                    # Recovery only trusts allowlisted terminal tool evidence
+                    # (compressed verifier batches embed TOOL_RESULT JSON).
                     "role": "user",
-                    "content": "Tool finished\n\nStructured Response: "
-                    + json.dumps(structured_response)
-                    + "\n\nEvaluate the agent's progress as JSON.",
+                    "content": "TOOL_RESULT " + json.dumps(tool_result_payload),
                 },
             ],
             model="rose",
