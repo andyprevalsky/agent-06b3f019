@@ -1,24 +1,22 @@
 import { createCardProviderForAgent, type CardProvider } from '../../providers/card-provider';
 import { createLogger } from '../../providers/logger';
-import {
-  captureAuthorizedHold,
-  reversePurchasePaymentIntent,
-  stripe,
-} from '../../providers/stripe';
+import { captureAuthorizedHold, reversePurchasePaymentIntent } from '../../providers/stripe';
 import {
   createWalletFundingProvider,
   type WalletFundingProvider,
 } from '../../providers/wallet-funding';
 import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
-import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
+import { assertIssuedCardIsSpendable, resolveIssuedCardDetails } from './chargeHelpers';
 import {
-  assertIssuedCardIsSpendable,
-  resolveIssuedCardDetails,
-  sanitizeDescriptorSuffix,
-} from './chargeHelpers';
+  authorizeStripeHold,
+  type ChargeState,
+  type StripePaymentIntent,
+} from './chargeAuthorize';
+
+export type { ChargeState } from './chargeAuthorize';
 import { mintCompanyFlowCard } from './companyFlowCard';
 import { classifyFundingResumeFailure } from './fundingResume';
 import {
@@ -36,72 +34,6 @@ import {
 } from './types';
 
 const log = createLogger('Purchases');
-
-type StripePaymentIntent = Awaited<ReturnType<typeof stripe.paymentIntents.create>>;
-
-/** Mutable side-effect state shared across the charge/mint/rollback steps. */
-export interface ChargeState {
-  paymentIntentId?: string;
-  paymentIntentCaptured: boolean;
-  paymentReversalFailed: boolean;
-  walletWasFunded: boolean;
-  walletReclaimFailed: boolean;
-  walletFundingPrepared: boolean;
-  fundingResumeRequired: boolean;
-  fundingRetryClaimed: boolean;
-  providerCallStarted: boolean;
-  stripeAuthorizationStarted: boolean;
-  activeWalletFundingProvider?: WalletFundingProvider;
-  activeCardProvider?: CardProvider;
-  issuedCardId?: string;
-  /**
-   * True when the issued card is the static, company-funded Rose Agent Card (mint cutoff active).
-   * It has no AgentCard company transfer and is reusable, so there is nothing to wallet-fund or
-   * reclaim — but the user's Stripe hold is still captured normally.
-   */
-  issuedStaticCard: boolean;
-}
-
-/** Authorize the user's saved card with a manual-capture hold. */
-async function authorizeStripeHold(
-  state: ChargeState,
-  purchase: PurchaseSpend,
-  input: MintPurchaseInput,
-  stripeCustomerId: string
-): Promise<StripePaymentIntent> {
-  const paymentMethodId = await getCustomerDefaultPaymentMethodId(stripeCustomerId);
-  const stripeRequest = {
-    amount: input.totalCents,
-    currency: 'usd',
-    customer: stripeCustomerId,
-    payment_method: paymentMethodId,
-    confirm: true,
-    off_session: true,
-    capture_method: 'manual' as const,
-    statement_descriptor_suffix: sanitizeDescriptorSuffix(input.merchant),
-    metadata: {
-      userId: input.userId,
-      agentId: input.agentId ?? '',
-      fingerprint: input.fingerprint,
-      purchaseSpendId: purchase.id,
-    },
-  };
-  state.stripeAuthorizationStarted = true;
-  const paymentIntent = await stripe.paymentIntents.create(
-    stripeRequest,
-    // Per-row idempotency: a retried mint of the SAME purchase never double-charges Stripe.
-    { idempotencyKey: `purchase-charge:${purchase.id}` }
-  );
-  state.paymentIntentId = paymentIntent.id;
-  await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING, {
-    stripePaymentIntentId: paymentIntent.id,
-  });
-  await archivePurchaseBoundary(input.agentId, purchase.id, 'stripe-payment-intent', {
-    request: stripeRequest,
-    response: paymentIntent,
-  });
-  return paymentIntent;
-}
 
 /**
  * Mint the company-funded card, capture the user's charge (when there is one), and mark the
@@ -348,11 +280,3 @@ export async function chargeAndIssueCard(
     return await rollbackChargeFailure(state, purchase, input, error);
   }
 }
-
-/**
- * Admin-only: issue a company-funded card WITHOUT any personal Stripe charge. Reserved for
- * `ADMIN_USER_IDS` (Andy + Tamy) purchases that bypass the subscription / card-on-file requirement
- * — Rose fronts the cost via the AgentCard company transfer and there is no Stripe hold to
- * capture or reverse. On failure the issued card is closed and its funding reclaimed, exactly like
- * the charged flow, but no payment reversal is attempted (nothing was charged).
- */
