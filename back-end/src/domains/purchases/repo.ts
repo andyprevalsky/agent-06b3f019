@@ -1,4 +1,4 @@
-import { Prisma, PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
+import { Prisma, PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { canonicalStoredPurchaseFingerprint } from './fingerprint';
 
@@ -31,12 +31,21 @@ function legacyFingerprintWhere(
 
 export async function findMostRecentPurchaseByUserAndFingerprint(
   userId: string,
-  fingerprint: string
+  fingerprint: string,
+  agentId?: string
 ) {
+  // When scoped to an agent, still surface legacy null-agent rows so in-flight / HELD carts
+  // keep the double-charge guard. Other agents' rows stay excluded.
+  const scopedAgentId = agentId !== undefined && agentId.trim() !== '' ? agentId.trim() : undefined;
   return prisma.purchaseSpend.findFirst({
     where: {
       userId,
-      OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }],
+      AND: [
+        { OR: [{ fingerprint }, { canonicalFingerprint: fingerprint }] },
+        ...(scopedAgentId !== undefined
+          ? [{ OR: [{ agentId: scopedAgentId }, { agentId: null }] }]
+          : []),
+      ],
     },
     orderBy: { createdAt: 'desc' },
   });
@@ -200,189 +209,9 @@ export async function markFundingPendingAbandoned(id: string, observedUpdatedAt:
   });
 }
 
-export async function createOrGetWalletFunding(data: {
-  purchaseId: string;
-  userId: string;
-  agentId?: string;
-  amountCents: number;
-  currency: string;
-  idempotencyKey: string;
-}) {
-  return prisma.purchaseWalletFunding.upsert({
-    where: { purchaseId: data.purchaseId },
-    create: {
-      purchaseId: data.purchaseId,
-      userId: data.userId,
-      agentId: data.agentId,
-      amountCents: data.amountCents,
-      currency: data.currency,
-      idempotencyKey: data.idempotencyKey,
-      status: PurchaseWalletFundingStatus.PENDING,
-    },
-    update: {},
-  });
-}
-
-export async function findWalletFundingByPurchaseId(purchaseId: string) {
-  return prisma.purchaseWalletFunding.findUnique({ where: { purchaseId } });
-}
-
-export async function markWalletFundingFunded(
-  id: string,
-  data: {
-    providerTransferId?: string;
-    metadata?: Record<string, unknown>;
-  }
-) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
-    data: {
-      status: PurchaseWalletFundingStatus.FUNDED,
-      providerTransferId: data.providerTransferId,
-      metadata: data.metadata as Prisma.InputJsonValue | undefined,
-      errorMessage: null,
-      fundedAt: new Date(),
-    },
-  });
-}
-
-export async function markWalletFundingFailed(id: string, error: string) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
-    data: {
-      status: PurchaseWalletFundingStatus.FAILED,
-      errorMessage: error,
-    },
-  });
-}
-
-export async function markWalletFundingConsumed(purchaseId: string) {
-  return prisma.purchaseWalletFunding.updateMany({
-    where: {
-      purchaseId,
-      status: { in: [PurchaseWalletFundingStatus.FUNDED, PurchaseWalletFundingStatus.CONSUMED] },
-    },
-    data: {
-      status: PurchaseWalletFundingStatus.CONSUMED,
-      consumedAt: new Date(),
-      errorMessage: null,
-    },
-  });
-}
-
-export async function markWalletFundingReclaiming(
-  id: string,
-  data: { reclaimIdempotencyKey: string }
-) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMING,
-      reclaimIdempotencyKey: data.reclaimIdempotencyKey,
-      errorMessage: null,
-    },
-  });
-}
-
-export async function markWalletFundingReclaimed(
-  id: string,
-  data: {
-    providerTransferId?: string;
-    metadata?: Record<string, unknown>;
-  }
-) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIMED,
-      reclaimProviderTransferId: data.providerTransferId,
-      metadata: data.metadata as Prisma.InputJsonValue | undefined,
-      errorMessage: null,
-      reclaimedAt: new Date(),
-    },
-  });
-}
-
-export async function markWalletFundingReclaimFailed(id: string, error: string) {
-  return prisma.purchaseWalletFunding.update({
-    where: { id },
-    data: {
-      status: PurchaseWalletFundingStatus.RECLAIM_FAILED,
-      errorMessage: error,
-    },
-  });
-}
-
-const STRUCTURED_GMV_PROVIDERS = ['order_confirmation', 'merchant_saved'] as const;
-
-export async function findAgentcardCoveringPurchase(input: {
-  agentId: string;
-  totalCents: number;
-  statuses: PurchaseSpendStatus[];
-  since: Date;
-}): Promise<{ id: string } | null> {
-  return prisma.purchaseSpend.findFirst({
-    where: {
-      agentId: input.agentId,
-      provider: { notIn: [...STRUCTURED_GMV_PROVIDERS] },
-      status: { in: input.statuses },
-      totalCents: input.totalCents,
-      createdAt: { gte: input.since },
-    },
-    select: { id: true },
-  });
-}
-
-export async function findOrderConfirmationByFingerprint(input: {
-  userId: string;
-  fingerprint: string;
-  confirmationId: string;
-}): Promise<{ id: string } | null> {
-  return prisma.purchaseSpend.findFirst({
-    where: {
-      userId: input.userId,
-      OR: [
-        { fingerprint: input.fingerprint },
-        {
-          provider: 'order_confirmation',
-          lineItemsJson: {
-            path: ['confirmationId'],
-            equals: input.confirmationId,
-          },
-        },
-      ],
-    },
-    select: { id: true },
-  });
-}
-
-export async function createClearedOrderConfirmation(input: {
-  userId: string;
-  agentId: string | undefined;
-  fingerprint: string;
-  merchant: string;
-  lineItemsJson: Record<string, unknown>;
-  totalCents: number;
-  createdAt?: Date;
-}): Promise<{ id: string }> {
-  return prisma.purchaseSpend.create({
-    data: {
-      userId: input.userId,
-      agentId: input.agentId,
-      fingerprint: input.fingerprint,
-      canonicalFingerprint: input.fingerprint,
-      merchant: input.merchant,
-      lineItemsJson: input.lineItemsJson as Prisma.InputJsonValue,
-      totalCents: input.totalCents,
-      status: PurchaseSpendStatus.CLEARED,
-      provider: 'order_confirmation',
-      ...(input.createdAt !== undefined ? { createdAt: input.createdAt } : {}),
-    },
-    select: { id: true },
-  });
-}
-
+export * from './repoGmv';
 export * from './repoRead';
+export * from './repoWalletFunding';
 
 export {
   settlePurchaseAfterTransactionCleared,

@@ -144,6 +144,17 @@ export async function classifyFundingResumeFailure(
   };
 }
 
+function fundingResumeAgentMatches(purchase: PurchaseSpend, input: MintPurchaseInput): boolean {
+  // Null-agent legacy rows remain claimable by any agent (same as tryReuseExistingPurchase).
+  // A different non-null agent must not 409 — the caller should open its own purchase instead.
+  return !(
+    input.agentId !== undefined &&
+    input.agentId.trim() !== '' &&
+    purchase.agentId !== null &&
+    purchase.agentId !== input.agentId
+  );
+}
+
 function assertFundingResumeMatchesInput(purchase: PurchaseSpend, input: MintPurchaseInput): void {
   const storedCanonicalFingerprint =
     purchase.canonicalFingerprint ??
@@ -190,6 +201,7 @@ export async function tryClaimFundingResume(
   now: Date
 ): Promise<PurchaseSpend | null> {
   let candidate = existing;
+  if (!fundingResumeAgentMatches(candidate, input)) return null;
   if (isStaleChargingPurchase(candidate, now)) {
     const funding = await repo.findWalletFundingByPurchaseId(candidate.id);
     if (

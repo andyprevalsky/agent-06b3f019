@@ -158,8 +158,21 @@ export async function lookupPurchase(
 async function tryReuseExistingPurchase(
   existing: PurchaseSpend,
   cardProvider?: CardProvider,
-  now = new Date()
+  now = new Date(),
+  requestingAgentId?: string
 ): Promise<MintPurchaseResult | null> {
+  // Cross-agent fingerprint hits must never reuse a live card. Lifecycle/abandon keys off the
+  // requesting agentId; handing back another agent's HELD purchase leaves the new agent with no
+  // PurchaseSpend row (prod AgentCard gate: purchaseCount expected 1, got 0).
+  if (
+    requestingAgentId !== undefined &&
+    requestingAgentId.trim() !== '' &&
+    existing.agentId !== null &&
+    existing.agentId !== requestingAgentId
+  ) {
+    return null;
+  }
+
   if (isStaleChargingPurchase(existing, now)) {
     await recoverStaleChargingPurchase(existing);
     return null;
@@ -287,7 +300,8 @@ export async function mintPurchaseCard(
 
   let existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
     input.userId,
-    input.fingerprint
+    input.fingerprint,
+    input.agentId
   );
   if (!existing) {
     // Mint's in-flight guard has no age limit: an old CHARGING row can still need recovery, and a
@@ -295,14 +309,15 @@ export async function mintPurchaseCard(
     await ensureAllLegacyFingerprintsIndexed(input.userId);
     existing = await repo.findMostRecentPurchaseByUserAndFingerprint(
       input.userId,
-      input.fingerprint
+      input.fingerprint,
+      input.agentId
     );
   }
   let resumedPurchase: PurchaseSpend | null = null;
   if (existing) {
     resumedPurchase = await tryClaimFundingResume(existing, input, now);
     if (resumedPurchase === null) {
-      const reused = await tryReuseExistingPurchase(existing, cardProvider, now);
+      const reused = await tryReuseExistingPurchase(existing, cardProvider, now, input.agentId);
       if (reused) return reused;
     }
   }
@@ -311,7 +326,12 @@ export async function mintPurchaseCard(
   if (purchase === null) {
     const opened = await openPendingPurchase(input);
     if (!opened.created) {
-      const reused = await tryReuseExistingPurchase(opened.purchase, cardProvider, now);
+      const reused = await tryReuseExistingPurchase(
+        opened.purchase,
+        cardProvider,
+        now,
+        input.agentId
+      );
       if (reused !== null) return reused;
       throw new PurchaseError('This purchase is already in progress', 409);
     }
