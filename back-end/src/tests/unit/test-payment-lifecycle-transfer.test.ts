@@ -93,6 +93,30 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.orgTransfer?.releasedCents, 0);
   });
 
+  await test('mapOrgTransfer zeroes transferredCents when transfer is reclaimed', async () => {
+    const mapped = mapOrgTransfer({ cardId: 'card-reclaimed' }, [
+      {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-reclaimed',
+              status: 'reclaimed',
+              amount_cents: 100,
+              transferred_cents: 100,
+              released_cents: 100,
+              card_id: 'card-reclaimed',
+              livemode: true,
+            },
+          ],
+        },
+      },
+    ]);
+    assert.equal(mapped?.status, 'reclaimed');
+    assert.equal(mapped?.amountCents, 100);
+    assert.equal(mapped?.transferredCents, 0);
+    assert.equal(mapped?.releasedCents, 100);
+  });
+
   await test('mapOrgTransfer returns null when purchase has no card', async () => {
     const mapped = mapOrgTransfer({ cardId: null }, [
       {

@@ -30,17 +30,21 @@ function transferId(transfer: Record<string, unknown> | undefined): string {
 
 /**
  * AgentCard sandbox (observed 2026-08-09+) leaves `transferred_cents` at 0 for
- * mint/consumed/reclaimed rows while `amount_cents` still carries the funded
- * amount. Prefer the explicit transferred counter when present; otherwise fall
- * back to amount for terminal funded statuses so lifecycle gates stay aligned
- * with the provider's funded amount.
+ * consumed mint rows while `amount_cents` still carries the funded amount.
+ * Prefer the explicit transferred counter when present; otherwise fall back to
+ * amount for consumed so lifecycle gates stay aligned with the funded amount.
+ *
+ * Reclaimed transfers have returned funds to the org float — outstanding
+ * transferred balance is 0 even when the provider still echoes the original
+ * transferred_cents (live AgentCard, observed on production abandon).
  */
 function mapTransferredCents(transfer: Record<string, unknown>): number {
+  const status = transfer.status;
+  if (status === 'reclaimed') return 0;
   const transferred = integerField(transfer, 'transferred_cents');
   if (transferred > 0) return transferred;
   const amount = integerField(transfer, 'amount_cents');
-  const status = transfer.status;
-  if ((status === 'consumed' || status === 'reclaimed') && amount > 0) return amount;
+  if (status === 'consumed' && amount > 0) return amount;
   return transferred;
 }
 
