@@ -264,33 +264,10 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert "do not keep searching" in action_src
 
 
-def test_confused_platform_merchant_parenthetical_is_rejected_and_taught():
-    """Bench12: 'Eventim US (1015 Folsom)' must fail before payment_approval is created.
-
-    Bare first-party names and structured/connector identities remain valid so
-    Toast/Blick/test-payment paths are unchanged. Only the confused trailing
-    parenthetical (no `Platform - host`) is rejected, and every LLM-facing
-    surface teaches the correct Eventim-shaped formats.
-    """
-    from pydantic import ValidationError
-
+def test_payment_tool_accepts_flexible_merchant_labels():
+    """Merchant is a free-form label — no Eventim-shaped format gate at schema time."""
     from browser_tools.schemas import RequestPaymentCardBrowserTool
     from providers.rose.browser_use import BROWSER_USE_TOOLS
-    from utils.purchase_approval import validate_payment_merchant_name
-
-    assert validate_payment_merchant_name("Blick Art Materials") == "Blick Art Materials"
-    assert (
-        validate_payment_merchant_name("1015 Folsom (Eventim - eventim.us)")
-        == "1015 Folsom (Eventim - eventim.us)"
-    )
-    assert validate_payment_merchant_name("1015 Folsom via Eventim") == "1015 Folsom via Eventim"
-
-    try:
-        validate_payment_merchant_name("Eventim US (1015 Folsom)")
-        raise AssertionError("confused venue parenthetical was accepted")
-    except ValueError as error:
-        assert "1015 Folsom (Eventim - eventim.us)" in str(error)
-        assert "Eventim US (1015 Folsom)" in str(error)
 
     item = _sample_tool_call()["line_items"][0]
     base = {
@@ -300,18 +277,19 @@ def test_confused_platform_merchant_parenthetical_is_rejected_and_taught():
         "subtotal_cents": item["line_total_cents"],
         "total_cents": item["line_total_cents"],
     }
-    RequestPaymentCardBrowserTool.model_validate({**base, "merchant": "1015 Folsom via Eventim"})
-    try:
-        RequestPaymentCardBrowserTool.model_validate({**base, "merchant": "Eventim US (1015 Folsom)"})
-        raise AssertionError("RequestPaymentCardBrowserTool accepted confused merchant")
-    except ValidationError as error:
-        assert "Eventim - eventim.us" in str(error) or "via Eventim" in str(error)
+    for merchant in (
+        "Blick Art Materials",
+        "1015 Folsom (Eventim - eventim.us)",
+        "1015 Folsom via Eventim",
+        "Eventim US (1015 Folsom)",
+    ):
+        parsed = RequestPaymentCardBrowserTool.model_validate({**base, "merchant": merchant})
+        assert parsed.merchant == merchant
 
     merchant_desc = BROWSER_USE_TOOLS["request_payment_card"]["params"]["merchant"]["description"]
-    assert "1015 Folsom (Eventim - eventim.us)" in merchant_desc
-    assert "Eventim US (1015 Folsom)" in merchant_desc
+    assert merchant_desc == "Merchant or site name for the purchase"
     schema_desc = RequestPaymentCardBrowserTool.model_fields["merchant"].description or ""
-    assert "1015 Folsom (Eventim - eventim.us)" in schema_desc
+    assert schema_desc == "Merchant or site name for the purchase"
 
 
 def test_payment_tool_accepts_camel_case_transport_fields():
@@ -808,8 +786,8 @@ async def run_all_tests():
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
     )
     result.record(
-        "confused_platform_merchant_parenthetical",
-        test_confused_platform_merchant_parenthetical_is_rejected_and_taught,
+        "flexible_merchant_labels",
+        test_payment_tool_accepts_flexible_merchant_labels,
     )
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
     result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)

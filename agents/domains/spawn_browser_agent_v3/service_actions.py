@@ -406,18 +406,12 @@ async def execute_action(  # noqa: C901
                     )
             except ValueError as error:
                 hint = ""
-                error_text = str(error).lower()
-                if any(term in error_text for term in ("rating", "review")):
+                if any(term in str(error).lower() for term in ("rating", "review")):
                     hint = (
                         " If this page genuinely has no rating/reviews (e.g. a service, ticket, "
                         "or event booking), pass rating '0 stars' and review_count '0 reviews', "
                         "do not use 'N/A', 'none', or a made-up number, and do not keep searching "
                         "for a rating that is not shown."
-                    )
-                elif "merchant" in error_text:
-                    hint = (
-                        " Retry request_payment_card with the corrected merchant identity before "
-                        "creating another payment approval."
                     )
                 return {
                     "success": False,

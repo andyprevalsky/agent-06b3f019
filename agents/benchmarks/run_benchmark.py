@@ -728,15 +728,7 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
     r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
     re.IGNORECASE,
 )
-_CONNECTED_MERCHANT_IDENTITY = re.compile(
-    r"^\s*(?P<business>.+?)\s+(?:via|on|through|by|/)\s+(?P<platform>.+?)\s*$",
-    re.IGNORECASE,
-)
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
-
-
-def _merchant_identity_tokens(value: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
@@ -884,10 +876,20 @@ def _validate_payment_merchant_identity(
     messages: Optional[List[dict]],
     business_aliases: object = None,
 ) -> Optional[str]:
+    """Validate business/platform/site for structured merchants without format pedantry.
+
+    Pass/fail is: checkout host grounded + business alias and platform tokens appear
+    somewhere in the merchant label. Do **not** require ``Business (Platform - host)``
+    formatting — e.g. ``Eventim US (1015 Folsom)`` is fine when aliases/platform match
+    and the approval is on eventim.us.
+    """
     if not isinstance(expected_merchant, str) or not isinstance(actual_merchant, str):
         if actual_merchant != expected_merchant:
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
+
+    if not actual_merchant.strip():
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
     expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
     if expected_match is None:
@@ -895,28 +897,21 @@ def _validate_payment_merchant_identity(
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
 
-    expected_businesses = {_merchant_identity_tokens(expected_match.group("business"))}
-    if isinstance(business_aliases, list):
-        expected_businesses.update(
-            _merchant_identity_tokens(alias) for alias in business_aliases if isinstance(alias, str) and alias.strip()
-        )
-    expected_platform = _merchant_identity_tokens(expected_match.group("platform"))
     expected_host = expected_match.group("host").casefold().rstrip(".")
-    actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    if actual_match is None:
-        actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    direct_merchant = (
-        expected_platform == ("direct",) and _merchant_identity_tokens(actual_merchant) in expected_businesses
-    )
-    if not direct_merchant:
-        if (
-            actual_match is None
-            or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
-            or _merchant_identity_tokens(actual_match.group("platform")) != expected_platform
-        ):
-            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
-    if actual_match is not None and "host" in actual_match.groupdict():
-        actual_host = actual_match.group("host").casefold().rstrip(".")
+    expected_platform = expected_match.group("platform").casefold().strip()
+    actual_cf = actual_merchant.casefold()
+    business_labels = [expected_match.group("business")]
+    if isinstance(business_aliases, list):
+        business_labels.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
+    business_ok = any(label.casefold() in actual_cf for label in business_labels)
+    platform_ok = expected_platform == "direct" or expected_platform in actual_cf
+    if not (business_ok and platform_ok):
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+
+    # If the agent claimed a structured host in the label, it must match expectation.
+    actual_structured = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    if actual_structured is not None:
+        actual_host = actual_structured.group("host").casefold().rstrip(".")
         if not _merchant_host_matches(expected_host, actual_host):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 

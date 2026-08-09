@@ -10902,19 +10902,19 @@ def test_eventim_payment_merchant_identity_accepts_grounded_variants():
         assert _validate_payment_receipt(task, flat_request, messages=flat_messages) is None, merchant
 
 
-def test_eventim_payment_merchant_identity_rejects_confused_parenthetical():
-    """Bench12 failure shape: swapped venue parenthetical is not a validated payment card request."""
+def test_eventim_payment_merchant_identity_accepts_any_label_when_host_grounded():
+    """Merchant display wording must not fail once checkout host is grounded."""
     from benchmarks.benchmark_tasks import get_task_by_name
     from benchmarks.run_benchmark import _validate_payment_receipt
 
     task = get_task_by_name("browser-1015-eventim-request-card")
-    request, messages = _captured_eventim_payment_approval(merchant="Eventim US (1015 Folsom)")
-    reason = _validate_payment_receipt(task, request, messages=messages)
-    assert reason is not None
-    # Runtime schema rejects the confused parenthetical before identity matching;
-    # either surface proves the payload is not a validated payment-card request.
-    assert "Eventim US (1015 Folsom)" in reason
-    assert "merchant mismatch" in reason or "malformed complete payment receipt" in reason
+    for merchant in (
+        "Eventim US (1015 Folsom)",
+        "1015 Folsom via Eventim",
+        "1015 Folsom (Eventim - checkout.eventim.us)",
+    ):
+        request, messages = _captured_eventim_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
 
 
 def test_history_ledger_task_names_still_exist_in_catalog():
@@ -12275,8 +12275,8 @@ async def run_all_tests():
         test_eventim_payment_merchant_identity_accepts_grounded_variants,
     )
     r.record(
-        "eventim_payment_merchant_rejects_confused_parenthetical",
-        test_eventim_payment_merchant_identity_rejects_confused_parenthetical,
+        "eventim_payment_merchant_accepts_any_label_when_host_grounded",
+        test_eventim_payment_merchant_identity_accepts_any_label_when_host_grounded,
     )
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)

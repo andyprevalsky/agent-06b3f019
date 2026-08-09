@@ -32,35 +32,7 @@ PAYMENT_CARD_SECRET_REFS = ("card_number", "card_name", "card_expiry", "card_cvv
 PAYMENT_CARD_ENTRY_RULE = (
     "Use request_payment_card only if checkout requires you to enter new card details. "
     "If a valid saved payment method is already selected and no card entry is required, "
-    "do not call request_payment_card; continue with that saved method. "
-    "When Payment Details / card-entry markers are visible — including empty Stripe "
-    "Element shells with no mounted card-number fields — call request_payment_card "
-    "immediately with the itemized receipt; do not keep debugging iframe mounts, and "
-    "do not call send_message_to_user or attempt_completion as a substitute for "
-    "request_payment_card."
-)
-
-PAYMENT_CARD_EMPTY_SHELL_NUDGE = (
-    "CHECKOUT CARD ENTRY REQUIRED: The page already shows Payment Details / card-entry "
-    "markers (including empty Stripe Element shells). Do NOT keep debugging iframe "
-    "mounts or waiting for card number fields to become visible. Extract the itemized "
-    "receipt from Order Details now and call request_payment_card with merchant as "
-    "'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') "
-    "or 'Business via Platform' (e.g. '1015 Folsom via Eventim'). Empty Stripe shells "
-    "still count as needing a payment card. Do not call send_message_to_user or "
-    "attempt_completion until request_payment_card has been approved."
-)
-
-PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR = (
-    "Checkout still requires new card details. Extract the full itemized "
-    "receipt from the page (ticket line items, fees, subtotal, total), call "
-    "request_payment_card with that receipt, and wait for approval before "
-    "attempt_completion or send_message_to_user. Set merchant to "
-    "'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') "
-    "or 'Business via Platform' (e.g. '1015 Folsom via Eventim') — never a swapped "
-    "venue-only parenthetical like 'Eventim US (1015 Folsom)'. Do not treat empty "
-    "Stripe Element shells as done, and do not report the payment step via "
-    "send_message_to_user instead of request_payment_card."
+    "do not call request_payment_card; continue with that saved method."
 )
 
 
@@ -903,7 +875,7 @@ def build_autopay_prompt_section(payment_data: Dict[str, Any], encrypted_envelop
 ## Payment Information
 AUTOPAY ENABLED (limit: ${autopay_limit_dollars:.2f}): {PAYMENT_CARD_ENTRY_RULE}
 
-If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field. Set merchant to 'Business (Platform - checkout.host)' (e.g. '1015 Folsom (Eventim - eventim.us)') or 'Business via Platform' (e.g. '1015 Folsom via Eventim') — never a swapped venue-only parenthetical like 'Eventim US (1015 Folsom)'.
+If new card details are required, first read the full itemized receipt off the page (each product: name, image URL if visible, unit price in cents, quantity, line total in cents; plus every fee, the subtotal, and the final total), then call request_payment_card with it BEFORE touching any payment field.
 
 Do not type any card details yet, and do not ask the user to enter a card. The one-time card is minted on demand only after you call request_payment_card and the user approves; its secret refs are then provided for you to type into the payment fields."""
 
@@ -912,117 +884,6 @@ def has_payment_card_secret_refs(secret_refs: Optional[Dict[str, Any]]) -> bool:
     """Return true when a one-time payment card is already available as secret refs."""
     refs = secret_refs or {}
     return all(bool(refs.get(ref)) for ref in PAYMENT_CARD_SECRET_REFS)
-
-
-_CHECKOUT_URL_MARKERS = (
-    "checkout",
-    "/cart",
-    "/payment",
-    "/pay",
-    "/billing",
-    "purchase",
-)
-_CARD_ENTRY_PAGE_MARKERS = (
-    "payment details",
-    "enter your payment details",
-    "secure payment input frame",
-    "card number",
-    "credit card",
-    "stripeelement",
-    "__privatestripeframe",
-    "js.stripe.com/v3/elements",
-)
-
-
-def page_requires_new_card_entry(
-    *,
-    current_url: str,
-    browser_state: Optional[Dict[str, Any]] = None,
-) -> bool:
-    """True when the live tab looks like a checkout that still needs card entry.
-
-    Used to block ``attempt_completion`` before ``request_payment_card`` when the
-    page already shows Payment Details / Stripe Element shells (Eventim can show
-    those headings with empty 2px accessory iframes — the verifier must not treat
-    that as done).
-    """
-    url = (current_url or "").lower()
-    if not any(marker in url for marker in _CHECKOUT_URL_MARKERS):
-        return False
-    state = browser_state or {}
-    chunks: List[str] = [url, str(state.get("title") or "").lower()]
-    for key in ("dom_tree", "dom_text", "page_text", "body_text", "content"):
-        value = state.get(key)
-        if isinstance(value, str) and value:
-            chunks.append(value.lower())
-    # Interactive / iframe summaries from the browser-use state dump.
-    for key in ("interactive_elements", "elements", "iframe_srcs", "frames"):
-        value = state.get(key)
-        if value is None:
-            continue
-        try:
-            chunks.append(json.dumps(value, default=str).lower())
-        except Exception:
-            chunks.append(str(value).lower())
-    blob = "\n".join(chunks)
-    return any(marker in blob for marker in _CARD_ENTRY_PAGE_MARKERS)
-
-
-def payment_card_already_requested(action_entries: Optional[List[Any]] = None) -> bool:
-    """True when the browser action history already includes request_payment_card."""
-    for entry in action_entries or []:
-        if isinstance(entry, str):
-            if entry.startswith("request_payment_card"):
-                return True
-            continue
-        if not isinstance(entry, dict):
-            continue
-        action = entry.get("action") or entry.get("name") or entry.get("tool") or ""
-        if str(action).startswith("request_payment_card"):
-            return True
-    return False
-
-
-def payment_card_required_before_exit(
-    *,
-    current_url: str,
-    browser_state: Optional[Dict[str, Any]] = None,
-    action_entries: Optional[List[Any]] = None,
-    payment_card_ready: bool = False,
-) -> Optional[str]:
-    """Error text when checkout still needs ``request_payment_card`` before exiting.
-
-    Covers both ``attempt_completion``/``done`` and ``send_message_to_user``. Bench15
-    (`7edaeabe-…`) received the empty-shell nudge, then exited via
-    ``send_message_to_user`` ("stopped at the payment card step") without ever
-    calling ``request_payment_card`` — the completion gate did not cover that exit.
-    """
-    if payment_card_ready or payment_card_already_requested(action_entries):
-        return None
-    if not page_requires_new_card_entry(current_url=current_url, browser_state=browser_state):
-        return None
-    return PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR
-
-
-def build_payment_card_request_nudge(
-    *,
-    current_url: str,
-    browser_state: Optional[Dict[str, Any]] = None,
-    action_entries: Optional[List[Any]] = None,
-    payment_card_ready: bool = False,
-) -> Optional[str]:
-    """Mid-loop nudge so empty Payment Details shells trigger request_payment_card.
-
-    Bench13 (`e16297f6-…`) reached Eventim checkout with Payment Details visible
-    and empty Stripe mounts, then burned the 1200s budget debugging iframes
-    instead of calling request_payment_card (bench12's passing path once merchant
-    identity is correct).
-    """
-    if payment_card_ready or payment_card_already_requested(action_entries):
-        return None
-    if not page_requires_new_card_entry(current_url=current_url, browser_state=browser_state):
-        return None
-    return PAYMENT_CARD_EMPTY_SHELL_NUDGE
 
 
 def build_payment_card_resume_prompt_section(payment_card_refs: Dict[str, Any]) -> str:

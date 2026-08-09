@@ -160,11 +160,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {},
     },
     "send_message_to_user": {
-        "description": (
-            "Send a message to the user (for updates or asking for help). "
-            "Do not use this to report that you reached a payment-card / Payment Details "
-            "step — call request_payment_card instead and wait for approval."
-        ),
+        "description": "Send a message to the user (for updates or asking for help)",
         "params": {
             "message": {
                 "type": "string",
@@ -226,14 +222,7 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
         "params": {
             "merchant": {
                 "type": "string",
-                "description": (
-                    "Business + platform identity for the purchase. Prefer "
-                    "'Business (Platform - checkout.host)' "
-                    "(e.g. '1015 Folsom (Eventim - eventim.us)') or 'Business via Platform' "
-                    "(e.g. '1015 Folsom via Eventim'). For a first-party storefront with no "
-                    "separate platform, a bare business name is fine. Never use a swapped "
-                    "venue-only parenthetical like 'Eventim US (1015 Folsom)'."
-                ),
+                "description": "Merchant or site name for the purchase",
                 "required": True,
             },
             "currency": {"type": "string", "description": "Purchase currency (currently only USD)"},
@@ -606,10 +595,6 @@ Each turn you will receive a snapshot of the current browser environment which i
 - By default, only elements in the visible viewport are listed; use scroll if content is offscreen
 - Scroll with direction and a pixel amount; about 600 pixels is roughly one page
 - If you fill an input field and the action is interrupted, suggestions may have appeared
-- When the goal requires the cheapest available ticket/tier/option, first use evaluate to extract
-  every visible tier/variant with its price and availability (including sold-out / waitlist),
-  then select quantity 1 of the cheapest available option. Leave that tier/price list in the
-  evaluate tool result before checkout so the selection is grounded in tool evidence.
 
 # Output Format
 
