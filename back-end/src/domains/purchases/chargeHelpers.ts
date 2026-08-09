@@ -32,6 +32,16 @@ export function assertIssuedCardIsSpendable(
   }
 }
 
+/** Drop PAN/CVV before persisting mint evidence to the archive boundary. */
+export function mintResponseForArchive(
+  minted: CardProviderMintResult
+): Omit<CardProviderMintResult, 'pan' | 'cvv'> {
+  const safe: CardProviderMintResult = { ...minted };
+  delete safe.pan;
+  delete safe.cvv;
+  return safe;
+}
+
 /** Prefer secrets already fetched during mint; only call getDetails when mint omitted them. */
 export async function resolveIssuedCardDetails(
   minted: CardProviderMintResult,

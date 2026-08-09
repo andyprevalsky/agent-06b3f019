@@ -4,7 +4,10 @@ import type { TestPaymentLifecycle } from './types';
 type PurchaseCardRef = { cardId: string | null };
 
 function transferReleasedCents(transfer: Record<string, unknown> | undefined): number {
-  return typeof transfer?.released_cents === 'number' ? transfer.released_cents : 0;
+  const value = transfer?.released_cents;
+  // Match integerField acceptance (integers only) but soft-fallback to 0 so a
+  // malformed sort key cannot select a row that later fails mapping.
+  return typeof value === 'number' && Number.isInteger(value) ? value : 0;
 }
 
 /** Higher rank = a more terminal/settled transfer state, used as a stable tie-breaker. */
@@ -45,9 +48,10 @@ export function mapOrgTransfer(
   purchase: PurchaseCardRef,
   transferResults: unknown[]
 ): TestPaymentLifecycle['orgTransfer'] {
+  if (purchase.cardId === null || purchase.cardId === '') return null;
   const transfer = transferResults
     .flatMap((result) => mcpResultRows(result, 'transfers'))
-    .filter((value) => value?.card_id === purchase.cardId)
+    .filter((value) => value.card_id === purchase.cardId)
     .sort((left, right) => {
       const releasedDifference = transferReleasedCents(right) - transferReleasedCents(left);
       if (releasedDifference !== 0) return releasedDifference;

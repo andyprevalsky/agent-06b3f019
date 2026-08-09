@@ -9,12 +9,12 @@ import { PurchaseError } from './errors';
 import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
-import { assertIssuedCardIsSpendable, resolveIssuedCardDetails } from './chargeHelpers';
 import {
-  authorizeStripeHold,
-  type ChargeState,
-  type StripePaymentIntent,
-} from './chargeAuthorize';
+  assertIssuedCardIsSpendable,
+  mintResponseForArchive,
+  resolveIssuedCardDetails,
+} from './chargeHelpers';
+import { authorizeStripeHold, type ChargeState, type StripePaymentIntent } from './chargeAuthorize';
 
 export type { ChargeState } from './chargeAuthorize';
 import { mintCompanyFlowCard } from './companyFlowCard';
@@ -105,7 +105,8 @@ export async function mintCaptureAndIssue(
   }
   await archivePurchaseBoundary(input.agentId, purchaseId, 'agentcard-mint-and-details', {
     mint_request: cardRequest,
-    mint_response: minted,
+    // Mint may carry pan/cvv when org mint already resolved secrets — never archive them.
+    mint_response: mintResponseForArchive(minted),
     // Never archive the PAN/CVV that `getDetails` returns; persist only non-sensitive evidence.
     details_response: {
       cardId: minted.cardId,

@@ -6,6 +6,7 @@
 import assert from 'node:assert/strict';
 import { PurchaseSpendStatus } from '@prisma/client';
 import { getTestPaymentLifecycle } from '../../domains/test-payment/lifecycle';
+import { mapOrgTransfer } from '../../domains/test-payment/lifecycleOrgTransfer';
 
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   process.stdout.write(`  ${name}: `);
@@ -91,9 +92,63 @@ async function main(): Promise<void> {
     assert.equal(lifecycle.orgTransfer?.transferredCents, 4396);
     assert.equal(lifecycle.orgTransfer?.releasedCents, 0);
   });
+
+  await test('mapOrgTransfer returns null when purchase has no card', async () => {
+    const mapped = mapOrgTransfer({ cardId: null }, [
+      {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-unlinked',
+              status: 'released',
+              amount_cents: 100,
+              transferred_cents: 100,
+              released_cents: 100,
+              card_id: null,
+              livemode: false,
+            },
+          ],
+        },
+      },
+    ]);
+    assert.equal(mapped, null);
+  });
+
+  await test('mapOrgTransfer ignores non-integer released_cents when sorting', async () => {
+    const mapped = mapOrgTransfer({ cardId: 'card-1' }, [
+      {
+        structuredContent: {
+          transfers: [
+            {
+              id: 'owt-bad',
+              status: 'released',
+              amount_cents: 50,
+              transferred_cents: 50,
+              released_cents: 0.5,
+              card_id: 'card-1',
+              livemode: false,
+            },
+            {
+              id: 'owt-good',
+              status: 'released',
+              amount_cents: 75,
+              transferred_cents: 75,
+              released_cents: 10,
+              card_id: 'card-1',
+              livemode: false,
+            },
+          ],
+        },
+      },
+    ]);
+    assert.equal(mapped?.id, 'owt-good');
+    assert.equal(mapped?.releasedCents, 10);
+  });
 }
 
 void main().catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+  process.stderr.write(
+    `${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`
+  );
   process.exit(1);
 });

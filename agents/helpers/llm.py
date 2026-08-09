@@ -4245,28 +4245,148 @@ def _iter_verifier_message_text_parts(message: Dict[str, Any]) -> List[str]:
     return parts
 
 
-def _extract_structured_responses_from_verifier_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Extract JSON objects copied into verifier context as `Structured Response` blocks."""
+_VERIFIER_TRUSTED_TOOL_NAMES = frozenset(
+    {
+        "payment_card_ready",
+        "spawn_browser_agent",
+        "request_payment_card",
+        "attempt_completion",
+    }
+)
+
+
+def _verifier_tool_name(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    return str(metadata.get("toolName") or metadata.get("tool_name") or "").strip()
+
+
+def _verifier_tool_call_id(metadata: Any) -> Optional[str]:
+    if not isinstance(metadata, dict):
+        return None
+    raw = metadata.get("toolCallId") or metadata.get("tool_call_id")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    return None
+
+
+def _is_terminal_tool_status(metadata: Any) -> bool:
+    if not isinstance(metadata, dict):
+        return True
+    status = metadata.get("toolStatus") or metadata.get("tool_status")
+    if status is None:
+        return True
+    return str(status).upper() in {"FINISHED", "ERROR", "COMPLETED", "SUCCESS"}
+
+
+def _is_trusted_tool_role_message(message: Dict[str, Any]) -> bool:
+    role = str(message.get("role") or "").upper()
+    if role not in {"TOOL", "TOOL_RESULT"}:
+        return False
+    metadata = message.get("metadata")
+    if _verifier_tool_name(metadata) not in _VERIFIER_TRUSTED_TOOL_NAMES:
+        return False
+    return _is_terminal_tool_status(metadata)
+
+
+def _iter_tool_result_payloads_from_text(text: str) -> List[Dict[str, Any]]:
+    """Parse `TOOL_RESULT {...}` JSON objects embedded in verifier user batches."""
+    decoder = json.JSONDecoder()
+    payloads: List[Dict[str, Any]] = []
+    start = 0
+    marker = "TOOL_RESULT "
+    while True:
+        marker_index = text.find(marker, start)
+        if marker_index == -1:
+            break
+        json_start = marker_index + len(marker)
+        payload_text = text[json_start:]
+        stripped = payload_text.lstrip()
+        leading = len(payload_text) - len(stripped)
+        try:
+            candidate, consumed = decoder.raw_decode(stripped)
+        except json.JSONDecodeError:
+            start = json_start
+            continue
+        if isinstance(candidate, dict):
+            payloads.append(candidate)
+        start = json_start + leading + consumed
+    return payloads
+
+
+def _iter_trusted_verifier_tool_evidences(
+    messages: List[Dict[str, Any]],
+) -> List[Tuple[Optional[str], str, str]]:
+    """Yield (tool_call_id, tool_name, text) for allowlisted terminal tool evidence.
+
+    Supports both raw TOOL conversation rows (unit tests / direct callers) and
+    the compressed verifier batches that embed `TOOL_RESULT` JSON payloads.
+    """
+    evidences: List[Tuple[Optional[str], str, str]] = []
+    for message in messages:
+        if _is_trusted_tool_role_message(message):
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            tool_name = _verifier_tool_name(metadata)
+            tool_call_id = _verifier_tool_call_id(metadata)
+            for part in _iter_verifier_message_text_parts(message):
+                if part.strip():
+                    evidences.append((tool_call_id, tool_name, part))
+            continue
+
+        for part in _iter_verifier_message_text_parts(message):
+            for payload in _iter_tool_result_payloads_from_text(part):
+                tool_name = str(payload.get("tool_name") or "").strip()
+                if tool_name not in _VERIFIER_TRUSTED_TOOL_NAMES:
+                    continue
+                raw_call_id = payload.get("tool_call_id")
+                call_id = (
+                    raw_call_id.strip()
+                    if isinstance(raw_call_id, str) and raw_call_id.strip()
+                    else None
+                )
+                result = payload.get("result")
+                if isinstance(result, str):
+                    result_text = result
+                else:
+                    try:
+                        result_text = json.dumps(result, ensure_ascii=False, default=str)
+                    except (TypeError, ValueError):
+                        result_text = str(result)
+                if result_text.strip():
+                    evidences.append((call_id, tool_name, result_text))
+    return evidences
+
+
+def _extract_structured_responses_from_text(text: str) -> List[Dict[str, Any]]:
+    """Extract `Structured Response:` JSON objects, advancing past leading whitespace."""
     decoder = json.JSONDecoder()
     responses: List[Dict[str, Any]] = []
+    start = 0
+    marker = "Structured Response:"
+    while True:
+        marker_index = text.find(marker, start)
+        if marker_index == -1:
+            break
+        json_start = marker_index + len(marker)
+        payload = text[json_start:]
+        stripped = payload.lstrip()
+        leading = len(payload) - len(stripped)
+        try:
+            candidate, consumed = decoder.raw_decode(stripped)
+        except json.JSONDecodeError:
+            start = json_start
+            continue
+        if isinstance(candidate, dict):
+            responses.append(candidate)
+        start = json_start + leading + consumed
+    return responses
 
-    for message in messages:
-        for text in _iter_verifier_message_text_parts(message):
-            start = 0
-            while True:
-                marker_index = text.find("Structured Response:", start)
-                if marker_index == -1:
-                    break
-                json_start = marker_index + len("Structured Response:")
-                try:
-                    candidate, consumed = decoder.raw_decode(text[json_start:].lstrip())
-                except json.JSONDecodeError:
-                    start = json_start
-                    continue
-                if isinstance(candidate, dict):
-                    responses.append(candidate)
-                start = json_start + consumed
 
+def _extract_structured_responses_from_verifier_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Extract structured JSON only from trusted allowlisted tool evidence."""
+    responses: List[Dict[str, Any]] = []
+    for _tool_call_id, _tool_name, text in _iter_trusted_verifier_tool_evidences(messages):
+        responses.extend(_extract_structured_responses_from_text(text))
     return responses
 
 
@@ -4278,33 +4398,66 @@ _PAYMENT_CARD_LAST4_PATTERNS = (
 
 
 def _extract_payment_card_last4_from_verifier_messages(messages: List[Dict[str, Any]]) -> List[str]:
-    """Return ordered last-four digits from independent payment-card tool evidence.
+    """Return ordered last-four digits from independent trusted payment-card tool evidence.
 
     Matching digits across multiple evidences are valid — idempotent card reuse
-    for the same order intentionally returns the same last four twice.
+    for the same order intentionally returns the same last four twice. Evidence
+    is restricted to allowlisted terminal tool results and deduplicated by
+    ``toolCallId`` so a single tool call cannot count twice.
     """
     last4_values: List[str] = []
+    seen_tool_call_ids: set[str] = set()
+    handled_raw_tool_call_ids: set[str] = set()
+
     for message in messages:
-        metadata = message.get("metadata")
-        if isinstance(metadata, dict):
-            meta_last4 = metadata.get("paymentCardLast4")
-            if isinstance(meta_last4, str) and re.fullmatch(r"\d{4}", meta_last4):
-                last4_values.append(meta_last4)
+        if not _is_trusted_tool_role_message(message):
+            continue
+        metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+        tool_call_id = _verifier_tool_call_id(metadata)
+        if tool_call_id is not None:
+            if tool_call_id in seen_tool_call_ids:
                 continue
-            tool_name = str(metadata.get("toolName") or "")
-            if tool_name not in {"payment_card_ready", "spawn_browser_agent", "request_payment_card"}:
-                # Still scan text below for TOOL_RESULT prose that omits metadata.
-                pass
-        for text in _iter_verifier_message_text_parts(message):
+            seen_tool_call_ids.add(tool_call_id)
+            handled_raw_tool_call_ids.add(tool_call_id)
+        meta_last4 = metadata.get("paymentCardLast4")
+        if isinstance(meta_last4, str) and re.fullmatch(r"\d{4}", meta_last4):
+            last4_values.append(meta_last4)
+            continue
+        for part in _iter_verifier_message_text_parts(message):
             matched = False
             for pattern in _PAYMENT_CARD_LAST4_PATTERNS:
-                found = pattern.search(text)
+                found = pattern.search(part)
                 if found:
                     last4_values.append(found.group(1))
                     matched = True
                     break
             if matched:
                 break
+
+    for tool_call_id, tool_name, text in _iter_trusted_verifier_tool_evidences(messages):
+        if tool_name not in {"payment_card_ready", "spawn_browser_agent", "request_payment_card"}:
+            continue
+        # Skip evidences already consumed from raw TOOL-role rows.
+        if tool_call_id is not None and tool_call_id in handled_raw_tool_call_ids:
+            continue
+        if tool_call_id is not None:
+            if tool_call_id in seen_tool_call_ids:
+                continue
+            seen_tool_call_ids.add(tool_call_id)
+        # Avoid double-counting the same raw TOOL message text that
+        # `_iter_trusted_verifier_tool_evidences` also yields.
+        if tool_call_id is None and any(
+            _is_trusted_tool_role_message(message)
+            and text in _iter_verifier_message_text_parts(message)
+            for message in messages
+        ):
+            continue
+        for pattern in _PAYMENT_CARD_LAST4_PATTERNS:
+            found = pattern.search(text)
+            if found:
+                last4_values.append(found.group(1))
+                break
+
     return last4_values
 
 

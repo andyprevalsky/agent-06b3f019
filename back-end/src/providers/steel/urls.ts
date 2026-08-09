@@ -81,13 +81,17 @@ export function steelCdpConnectionUrl(wsUrl: string): string {
 
 export function steelDebugUrl(debugUrl: string): string {
   const url = new URL(debugUrl);
-  // Normalize API / legacy hosts onto the live-view origin (not the REST API host).
-  if (
+  const apiHost = new URL(STEEL_API_BASE_URL).hostname;
+  const liveViewExplicitlyConfigured = Boolean(process.env.STEEL_LIVE_VIEW_BASE_URL?.trim());
+  // Normalize public API / legacy hosts onto the live-view origin. Custom
+  // STEEL_BASE_URL hosts only rewrite when STEEL_LIVE_VIEW_BASE_URL is set —
+  // otherwise keep the custom host (do not invent public connect.steel.dev).
+  const shouldRewriteToLiveView =
     url.hostname === 'api.steel.dev' ||
     url.hostname === 'connect.steel.dev' ||
     url.hostname === 'connect.steelbrowser.com' ||
-    url.hostname === new URL(STEEL_API_BASE_URL).hostname
-  ) {
+    (url.hostname === apiHost && (apiHost === 'api.steel.dev' || liveViewExplicitlyConfigured));
+  if (shouldRewriteToLiveView) {
     const liveOrigin = new URL(STEEL_LIVE_VIEW_BASE_URL);
     url.protocol = liveOrigin.protocol;
     url.host = liveOrigin.host;

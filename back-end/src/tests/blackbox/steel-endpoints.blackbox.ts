@@ -17,6 +17,48 @@ function assert(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
 }
 
+async function assertCustomSteelApiKeepsDebugHostWithoutLiveView(): Promise<void> {
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const { fileURLToPath, pathToFileURL } = await import('node:url');
+  const urlsAbs = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '../../providers/steel/urls.ts'
+  );
+  const dir = mkdtempSync(path.join(tmpdir(), 'steel-url-'));
+  const scriptPath = path.join(dir, 'check.mts');
+  writeFileSync(
+    scriptPath,
+    `
+process.env.STEEL_BASE_URL = 'https://staging-steel.internal';
+delete process.env.STEEL_LIVE_VIEW_BASE_URL;
+const mod = await import(${JSON.stringify(pathToFileURL(urlsAbs).href)});
+const url = new URL(mod.steelDebugUrl('https://staging-steel.internal/v1/sessions/s1/player?token=x'));
+if (url.hostname !== 'staging-steel.internal') {
+  throw new Error('custom API debug URL rewrote to ' + url.hostname);
+}
+if (url.searchParams.get('interactive') !== 'false') {
+  throw new Error('interactive=false missing on custom debug URL');
+}
+`
+  );
+  try {
+    const result = spawnSync(process.execPath, ['--import', 'tsx', scriptPath], {
+      encoding: 'utf8',
+      env: process.env,
+    });
+    if (result.status !== 0) {
+      throw new Error(
+        `custom Steel API live-view contract failed: ${result.stderr || result.stdout || result.error}`
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function assertReleaseRetriesAreBounded(): Promise<void> {
   const sessions = steel.sessions as unknown as {
     release: (sessionId: string) => Promise<unknown>;
@@ -181,6 +223,7 @@ async function main(): Promise<void> {
       debugUrl.searchParams.get('interactive') === 'false',
       'Steel live view was not read-only'
     );
+    await assertCustomSteelApiKeepsDebugHostWithoutLiveView();
     assert(
       steelSessionFileUrl('session/one', 'reports/a?b#c.txt') ===
         'https://api.steel.dev/v1/sessions/session%2Fone/files/reports/a%3Fb%23c.txt',

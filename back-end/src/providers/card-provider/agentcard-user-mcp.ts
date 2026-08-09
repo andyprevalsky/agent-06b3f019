@@ -431,7 +431,9 @@ export class AgentCardUserMcpProvider implements CardProvider {
       last4,
       expiry,
       spendLimitCents,
-      status,
+      // get_card_details is current truth on replay; create_card can still say "active"
+      // after a prior attempt closed the returned card.
+      status: details?.status ?? status,
       ...(details !== undefined
         ? { pan: details.pan, cvv: details.cvv, balanceCents: details.balanceCents }
         : {}),

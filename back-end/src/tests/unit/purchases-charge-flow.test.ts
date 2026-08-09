@@ -27,6 +27,9 @@ import {
   withFakeStripe,
 } from '../blackbox/purchases.testkit';
 import { ROSE_AGENT_CARD_ID } from '../../providers/card-provider/static-card';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 
 // Test-only Rose Agent Card credentials, injected via env (never a real card).
 const STATIC_CARD_ENV = {
@@ -449,6 +452,29 @@ async function main(): Promise<void> {
         else process.env[name] = value;
       }
     }
+  });
+
+  await test('redacts pan/cvv from mint archive payload', async () => {
+    const { mintResponseForArchive } = await import('../../domains/purchases/chargeHelpers');
+    const safe = mintResponseForArchive({
+      cardId: 'card-archive',
+      last4: '1111',
+      expiry: '12/30',
+      spendLimitCents: 1000,
+      status: 'ACTIVE',
+      pan: '4111111111111111',
+      cvv: '123',
+      balanceCents: 1000,
+    });
+    assert.equal('pan' in safe, false);
+    assert.equal('cvv' in safe, false);
+    assert.equal(safe.cardId, 'card-archive');
+    const chargePath = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../../domains/purchases/charge.ts'
+    );
+    const source = readFileSync(chargePath, 'utf8');
+    assert.match(source, /mint_response:\s*mintResponseForArchive\(minted\)/);
   });
 
   process.stdout.write(
