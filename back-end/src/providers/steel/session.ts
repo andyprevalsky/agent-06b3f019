@@ -402,6 +402,9 @@ export async function createSessionWithContext(
           throw new SteelSessionCleanupError(session.id, releaseErr);
         }
         lastError = new Error(`Session validation failed on attempt ${attempt}`);
+        if (attempt < MAX_SESSION_RETRIES) {
+          await sleepBeforeSteelRetry(attempt);
+        }
         continue; // Retry
       }
 
@@ -438,6 +441,9 @@ export async function createSessionWithContext(
             lastError = new Error(
               'Concurrent Steel profile initialization; retrying with persisted profile'
             );
+            if (attempt < MAX_SESSION_RETRIES) {
+              await sleepBeforeSteelRetry(attempt);
+            }
             continue;
           }
         } else {
