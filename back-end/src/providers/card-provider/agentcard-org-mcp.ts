@@ -471,6 +471,11 @@ export class AgentCardOrgMcpProvider implements CardProvider {
       // get_card_details is the current source of truth on an idempotency replay. create_card may
       // still say "created" even if a prior attempt closed the returned card.
       status: details.status,
+      // Thread secrets so mintCaptureAndIssue does not re-call get_card_details (a second call has
+      // hung the HTTP mint for 15+ minutes while CHARGING blocked same-fingerprint retries).
+      pan: details.pan,
+      cvv: details.cvv,
+      balanceCents: details.balanceCents,
       ...(transferId !== undefined ? { providerTransferId: transferId, metadata: record } : {}),
     };
   }

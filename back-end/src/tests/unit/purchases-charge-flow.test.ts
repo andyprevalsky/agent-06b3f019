@@ -63,6 +63,24 @@ class TransferlessFundingInProgressCardProvider extends FakeCardProvider {
   }
 }
 
+/** Org-style mint: secrets already resolved during mintCard — charge must not re-getDetails. */
+class MintWithSecretsCardProvider extends FakeCardProvider {
+  async mintCard(request: CardProviderMintRequest) {
+    const minted = await super.mintCard(request);
+    return {
+      ...minted,
+      pan: this.pan,
+      cvv: this.cvv,
+      balanceCents: request.amountCents,
+    };
+  }
+
+  async getDetails(cardId: string) {
+    this.detailCalls += 1;
+    throw new Error(`getDetails must not run when mint returned secrets (card=${cardId})`);
+  }
+}
+
 async function test(name: string, fn: () => Promise<void>): Promise<void> {
   try {
     await fn();
@@ -134,6 +152,17 @@ async function main(): Promise<void> {
     assert.equal(result.cardId, provider.cardId);
     assert.equal(result.pan, provider.pan);
     assert.equal(await latestStatus(userId, input.fingerprint), PurchaseSpendStatus.HELD);
+  });
+
+  await test('mintPurchaseCard reuses mint secrets and skips a second getDetails', async () => {
+    const userId = await seedSubscribedUser();
+    const provider = new MintWithSecretsCardProvider();
+    const wallet = new FakeWalletFundingProvider();
+    const input = mintInput(userId);
+    const result = await withFakeStripe(async () => mintPurchaseCard(input, provider, wallet));
+    assert.equal(result.status, PurchaseSpendStatus.HELD);
+    assert.equal(result.pan, provider.pan);
+    assert.equal(provider.detailCalls, 0, 'mint-provided secrets must not trigger getDetails');
   });
 
   await test('mintPurchaseCard reclaims and cancels when pre-capture card details fail', async () => {

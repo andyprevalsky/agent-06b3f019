@@ -420,5 +420,5 @@ export class AgentCardOrgRuntime {
 
 const runtime = new AgentCardOrgRuntime();
 
-export const callOrgTool: AgentCardOrgToolCaller = (toolName, args) =>
-  runtime.callTool(toolName, args);
+export const callOrgTool: AgentCardOrgToolCaller = (toolName, args, deadlineAtMs) =>
+  runtime.callTool(toolName, args, deadlineAtMs);

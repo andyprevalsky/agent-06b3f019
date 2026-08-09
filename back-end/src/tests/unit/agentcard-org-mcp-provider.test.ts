@@ -211,6 +211,9 @@ async function main(): Promise<void> {
   ]);
   assert.strictEqual(minted.providerTransferId, 'owt-123');
   assert.strictEqual(minted.last4, '4242');
+  assert.strictEqual(minted.pan, '4242424242424242');
+  assert.strictEqual(minted.cvv, '123');
+  assert.strictEqual(minted.balanceCents, 4396);
   assert.strictEqual(details.balanceCents, 4396);
 
   const instantCalls: ToolCall[] = [];

@@ -14,7 +14,11 @@ import { isKycRequiredError, kycRequiredPurchaseError } from './kyc';
 import { getCustomerDefaultPaymentMethodId } from './stripeCustomer';
 import * as repo from './repo';
 import { archivePurchaseBoundary } from './archive';
-import { assertIssuedCardIsSpendable, sanitizeDescriptorSuffix } from './chargeHelpers';
+import {
+  assertIssuedCardIsSpendable,
+  resolveIssuedCardDetails,
+  sanitizeDescriptorSuffix,
+} from './chargeHelpers';
 import { mintCompanyFlowCard } from './companyFlowCard';
 import { classifyFundingResumeFailure } from './fundingResume';
 import {
@@ -158,7 +162,9 @@ export async function mintCaptureAndIssue(
     state.issuedStaticCard = false;
     state.walletWasFunded = true;
   }
-  const details = await state.activeCardProvider.getDetails(minted.cardId);
+  // Org mint already fetched get_card_details; reusing those secrets avoids a second MCP read that
+  // has hung the HTTP request for 15+ minutes (client ReadTimeout, purchase stuck CHARGING → 409).
+  const details = await resolveIssuedCardDetails(minted, state.activeCardProvider);
   if (!isStaticCard) {
     // An exact-key replay can return a card created by an earlier attempt. Re-read the provider
     // state after card+transfer persistence and before charging the user; a closed/consumed or

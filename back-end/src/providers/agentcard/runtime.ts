@@ -22,10 +22,27 @@ export type { AgentCardTool } from './types';
 
 const log = createLogger('AgentCardMCP');
 
+/** Per-tool MCP call ceiling. Unbounded client.callTool has hung mint for 15+ minutes. */
+const DEFAULT_MCP_TOOL_TIMEOUT_MS = 30_000;
+
+function mcpToolTimeoutMs(): number {
+  const raw = process.env.AGENTCARD_MCP_TOOL_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_MCP_TOOL_TIMEOUT_MS;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : DEFAULT_MCP_TOOL_TIMEOUT_MS;
+}
+
 export class AgentCardNotConnectedError extends Error {
   constructor(readonly userId: string) {
     super('User has not connected AgentCard');
     this.name = 'AgentCardNotConnectedError';
+  }
+}
+
+export class AgentCardMcpTimeoutError extends Error {
+  constructor(readonly toolName: string, readonly timeoutMs: number) {
+    super(`AgentCard MCP tool ${toolName} timed out after ${timeoutMs}ms`);
+    this.name = 'AgentCardMcpTimeoutError';
   }
 }
 
@@ -146,7 +163,24 @@ export async function mcpCallTool(
   args: Record<string, unknown>,
   fetchImpl?: FetchLike
 ): Promise<unknown> {
-  return withClient(accessToken, (client) => client.callTool({ name, arguments: args }), fetchImpl);
+  const timeoutMs = mcpToolTimeoutMs();
+  return withClient(
+    accessToken,
+    async (client) => {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        return await Promise.race([
+          client.callTool({ name, arguments: args }),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(() => reject(new AgentCardMcpTimeoutError(name, timeoutMs)), timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    },
+    fetchImpl
+  );
 }
 
 /**

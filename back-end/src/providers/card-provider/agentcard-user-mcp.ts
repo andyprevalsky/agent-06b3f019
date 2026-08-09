@@ -432,6 +432,9 @@ export class AgentCardUserMcpProvider implements CardProvider {
       expiry,
       spendLimitCents,
       status,
+      ...(details !== undefined
+        ? { pan: details.pan, cvv: details.cvv, balanceCents: details.balanceCents }
+        : {}),
       ...(providerTransferId !== undefined ? { providerTransferId, metadata: record } : {}),
     };
   }
