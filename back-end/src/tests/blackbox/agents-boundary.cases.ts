@@ -203,11 +203,39 @@ export async function testBoundary_createAgentCallOrdering(): Promise<void> {
   }
 }
 
+function isAgentBoundaryOutbound(call: CapturedCall): boolean {
+  return (
+    call.url.includes('openrouter.ai') ||
+    call.url.includes('ip-api.com') ||
+    call.url.includes('api.github.com')
+  );
+}
+
+/** Wait until prior create-agent fire-and-forget traffic stops writing captures. */
+async function drainAgentBoundaryOutbound(maxAttempts = 8): Promise<void> {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await clearCaptures();
+    await sleep(500);
+    const leftover = (await readCaptures()).filter(isAgentBoundaryOutbound);
+    if (leftover.length === 0) return;
+  }
+  const stillBusy = (await readCaptures()).filter(isAgentBoundaryOutbound);
+  assert(
+    stillBusy.length === 0,
+    `Agent boundary capture buffer did not drain before validation short-circuit: ${JSON.stringify(
+      stillBusy.map((c) => c.url)
+    ).slice(0, 500)}`
+  );
+}
+
 export async function testBoundary_validationShortCircuitNoOutbound(): Promise<void> {
   const session = await createAnonymousSession('boundary-validation');
-  // Drain any in-flight calls from the parallel phase before asserting zero outbound
-  await sleep(500);
+  // Prior sequential create-agent cases leave GitHub/OpenRouter fire-and-forget work that can
+  // land after a single sleep+clear. Drain until quiet, then only count captures after the
+  // validation request starts so leftover traffic cannot poison the zero-outbound assertion.
+  await drainAgentBoundaryOutbound();
   await clearCaptures();
+  const requestStartedAtMs = Date.now();
 
   // Missing goal → 400: should not make any outbound calls
   const res = await request(`${BASE_URL}/api/agents`, {
@@ -219,15 +247,13 @@ export async function testBoundary_validationShortCircuitNoOutbound(): Promise<v
   assertSchema(ErrorResponse, res.data, 'validation short-circuit');
 
   const calls = await readCaptures();
-  // Filter to agent-relevant services only
   const agentCalls = calls.filter(
-    (c) =>
-      c.url.includes('openrouter.ai') ||
-      c.url.includes('ip-api.com') ||
-      c.url.includes('api.github.com')
+    (c) => isAgentBoundaryOutbound(c) && new Date(c.timestamp).getTime() >= requestStartedAtMs
   );
   assert(
     agentCalls.length === 0,
-    `Validation failure should make 0 outbound calls, got ${agentCalls.length}`
+    `Validation failure should make 0 outbound calls, got ${agentCalls.length}: ${JSON.stringify(
+      agentCalls.map((c) => ({ url: c.url, timestamp: c.timestamp }))
+    ).slice(0, 500)}`
   );
 }
