@@ -230,25 +230,28 @@ async function drainAgentBoundaryOutbound(maxAttempts = 8): Promise<void> {
 
 export async function testBoundary_validationShortCircuitNoOutbound(): Promise<void> {
   const session = await createAnonymousSession('boundary-validation');
-  // Prior sequential create-agent cases leave GitHub/OpenRouter fire-and-forget work that can
-  // land after a single sleep+clear. Drain until quiet, then only count captures after the
-  // validation request starts so leftover traffic cannot poison the zero-outbound assertion.
+  // Prior create-agent cases (and parallel blackbox domains under coverage) share the
+  // global capture buffer. Scope this assertion with X-Capture-Token so only outbound
+  // attributed to THIS request can fail the zero-call check.
   await drainAgentBoundaryOutbound();
-  await clearCaptures();
-  const requestStartedAtMs = Date.now();
+  const captureToken = `validation-${randomUUID()}`;
 
   // Missing goal → 400: should not make any outbound calls
   const res = await request(`${BASE_URL}/api/agents`, {
     method: 'POST',
-    headers: authHeaders(session.session.access_token),
+    headers: {
+      ...authHeaders(session.session.access_token),
+      'X-Capture-Token': captureToken,
+    },
     body: JSON.stringify({}),
   });
   assertStatus(res.status, 400, res.data);
   assertSchema(ErrorResponse, res.data, 'validation short-circuit');
 
-  const calls = await readCaptures();
-  const agentCalls = calls.filter(
-    (c) => isAgentBoundaryOutbound(c) && new Date(c.timestamp).getTime() >= requestStartedAtMs
+  const capturesRes = await request(`${BASE_URL}/api/test/captures?token=${captureToken}`);
+  assertStatus(capturesRes.status, 200, capturesRes.data);
+  const agentCalls = ((capturesRes.data as { captures: CapturedCall[] }).captures || []).filter(
+    isAgentBoundaryOutbound
   );
   assert(
     agentCalls.length === 0,
