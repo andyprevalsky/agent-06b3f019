@@ -20,7 +20,7 @@ tags:
   - browser-1015-eventim-request-card
 sources:
   - agent 317bd635-7f07-4afb-acee-cab8e99e3413
-  - agents/benchmarks/runs/20260810_053337_browser-1015-eventim-request-card.json
+  - commit bafc05068
   - PR #948
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::test_write_lock_email_send_excludes_marketing_opt_in_controls
 status: fixed
