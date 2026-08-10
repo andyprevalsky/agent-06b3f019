@@ -105,6 +105,48 @@ async function testNotConfigured(): Promise<void> {
   assert.strictEqual(calls.length, 0, 'never calls Meta when unconfigured');
 }
 
+async function testRecipientUnreachableCodes(): Promise<void> {
+  // Meta deliverability codes → recipientUnreachable (stop mirroring to this number).
+  for (const code of [131026, 131030, 131047, 470]) {
+    await withMockedFetch(
+      () =>
+        new Response(JSON.stringify({ error: { message: 'x', code } }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        }),
+      CONFIGURED,
+      async () => {
+        const result = await sendWhatsAppMessage('+15551234567', 'hi');
+        assert.strictEqual(result.success, false, `code ${code} is a failure`);
+        assert.strictEqual(
+          result.recipientUnreachable,
+          true,
+          `code ${code} must flag recipientUnreachable`
+        );
+      }
+    );
+  }
+  // Auth/other errors are NOT a recipient-reachability signal.
+  for (const code of [190, 131056, 368]) {
+    await withMockedFetch(
+      () =>
+        new Response(JSON.stringify({ error: { message: 'x', code } }), {
+          status: 401,
+          headers: { 'content-type': 'application/json' },
+        }),
+      CONFIGURED,
+      async () => {
+        const result = await sendWhatsAppMessage('+15551234567', 'hi');
+        assert.notStrictEqual(
+          result.recipientUnreachable,
+          true,
+          `code ${code} must NOT flag recipientUnreachable`
+        );
+      }
+    );
+  }
+}
+
 async function testNetworkThrow(): Promise<void> {
   await withMockedFetch(
     () => {
@@ -122,6 +164,7 @@ async function testNetworkThrow(): Promise<void> {
 async function main(): Promise<void> {
   await testSendSuccess();
   await testSendApiError();
+  await testRecipientUnreachableCodes();
   await testNotConfigured();
   await testNetworkThrow();
   process.stdout.write('PASS sendWhatsAppMessage request shape + result contract\n');

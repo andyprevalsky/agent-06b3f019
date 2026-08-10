@@ -285,6 +285,11 @@ model User {
   isAnonymous                 Boolean                     @default(false)
   onboardingCompletedAt       DateTime?
   imessageBridgeLastSeenAt    DateTime?
+  // Per-number WhatsApp deliverability for mirrored lifecycle notifications.
+  // null = unknown (try once, learn); true = reachable (received an inbound WA
+  // message or a send succeeded); false = not on WhatsApp / undeliverable (skip
+  // WhatsApp sends so we don't hammer a number that can't receive).
+  whatsappReachable           Boolean?
   systemName                  String?
   profilePicture              String?
   customSystemPrompt          String?

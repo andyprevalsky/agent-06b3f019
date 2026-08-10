@@ -376,6 +376,13 @@ async function testInbound_newNumberProvisionsAndRoutes() {
     const user = await prisma.user.findFirst({ where: { phone } });
     if (!user) throw new Error('Expected new WhatsApp number to be provisioned as a User row');
     userId = user.userId;
+    // An inbound WhatsApp message marks the user reachable so lifecycle/onboarding
+    // notifications mirror to WhatsApp (and self-heal a previously-unreachable flag).
+    if (user.whatsappReachable !== true) {
+      throw new Error(
+        `Expected inbound WhatsApp to set whatsappReachable=true, got ${String(user.whatsappReachable)}`
+      );
+    }
     // routeToSupervisor bumps the inbound seq synchronously before the async run.
     const session = await prisma.smsSession.findUnique({ where: { userId } });
     if (!session || session.lastInboundSeq < 1) {

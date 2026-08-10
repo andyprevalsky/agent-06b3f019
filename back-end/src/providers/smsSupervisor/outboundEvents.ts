@@ -12,6 +12,7 @@
 import { createLogger } from '../logger';
 import { sendSms, sendMms, getUserPhone } from '../smsQueue';
 import { sendOnChannel, type SupervisorChannel } from './channelDelivery';
+import { markWhatsAppReachable, markWhatsAppUnreachable } from '../whatsappReachability';
 import { SMS_TEMPLATES, getAgentUrl } from '../smsTemplates';
 import { getSignedUrl, uploadToStorage } from '../storage';
 import { appendLifecycleSms } from './sessionStore';
@@ -29,6 +30,8 @@ const log = createLogger('OutboundEvents');
 
 type SmsArchiveOptions = Parameters<typeof sendSms>[2];
 type SmsSendResult = Awaited<ReturnType<typeof sendSms>>;
+// Superset of SmsSendResult that also carries WhatsApp's `recipientUnreachable`.
+type ChannelSendResult = Awaited<ReturnType<typeof sendOnChannel>>;
 
 /**
  * Record a delivered lifecycle SMS on the user's supervisor transcript.
@@ -55,14 +58,41 @@ async function recordLifecycleTurn(
   }
 }
 
+/**
+ * Deliver one lifecycle message across every mirrored channel, updating WhatsApp
+ * reachability from the result (stop mirroring on undeliverable, re-enable on a
+ * successful send). Returns the SMS result (or the first channel's) as the
+ * transcript anchor so a mirrored send appends the user's thread exactly once.
+ */
+async function deliverAcrossChannels(
+  userId: string,
+  phone: string,
+  message: string,
+  channels: readonly SupervisorChannel[],
+  send: (channel: SupervisorChannel) => Promise<ChannelSendResult>
+): Promise<ChannelSendResult> {
+  let anchor: ChannelSendResult | undefined;
+  for (const channel of channels) {
+    const result = await send(channel);
+    if (channel === 'WHATSAPP') {
+      if (result.recipientUnreachable === true) await markWhatsAppUnreachable(userId);
+      else if (result.success) await markWhatsAppReachable(userId);
+    }
+    if (channel === 'SMS' || anchor === undefined) anchor = result;
+  }
+  return anchor ?? { success: false, error: 'no delivery channels' };
+}
+
 async function sendLifecycleSms(
   userId: string,
   phone: string,
   message: string,
   options?: SmsArchiveOptions,
-  channel: SupervisorChannel = 'SMS'
+  channels: readonly SupervisorChannel[] = ['SMS']
 ): Promise<SmsSendResult> {
-  const result = await sendOnChannel(channel, phone, message, options);
+  const result = await deliverAcrossChannels(userId, phone, message, channels, (channel) =>
+    sendOnChannel(channel, phone, message, options)
+  );
   await recordLifecycleTurn(userId, message, result);
   return result;
 }
@@ -73,14 +103,16 @@ async function sendLifecycleMms(
   message: string,
   mediaUrl: string,
   options?: SmsArchiveOptions,
-  channel: SupervisorChannel = 'SMS'
+  channels: readonly SupervisorChannel[] = ['SMS']
 ): Promise<SmsSendResult> {
   // WhatsApp Cloud API sends are text-only in v1 (media is a follow-up); the
-  // message body already carries the deep link, so degrade gracefully to text.
-  const result =
+  // message body already carries the deep link, so WhatsApp degrades to text
+  // while SMS keeps the MMS attachment.
+  const result = await deliverAcrossChannels(userId, phone, message, channels, (channel) =>
     channel === 'WHATSAPP'
-      ? await sendOnChannel('WHATSAPP', phone, message, options)
-      : await sendMms(phone, message, mediaUrl, options);
+      ? sendOnChannel('WHATSAPP', phone, message, options)
+      : sendMms(phone, message, mediaUrl, options)
+  );
   await recordLifecycleTurn(userId, message, result);
   return result;
 }
@@ -203,7 +235,7 @@ async function rehostMmsAttachmentUrl(userId: string, mediaUrl: string): Promise
 export async function notifyAgentStarted(
   userId: string,
   agent: { id: string; goal: string },
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -231,7 +263,7 @@ export async function notifyAgentStarted(
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'agent_started', user_id: userId },
     },
-    channel
+    channels
   );
 
   log.info('agentStarted SMS sent', {
@@ -252,7 +284,7 @@ export async function notifyPlannerMessage(
   agent: { id: string },
   messageText: string,
   isQuestion: boolean,
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -282,7 +314,7 @@ export async function notifyPlannerMessage(
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'planner_message', user_id: userId, is_question: isQuestion },
     },
-    channel
+    channels
   );
 
   log.info('plannerMessage SMS sent', {
@@ -309,7 +341,7 @@ export async function notifyWriteLock(
   attentionRequestId: string,
   _workflowId: string,
   metadata?: unknown,
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -347,7 +379,7 @@ export async function notifyWriteLock(
             attention_request_id: attentionRequestId,
           },
         },
-        channel
+        channels
       )
     : await sendLifecycleSms(
         userId,
@@ -361,7 +393,7 @@ export async function notifyWriteLock(
             attention_request_id: attentionRequestId,
           },
         },
-        channel
+        channels
       );
 
   log.info('writeLock notification sent', {
@@ -434,7 +466,7 @@ export async function notifyAgentCardSetup(
   userId: string,
   agent: { id: string },
   setupUrl: string,
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -452,7 +484,7 @@ export async function notifyAgentCardSetup(
 
   const prefix = agent.id.substring(0, 6);
   const message = SMS_TEMPLATES.agentCardSetup(prefix, setupUrl);
-  const result = await sendLifecycleSms(userId, phone, message, undefined, channel);
+  const result = await sendLifecycleSms(userId, phone, message, undefined, channels);
 
   log.info('agentCardSetup SMS sent', {
     userId,
@@ -471,7 +503,7 @@ export async function notifyCompletion(
   agent: { id: string },
   summary: string,
   outputs?: unknown,
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<{
   success: boolean;
   messageSid?: string;
@@ -504,7 +536,7 @@ export async function notifyCompletion(
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'completion', user_id: userId },
     },
-    channel
+    channels
   );
 
   log.info('completion SMS sent', {
@@ -523,7 +555,7 @@ export async function notifyCompletion(
 export async function notifyCostLimit(
   userId: string,
   agent: { id: string; goal: string; treeCostCents: number; priceLimitCents: number },
-  channel: SupervisorChannel = 'SMS'
+  channels: SupervisorChannel[] = ['SMS']
 ): Promise<void> {
   const startTime = Date.now();
 
@@ -557,7 +589,7 @@ export async function notifyCostLimit(
       archiveRootAgentId: agent.id,
       archiveContext: { event_type: 'cost_limit', user_id: userId },
     },
-    channel
+    channels
   );
 
   log.info('costLimit SMS sent', {

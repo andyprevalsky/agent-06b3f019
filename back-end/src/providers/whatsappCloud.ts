@@ -123,6 +123,28 @@ interface WhatsAppSendResponse {
 }
 
 /**
+ * Meta error codes meaning "this number cannot receive a proactive message from
+ * us" — so we should stop mirroring lifecycle notifications to it (until it
+ * texts our WhatsApp again, which re-enables it):
+ *   131026 — message undeliverable (recipient not a valid WhatsApp user / can't receive)
+ *   131030 — recipient phone number not in the allowed list (dev/test mode)
+ *   131047 / 470 — re-engagement required (outside the 24h customer-service window)
+ * Auth (190/401), rate-limit (131056/429), and transient errors are NOT here —
+ * those are our-side or temporary, not a property of the recipient number.
+ */
+const WHATSAPP_UNREACHABLE_ERROR_CODES = new Set([131026, 131030, 131047, 470]);
+
+function extractWhatsAppErrorCode(errorText: string): number | null {
+  try {
+    const parsed = JSON.parse(errorText) as { error?: { code?: unknown } };
+    const code = parsed.error?.code;
+    return typeof code === 'number' ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Send a WhatsApp text message via the Meta Cloud API.
  *
  * Returns the same `{ success, messageSid?, error?, definitiveFailure? }` shape
@@ -142,6 +164,8 @@ export async function sendWhatsAppMessage(
   messageSid?: string;
   error?: string;
   definitiveFailure?: boolean;
+  /** Meta reports this number can't receive a proactive message — stop mirroring. */
+  recipientUnreachable?: boolean;
 }> {
   const { phoneNumberId, accessToken, graphApiVersion } = getWhatsAppConfig();
 
@@ -194,10 +218,14 @@ export async function sendWhatsAppMessage(
         success: false,
         context: options.archiveContext,
       });
+      const errorCode = extractWhatsAppErrorCode(errorText);
+      const recipientUnreachable =
+        errorCode !== null && WHATSAPP_UNREACHABLE_ERROR_CODES.has(errorCode);
       return {
         success: false,
         error: `WhatsApp API error: ${response.status}`,
         definitiveFailure: true,
+        ...(recipientUnreachable ? { recipientUnreachable: true } : {}),
       };
     }
 

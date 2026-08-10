@@ -22,6 +22,7 @@ import {
 } from './service.validation';
 import { getWhatsAppConfig, verifyMetaSignature } from '../../providers/whatsappCloud';
 import { provisionUserByPhone, getInboundSeq } from './repo';
+import { markWhatsAppReachable } from '../../providers/whatsappReachability';
 import { createSignupBonusCredit } from '../../providers/credits';
 import {
   handleSmsSupervisorMessage,
@@ -213,6 +214,10 @@ export async function handleInboundWhatsApp(
       });
     }
   }
+
+  // The user just texted us on WhatsApp, so they are definitively reachable —
+  // (re-)enable WhatsApp mirroring of their lifecycle/onboarding notifications.
+  await markWhatsAppReachable(user.userId);
 
   await routeToSupervisor(user.userId, fromPhone, messageBody, requestStart);
   return { ok: true };
