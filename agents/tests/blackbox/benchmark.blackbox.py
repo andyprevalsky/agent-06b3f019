@@ -11994,6 +11994,10 @@ def test_eventim_1015_request_card_benchmark_contract():
     # so the min-count key must use the remapped name (peer browser ecommerce tasks).
     assert task.min_tool_counts == {"spawn_browser_agent": 1}
     assert task.tool_count_scope == "root"
+    semantic = next(ev for ev in task.evaluators if ev["id"] == "eventim-1015-payment-boundary-semantics")
+    judge = semantic["judge_prompt"].lower()
+    assert "do not require a cheapest-tier comparison dump" in judge
+    assert "pending payment approval" in judge and "sufficient grounding" in judge
     assert {"browser", "antibot", "ecommerce", "ticketing"} <= set(task.tags)
     assert task.expected_payment_receipt["merchant"] == "1015 Folsom (Eventim - eventim.us)"
     assert "eventim.us" in task.environment["live_targets"][1] or any(
