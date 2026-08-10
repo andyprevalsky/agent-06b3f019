@@ -7264,6 +7264,49 @@ def test_is_approval_valid_expired():
     }
     assert is_approval_valid(approvals, "purchase", "https://amazon.com/x") is False
 
+
+def test_site_write_lock_unlock_covers_purchase_on_approved_domain():
+    """Payment-card site unlock disables Place-order write lock on that domain only."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time()
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        approved_at,
+    )
+    assert approvals["payment"]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    # Other sites stay locked — and a newly spawned browser agent starts with {}.
+    assert is_approval_valid(approvals, "purchase", "https://amazon.com/checkout") is False
+    assert is_approval_valid({}, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
+    """write_lock_approvals are resume-state only; a new browser activity starts empty."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    prior = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment",
+        time_module.time(),
+    )
+    # Simulate a newly spawned browser agent: no write_lock_resume_state.
+    fresh_session_approvals: dict = {}
+    assert prior is not fresh_session_approvals
+    assert is_approval_valid(prior, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(fresh_session_approvals, "purchase", "https://roselabs.ai/test_payment") is False
+
+
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
 
@@ -13525,8 +13568,15 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resume_state["approval_type"] == "payment"
     assert resume_state["auth_realm"] == "dickblick.com"
     assert resume_state["step_count"] == 12
+    checkout_domain = get_domain_from_url("https://www.dickblick.com/checkout/")
     assert resume_state["write_lock_approvals"]["payment"] == {
-        "domain": get_domain_from_url("https://www.dickblick.com/checkout/"),
+        "domain": checkout_domain,
+        "approved_at": current_time.timestamp(),
+    }
+    # Site-wide unlock so Place order does not re-prompt on this domain
+    # (ephemeral to this browser activity's resume state only).
+    assert resume_state["write_lock_approvals"]["site"] == {
+        "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
     }
     assert resume_state["payment_card_refs"] == {
@@ -14715,6 +14765,14 @@ async def run_all_tests():
     r.record("is_approval_valid_domain_mismatch", test_is_approval_valid_domain_mismatch)
     r.record("is_approval_valid_fresh", test_is_approval_valid_still_fresh)
     r.record("is_approval_valid_expired", test_is_approval_valid_expired)
+    r.record(
+        "site_write_lock_unlock_covers_purchase",
+        test_site_write_lock_unlock_covers_purchase_on_approved_domain,
+    )
+    r.record(
+        "fresh_browser_session_no_site_unlock_inherit",
+        test_fresh_browser_session_does_not_inherit_site_write_lock_unlock,
+    )
     r.record("get_element_description_none", test_get_element_description_none)
     r.record("get_element_description_text", test_get_element_description_with_text)
     r.record(

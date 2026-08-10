@@ -270,23 +270,55 @@ def _get_base_domain(domain: str) -> str:
     return domain
 
 
+# Ephemeral site-wide unlock after payment-card approval for this browser-agent
+# session only. Never copied into a newly spawned browser agent.
+SITE_WRITE_LOCK_APPROVAL_KEY = "site"
+
+
+def _approval_entry_still_valid(approval: Optional[Dict], current_domain: str) -> bool:
+    if not approval or not approval.get("domain") or not approval.get("approved_at"):
+        return False
+    if current_domain != approval["domain"]:
+        return False
+    return not time_module.time() - approval["approved_at"] > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+
 def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url: str) -> bool:
-    """Check if an existing approval is still valid for the current domain."""
+    """Check if an existing approval is still valid for the current domain.
+
+    A payment-card approval grants a site-wide unlock (``SITE_WRITE_LOCK_APPROVAL_KEY``)
+    so Place order / other write locks on that checkout domain do not re-prompt.
+    That unlock lives only in this browser activity's ``write_lock_approvals`` /
+    resume state — a newly spawned browser agent starts empty and does not inherit it.
+    """
     if not approvals:
         return False
 
-    approval = approvals.get(approval_type, {})
-    if not approval.get("domain") or not approval.get("approved_at"):
-        return False
-
     current_domain = get_domain_from_url(current_url)
-    approved_domain = approval["domain"]
-    approved_at = approval["approved_at"]
+    if _approval_entry_still_valid(approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY), current_domain):
+        return True
 
-    if current_domain != approved_domain:
-        return False
+    return _approval_entry_still_valid(approvals.get(approval_type), current_domain)
 
-    return not time_module.time() - approved_at > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+def grant_site_write_lock_approvals(
+    approvals: Optional[Dict],
+    current_url: str,
+    approved_at: float,
+) -> Dict[str, Dict]:
+    """Record payment-card approval as a site unlock for this browser session.
+
+    Sets both the legacy ``payment`` entry (payment-field bypass) and the site-wide
+    unlock used by purchase / other write-lock types on the same domain.
+    """
+    granted = dict(approvals or {})
+    entry = {
+        "domain": get_domain_from_url(current_url),
+        "approved_at": approved_at,
+    }
+    granted["payment"] = entry
+    granted[SITE_WRITE_LOCK_APPROVAL_KEY] = entry
+    return granted
 
 
 # ========================================

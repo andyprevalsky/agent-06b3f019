@@ -136,6 +136,7 @@ from .service_actions import (
     execute_action,
     get_domain_from_url,
     get_element_description,
+    grant_site_write_lock_approvals,
     wait_for_navigation_ready,
 )
 from .service_crypto import (
@@ -8842,11 +8843,15 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "card_cvv": card_cvv,
                     }
 
-                    current_approvals = result.get("write_lock_approvals", {})
-                    current_approvals["payment"] = {
-                        "domain": get_domain_from_url(result.get("current_url", "")),
-                        "approved_at": workflow.now().timestamp(),
-                    }
+                    # Payment-card approval unlocks write locks on this checkout
+                    # domain for THIS browser activity only (resume state). A newly
+                    # spawned browser agent starts with empty write_lock_approvals
+                    # and must not inherit this unlock.
+                    current_approvals = grant_site_write_lock_approvals(
+                        result.get("write_lock_approvals", {}),
+                        result.get("current_url", ""),
+                        workflow.now().timestamp(),
+                    )
 
                     write_lock_resume_state = {
                         "pending_action": None,
