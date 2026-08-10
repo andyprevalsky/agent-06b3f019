@@ -2026,6 +2026,9 @@ _TUNNEL_FAILURE_MARKERS = (
     "err_tunnel_connection_failed",
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
+    # Opaque Response Blocking: Chrome blocks reading cross-origin Stripe
+    # bodies/scripts when the exit is poisoned; same recovery path as tunnel die.
+    "err_blocked_by_orb",
 )
 _API_CHALLENGE_HTML_MARKERS = (
     "access denied",
@@ -2118,14 +2121,15 @@ def _is_api_challenge_html_response(
 
 
 def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
-    """Only rotate for Stripe tunnel failures on checkout/payment documents."""
+    """Only rotate for Stripe tunnel/ORB failures on checkout/payment documents."""
     lowered = (document_url or "").lower()
     if any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS):
         return True
     if any(marker in lowered for marker in _EVENT_BROWSE_DOCUMENT_MARKERS):
         return False
-    # Unknown SPA paths: keep the signal so opaque checkout URLs still rotate.
-    return bool(lowered)
+    # Unknown SPA paths or CDP events that omit document_url: keep the signal
+    # so opaque checkout URLs (and ORB failures without a document URL) still rotate.
+    return True
 
 
 def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:

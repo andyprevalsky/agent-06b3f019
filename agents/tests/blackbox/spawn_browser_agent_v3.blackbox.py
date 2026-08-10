@@ -8239,7 +8239,7 @@ async def test_api_challenge_html_triggers_provider_exit_rejection():
 
 
 def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
-    """js.stripe.com ERR_TUNNEL must rotate the provider exit (Eventim card fields)."""
+    """js.stripe.com ERR_TUNNEL / ERR_BLOCKED_BY_ORB must rotate the provider exit."""
     from domains.spawn_browser_agent_v3.recording import (
         BrowserNetworkRecorder,
         _document_warrants_payment_cdn_exit,
@@ -8250,6 +8250,10 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "https://js.stripe.com/v3/",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
     )
+    assert _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+    )
     assert not _is_payment_cdn_tunnel_failure(
         "https://wl.eventim.us/asset.js",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
@@ -8259,6 +8263,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "net::ERR_NAME_NOT_RESOLVED",
     )
     assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
+    assert _document_warrants_payment_cdn_exit("")  # CDP often omits document_url on ORB
     assert not _document_warrants_payment_cdn_exit(
         "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
     )
@@ -8321,6 +8326,128 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         generation=1,
     )
     assert browse.pop_provider_exit_rejection() is None
+
+    # ORB with missing document_url (agent 5d59430b gen3) must still rotate.
+    orb = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    orb._network_generation = 4
+    orb._provider_exit_rejections = []
+    orb._rejected_network_generations = set()
+    orb._payment_cdn_provider_exits = 0
+    orb._ignored_request_ids = set()
+    orb._active_request_ids = set()
+    orb.agent_id = "agent"
+    orb.task_id = "task"
+    orb.entries = {
+        "4:r3": {
+            "browser_generation": 4,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "",
+        }
+    }
+    orb._on_loading_failed(
+        {"requestId": "r3", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-4",
+        generation=4,
+    )
+    assert orb.pop_provider_exit_rejection() == {
+        "reason": "payment CDN blocked by proxy tunnel",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 4,
+        "document_url": "",
+    }
+
+
+def test_page_requires_new_card_entry_detects_payment_shells():
+    from domains.spawn_browser_agent_v3.service_crypto import page_requires_new_card_entry
+
+    assert page_requires_new_card_entry(
+        current_url="https://checkout.eventim.us/?afflky=1015Folsom",
+        browser_state={
+            "title": "Eventim Checkout",
+            "dom_text": "Payment Details\nEnter your payment details to complete your purchase.",
+        },
+    )
+    assert not page_requires_new_card_entry(
+        current_url="https://wl.eventim.us/event/lyny/692405",
+        browser_state={"title": "Buy tickets", "dom_text": "Select tickets"},
+    )
+
+
+def test_payment_card_request_nudge_fires_on_empty_payment_shells():
+    """Empty Payment Details shells must nudge request_payment_card (H-02 / 5d59430b)."""
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        PAYMENT_CARD_EMPTY_SHELL_NUDGE,
+        build_payment_card_request_nudge,
+    )
+
+    state = {
+        "url": "https://checkout.eventim.us/?afflky=1015Folsom",
+        "title": "Eventim Checkout",
+        "dom_text": "Payment Details\nEnter your payment details to complete your purchase.",
+    }
+    nudge = build_payment_card_request_nudge(
+        current_url=state["url"],
+        browser_state=state,
+        action_entries=[],
+        payment_card_ready=False,
+    )
+    assert nudge == PAYMENT_CARD_EMPTY_SHELL_NUDGE
+    assert (
+        build_payment_card_request_nudge(
+            current_url=state["url"],
+            browser_state=state,
+            action_entries=[{"action": "request_payment_card"}],
+            payment_card_ready=False,
+        )
+        is None
+    )
+    assert (
+        build_payment_card_request_nudge(
+            current_url=state["url"],
+            browser_state=state,
+            action_entries=[],
+            payment_card_ready=True,
+        )
+        is None
+    )
+
+
+def test_payment_card_required_before_exit_blocks_send_message_bypass():
+    from domains.spawn_browser_agent_v3.service_crypto import (
+        PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR,
+        payment_card_required_before_exit,
+    )
+
+    state = {
+        "url": "https://checkout.eventim.us/?afflky=1015Folsom",
+        "dom_text": "Payment Details Enter your payment details",
+    }
+    blocked = payment_card_required_before_exit(
+        current_url=state["url"],
+        browser_state=state,
+        action_entries=[],
+        payment_card_ready=False,
+    )
+    assert blocked == PAYMENT_CARD_REQUIRED_BEFORE_EXIT_ERROR
+    assert (
+        payment_card_required_before_exit(
+            current_url=state["url"],
+            browser_state=state,
+            action_entries=["request_payment_card"],
+            payment_card_ready=False,
+        )
+        is None
+    )
+
+    from pathlib import Path
+
+    handler_source = Path("domains/spawn_browser_agent_v3/handler.py").read_text()
+    send_idx = handler_source.index('if action_name == "send_message_to_user":')
+    send_block = handler_source[send_idx : send_idx + 2500]
+    assert "payment_card_required_before_exit" in send_block
+    completion_idx = handler_source.index('if action_name in ("attempt_completion", "done"):')
+    completion_block = handler_source[completion_idx : completion_idx + 2500]
+    assert "payment_card_required_before_exit" in completion_block
 
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
@@ -15090,6 +15217,18 @@ async def run_all_tests():
     r.record(
         "payment_cdn_tunnel_failure_provider_exit",
         test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "page_requires_new_card_entry_payment_shells",
+        test_page_requires_new_card_entry_detects_payment_shells,
+    )
+    r.record(
+        "payment_card_request_nudge_empty_shells",
+        test_payment_card_request_nudge_fires_on_empty_payment_shells,
+    )
+    r.record(
+        "payment_card_required_before_exit_blocks_send_message",
+        test_payment_card_required_before_exit_blocks_send_message_bypass,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",

@@ -146,6 +146,7 @@ from .service_crypto import (
     auth_realm_from_url,
     auth_realm_matches_url,
     build_autopay_prompt_section,
+    build_payment_card_request_nudge,
     build_payment_card_resume_prompt_section,
     decrypt_payment_info,
     extract_rate_limited_until,
@@ -153,6 +154,7 @@ from .service_crypto import (
     format_otp_user_message,
     has_payment_card_secret_refs,
     is_usable_email_otp,
+    payment_card_required_before_exit,
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
 from .types import ClaudeTokenState
@@ -6246,7 +6248,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     action_entries_snapshot: List[Dict[str, Any]] = action_entries,
                     browser_use_mode_snapshot: Optional[str] = browser_use_mode,
                     dom_service_snapshot: Any = dom_service,
+                    current_url_snapshot: str = current_url or "",
+                    payment_card_ready_snapshot: bool = (
+                        payment_card_last4 is not None
+                        or has_payment_card_secret_refs(
+                            (write_lock_resume_state or {}).get("payment_card_refs")
+                            if isinstance(write_lock_resume_state, dict)
+                            else None
+                        )
+                    ),
                 ) -> Dict[str, Any]:
+                    payment_nudge = build_payment_card_request_nudge(
+                        current_url=current_url_snapshot
+                        or str((browser_state_snapshot or {}).get("url") or ""),
+                        browser_state=browser_state_snapshot,
+                        action_entries=action_entries_snapshot,
+                        payment_card_ready=payment_card_ready_snapshot,
+                    )
+                    extra_user_messages = (
+                        [{"role": "user", "content": payment_nudge}] if payment_nudge else []
+                    )
                     live_result = await _call_browser_use_with_rotation(
                         rose_client=rose_client,
                         task=task_prompt,
@@ -6265,7 +6286,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         gpt_token_source=gpt_token_source,
                         gpt_token_pool_id=gpt_token_pool_id,
                         browser_use_mode=browser_use_mode_snapshot,
-                        extra_user_messages=[],
+                        extra_user_messages=extra_user_messages,
                         dump_extra=(
                             {
                                 "browser_recording_manifest_path": str(browser_recorder.output_dir / "manifest.json"),
@@ -7129,6 +7150,56 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 message = unified_action.get("params", {}).get("message", "")
                 reason = unified_action.get("params", {}).get("reason", "other")
 
+                # Hard gate: do not let send_message_to_user bypass payment approval
+                # when Payment Details / empty Stripe shells are already visible.
+                payment_card_ready = payment_card_last4 is not None or has_payment_card_secret_refs(
+                    (write_lock_resume_state or {}).get("payment_card_refs")
+                    if isinstance(write_lock_resume_state, dict)
+                    else None
+                )
+                exit_state = browser_state if isinstance(browser_state, dict) else {}
+                with contextlib.suppress(Exception):
+                    exit_state = await dom_service.get_browser_state(include_screenshot=False)
+                payment_block_error = payment_card_required_before_exit(
+                    current_url=current_url or browser_url or "",
+                    browser_state=exit_state if isinstance(exit_state, dict) else {},
+                    action_entries=[*action_entries, *action_summary],
+                    payment_card_ready=payment_card_ready,
+                )
+                if payment_block_error:
+                    blocked_result = {"success": False, "error": payment_block_error}
+                    blocked_tool_call_id = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action=action_name,
+                        thinking=thinking,
+                        params=unified_action.get("params") or {},
+                        result=blocked_result,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Blocked message: request payment card first",
+                        task_id=task_id,
+                        message=payment_block_error,
+                        status=MessageStatus.ERROR,
+                        browser_url=browser_url,
+                        action_type=action_name,
+                        tool_call_id=blocked_tool_call_id,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=exit_state
+                        if isinstance(exit_state, dict)
+                        else (browser_state if isinstance(browser_state, dict) else {}),
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=blocked_result,
+                        tool_call_id=blocked_tool_call_id,
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
+
                 logger.info("Browser agent requested user attention", reason=reason)
                 await disconnect_browser_after_passkey_capture(dom_service, record_passkey_usage_once)
                 dom_service = None
@@ -7172,6 +7243,56 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 close_reasoning = unified_action.get("params", {}).get("reasoning", "") or unified_action.get(
                     "params", {}
                 ).get("text", "")
+
+                payment_card_ready = payment_card_last4 is not None or has_payment_card_secret_refs(
+                    (write_lock_resume_state or {}).get("payment_card_refs")
+                    if isinstance(write_lock_resume_state, dict)
+                    else None
+                )
+                completion_state = browser_state if isinstance(browser_state, dict) else {}
+                with contextlib.suppress(Exception):
+                    completion_state = await dom_service.get_browser_state(include_screenshot=False)
+                payment_block_error = payment_card_required_before_exit(
+                    current_url=current_url or browser_url or "",
+                    browser_state=completion_state if isinstance(completion_state, dict) else {},
+                    action_entries=[*action_entries, *action_summary],
+                    payment_card_ready=payment_card_ready,
+                )
+                if payment_block_error:
+                    blocked_result = {
+                        "success": False,
+                        "error": payment_block_error,
+                    }
+                    blocked_tool_call_id = str(llm_result.get("tool_call_id") or uuid_module.uuid4())
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action=action_name,
+                        thinking=thinking,
+                        params=unified_action.get("params") or {},
+                        result=blocked_result,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Blocked completion: request payment card first",
+                        task_id=task_id,
+                        message=blocked_result["error"],
+                        status=MessageStatus.ERROR,
+                        browser_url=browser_url,
+                        action_type=action_name,
+                        tool_call_id=blocked_tool_call_id,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=completion_state
+                        if isinstance(completion_state, dict)
+                        else (browser_state if isinstance(browser_state, dict) else {}),
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=blocked_result,
+                        tool_call_id=blocked_tool_call_id,
+                    )
+                    continue
 
                 verifier_call_id = str(uuid_module.uuid4())
                 completion_tool_status = "ERROR"
