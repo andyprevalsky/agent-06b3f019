@@ -313,12 +313,18 @@ async function ensureMintedIdentity(
 export async function markSteelSessionAuthFailed(
   userId: string,
   steelSessionAuthId: string,
-  reason: string
+  reason: string,
+  preserveBrowserSessionId?: string
 ) {
   const trimmedReason = reason.trim() || 'steel session auth failed';
   if (steelSessionAuthId.trim() === '') {
     throw new Error('Steel session auth id is required');
   }
 
-  return repo.markSteelSessionAuthFailed(userId, steelSessionAuthId, trimmedReason);
+  return repo.markSteelSessionAuthFailed(
+    userId,
+    steelSessionAuthId,
+    trimmedReason,
+    preserveBrowserSessionId
+  );
 }

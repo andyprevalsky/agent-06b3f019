@@ -51,7 +51,10 @@ import {
   testRealLlm_photoAttachmentRoundTrip,
   testRealLlm_voiceNoteRoundTrip,
 } from './sms-supervisor.media.behavior';
-import { replyIntentBlackboxCase } from './sms-supervisor.intent.behavior';
+import {
+  bareRejectionBlackboxCase,
+  replyIntentBlackboxCase,
+} from './sms-supervisor.intent.behavior';
 import { smsTimezoneBehaviorCases } from './sms-supervisor.timezone.behavior';
 import { buildToolFailureMessage } from '../../providers/smsSupervisor/supervisorHandler';
 import { commitPendingWrites, PendingOp } from '../../providers/smsSupervisor/supervisorTools';
@@ -642,6 +645,7 @@ async function runAll() {
       fn: () => testNaturalApproval_ambiguousApprovalAsksClarification(prisma),
     },
     replyIntentBlackboxCase(prisma),
+    bareRejectionBlackboxCase(prisma),
     {
       name: 'prompt -- supervisor never exposes routing identifiers',
       fn: () => testPrompt_neverExposeRoutingIds(prisma),

@@ -1256,30 +1256,21 @@ def test_build_verifier_response_model_requires_nested_object_properties():
     assert raised
 
 
-def test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier():
-    """Purchase goals cannot be satisfied by product selection or checkout fields alone."""
+
+
+def test_normalize_response_schema_preserves_explicit_confirmation_identifier_request():
+    """An identifier remains required when the user explicitly requests it."""
     from helpers.llm import _normalize_response_schema_for_goal
 
-    schema = {
-        "fields": [
-            {"name": "selected_beanie_url", "type": "str", "required": True},
-            {"name": "selected_beanie_price_usd", "type": "float", "required": True},
-        ]
-    }
-
     result = _normalize_response_schema_for_goal(
-        "Buy me a black beanie on Amazon that costs less than $35 and looks well-made.",
-        schema,
+        "Purchase the selected cable and return the order confirmation ID.",
+        {"fields": [{"name": "purchased_cable", "type": "str", "required": True}]},
     )
 
-    field_names = [field["name"] for field in result["fields"]]
-    assert field_names == [
-        "selected_beanie_url",
-        "selected_beanie_price_usd",
+    assert [field["name"] for field in result["fields"]] == [
+        "purchased_cable",
         "order_confirmation_id",
     ]
-    assert result["fields"][-1]["required"] is True
-    assert "confirmation id" in result["fields"][-1]["description"]
 
 
 def test_fill_missing_verifier_output_accepts_matching_idempotent_card_last4():
@@ -7568,8 +7559,8 @@ async def run_all_tests():
         test_call_llm_structured_streaming_fast_cache_writes_only_after_validation,
     )
     r.record(
-        "normalize_response_schema_purchase_confirmation_identifier",
-        test_normalize_response_schema_for_purchase_goal_adds_confirmation_identifier,
+        "normalize_response_schema_explicit_confirmation_identifier",
+        test_normalize_response_schema_preserves_explicit_confirmation_identifier_request,
     )
     r.record(
         "fill_missing_verifier_output_matching_idempotent_card_last4",

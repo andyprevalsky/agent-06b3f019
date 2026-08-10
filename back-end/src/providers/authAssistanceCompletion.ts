@@ -141,6 +141,47 @@ export async function completeAuthAssistanceForUser(
             disabledReason: null,
           },
         });
+        // Release this Steel context from any OTHER row before claiming it.
+        // `BrowserContext.contextId` is @unique and BrowserProviderProfile has
+        // @@unique([provider, profileId]), so a stale binding elsewhere makes
+        // the next two writes throw — and that rolls the whole transaction
+        // back, discarding a sign-in the user actually completed.
+        await tx.browserContext.updateMany({
+          where: { contextId: steelContextId, id: { not: session.context.id } },
+          data: { contextId: null },
+        });
+        await tx.browserProviderProfile.deleteMany({
+          where: {
+            provider: 'steel',
+            profileId: steelContextId,
+            contextId: { not: session.context.id },
+          },
+        });
+        await tx.browserContext.update({
+          where: { id: session.context.id },
+          data: { contextId: steelContextId },
+        });
+        await tx.browserProviderProfile.upsert({
+          where: {
+            contextId_provider: {
+              contextId: session.context.id,
+              provider: 'steel',
+            },
+          },
+          create: {
+            contextId: session.context.id,
+            provider: 'steel',
+            profileId: steelContextId,
+          },
+          update: { profileId: steelContextId },
+        });
+        await tx.browserSession.update({
+          where: { id: session.id },
+          data: {
+            providerProfileSource: 'steel_session_auth',
+            providerProfilePersist: true,
+          },
+        });
         steelSessionAuthId = steelAuth.id;
       } else if (session.provider !== 'kernel') {
         return {

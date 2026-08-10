@@ -89,6 +89,24 @@ Implications sections.
    the RCA from Causal proof; outcome pending to Complete. When the slice is
    executed one task at a time, finish this full RCA → approval when required →
    exact rerun cycle before starting another original-slice task.
+12. **Approval format is the ONLY response format — no exceptions.** Every
+   response emitted while `/descend` is active MUST consist of exactly: the
+   header block (including the approvals counter), the delta rows of the
+   lifecycle table, and — only at a stop — the ONE approval section for the
+   highest-priority pending row. Never re-render the full ledger; never batch
+   two approval requests into one response. Nothing else may appear. No
+   free-form prose report, no narrative of what you did, no "what I found"
+   essay, no recap of completed work, no bulleted list of open items outside
+   the table, no explanation of a fix outside its own approval section, no
+   commentary on sub-agent results. If a fact does not fit in the header, a
+   table cell, or a required approval section, it is not said in chat —
+   evidence belongs in the RCA and the commit message.
+   **Single exception:** inside a deploy approval gate you may additionally show
+   the exact file diff or file content under review, because a human cannot
+   approve a snapshot they cannot see.
+   Be as concise as possible without losing critical information: preserve the
+   measurement, the wrong value, the expected value, and the file link; cut
+   everything else. Never pad.
 
 ## Issue clusters
 
@@ -497,6 +515,15 @@ banner, an infra 0 field, or a LANES section. Passing tasks collapse into the
 overall-slice header count. Emit exactly one table row per issue/fix, including
 the full infra ledger and current HARNESS fixes.
 
+**This contract is exhaustive, not a minimum (Hard rule 12).** A response
+contains the header, the lifecycle table, and — at a stop only — the approval
+sections below. It contains nothing else. Do not append a summary, a status
+narrative, a list of what is still open, or any prose outside an approval
+section; the table already carries that state. The only permitted addition is
+the file diff or file content shown inside a deploy approval gate. Keep every
+required field as short as it can be while preserving the measurement, the
+wrong value, the expected value, and the file link.
+
 ### Header
 
 Use a Markdown heading and a human-readable status. The only status labels are:
@@ -531,6 +558,8 @@ For a completed run:
 
 **Epoch 3**
 
+Approvals: **2/6 complete**
+
 Overall slice: **39/42 passed**
 
 Latest run: **3/3 passed** · **42m 46s**
@@ -548,12 +577,44 @@ Bench run: **Started Jul 20, 2026 · 10:14:22 PDT** · **18m 42s elapsed**
 
 ### Ledger order
 
-Re-sort the entire ledger on every response:
+Sort by:
 
 1. Rows with ⏳ Deploy approval first, ordered by row ID.
 2. Rows with ⏳ Fix approval next, ordered by row ID.
 3. All other rows not yet deployed next, ordered by row ID.
 4. Rows with ✅ Deployed #<PR> last, ordered by deployment completion timestamp.
+
+### Render the delta, not the whole ledger
+
+**Never re-render the full lifecycle table.** It grows without bound and buries
+the one thing needing attention. Each response shows only:
+
+- the row currently being asked about, and
+- any row whose state changed since the previous response.
+
+Emit no table at all when nothing changed and nothing is being asked. Render the
+complete ledger exactly twice: once at the terminal `DONE`/`BLOCKED` response,
+and whenever Andy explicitly asks for it. `state.json` remains the durable
+record of every row, so omitting a row from a response never loses it.
+
+### One approval per response
+
+**Ask for exactly ONE approval at a time.** Emit the single highest-priority
+pending row by the sort order above, wait for Andy's answer, then emit the next.
+Never batch multiple approval sections into one response, and never list the
+still-pending ones as a preview — the counter below already conveys how many
+remain.
+
+### Approvals counter
+
+Every response begins with the approvals counter directly under the status line:
+
+Approvals: **<resolved>/<total> complete**
+
+`total` counts every row that has ever required a fix or deploy approval in this
+descent. `resolved` counts those Andy has answered — approved, edited, or
+rejected. The counter only ever grows in `total` as new approval-bearing rows
+are proven; it never silently drops a row Andy has not answered.
 
 ### Lifecycle table
 

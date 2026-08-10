@@ -8,8 +8,13 @@
  * providers (here: `main/base/crypto` for payload encryption).
  */
 
-import { Crypto } from '../../base/crypto';
-import { BROWSER_COOKIE_INTEGRATIONS } from './config';
+import { Crypto, type EncryptedData } from '../../base/crypto';
+import {
+  BROWSER_COOKIE_INTEGRATIONS,
+  BROWSER_COOKIE_UPLOAD_MAX_ATTEMPTS,
+  BROWSER_COOKIE_UPLOAD_RETRY_DELAY_MS,
+} from './config';
+import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import {
   postBrowserCookies,
   postFingerprint,
@@ -148,9 +153,11 @@ export function resolveStrategy(integrationType: string): UploadStrategy {
 // Upload dispatch
 // ---------------------------------------------------------------------------
 
-/** Build a FormData body for an encrypted integration upload. */
-function buildEncryptedFormData(data: unknown, extraFields: Record<string, string> = {}): FormData {
-  const { encrypted, iv, key } = Crypto.encrypt(data);
+/** Build a fresh FormData body from an already-encrypted payload. */
+function buildEncryptedFormDataFromEnvelope(
+  { encrypted, iv, key }: EncryptedData,
+  extraFields: Record<string, string> = {}
+): FormData {
   const formData = new FormData();
   formData.append('data', encrypted);
   formData.append('iv', iv);
@@ -159,6 +166,11 @@ function buildEncryptedFormData(data: unknown, extraFields: Record<string, strin
     formData.append(field, value);
   }
   return formData;
+}
+
+/** Build a FormData body for an encrypted integration upload. */
+function buildEncryptedFormData(data: unknown, extraFields: Record<string, string> = {}): FormData {
+  return buildEncryptedFormDataFromEnvelope(Crypto.encrypt(data), extraFields);
 }
 
 /**
@@ -198,4 +210,45 @@ export async function dispatchUpload(
   }
 
   return postGeneric(buildEncryptedFormData(data, { integrationType }), accessToken);
+}
+
+/**
+ * Dispatch an upload with the transport policy appropriate for its strategy.
+ * Complete browser-cookie snapshots are idempotent, so a thrown transport
+ * exception is retried. HTTP responses and every other strategy remain
+ * one-shot and retain their existing result semantics.
+ */
+export async function dispatchUploadWithTransportRetry(
+  strategy: UploadStrategy,
+  integrationType: string,
+  data: unknown,
+  accessToken: string
+): Promise<UploadHttpResult> {
+  if (strategy !== 'browserCookies') {
+    return dispatchUpload(strategy, integrationType, data, accessToken);
+  }
+
+  // Encryption belongs before the transport boundary: programming/data-shaping
+  // failures are terminal, while each fetch attempt gets a fresh FormData body.
+  const encrypted = Crypto.encrypt(data);
+
+  for (let attempt = 1; attempt <= BROWSER_COOKIE_UPLOAD_MAX_ATTEMPTS; attempt++) {
+    const formData = buildEncryptedFormDataFromEnvelope(encrypted, {
+      browser: integrationType,
+    });
+    try {
+      return await postBrowserCookies(formData, accessToken);
+    } catch (error) {
+      if (attempt === BROWSER_COOKIE_UPLOAD_MAX_ATTEMPTS) throw error;
+
+      console.warn(
+        `[Uploader] Browser-cookie transport attempt ${attempt}/${BROWSER_COOKIE_UPLOAD_MAX_ATTEMPTS} failed:`,
+        getErrorMessageOrFallback(error)
+      );
+      const delay = BROWSER_COOKIE_UPLOAD_RETRY_DELAY_MS * Math.pow(2, attempt - 1);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+
+  throw new Error('Browser-cookie upload exhausted without a result');
 }

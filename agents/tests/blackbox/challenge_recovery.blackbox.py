@@ -277,6 +277,130 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
     )
 
 
+def test_challenge_page_classifier_detects_non_cloudflare_vendors():
+    """HTTP-200 interstitials from non-Cloudflare vendors are still challenges.
+
+    These walls return 200 with benign title/body, so only the HTML fingerprint
+    can catch them. When the classifier matched Cloudflare markers only, a
+    DataDome interstitial read as a clean page: `recover_from_challenge` reported
+    success, the caller re-probed, and one Expedia run burned four cycles / 312s
+    looping on false recoveries. Vendor coverage here is kept at parity with
+    `_CHALLENGE_COOKIE_RE`.
+    """
+    datadome = (
+        '<html><head><title>expedia.com</title></head><body>'
+        '<div id="ddchallengebody"></div>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "</body></html>"
+    )
+    assert page_looks_challenged(status=200, title="expedia.com", body_text="", html=datadome)
+    assert page_looks_challenged(
+        status=200,
+        title="",
+        body_text="loading",
+        html='<script src="//client.perimeterx.net/px.js"></script>',
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="",
+        body_text="loading",
+        html='<iframe src="/_Incapsula_Resource?SWKMTFSR=1"></iframe>',
+    )
+
+
+def test_recovered_page_keeping_vendor_sensor_markup_reads_clean():
+    """A vendor sensor bundle stays loaded AFTER a challenge clears.
+
+    _CHALLENGE_HTML_MARKERS deliberately includes sensor hosts so a DataDome
+    interstitial is caught (see the non-Cloudflare vendor test). But those same
+    hosts remain on the real page once the wall lifts, so a marker alone must
+    not mean "still challenged" - otherwise _wait_for_clean_page can never
+    converge and recovery reports failure for a page that already works.
+    """
+    recovered = (
+        '<html><head><title>Expedia - Hotels in San Francisco</title></head><body>'
+        '<script src="//client.perimeterx.net/px.js"></script>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "<h1>Hotels in San Francisco</h1>"
+        + ("<p>Book a room at one of 480 available San Francisco hotels tonight. </p>" * 20)
+        + "</body></html>"
+    )
+    body = "Hotels in San Francisco " + ("Book a room at one of 480 available hotels. " * 20)
+    assert not page_looks_challenged(
+        status=200,
+        title="Expedia - Hotels in San Francisco",
+        body_text=body,
+        html=recovered,
+    ), "a recovered page that still loads sensor markup must read clean"
+
+    # The interstitial form of the same vendor markup must still be caught.
+    interstitial = (
+        '<html><head><title>expedia.com</title></head><body>'
+        '<div id="ddchallengebody"></div>'
+        '<iframe src="https://geo.captcha-delivery.com/captcha/?initialCid=AHrl"></iframe>'
+        "</body></html>"
+    )
+    assert page_looks_challenged(status=200, title="expedia.com", body_text="", html=interstitial)
+
+
+def test_commented_script_tag_does_not_delete_the_rest_of_the_page():
+    """A `<script` that only appears inside an HTML comment must not blank the page.
+
+    Script stripping runs two passes: complete blocks, then any UNTERMINATED
+    opening tag through end-of-input (needed because `_wait_for_clean_page`
+    truncates at 100k and can cut mid-script). That second pass deletes from the
+    leftmost surviving `<script` onward — so a commented-out, unterminated tag
+    like `<!-- <script src="legacy.js"> -->` took the whole rest of the document
+    with it.
+
+    This only bites when `body_text` is empty, because `_has_substantive_content`
+    prefers body text and falls back to the stripped markup — exactly the state
+    a browser reports when body-text extraction comes back blank but the DOM has
+    content. The page still carries a vendor sensor marker, so with the markup
+    gone it failed the 600-char bar, read as challenged, and the solver looped
+    to timeout on a page that was already fine.
+    """
+    recovered = (
+        "<html><head><title>Expedia - Hotels in San Francisco</title></head><body>"
+        '<script src="//client.perimeterx.net/px.js"></script>'
+        '<!-- legacy loader: <script src="legacy.js"> -->'
+        "<h1>Hotels in San Francisco</h1>"
+        + ("<p>Book a room at one of 480 available San Francisco hotels tonight. </p>" * 20)
+        + "</body></html>"
+    )
+    # body_text empty on purpose: that is what makes visible_markup the deciding
+    # signal, and it is the only state in which the tail-deletion bug is visible.
+    assert not page_looks_challenged(
+        status=200,
+        title="Expedia - Hotels in San Francisco",
+        body_text="",
+        html=recovered,
+    ), "a commented-out script tag must not wipe the visible markup after it"
+
+    # A genuinely truncated inline script must STILL be stripped, so widening the
+    # comment handling cannot re-open the hole the second pass exists to close.
+    # A real interstitial: no rendered content, just the sensor div and a large
+    # inline script the 100k truncation cut in half.
+    truncated = (
+        "<html><head><title>Just a moment...</title></head><body>"
+        '<div id="ddchallengebody"></div>'
+        '<script>var payload = "' + ("A" * 3000)
+    )
+    assert page_looks_challenged(
+        status=200, title="Just a moment...", body_text="", html=truncated
+    ), "raw text of a truncated inline script must not count as visible content"
+
+
+def test_challenge_page_classifier_ignores_incidental_captcha_prose():
+    """Widening vendor coverage must not flag pages that merely discuss captchas."""
+    assert not page_looks_challenged(
+        status=200,
+        title="Help Center",
+        body_text="How do I solve a captcha?",
+        html="<article><p>How do I solve a captcha?</p></article>",
+    )
+
+
 async def test_live_cookie_commit_requires_two_clean_loads():
     class FakeContext:
         def __init__(self):
@@ -368,6 +492,22 @@ async def run_all_tests():
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    result.record(
+        "challenge_page_classifier_vendors",
+        test_challenge_page_classifier_detects_non_cloudflare_vendors,
+    )
+    result.record(
+        "recovered_page_with_vendor_markup_reads_clean",
+        test_recovered_page_keeping_vendor_sensor_markup_reads_clean,
+    )
+    result.record(
+        "commented_script_does_not_delete_page",
+        test_commented_script_tag_does_not_delete_the_rest_of_the_page,
+    )
+    result.record(
+        "challenge_page_classifier_prose",
+        test_challenge_page_classifier_ignores_incidental_captcha_prose,
+    )
     await result.record_async(
         "live_cookie_commit_two_passes",
         test_live_cookie_commit_requires_two_clean_loads,

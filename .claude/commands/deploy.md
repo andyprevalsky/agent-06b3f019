@@ -430,11 +430,14 @@ If any invariant fails, fix the violation. The test output includes remediation 
 
 ## Step 4s: Deploy environment + command structural tests (no skip)
 
-The concurrent runner executes exactly these nineteen independent suites without
-changing their assertions or test counts: `bash scripts/tests/workspace-env.test.sh`,
+The concurrent runner executes exactly these independent suites, without changing
+their assertions or test counts:
+
+`bash scripts/tests/workspace-env.test.sh`,
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
 `bash scripts/tests/approval-format.test.sh`,
@@ -442,14 +445,21 @@ changing their assertions or test counts: `bash scripts/tests/workspace-env.test
 `bash scripts/tests/agent-surface-hash.test.sh`,
 `python3 scripts/tests/factory-review.test.py`,
 `python3 scripts/tests/wait-for-code-review.test.py`,
-`python3 scripts/tests/deploy-review-cycle.test.py`, and
-`bash scripts/tests/run-deploy-stage.test.sh`, and
-`python3 scripts/tests/run-deploy-structural-gates.test.py`, and
+`python3 scripts/tests/deploy-review-cycle.test.py`,
+`bash scripts/tests/run-deploy-stage.test.sh`,
+`python3 scripts/tests/run-deploy-structural-gates.test.py`,
 `python3 scripts/tests/deploy-live-probes.test.py`,
 `bash scripts/tests/run-process-cleanup.test.sh`,
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
-`bash scripts/tests/run-seed-exit-code.test.sh`, and
-`bash scripts/tests/run-public-tunnel-routing.test.sh`.
+`bash scripts/tests/run-seed-exit-code.test.sh`,
+`bash scripts/tests/run-public-tunnel-routing.test.sh`, and
+`bash scripts/tests/setup-db-concurrency.test.sh`.
+
+This list is deliberately explicit, not a registry pointer: several of these
+suites assert that their own command still appears here, which is how a gate
+cannot be silently dropped from the deploy path. `run-deploy-structural-gates.test.py`
+asserts this list and the `GATES` registry match exactly in both directions, so
+adding a gate without documenting it here fails the build.
 
 ```bash
 bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
@@ -458,7 +468,7 @@ bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
   bash scripts/tests/seed-cache-decision.test.sh
 ```
 
-These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
+These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
 runner.

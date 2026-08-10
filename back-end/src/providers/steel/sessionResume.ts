@@ -3,6 +3,7 @@ import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { type ProxyGeoLocation, DEFAULT_GEOLOCATION } from '../geoip';
 import { getProviderProfile, rememberProviderProfile } from '../browser/context';
+import { INVALIDATED_STEEL_PROFILE_SOURCE } from '../browser/profileBinding';
 import type { BrowserProviderName } from '../browser/types';
 import { SteelRateLimitError, type FingerprintData, log } from './types';
 import {
@@ -46,9 +47,15 @@ function sleepBeforeSteelRetry(attempt: number): Promise<void> {
 export function reusableSteelRecordedProfileId(oldSession: {
   provider: string;
   providerProfileId?: string | null;
+  // Required on purpose: an object literal that omits this compiles with
+  // `undefined`, which passes the invalidated-source check below and reuses a
+  // profile that was explicitly invalidated. Every caller reads a Prisma row,
+  // so they can all supply it.
+  providerProfileSource: string | null;
 }): string | null {
   const wasSteel = oldSession.provider !== 'kernel';
   return wasSteel &&
+    oldSession.providerProfileSource !== INVALIDATED_STEEL_PROFILE_SOURCE &&
     typeof oldSession.providerProfileId === 'string' &&
     oldSession.providerProfileId !== ''
     ? oldSession.providerProfileId
@@ -146,7 +153,7 @@ const defaultReplacementDependencies: SteelSessionReplacementDependencies = {
 
 export async function recreateSession(
   taskId: string,
-  options: { forceManagedRotation: boolean },
+  options: { forceManagedRotation: boolean; forceFreshProfile?: boolean },
   dependencies: SteelSessionReplacementDependencies = defaultReplacementDependencies
 ): Promise<RecreatedSteelSession> {
   const operation = options.forceManagedRotation ? 'Rotating' : 'Resuming';
@@ -169,9 +176,12 @@ export async function recreateSession(
   const proxyGeo = await proxyLocationForAgent(oldSession.agentId);
   log.info(`  Using proxy location: ${proxyGeo.city}, ${proxyGeo.state}, ${proxyGeo.country}`);
   const userAgent = await fingerprintUserAgent(oldSession.context.userId);
-  const steelRecordedProfileId = reusableSteelRecordedProfileId(oldSession);
+  const steelRecordedProfileId = options.forceFreshProfile
+    ? null
+    : reusableSteelRecordedProfileId(oldSession);
   const persistedProfileId =
-    steelRecordedProfileId ?? (await getProviderProfile(oldSession.contextId, 'steel'));
+    steelRecordedProfileId ??
+    (options.forceFreshProfile ? null : await getProviderProfile(oldSession.contextId, 'steel'));
   const boundProfile =
     steelRecordedProfileId !== null
       ? {
@@ -194,7 +204,7 @@ export async function recreateSession(
         options.forceManagedRotation
       );
       const profile = resolveSteelProfileForSession(
-        oldSession.agentId,
+        options.forceFreshProfile ? null : oldSession.agentId,
         persistedProfileId,
         null,
         boundProfile
@@ -319,8 +329,14 @@ export async function recreateSession(
   );
 }
 
-export async function resumeSession(taskId: string): Promise<RecreatedSteelSession> {
-  return recreateSession(taskId, { forceManagedRotation: false });
+export async function resumeSession(
+  taskId: string,
+  options: { forceFreshProfile?: boolean } = {}
+): Promise<RecreatedSteelSession> {
+  return recreateSession(taskId, {
+    forceManagedRotation: false,
+    forceFreshProfile: options.forceFreshProfile,
+  });
 }
 
 export async function rotateSession(taskId: string): Promise<RecreatedSteelSession> {

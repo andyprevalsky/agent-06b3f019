@@ -51,7 +51,11 @@ export function detectCodexCreditExhaustion(output: string, events: unknown[]): 
   const haystacks: string[] = [output];
   for (const event of events) {
     const typed = event as { message?: unknown; reason?: unknown; error?: unknown };
-    for (const field of [typed?.message, typed?.reason, typed?.error]) {
+    // `error` arrives as a bare string on some providers and as
+    // `{ message }` on others; only reading the string form let a nested
+    // out-of-funds message slip past the detector and hard-fail the deploy.
+    const nestedError = (typed?.error as { message?: unknown } | null | undefined)?.message;
+    for (const field of [typed?.message, typed?.reason, typed?.error, nestedError]) {
       if (typeof field === 'string' && field) haystacks.push(field);
     }
   }

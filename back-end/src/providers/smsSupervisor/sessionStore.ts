@@ -30,8 +30,22 @@ export interface SmsSessionMessage {
  * round — the blind spot it exists to close stayed wide open.
  *
  * Keep this the only way a session timestamp is written.
+ *
+ * `clock_timestamp()`, NOT `NOW()`: `NOW()` is the TRANSACTION start time and
+ * does not advance inside one, so an append made later in a transaction is
+ * stamped with an instant that can precede a watermark taken before the write.
+ * `fetchSessionMessagesSince` compares with a strict `>`, so such a message is
+ * invisible to catch-up forever. `clock_timestamp()` is the real current
+ * instant and advances within the transaction.
+ *
+ * Precision stays at `.MS` (3 digits) deliberately. The comparison is a plain
+ * fixed-width STRING compare against a `Date.toISOString()` watermark, so a
+ * microsecond format would sort WRONG against it — `...718500Z` < `...718Z`
+ * because '5' < 'Z'. Widening this silently inverts ordering. The residual
+ * cost is that two writes inside one millisecond tie, and strict `>` then
+ * treats the second as already-seen.
  */
-const SESSION_TIMESTAMP_SQL = Prisma.sql`to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
+const SESSION_TIMESTAMP_SQL = Prisma.sql`to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`;
 
 function storedMessagesArray(column: Prisma.Sql = Prisma.sql`messages`): Prisma.Sql {
   return Prisma.sql`CASE
