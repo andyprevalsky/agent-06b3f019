@@ -5669,17 +5669,25 @@ async def _refresh_local_compute_tokens_for_run(
     # tolerance — spawn_claude_code_agent cannot use that fallback.
     tolerate_missing_claude = False
     required_token_types: tuple[str, ...] | None = None
+    # Probed at most ONCE per run and reused for the cost warning below. Asking
+    # again is a second live HTTP round-trip and breaks the awaited-once contract
+    # its tests pin.
+    has_anthropic_key_fallback = False
     if require_claude_code:
         required_token_types = ("claude",)
     else:
-        tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+        tolerate_missing_claude = has_anthropic_key_fallback
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
-    if not await _has_usable_anthropic_api_key_fallback(base_url):
+    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
+    # on a real claude token above, so it always has a claudeAuth path and this
+    # warning would be false.
+    if not require_claude_code and not has_anthropic_key_fallback:
         print(
             "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
             "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
@@ -5956,15 +5964,18 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     raw_required_domains = (task.environment or {}).get("required_injectable_cookie_domains") or []
     required_cookie_domains = tuple(str(d).strip() for d in raw_required_domains if str(d).strip())
     # Same reasoning as the blanket pre-flight above: a missing Claude compute
-    # token degrades cost, it does not remove a capability the task needs.
-    # Always tolerate. Deriving this from a funded Anthropic key is the
-    # fail-closed form that killed epoch 4 of the ecommerce descent: the dev
-    # claude_code row was EXPIRED and the rest rate-limited, so three tasks
-    # died on 'No usable claude_code integrations after sync' at $0.00,
-    # before an agent existed. claude_code only routes inference to Anthropic
-    # at $0 instead of the paid waterfall; the Rose pools race OpenRouter
-    # without it. Cost degradation is announced below instead.
-    tolerate_missing_claude = True
+    # token degrades cost, it does not remove a capability the task needs. Live
+    # fixtures never require claudeAuth, so this path only ever takes the
+    # tolerant branch — it derives tolerance the same way the pre-flight does so
+    # the two cannot disagree about whether a run may proceed.
+    #
+    # Epoch 4 of the ecommerce descent died here on the fail-closed form (the dev
+    # claude_code row was EXPIRED and the rest rate-limited, so three tasks died
+    # on "No usable claude_code integrations after sync" at $0.00, before an
+    # agent existed). That is now narrower — an Anthropic key satisfies it — but
+    # "no token AND no key" still aborts. See the residual-exposure note in
+    # `test_live_fixture_tolerates_missing_claude_compute_token`.
+    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
         user_id=USER_ID,

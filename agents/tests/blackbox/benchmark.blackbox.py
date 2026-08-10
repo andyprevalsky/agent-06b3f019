@@ -4252,14 +4252,31 @@ def test_live_fixture_tolerates_missing_claude_compute_token():
 
     for func in (bench._refresh_local_compute_tokens_for_run, bench._apply_live_fixtures):
         source = inspect.getsource(func)
-        assert "tolerate_missing_claude = True" in source, func.__name__
-        # The old fail-closed form gated tolerance on a funded Anthropic key.
-        assert "tolerate_missing_claude = await" not in source, func.__name__
+        # Tolerance must be PASSED THROUGH, never hardcoded False: a run that
+        # cannot tolerate a missing claude_code row dies before any agent exists.
+        assert "tolerate_claude_code_unavailable=tolerate_missing_claude" in source, func.__name__
+
+    preflight = inspect.getsource(bench._refresh_local_compute_tokens_for_run)
+    # Only a claude-REQUIRING run may hard-gate on the token. Any other run
+    # gating on it is the epoch-4 regression. Live fixtures never require it,
+    # so this branch exists solely in the pre-flight.
+    assert "require_claude_code" in preflight
+
+    # RESIDUAL EXPOSURE, deliberately left open and owned by main's design:
+    # tolerance is derived from a funded Anthropic key, so "no claude_code AND
+    # no Anthropic key" still aborts the run — the epoch-4 shape, now narrower
+    # (epoch 4 aborted even WITH a healthy key) but not fully closed. This
+    # branch previously forced unconditional tolerance; that override is NOT
+    # reapplied here because main iterated on this design twice and owns the
+    # call. Asserted as-is so the gap stays visible instead of being forgotten.
+    assert "_has_usable_anthropic_api_key_fallback" in preflight
 
     # The degraded path must announce itself so cost figures are not misread as
     # comparable to a token-backed run.
-    preflight = inspect.getsource(bench._refresh_local_compute_tokens_for_run)
     assert "bills the paid waterfall" in preflight
+    # ...and must reuse the single probe rather than re-issuing the live check,
+    # which is what the awaited-once contract in the sibling tests pins.
+    assert preflight.count("await _has_usable_anthropic_api_key_fallback") == 1
 
 
 def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle():
