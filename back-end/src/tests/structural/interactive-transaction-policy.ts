@@ -78,12 +78,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'providers/authOptionsStore.ts',
-    scope: 'markSteelSessionAuthFailed',
-    fingerprint: '8527037205efaa5f',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'providers/benchmarkHubStore.ts',
     scope: 'withIndexLock',
     fingerprint: '50096ee3d1862882',

@@ -1,4 +1,4 @@
-import { prisma } from './database';
+import { prisma, runTransactionWithRetry } from './database';
 import { INVALIDATED_STEEL_PROFILE_SOURCE } from './browser/profileBinding';
 
 export async function findSteelSessionAuth(
@@ -138,7 +138,11 @@ export async function markSteelSessionAuthFailed(
   reason: string,
   preserveBrowserSessionId?: string
 ) {
-  return prisma.$transaction(async (tx) => {
+  // runTransactionWithRetry, not a raw $transaction: it applies the shared
+  // timeout and retries only a transaction that failed to START, so a partially
+  // executed body is never replayed. Migrated off the hash-pinned legacy
+  // exception, which went stale the moment this function was edited.
+  return runTransactionWithRetry(async (tx) => {
     const auth = await tx.steelSessionAuth.findFirst({
       where: { id: steelSessionAuthId, userId },
       select: { id: true, contextId: true, authRealm: true },
