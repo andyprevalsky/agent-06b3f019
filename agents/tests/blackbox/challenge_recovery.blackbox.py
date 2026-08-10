@@ -343,6 +343,54 @@ def test_recovered_page_keeping_vendor_sensor_markup_reads_clean():
     assert page_looks_challenged(status=200, title="expedia.com", body_text="", html=interstitial)
 
 
+def test_commented_script_tag_does_not_delete_the_rest_of_the_page():
+    """A `<script` that only appears inside an HTML comment must not blank the page.
+
+    Script stripping runs two passes: complete blocks, then any UNTERMINATED
+    opening tag through end-of-input (needed because `_wait_for_clean_page`
+    truncates at 100k and can cut mid-script). That second pass deletes from the
+    leftmost surviving `<script` onward — so a commented-out, unterminated tag
+    like `<!-- <script src="legacy.js"> -->` took the whole rest of the document
+    with it.
+
+    This only bites when `body_text` is empty, because `_has_substantive_content`
+    prefers body text and falls back to the stripped markup — exactly the state
+    a browser reports when body-text extraction comes back blank but the DOM has
+    content. The page still carries a vendor sensor marker, so with the markup
+    gone it failed the 600-char bar, read as challenged, and the solver looped
+    to timeout on a page that was already fine.
+    """
+    recovered = (
+        "<html><head><title>Expedia - Hotels in San Francisco</title></head><body>"
+        '<script src="//client.perimeterx.net/px.js"></script>'
+        '<!-- legacy loader: <script src="legacy.js"> -->'
+        "<h1>Hotels in San Francisco</h1>"
+        + ("<p>Book a room at one of 480 available San Francisco hotels tonight. </p>" * 20)
+        + "</body></html>"
+    )
+    # body_text empty on purpose: that is what makes visible_markup the deciding
+    # signal, and it is the only state in which the tail-deletion bug is visible.
+    assert not page_looks_challenged(
+        status=200,
+        title="Expedia - Hotels in San Francisco",
+        body_text="",
+        html=recovered,
+    ), "a commented-out script tag must not wipe the visible markup after it"
+
+    # A genuinely truncated inline script must STILL be stripped, so widening the
+    # comment handling cannot re-open the hole the second pass exists to close.
+    # A real interstitial: no rendered content, just the sensor div and a large
+    # inline script the 100k truncation cut in half.
+    truncated = (
+        "<html><head><title>Just a moment...</title></head><body>"
+        '<div id="ddchallengebody"></div>'
+        '<script>var payload = "' + ("A" * 3000)
+    )
+    assert page_looks_challenged(
+        status=200, title="Just a moment...", body_text="", html=truncated
+    ), "raw text of a truncated inline script must not count as visible content"
+
+
 def test_challenge_page_classifier_ignores_incidental_captcha_prose():
     """Widening vendor coverage must not flag pages that merely discuss captchas."""
     assert not page_looks_challenged(
@@ -451,6 +499,10 @@ async def run_all_tests():
     result.record(
         "recovered_page_with_vendor_markup_reads_clean",
         test_recovered_page_keeping_vendor_sensor_markup_reads_clean,
+    )
+    result.record(
+        "commented_script_does_not_delete_page",
+        test_commented_script_tag_does_not_delete_the_rest_of_the_page,
     )
     result.record(
         "challenge_page_classifier_prose",

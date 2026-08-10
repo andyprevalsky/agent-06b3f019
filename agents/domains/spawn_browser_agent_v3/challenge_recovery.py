@@ -176,8 +176,17 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     # interstitial is precisely the page that ships a large inline script with
     # almost no rendered text — so it would clear the substantive-content bar
     # and read as clean.
+    # Comments go FIRST. The unterminated-block pass below deletes from the
+    # leftmost surviving opening tag to end-of-input, so a `<script` that only
+    # ever appears inside a comment — `<!-- <script src="legacy.js"> -->` —
+    # would wipe the entire rest of the page. `visible_markup` then collapses,
+    # a recovered page fails the substantive-content bar, and the solver loops
+    # to timeout on a page that was actually fine. An unterminated comment is
+    # dropped through end-of-input for the same truncation reason as scripts.
+    stripped_html = re.sub(r"<!--.*?-->", " ", normalized_html, flags=re.S)
+    stripped_html = re.sub(r"<!--.*\Z", " ", stripped_html, flags=re.S)
     stripped_html = re.sub(
-        r"<(script|style|noscript)\b[^>]*>.*?</\1>", " ", normalized_html, flags=re.S
+        r"<(script|style|noscript)\b[^>]*>.*?</\1>", " ", stripped_html, flags=re.S
     )
     # `_wait_for_clean_page` truncates to 100k chars, which can cut a large
     # interstitial mid-script. The opening tag then has no closing match, the

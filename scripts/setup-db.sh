@@ -27,19 +27,6 @@ LOCAL_DB_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria"
 USE_SYSTEM_PG=false
 SEED_DUMP_SOURCE="$DB_CONTAINER"
 
-# Everything below rebuilds ONE database from scratch: it drops the public
-# schema, re-pushes it, and streams prod data in. Two invocations for the same
-# workspace are not rare — a fresh Conductor workspace runs this script as the
-# tail of its `setup` hook while the first `/sync` runs it too — and unserialized
-# they destroy each other's work mid-seed. Wait for the peer instead.
-#
-# Keyed on the workspace's Docker container name because that is the stable
-# workspace identity: `use_system_postgres` blanks $DB_CONTAINER when it falls
-# back to system Postgres, so acquiring after the provisioning branch would key
-# two concurrent system-PG runs on an empty string and serialize nothing.
-acquire_workspace_db_lock "$DB_CONTAINER"
-trap release_workspace_db_lock EXIT
-
 use_system_postgres() {
     USE_SYSTEM_PG=true
     LOCAL_DB_PORT=5432
@@ -184,6 +171,30 @@ elif ! create_docker_postgres; then
     use_system_postgres
     start_system_postgres
 fi
+
+# Everything below rebuilds ONE database from scratch: it drops the public
+# schema, re-pushes it, and streams prod data in. Two invocations against the
+# same database are not rare — a fresh Conductor workspace runs this script as
+# the tail of its `setup` hook while the first `/sync` runs it too — and
+# unserialized they destroy each other's work mid-seed. Wait for the peer.
+#
+# The key must be the DATABASE actually being reset, not the workspace:
+#   - Docker mode: each workspace owns its own container, so $DB_CONTAINER is
+#     both the workspace identity and the database identity.
+#   - System-PG mode: EVERY workspace targets the one shared
+#     localhost:5432/victoria. Keying on the per-workspace container name there
+#     would give each concurrent run a different lock and serialize nothing,
+#     which is precisely the wipe-each-other's-seed race this lock exists to
+#     stop. They must contend on one shared key.
+#
+# Acquired after provisioning because that is where the mode is decided;
+# provisioning itself only creates/starts a server, it does not touch data.
+if $USE_SYSTEM_PG; then
+    acquire_workspace_db_lock "system-pg:localhost:5432/victoria"
+else
+    acquire_workspace_db_lock "$DB_CONTAINER"
+fi
+trap release_workspace_db_lock EXIT
 
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.

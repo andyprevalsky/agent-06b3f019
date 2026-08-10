@@ -627,6 +627,20 @@ async function commitIncreaseBudget(
     };
   }
 
+  // Reject non-finite input FIRST and by name. `Math.round(NaN)` is `NaN` and
+  // `NaN < 1` is false, so a non-numeric or Infinite amount slips past the
+  // sub-cent guard below and is only caught by the safe-integer check further
+  // down — which reports "exceeds the maximum" for an input that was never a
+  // number, sending the user chasing a limit that is not the problem.
+  if (!Number.isFinite(amount_dollars)) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase amount must be a number, got ${JSON.stringify(amount_dollars)}`,
+    };
+  }
+
   // A sub-cent amount rounds to 0 and would report an increase that never
   // happened; an enormous one overflows the Prisma `Int` column and throws
   // AFTER the SMS commit gate.
