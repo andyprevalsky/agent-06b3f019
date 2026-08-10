@@ -16,7 +16,7 @@ import { steel, steelCdpConnectionUrl } from '../../providers/steel/session';
 import {
   assertFixedRotationLadder,
   deleteKernelResource,
-  runCrossProviderRotationLadder,
+  runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
 
 function assert(condition: unknown, message: string): void {
@@ -592,7 +592,9 @@ async function runLiveProviderParity(): Promise<void> {
     const secondRemote = await kernel.browsers.retrieve(liveSessionId, { include_deleted: true });
     assert(secondRemote.proxy_id === proxyId, 'resume did not reuse the managed proxy ID');
 
-    const crossProvider = await runCrossProviderRotationLadder({
+    // A Steel infra outage returns null (skips the Steel legs) while Kernel is
+    // healthy; real rotation defects still throw. See the wrapper's doc comment.
+    const crossProvider = await runCrossProviderRotationLadderOrSkipOnSteelOutage({
       baseUrl,
       headers,
       taskId: String(init.task_id),
@@ -604,13 +606,11 @@ async function runLiveProviderParity(): Promise<void> {
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
     });
+    if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
 
     console.log(
-      `[rotate_ip repro] complete ladder: Kernel baseline=${ipBefore} ` +
-        `-> Kernel residential=${ipAfter} -> Kernel mobile=${mobileIp} ` +
-        `-> Steel residential=${crossProvider.firstSteelIp} ` +
-        `-> Steel residential=${crossProvider.secondSteelIp}`
+      `[rotate_ip repro] complete ladder: kernel baseline=${ipBefore} residential=${ipAfter} mobile=${mobileIp}; steel=${crossProvider.firstSteelIp}/${crossProvider.secondSteelIp}`
     );
 
     await post('/close', { session_id: liveSessionId, pause: false });
