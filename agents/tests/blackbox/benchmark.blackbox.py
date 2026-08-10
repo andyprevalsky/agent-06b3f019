@@ -11952,6 +11952,10 @@ def test_eventim_1015_request_card_benchmark_contract():
     assert task.success_on_payment_card_request is True
     assert task.price_limit_cents == 200
     assert task.anti_bot == "yes"
+    # Logical tool counting remaps spawn_agent(type=browser) → spawn_browser_agent,
+    # so the min-count key must use the remapped name (peer browser ecommerce tasks).
+    assert task.min_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
     assert {"browser", "antibot", "ecommerce", "ticketing"} <= set(task.tags)
     assert task.expected_payment_receipt["merchant"] == "1015 Folsom (Eventim - eventim.us)"
     assert "eventim.us" in task.environment["live_targets"][1] or any(
