@@ -25,6 +25,15 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$pid" ] && [ -n "$file" ] || { echo "usage: shlock -p PID -f LOCKFILE" >&2; exit 2; }
 
+# Ensure the lock directory exists. Callers often pass paths with ':' in the
+# directory name (e.g. system-pg:localhost:5432/victoria.lock); without this,
+# the first acquire fails forever with "No such file or directory" on tmp write
+# and waiters spin until timeout.
+lock_dir="$(dirname -- "$file")"
+if [ -n "$lock_dir" ] && [ "$lock_dir" != "." ]; then
+    mkdir -p -- "$lock_dir" 2>/dev/null || true
+fi
+
 tmp="${file}.tmp.$$.${RANDOM:-0}"
 if ! printf '%s\n' "$pid" > "$tmp" 2>/dev/null; then
     exit 1
