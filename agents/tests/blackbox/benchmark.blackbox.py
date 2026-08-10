@@ -10795,7 +10795,9 @@ def test_eventim_1015_request_card_benchmark_contract():
     assert "Eventim" in task.prompt
     assert "any upcoming" in task.prompt.lower() or "Artist and date may change" in task.prompt
     assert "Do not use AXS Marketplace" in task.prompt
-    assert "Do not submit payment" in task.prompt
+    assert "Do not click Buy Now" in task.prompt
+    assert "until payment credentials have been obtained and entered" in task.prompt
+    assert "request_payment_card" in task.prompt
     assert task.expected_attention_kind == "payment_approval"
     assert task.approval_handling == "ignore"
     assert task.success_on_payment_card_request is True
