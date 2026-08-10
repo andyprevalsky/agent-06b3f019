@@ -20,8 +20,10 @@ tags:
 sources:
   - agent 5d59430b-8c5c-4b93-98ab-da7b77a46af7 (FAIL)
   - agent 7f91554e-9cc5-4ea2-bf29-1dc75578511f (PASS)
+  - agent ce52f350-ec60-417a-89d1-ecef08a391ea (post-H-03 FAIL)
   - run agents/benchmarks/runs/20260810_205819_browser-1015-eventim-request-card.json
   - run agents/benchmarks/runs/20260810_073019_browser-1015-eventim-request-card.json
+  - run agents/benchmarks/runs/20260810_215512_browser-1015-eventim-request-card.json
 status: closed
 ---
 
