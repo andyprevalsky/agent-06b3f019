@@ -1,4 +1,4 @@
-import { stripe, type Stripe } from '../../providers/stripe';
+import { stripe, getStripeClientForLivemode, type Stripe } from '../../providers/stripe';
 import { getUserUsage } from '../../providers/credits';
 import { resumeAgentWorkflow } from '../../providers/agentResume';
 import { createLogger } from '../../providers/logger';
@@ -22,7 +22,7 @@ export function constructStripeEvent(rawBody: Buffer, signature: string): Stripe
  * invoice.payment_succeeded covers BOTH cases
  */
 export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<void> {
-  log.info('Payment successful', { invoice_id: invoice.id });
+  log.info('Payment successful', { invoice_id: invoice.id, livemode: invoice.livemode });
 
   const subscriptionId = invoice.subscription as string;
 
@@ -31,9 +31,13 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
     return;
   }
 
-  const subscription = await stripe.subscriptions.retrieve(subscriptionId);
+  // Live checkouts land on the live Rose Labs account; the sandbox billing
+  // singleton cannot retrieve those subscription/session objects.
+  const stripeClient = getStripeClientForLivemode(invoice.livemode === true);
 
-  const sessions = await stripe.checkout.sessions.list({
+  const subscription = await stripeClient.subscriptions.retrieve(subscriptionId);
+
+  const sessions = await stripeClient.checkout.sessions.list({
     subscription: subscriptionId,
     limit: 1,
   });
@@ -62,6 +66,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
     subscriptionTier: tier,
     stripeSubscriptionId: subscription.id,
     stripeCustomerId: subscription.customer as string,
+    stripeLivemode: invoice.livemode === true,
     currentPeriodEnd,
   });
 
@@ -74,6 +79,7 @@ export async function handlePaymentSuccess(invoice: Stripe.Invoice): Promise<voi
   log.info('Added credit for user', {
     user_id: userId,
     tier_dollars: tier,
+    livemode: invoice.livemode === true,
     expires: currentPeriodEnd.toISOString(),
   });
 
@@ -247,6 +253,7 @@ export async function handleSubscriptionUpdated(subscription: Stripe.Subscriptio
     subscriptionTier: tier,
     stripeSubscriptionId: subscription.id,
     stripeCustomerId: subscription.customer as string,
+    stripeLivemode: subscription.livemode === true,
     currentPeriodEnd: new Date(subscription.current_period_end * 1000),
   });
 

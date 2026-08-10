@@ -9,10 +9,19 @@
  */
 import dotenv from 'dotenv';
 
-/** Keys where a truncated Cursor-injected value may yield to a longer .env value. */
+/**
+ * Keys where a truncated/blank injected value may yield to a fuller .env value.
+ *
+ * Cursor Cloud and some Fly machine configs inject empty
+ * AGENTCARD_ORG_OAUTH_CLIENT_ID/SECRET; restoreCallerOwnedRuntimeEnv would
+ * otherwise clobber the decoded back-end/.env credentials and break AgentCard
+ * Organization MCP cardholder resolution (502 Missing AGENTCARD_ORG_OAUTH_*).
+ */
 export const AGENTCARD_ENV_OVERRIDE_KEYS = [
   'BENCHMARK_AGENTCARD_ORG_ID',
   'BENCHMARK_AGENTCARD_CARDHOLDER_ID',
+  'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+  'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
 ] as const;
 
 /** Kept for contract tests / callers that pin the historical runtime set. */
@@ -73,12 +82,32 @@ export function restoreCallerOwnedRuntimeEnv(
       callerOrg,
       env.BENCHMARK_AGENTCARD_ORG_ID
     );
+  const oauthIdYieldsToDotenv =
+    typeof preserved.get('AGENTCARD_ORG_OAUTH_CLIENT_ID') === 'string' &&
+    shouldKeepDotenvAgentCardValue(
+      'AGENTCARD_ORG_OAUTH_CLIENT_ID',
+      preserved.get('AGENTCARD_ORG_OAUTH_CLIENT_ID') ?? '',
+      env.AGENTCARD_ORG_OAUTH_CLIENT_ID
+    );
+  const oauthSecretYieldsToDotenv =
+    typeof preserved.get('AGENTCARD_ORG_OAUTH_CLIENT_SECRET') === 'string' &&
+    shouldKeepDotenvAgentCardValue(
+      'AGENTCARD_ORG_OAUTH_CLIENT_SECRET',
+      preserved.get('AGENTCARD_ORG_OAUTH_CLIENT_SECRET') ?? '',
+      env.AGENTCARD_ORG_OAUTH_CLIENT_SECRET
+    );
 
   for (const [key, callerValue] of preserved) {
     if (
       orgYieldsToDotenv &&
       (key === 'BENCHMARK_AGENTCARD_ORG_ID' || key === 'BENCHMARK_AGENTCARD_CARDHOLDER_ID')
     ) {
+      continue;
+    }
+    if (oauthIdYieldsToDotenv && key === 'AGENTCARD_ORG_OAUTH_CLIENT_ID') {
+      continue;
+    }
+    if (oauthSecretYieldsToDotenv && key === 'AGENTCARD_ORG_OAUTH_CLIENT_SECRET') {
       continue;
     }
     env[key] = callerValue;

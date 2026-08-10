@@ -6,8 +6,23 @@ import {
   type Response,
 } from '@playwright/test';
 
-export const BACKEND_URL =
-  process.env.BACKEND_URL ?? `http://localhost:${process.env.BACKEND_PORT ?? '3001'}`;
+function resolveLocalSemanticBackendUrl(): string {
+  // Prefer BACKEND_PORT when BACKEND_URL is missing or a stale local default.
+  // Cloud injections often pin BACKEND_URL to local port 3001 while the deploy
+  // worktree listens on CONDUCTOR_PORT. Keep non-local BACKEND_URL values
+  // (prod semantic mode) unchanged.
+  const port = process.env.BACKEND_PORT;
+  const explicit = process.env.BACKEND_URL;
+  const explicitIsLocal =
+    !!explicit &&
+    (explicit.startsWith('http://localhost:') || explicit.startsWith('http://127.0.0.1:'));
+  if (port && (!explicit || explicitIsLocal)) {
+    return `http://localhost:${port}`;
+  }
+  return explicit ?? `http://localhost:${port ?? '3001'}`;
+}
+
+export const BACKEND_URL = resolveLocalSemanticBackendUrl();
 export const FRONTEND_URL =
   process.env.FRONTEND_URL ?? `http://localhost:${process.env.FRONTEND_PORT ?? '3002'}`;
 

@@ -14,6 +14,11 @@ import {
   injectPermissionState,
   injectScrollbarState,
 } from './injectionState';
+import {
+  browserStateInjectionTimeoutMs,
+  credentialCdpConnectTimeoutMs,
+  withTimeout,
+} from './injectionTimeouts';
 
 interface CookieBundleCandidate {
   id: string;
@@ -440,8 +445,11 @@ export async function injectUserData(
       log.info(`  [3/9] Reusing validated CDP connection (${Date.now() - startTime}ms)`);
     } else {
       const { chromium } = await import('playwright');
-      log.info(`  [3/9] Connecting to CDP...`);
-      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl));
+      const connectTimeoutMs = credentialCdpConnectTimeoutMs();
+      log.info(`  [3/9] Connecting to CDP...`, { connectTimeoutMs });
+      browser = await chromium.connectOverCDP(steelCdpConnectionUrl(dbSession.wsUrl), {
+        timeout: connectTimeoutMs,
+      });
       log.info(`  [3/9] CDP connected (${Date.now() - startTime}ms)`);
     }
     const context = browser.contexts()[0];
@@ -532,9 +540,11 @@ export async function injectUserData(
       }
     }
 
-    // Run non-credential browser-state injections in parallel for performance.
-    log.info(`  [4/5] Injecting browser state in parallel...`);
-    const injectionPromises: Promise<void>[] = [];
+    // A BrowserContext is one remote Playwright channel. Concurrent
+    // addInitScript mutations can starve that channel indefinitely, so enqueue
+    // browser-state mutations serially and bound the entire best-effort phase.
+    log.info(`  [4/5] Injecting browser state serially...`);
+    const injectionTasks: Array<() => Promise<void>> = [];
 
     // 2. Fingerprint: NOT injected here on purpose. CDP-level settings
     // (Network.setUserAgentOverride, addInitScript, Emulation overrides) are
@@ -551,90 +561,103 @@ export async function injectUserData(
 
     // 3. Inject localStorage if available
     if (hasLocalStorage) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            localStorageResult = await injectLocalStorageState(
-              context,
-              localStorageOrigins,
-              startTime
-            );
-          } catch (error) {
-            log.error('Failed to inject localStorage', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        })()
-      );
+      injectionTasks.push(async () => {
+        try {
+          localStorageResult = await injectLocalStorageState(
+            context,
+            localStorageOrigins,
+            startTime
+          );
+        } catch (error) {
+          log.error('Failed to inject localStorage', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
     }
 
     // 4. Inject IndexedDB if available
     if (hasIndexedDB) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            indexedDBResult = await injectIndexedDBState(context, indexedDBOrigins, startTime);
-          } catch (error) {
-            log.error('Failed to inject indexedDB', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        })()
-      );
+      injectionTasks.push(async () => {
+        try {
+          indexedDBResult = await injectIndexedDBState(context, indexedDBOrigins, startTime);
+        } catch (error) {
+          log.error('Failed to inject indexedDB', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
     }
 
     // 5. Inject permissions if available
     // Uses JavaScript override for permission query checks
     if (hasPermissions) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            permissionsResult = await injectPermissionState(context, permissions, startTime);
-          } catch (error) {
-            log.error('Failed to inject permissions', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        })()
-      );
+      injectionTasks.push(async () => {
+        try {
+          permissionsResult = await injectPermissionState(context, permissions, startTime);
+        } catch (error) {
+          log.error('Failed to inject permissions', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
     }
 
     // 6. Inject Cache Storage metadata if available
     // Pre-opens caches so sites that check for cache existence work correctly
     if (hasCacheStorage) {
-      injectionPromises.push(
-        (async () => {
-          try {
-            cacheStorageResult = await injectCacheStorageState(
-              context,
-              cacheStorageOrigins,
-              startTime
-            );
-          } catch (error) {
-            log.error('Failed to inject cacheStorage', {
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        })()
-      );
+      injectionTasks.push(async () => {
+        try {
+          cacheStorageResult = await injectCacheStorageState(
+            context,
+            cacheStorageOrigins,
+            startTime
+          );
+        } catch (error) {
+          log.error('Failed to inject cacheStorage', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      });
     }
 
     // 7. Always inject scrollbar-hiding CSS to ensure viewport matches screenshot (1280x800)
     // This prevents coordinate mismatch where viewport reports 1265 (with scrollbar) but screenshot is 1280
-    injectionPromises.push(
-      (async () => {
-        try {
-          await injectScrollbarState(context, startTime);
-        } catch (error) {
-          log.error('Failed to inject scrollbar CSS', {
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      })()
-    );
+    injectionTasks.push(async () => {
+      try {
+        await injectScrollbarState(context, startTime);
+      } catch (error) {
+        log.error('Failed to inject scrollbar CSS', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    });
 
-    // Wait for all injections to complete in parallel
-    await Promise.all(injectionPromises);
+    const stateTimeoutMs = browserStateInjectionTimeoutMs();
+    // Deliberately propagates. `steel-injection.blackbox.ts` cements that a
+    // browser-state timeout REJECTS rather than resuming with partial state:
+    // a session silently missing localStorage/IndexedDB/permissions is harder
+    // to diagnose than a loud, bounded failure. Do not soften this without
+    // changing that invariant first.
+    // withTimeout is a Promise.race and cannot cancel the IIFE, so without this
+    // flag the serial loop keeps writing localStorage/IndexedDB/permission/cache
+    // state into a context the caller already treats as failed.
+    let injectionAborted = false;
+    try {
+      await withTimeout(
+        (async () => {
+          for (const injectState of injectionTasks) {
+            if (injectionAborted) break;
+            await injectState();
+          }
+        })(),
+        stateTimeoutMs,
+        `Browser state injection timed out after ${stateTimeoutMs}ms`
+      );
+    } catch (error) {
+      injectionAborted = true;
+      throw error;
+    }
     log.info(`  [4/5] ✅ All injections complete (${Date.now() - startTime}ms)`);
     return {
       cookies: cookieResult,

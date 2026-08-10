@@ -118,7 +118,7 @@ async function checkE2B(): Promise<void> {
 async function checkSteel(): Promise<void> {
   const key = requireEnv('STEEL_API_KEY');
   const res = await fetchWithTimeout(
-    'https://connect.steelbrowser.com/v1/sessions?limit=1',
+    'https://api.steel.dev/v1/sessions?limit=1',
     {
       method: 'GET',
       headers: { 'Steel-Api-Key': key },
@@ -197,6 +197,31 @@ async function checkAnthropic(): Promise<void> {
   }
 }
 
+/** Dollars left on the OpenRouter account. Memoized: two checks read it. */
+let openRouterRemainingUsd: Promise<number> | null = null;
+
+function fetchOpenRouterRemainingUsd(key: string): Promise<number> {
+  openRouterRemainingUsd ??= (async () => {
+    const res = await fetchWithTimeout('https://openrouter.ai/api/v1/credits', {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!res.ok) {
+      throw new Error(
+        `OpenRouter credits endpoint unavailable (HTTP ${res.status}); balance cannot be verified.`
+      );
+    }
+    const body = (await res.json()) as { data?: { total_credits?: number; total_usage?: number } };
+    const granted = body.data?.total_credits;
+    const used = body.data?.total_usage;
+    if (typeof granted !== 'number' || typeof used !== 'number') {
+      throw new Error('OpenRouter credits response did not include total_credits/total_usage.');
+    }
+    return granted - used;
+  })();
+  return openRouterRemainingUsd;
+}
+
 async function checkOpenRouter(): Promise<void> {
   const key = requireEnv('OPENROUTER_API_KEY');
   // /auth/key returns the credential's metadata; 401 on bad key, 200 on good.
@@ -208,6 +233,30 @@ async function checkOpenRouter(): Promise<void> {
     const body = await res.text().catch(() => '');
     throw new Error(
       `OpenRouter auth rejected (HTTP ${res.status}). Refresh OPENROUTER_API_KEY from https://openrouter.ai/keys. Body: ${body.slice(0, 200)}`
+    );
+  }
+  // A valid key with no balance still 402s every completion. OpenRouter is the
+  // waterfall backstop behind a rate-limited Claude compute token, so an
+  // exhausted account leaves agents with no provider at all -- that is fatal,
+  // not cosmetic, and auth alone can never reveal it.
+  const remaining = await fetchOpenRouterRemainingUsd(key);
+  if (remaining <= 0) {
+    throw new Error(
+      `OpenRouter credits exhausted ($${remaining.toFixed(2)} remaining). Every completion will return HTTP 402 ` +
+        `"Insufficient credits". Top up at https://openrouter.ai/settings/credits.`
+    );
+  }
+}
+
+async function checkOpenRouterBalance(): Promise<void> {
+  const key = requireEnv('OPENROUTER_API_KEY');
+  const remaining = await fetchOpenRouterRemainingUsd(key);
+  const floor = Number(process.env.OPENROUTER_MIN_CREDITS_USD ?? '50');
+  if (remaining < floor) {
+    throw new Error(
+      `OpenRouter balance is low: $${remaining.toFixed(2)} remaining (warn below $${floor.toFixed(2)}). ` +
+        `Expensive pool models 402 before the balance reaches zero. ` +
+        `Top up at https://openrouter.ai/settings/credits.`
     );
   }
 }
@@ -251,6 +300,7 @@ async function runAll(): Promise<void> {
         ]
       : []),
     { name: 'OpenRouter (LLM judge)', fn: checkOpenRouter },
+    { name: 'OpenRouter credit balance', fn: checkOpenRouterBalance, warnOnly: true },
     { name: 'Supabase (auth/DB)', fn: checkSupabase },
   ];
 

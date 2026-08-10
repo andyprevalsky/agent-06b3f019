@@ -464,13 +464,18 @@ async def init_browser_session(
     raise Exception(f"Failed to init session: {response.text}")
 
 
-async def resume_browser_session(config: Any, task_id: str) -> Dict[str, Any]:
+async def resume_browser_session(
+    config: Any,
+    task_id: str,
+    *,
+    force_fresh_profile: bool = False,
+) -> Dict[str, Any]:
     """Resume a paused browser session by asking backend/Steel for a fresh session."""
     async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             f"{config.backend.api_url}/api/browser-session/resume",
             headers={"x-api-key": config.backend.api_key or "", "Content-Type": "application/json"},
-            json={"task_id": task_id},
+            json={"task_id": task_id, "force_fresh_profile": force_fresh_profile},
         )
     if response.status_code in [200, 201]:
         return response.json()
@@ -567,6 +572,8 @@ async def mark_steel_session_auth_failed(
     user_id: str,
     steel_session_auth_id: str,
     reason: str,
+    *,
+    preserve_browser_session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Disable a stale Steel auth marker so the next session can fall through to cookies."""
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -577,7 +584,14 @@ async def mark_steel_session_auth_failed(
                 "x-user-id": user_id,
                 "Content-Type": "application/json",
             },
-            json={"reason": reason},
+            json={
+                "reason": reason,
+                **(
+                    {"preserve_browser_session_id": preserve_browser_session_id}
+                    if preserve_browser_session_id
+                    else {}
+                ),
+            },
         )
     if response.status_code in (200, 204):
         return response.json() if response.content else {"ok": True}

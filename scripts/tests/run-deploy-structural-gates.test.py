@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -15,6 +16,52 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "scripts" / "run-deploy-structural-gates.py"
+DEPLOY_MD = ROOT / ".claude" / "commands" / "deploy.md"
+
+
+def _registry_commands() -> set[str]:
+    """Every gate command the runner will actually execute."""
+    listed = subprocess.run(
+        [sys.executable, str(RUNNER), "--list"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    source = RUNNER.read_text()
+    body = source.split("GATES = (", 1)[1].split("\n)\n", 1)[0]
+    commands = set()
+    for match in re.finditer(r'\(\s*((?:"[^"]*"\s*,?\s*)+)\)', body):
+        parts = re.findall(r'"([^"]*)"', match.group(1))
+        if len(parts) >= 2:
+            commands.add(" ".join(parts))
+    assert len(commands) == len(listed), f"parsed {len(commands)} gates, runner lists {len(listed)}"
+    return commands
+
+
+class StructuralGateDocumentationTests(unittest.TestCase):
+    """Step 4s lists its suites explicitly so a gate cannot be silently dropped.
+
+    Several suites (approval-format, deploy-worktree-preflight, semantic-deploy,
+    check-agent-behavior-approval) assert their own command still appears in
+    deploy.md. Replacing that list with a registry pointer therefore removes
+    real coverage while still looking tidy. Pin both directions instead.
+    """
+
+    def test_deploy_md_lists_every_registered_gate(self) -> None:
+        deploy_md = DEPLOY_MD.read_text()
+        missing = sorted(c for c in _registry_commands() if f"`{c}`" not in deploy_md)
+        self.assertEqual(missing, [], f"deploy.md Step 4s is missing registered gate(s): {missing}")
+
+    def test_deploy_md_lists_no_unregistered_gate(self) -> None:
+        deploy_md = DEPLOY_MD.read_text()
+        registry = _registry_commands()
+        documented = {
+            match.group(1)
+            for match in re.finditer(r"`((?:bash|python3) scripts/tests/[^`]+)`", deploy_md)
+        }
+        stale = sorted(documented - registry)
+        self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
 
 
 class StructuralGateRunnerTests(unittest.TestCase):

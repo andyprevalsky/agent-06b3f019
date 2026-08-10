@@ -10,6 +10,10 @@
  *
  * The verified phone is read-only. Personal identity and delivery recipient
  * are edited independently, then persisted together by the parent settings flow.
+ *
+ * Fields live inside a single <form> so the browser groups the shipping-address
+ * inputs (autoComplete="shipping ...") and offers native address autofill.
+ * Submitting the form (Save button or Enter) triggers the parent save handler.
  */
 
 import { Loader2, Save, Check } from 'lucide-react';
@@ -76,7 +80,7 @@ function PersonalFields({
   );
 }
 
-function DeliveryFields({ userData, onFieldChange, saving, saved, onSave }: PersonalInfoTabProps) {
+function DeliveryFields({ userData, onFieldChange, saving, saved }: PersonalInfoTabProps) {
   return (
     <Card>
       <CardHeader>
@@ -122,7 +126,7 @@ function DeliveryFields({ userData, onFieldChange, saving, saved, onSave }: Pers
         <DeliveryLocationFields userData={userData} onFieldChange={onFieldChange} />
 
         <div className="flex gap-4 pt-4">
-          <Button onClick={onSave} disabled={saving} className="min-w-[120px]">
+          <Button type="submit" disabled={saving} className="min-w-[120px]">
             {saving ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -203,9 +207,15 @@ function DeliveryLocationFields({
 
 export default function PersonalInfoTab(props: PersonalInfoTabProps) {
   return (
-    <div className="space-y-6">
+    <form
+      className="space-y-6"
+      onSubmit={(event) => {
+        event.preventDefault();
+        props.onSave();
+      }}
+    >
       <PersonalFields userData={props.userData} onFieldChange={props.onFieldChange} />
       <DeliveryFields {...props} />
-    </div>
+    </form>
   );
 }

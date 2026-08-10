@@ -131,6 +131,25 @@ docker_available_for_workspace_db() {
     docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
 }
 
+# True only when Docker can actually create+run a container. Daemon `info`
+# success is not enough on Cloud VMs where overlay mounts return EINVAL.
+docker_can_create_container() {
+    local name="rose-docker-probe-$$"
+    # Prefer a tiny local image if present; otherwise skip the pull-heavy probe
+    # and trust ROSE_USE_SYSTEM_PG / prior daemon failures.
+    if ! docker image inspect alpine:3.20 >/dev/null 2>&1 && \
+       ! docker image inspect hello-world >/dev/null 2>&1; then
+        # No cached image: a pull+run is too expensive for every boot. Treat as
+        # unknown-OK and let create_db_container's failure path decide later.
+        return 0
+    fi
+    if docker image inspect alpine:3.20 >/dev/null 2>&1; then
+        docker run --rm --name "$name" alpine:3.20 true >/dev/null 2>&1
+        return $?
+    fi
+    docker run --rm --name "$name" hello-world >/dev/null 2>&1
+}
+
 docker_available_for_cold_seed() {
     local attempt delay_seconds integer_part fractional_part
     delay_seconds="${COLD_SEED_DOCKER_RETRY_DELAY_SECONDS:-1}"
@@ -394,10 +413,106 @@ process_cwd_in_this_worktree() {
 
 kill_stale_tree() {
     local pid=$1
+    # Recheck EVERY pid, not just the entry point. A stale matching parent must
+    # not take an active isolated benchmark's descendant down with it.
+    if pid_belongs_to_active_isolated_benchmark "$pid"; then
+        echo "⏭️  Preserving ACTIVE isolated benchmark descendant (PID $pid)"
+        return 0
+    fi
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_stale_tree "$child"
     done
     kill "$pid" 2>/dev/null || true
+}
+
+# An isolated benchmark lane (run-bench --local / run-predeploy-local) records a
+# live manifest at .context/benchmarks/<run-id>/services.json. "Stale" GC must
+# never reap one of those while it is RUNNING: doing so SIGTERMs an in-flight
+# smoke/agentcard lane and the deploy reports `run.sh exited early with code -15`
+# with no hint that a sibling stack killed it. Returns 0 when the pid belongs to
+# a live isolated run.
+pid_belongs_to_active_isolated_benchmark() {
+    local pid=$1
+    # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
+    # recurses into descendants. A child of an ACTIVE isolated run must be just
+    # as protected as its root, or the recursive pass kills the live stack.
+    local probe="$pid" hops=0
+    while [ -n "$probe" ] && [ "$probe" != "0" ] && [ "$probe" != "1" ] && [ "$hops" -lt 12 ]; do
+        local manifest
+        for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+            [ -f "$manifest" ] || continue
+            PID="$probe" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
+import json, os, sys
+
+# Only `starting` and `running` are live; run.sh emits nothing else that means
+# "in flight". A malformed manifest is a NON-match, never a reason to preserve
+# a stale pid — and it must not raise outside the parse guard.
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+if str(data.get("status", "")).strip().lower() not in {"starting", "running"}:
+    sys.exit(1)
+
+def valid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+pids = set()
+if valid(data.get("run_sh_pid")):
+    pids.add(data["run_sh_pid"])
+for service in data.get("services") or []:
+    if isinstance(service, dict) and valid(service.get("pid")):
+        pids.add(service["pid"])
+try:
+    probe = int(os.environ["PID"])
+except (TypeError, ValueError):
+    sys.exit(1)
+sys.exit(0 if probe in pids else 1)
+PYEOF
+        done
+        probe=$(ps -p "$probe" -o ppid= 2>/dev/null | tr -d ' ')
+        hops=$((hops + 1))
+    done
+
+    # Publication race: the isolated runner execs run.sh BEFORE it writes
+    # services.json, so a just-started stack has no manifest to match yet.
+    # Treat very young processes as owned rather than racing them to SIGTERM.
+    local age grace
+    age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
+    # Fall back to the default on any non-integer override. An arithmetic error
+    # here would return "not owned" and let cleanup kill a just-started run
+    # before it publishes services.json — fail toward preserving the stack.
+    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    # Bound before ANY numeric use. An all-digits string still breaks this
+    # function two ways: a leading-zero value ("0000000008") is invalid octal to
+    # the $(( )) below, and a value near the integer ceiling overflows
+    # `grace + 59`. Either one disables the young-process guard that stops
+    # cleanup from killing a benchmark which has not yet published
+    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
+    [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
+
+    # Young alone is not enough. An unqualified age check ALSO preserves a
+    # non-isolated benchmark that has no manifest and never will, so the next
+    # run inherits its workers and dies on occupied ports. Require evidence of
+    # a real in-flight isolated bootstrap: a run directory that exists but has
+    # not published services.json yet. `-mmin` is portable across BSD/GNU find;
+    # round the grace up to whole minutes.
+    local grace_min rundir
+    grace_min=$(( (grace + 59) / 60 ))
+    while IFS= read -r rundir; do
+        [ -n "$rundir" ] || continue
+        [ -f "$rundir/services.json" ] && continue
+        return 0
+    done <<EOF
+$(find "$PWD/.context/benchmarks" -maxdepth 1 -mindepth 1 -type d -mmin "-$grace_min" 2>/dev/null)
+EOF
+    return 1
 }
 
 kill_stale_same_worktree_benchmark_stack() {
@@ -412,6 +527,10 @@ kill_stale_same_worktree_benchmark_stack() {
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
         if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+            if pid_belongs_to_active_isolated_benchmark "$pid"; then
+                echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
+                continue
+            fi
             echo "🧹 Killing stale benchmark process from this worktree (PID $pid)"
             kill_stale_tree "$pid"
             killed_any=true
@@ -423,7 +542,8 @@ kill_stale_same_worktree_benchmark_stack() {
         for pid in $(pgrep -f "$pattern" 2>/dev/null); do
             [ "$pid" = "$$" ] && continue
             is_current_process_family "$pid" && continue
-            if process_cwd_in_this_worktree "$pid"; then
+            if process_cwd_in_this_worktree "$pid" &&
+                ! pid_belongs_to_active_isolated_benchmark "$pid"; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done
@@ -463,7 +583,11 @@ if $IS_CLOUD; then
         fi
     }
 
-    # Phase 1: kill everything on service ports + known process patterns
+    # Phase 1: kill everything on THIS stack's service ports.
+    # Pattern-based kills (worker.py / vite / …) are only safe for the
+    # non-isolated cloud stack: an isolated `run-bench --local` shares the
+    # worktree with the Step 5 /deploy semantic stack and must not SIGKILL its
+    # siblings. Port-scoped cleanup is enough for isolated ranges.
     CLOUD_KILLED=false
     for port in "${CLOUD_PORTS[@]}"; do
         if port_in_use "$port"; then
@@ -472,13 +596,15 @@ if $IS_CLOUD; then
             CLOUD_KILLED=true
         fi
     done
-    for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
-        for pid in $(pgrep -f "$pattern" 2>/dev/null); do
-            echo "🧹 Killing $pattern (PID $pid)"
-            kill -9 "$pid" 2>/dev/null || true
-            CLOUD_KILLED=true
+    if [ "$BENCHMARK_ISOLATED_RUN" != "true" ]; then
+        for pattern in "worker\.py" "tsx.*server\.ts" "npx vite" "run_local_worker"; do
+            for pid in $(pgrep -f "$pattern" 2>/dev/null); do
+                echo "🧹 Killing $pattern (PID $pid)"
+                kill -9 "$pid" 2>/dev/null || true
+                CLOUD_KILLED=true
+            done
         done
-    done
+    fi
 
     # Phase 2: retry until all ports are free (processes may linger briefly)
     if $CLOUD_KILLED; then
@@ -545,6 +671,13 @@ elif ! $PRESTARTED_WORKSPACE_DB && \
      [ "${BENCHMARK_REQUIRE_SEED_DUMP:-1}" = "0" ] && \
      docker_available_for_cold_seed; then
     DOCKER_OK=true
+fi
+
+# `docker info` can succeed while `docker run` fails (overlay mount EINVAL on
+# some Cloud VMs). Probe a real create before committing to the Docker path.
+if $DOCKER_OK && ! docker_can_create_container; then
+    echo "⚠️  Docker daemon responds but cannot create containers — using system Postgres"
+    DOCKER_OK=false
 fi
 
 DB_OWNED_BY_US=false  # Track whether this run started/created the DB.
@@ -785,13 +918,12 @@ _SEED_DUMP="${BENCHMARK_SEED_DUMP:-}"
 _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum back-end/prisma/schema.prisma 2>/dev/null) | awk '{print $1}')"
 # Cross-clone seed-dump cache (R2): a freshly-cloned cloud guest's /data has no
 # local dump, so without this it pays the full ~19-min prod cold-sync every time.
-# Pull a schema-matched dump from the SHARED cache first. This is purely additive
-# and neighbor-safe: on any miss/error $_SEED_DUMP stays absent and the block
-# below cold-syncs exactly as before (then repopulates the cache); the schemahash
-# guard + pg_restore fallback catch any mismatch/corruption, so it can never break
-# a boot or disturb a concurrently-running fleet. Token = schema hash (correctness)
-# + pg_dump major (compatibility) + UTC day (bounds staleness to 24h). Local dev
-# leaves BENCHMARK_SEED_DUMP unset.
+# Pull the immutable canonical base fixture from the SHARED cache first. The key
+# combines schema hash (correctness), pg_dump major (compatibility), and an
+# explicit base-image revision (content), so local and cloud restore the same
+# reviewed rows until that revision changes. A separate cachetoken sidecar
+# prevents an older same-schema daily snapshot from being mistaken for this
+# base. Local dev leaves BENCHMARK_SEED_DUMP unset.
 #
 # The pg major belongs in the token because a custom-format archive is NOT
 # backward compatible: a PG18 client emits header format 1.16, which the pinned
@@ -803,13 +935,16 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # than clobber each other.
 _SEED_DUMP_CLIENT_MAJOR="$(
     if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
-        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+        # Anchor at the first X.Y in the string. The Ubuntu package suffix
+        # (e.g. "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)") contains a later
+        # "24.04" that a greedy "last X.Y" sed mistakenly treats as the major.
+        pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/'
     else
         echo 16 # the pinned postgres:16-alpine container below writes the archive
     fi
 )"
 [ -n "$_SEED_DUMP_CLIENT_MAJOR" ] || _SEED_DUMP_CLIENT_MAJOR=unknown
-_SEED_CACHE_TOKEN="${_SCHEMA_HASH}-pg${_SEED_DUMP_CLIENT_MAJOR}-$(date -u +%Y%m%d 2>/dev/null || echo undated)"
+_SEED_CACHE_TOKEN="$(benchmark_base_cache_token back-end/prisma/schema.prisma "$_SEED_DUMP_CLIENT_MAJOR")"
 # R2 creds live in back-end/.env (run.sh does not export them to its shell), so
 # gate on the file, not the environment. seed-dump-cache.ts loads the .env itself.
 _SEED_CACHE_ENABLED=0
@@ -835,22 +970,23 @@ fi
 # baked into the warm snapshot must fall through to the shared cache, NOT shadow
 # it — the old `[ ! -s ]` guard skipped the download whenever ANY dump existed, so
 # a hash-mismatched snapshot dump cold-synced every clone and starved the barrier.
-_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED")"
+_SEED_DECISION="$(seed_cache_decision "$_SEED_DUMP" "$_SCHEMA_HASH" "$_SEED_CACHE_ENABLED" "$_SEED_CACHE_TOKEN")"
 if [ "$_SEED_DECISION" = "consult-remote" ]; then
     # Drop any stale local dump so a clean cache object lands in its place.
-    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
+    rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
     echo "🔎 Checking shared seed-dump cache ($_SEED_CACHE_TOKEN)..."
     if (cd back-end && npx tsx scripts/seed-dump-cache.ts get "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") 2>/dev/null && [ -s "$_SEED_DUMP" ]; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
         _SEED_DECISION="restore-local"
         echo "   ✅ pulled cached seed dump ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}')) — restoring instead of cold-syncing"
     else
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
-        echo "   ℹ️ no cached dump for this schema/day — will cold-sync and populate it"
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+        echo "   ℹ️ canonical base fixture is unavailable for this schema/revision"
     fi
 fi
 if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ] && [ "$_SEED_DECISION" != "restore-local" ]; then
-    fail_required_seed_dump "Isolated local benchmarks require a schema-matched seed dump; refusing a slow production cold-sync."
+    fail_required_seed_dump "Benchmarks require the canonical base fixture; refusing a slow production cold-sync substitute."
 fi
 if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SEED_DUMP" ]; then
     echo "🗜️  Restoring seeded DB from persistent dump ($_SEED_DUMP) — skipping schema push + seed..."
@@ -868,9 +1004,9 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
         # The target database's own pg_restore just proved this archive bad.
         # Invalidate it so a failed regeneration cannot make every later boot
         # retry the same unreadable archive and matching schema sidecar.
-        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" 2>/dev/null || true
+        rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
         if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
-            fail_required_seed_dump "Required isolated benchmark seed dump could not be restored; refusing a slow production cold-sync."
+            fail_required_seed_dump "Required canonical base fixture could not be restored; refusing a slow production cold-sync substitute."
         fi
     fi
 fi
@@ -885,6 +1021,17 @@ if $DB_RESTORED; then
     # which runs this same step, rather than a subtly different DB.
     echo "🔎 Ensuring agent-network grep indexes (post-restore)..."
     (cd back-end && npx tsx scripts/ensure-agent-network-grep-indexes.ts)
+    # Restoring a base image resets the schema to exactly what the dump holds, so
+    # anything ensured BEFORE the restore (the Fast Mode cache table above) is
+    # gone unless that dump happened to contain it. Re-ensure idempotently so a
+    # dump published before the table existed cannot leave the cache broken.
+    if [ "${FAST_MODE_CACHE_USE_LOCAL:-}" = "1" ]; then
+        echo "🧠 Re-ensuring Fast Mode cache schema (post-restore)..."
+        if ! ensure_fast_mode_cache_schema bash -c \
+            'cd back-end && npx tsx scripts/ensure-fast-mode-cache-schema.ts'; then
+            exit 1
+        fi
+    fi
 else
 
 # Sync Prisma schema to local DB (idempotent, dev-only)
@@ -967,12 +1114,14 @@ if [ -n "$_SEED_DUMP" ]; then
         "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
         "$_SEED_DUMP_CONTAINER"; then
         printf '%s' "$_SCHEMA_HASH" > "${_SEED_DUMP}.schemahash"
+        rm -f "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
         echo "   ✅ seed dump saved ($(du -h "$_SEED_DUMP" 2>/dev/null | awk '{print $1}'))"
-        # Publish to the shared cache so the NEXT clone (any workspace — including a
-        # neighbor's daily run) restores in seconds instead of cold-syncing. Best-
-        # effort; a failed upload never blocks the boot.
-        if [ "$_SEED_CACHE_ENABLED" = 1 ]; then
+        # Canonical base publication is an explicit operator action: an ordinary
+        # cold sync must never overwrite reviewed fixture rows such as WhatsApp
+        # history. The opt-in exists for the dedicated publication workflow only.
+        if [ "$_SEED_CACHE_ENABLED" = 1 ] && [ "${BENCHMARK_PUBLISH_SEED_DUMP:-0}" = "1" ]; then
             if (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
+                printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
             fi
         fi
@@ -2059,18 +2208,21 @@ run_service() {
 #   stable local ngrok or run-scoped cloud tunnel -> Vite on FRONTEND_PORT
 #   backend exposes PUBLIC_BASE_URL for /api/test-payment/public-url
 #
-# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: a self-contained cloud-bench box
-# (scripts/run-bench-cloud) runs simulate-only, where the WMH intercepts every
-# provider/environment boundary and no external browser ever needs to reach the
-# frontend over the internet. Standing up a public tunnel per one-shot
-# Fly machine is fragile and unnecessary there, so we point PUBLIC_BASE_URL at the
-# local frontend and skip the tunnel + tunnel smoke. Never set this for the normal
-# dev/benchmark stack — real browser agents need the public URL.
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 opt-out: point PUBLIC_BASE_URL at the local
+# frontend and skip the tunnel + tunnel smoke. Set by two callers, for the same
+# reason — nothing in the run needs to be reachable from the public internet:
+#   - scripts/run-bench-cloud: a self-contained simulate-only box, where the WMH
+#     intercepts every provider/environment boundary.
+#   - benchmarks/local.py (needs_public_tunnel): no selected task drives a
+#     browser agent or a hosted payment page. trycloudflare rate-limits per IP,
+#     so opening a tunnel a bench never uses turns a 429 into a task failure.
+# A real browser agent DOES need the public URL, so never force this on for a
+# selection that includes one — needs_public_tunnel() is what decides.
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
     export PUBLIC_BASE_URL="http://localhost:$FRONTEND_PORT"
     export VITE_ALLOWED_HOSTS="localhost"
     export ALLOWED_ORIGINS="$ALLOWED_ORIGINS,$PUBLIC_BASE_URL"
-    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (simulate-only cloud bench)"
+    echo "🌐 BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel; PUBLIC_BASE_URL=$PUBLIC_BASE_URL (no selected task drives a browser)"
 else
     start_public_tunnel
 fi
@@ -2237,6 +2389,13 @@ if $BENCHMARK_MODE; then
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    # SMS-supervisor benchmarks stub web_search through a file the backend
+    # re-reads per call (the backend is already running when a task picks its
+    # fixture, so an env var set by the benchmark process can never reach it).
+    # Exported here rather than in benchmarks/local.py so the CLOUD box — which
+    # launches run.sh directly via cloudbench-run.sh and never touches local.py —
+    # gets the same contract. Absent file = live search.
+    export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE="${BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE:-$RUN_CONTEXT_DIR/sms-web-search-fixture.json}"
     # Capture-outbound flips IS_BLACKBOX_TEST, which would disable the dev-phone
     # OTP login bypass — but the message-person iMessage relay needs it to
     # auto-login the benchmark user. Re-enable the login bypass here (still
@@ -2317,7 +2476,7 @@ fi
 wait_for_frontend_ready "$FRONTEND_PID" "$FRONTEND_PORT" "$FRONTEND_LOG_FILE" || exit 1
 
 if [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ]; then
-    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (simulate-only cloud bench)"
+    echo "⏭️  BENCHMARK_SKIP_PUBLIC_TUNNEL=1 — skipping public tunnel smoke (no selected task drives a browser)"
 else
     echo "⏳ Verifying public tunnel smoke..."
     bash scripts/test-public-tunnel.sh

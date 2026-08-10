@@ -287,7 +287,17 @@ class RecoverFromChallengeBrowserTool(BaseModel):
 class PaymentLineItem(BaseModel):
     """A checkout line item extracted from the merchant page."""
 
-    name: str = Field(description="Item name shown on the checkout page")
+    name: str = Field(
+        description=(
+            "Item name shown on the checkout page. When the purchase is tied to a specific "
+            "date, such as an event or movie ticket, a reservation, a flight, a hotel night, an "
+            "appointment, or a delivery window, include that date (and the time when the "
+            "booking is time-specific) in this name, for example "
+            "'Spider-Man: Brand New Day - Fri Jul 31, 2026, 7:15pm, Seat A7'. A person "
+            "approving the charge must be able to see which day they are paying for without "
+            "opening the merchant page."
+        )
+    )
     image_url: Optional[str] = Field(
         default=None,
         description="Product image URL if visible",
@@ -696,11 +706,6 @@ class GenerateWriteLockNotificationTool(BaseModel):
         if self.trigger_type == "purchase" and self.purchase is not None:
             trusted_page_urls = (info.context or {}).get("trusted_page_urls")
             for item in self.purchase.items:
-                # No current_page_url here on purpose: a write-lock purchase
-                # approval is often raised while the agent is standing ON the
-                # product page, so "product_url != current page" would be a
-                # false reject. That rule belongs to the request_payment_card
-                # path, where the agent is necessarily at checkout.
                 if trusted_page_urls:
                     validate_product_url_for_pages(item.product_url, trusted_page_urls)
                 else:

@@ -374,6 +374,7 @@ class GrepTool(BaseModel):
                 "agent_network",
                 "transactions",
                 "documents",
+                "summary",
             ]
         ]
     ] = Field(
@@ -391,6 +392,11 @@ class GrepTool(BaseModel):
             "message roles in the current agent tree and returns role/location metadata. "
             "transactions searches synced Plaid transaction rows. documents searches synced "
             "ChatGPT/Claude exports, Apple Notes, Obsidian vault notes, and generic user documents. "
+            "summary returns a compact, precomputed inventory with message counts, date ranges, "
+            "channel totals, and threads ranked by volume. Use sources=[\"summary\"] first for "
+            "aggregate questions such as total messages, date coverage, or most-contacted threads; "
+            "then use the concrete channel source to inspect exact message text. Thread identifiers "
+            "in the summary are valid contact identifiers when no human-readable name is stored. "
             "If a named source's connector isn't connected, the search returns a 'source not "
             "connected' notice and the user is automatically asked to connect it - do NOT retry "
             "that source; continue with the sources you can reach."
@@ -407,6 +413,7 @@ class GrepTool(BaseModel):
             "agent_network",
             "transactions",
             "documents",
+            "summary",
         ]
     ] = Field(
         default=None,
@@ -652,7 +659,13 @@ class SpawnAgentTool(BaseModel):
             "'code' starts a coding agent using Claude Code or Codex CLI in an ephemeral sandbox, selected by "
             "available credentials and configuration; 'general_purpose' starts a full autonomous agent for "
             "cross-domain multi-step work; 'explore' performs read-only research for web or user-data facts; "
-            "'for_each' starts one general-purpose agent per item for repeated fan-out."
+            "'for_each' starts one general-purpose agent per item for repeated fan-out. "
+            "A 'browser' agent is given an auth inventory at session start, separately from the goal: the user's "
+            "saved sessions, cookies, passwords and passkeys for the target site, and a minted agent-owned "
+            "identity - an email address and phone number it can read delivered messages at, including "
+            "verification codes. It can only read messages sent to that minted identity or to a mailbox the "
+            "user has connected as an integration; any other address, including one you compose from the "
+            "user's name, is write-only to it."
         )
     )
     goal: str = Field(

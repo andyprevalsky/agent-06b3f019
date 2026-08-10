@@ -43,9 +43,22 @@ function testBaselineCreatesNullableContextId() {
   );
 }
 
+// Anon-profile handling was extracted from session.ts into profileBinding.ts,
+// which red-lined assertions that grepped session.ts alone even though every
+// invariant still held. Scan the whole provider so an extraction cannot fail a
+// satisfied invariant -- and so a violation cannot hide in a new sibling file.
+function steelProviderSource(): string {
+  const dir = path.join(backendDir, 'src/providers/steel');
+  return fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith('.ts'))
+    .sort()
+    .map((f) => read(path.join('src/providers/steel', f)))
+    .join('\n');
+}
+
 function testSteelDoesNotCreateEmptyContextId() {
-  const source = read('src/providers/steel/session.ts');
-  const profileBindingSource = read('src/providers/steel/profileBinding.ts');
+  const source = steelProviderSource();
   const resumeSource = read('src/providers/steel/sessionResume.ts');
   assert(
     !source.includes("contextId: ''"),
@@ -60,17 +73,28 @@ function testSteelDoesNotCreateEmptyContextId() {
     'Steel session creation must omit profileId while the DB context is pending'
   );
   assert(
-    profileBindingSource.includes('BENCHMARK_ANON_STEEL_PROFILE'),
+    source.includes('BENCHMARK_ANON_STEEL_PROFILE'),
     'Steel provider must support benchmark anon mode for fresh per-agent profiles'
   );
   assert(
-    profileBindingSource.includes('benchmarkAnonProfilesByAgent'),
+    source.includes('benchmarkAnonProfilesByAgent'),
     'Benchmark anon Steel profiles must be keyed outside BrowserContext so user profile IDs are not overwritten'
   );
+  // Was a log-string grep; the refactor replaced that log line with an explicit
+  // predicate, so assert the predicate exists, excludes both non-persisting
+  // profile sources, and actually guards the BrowserContext write.
   assert(
-    profileBindingSource.includes("!profile.profileSource.startsWith('benchmark_anon')") &&
-      source.includes('if (!shouldWriteSteelProfileToBrowserContext(profile))'),
-    'Benchmark anon Steel sessions must not overwrite BrowserContext.contextId'
+    source.includes('export function shouldWriteSteelProfileToBrowserContext'),
+    'Steel provider must expose an explicit predicate for whether a profile may be persisted to BrowserContext'
+  );
+  assert(
+    source.includes("!profile.profileSource.startsWith('benchmark_anon')") &&
+      source.includes("profile.profileSource !== 'steel_session_auth_read_only'"),
+    'Benchmark anon and read-only auth Steel profiles must never overwrite BrowserContext.contextId'
+  );
+  assert(
+    source.includes('if (!shouldWriteSteelProfileToBrowserContext(profile)) {'),
+    'The BrowserContext profile write must be gated by shouldWriteSteelProfileToBrowserContext'
   );
   assert(
     source.includes('where: { id: dbContextId, contextId: null }'),

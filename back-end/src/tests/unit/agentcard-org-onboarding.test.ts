@@ -127,6 +127,24 @@ async function main(): Promise<void> {
   );
   assert.equal(pending.connected, false);
 
+  // Stale/missing hosted sessions must not 500 GET /api/agentcard/status.
+  const missingSession = await refreshOrgCardholderStatus(
+    'user-1',
+    deps({
+      getOrgOnboardingConfig: async () =>
+        ({
+          sessionId: 'stale-session',
+          setupUrl: 'https://example.invalid/setup',
+        }) as OrgOnboardingConfig,
+      callOrgTool: async () => {
+        throw new Error('get_onboarding_session failed: Onboarding session not found');
+      },
+    })
+  );
+  assert.equal(missingSession.connected, false);
+  assert.equal(missingSession.status, 'session_not_found');
+  assert.equal(missingSession.setupSessionId, 'stale-session');
+
   let verificationArgs: Record<string, unknown> | undefined;
   const verificationStatus = await getOrgCardholderVerificationStatus('ch-ready', {
     callOrgTool: async (name, args) => {

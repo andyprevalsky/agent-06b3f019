@@ -52,6 +52,35 @@ cloudbench_worktree_has_changes() {  # <repo-root>
   [ -n "$first_untracked" ]
 }
 
+# Returned by cloudbench_prepare_workspace_patch when the worktree and the base
+# ref differ only by content the patch generator intentionally excludes, so
+# there is nothing to ship. This is a normal launch state, NOT a failure: the
+# guest simply runs the base ref. Kept distinct from rc=1 (generation broke) so
+# a real patch failure can never be silently downgraded to "no delta".
+CLOUDBENCH_PATCH_NO_DELTA=2
+
+# Single source of truth for "does this launch ship a workspace patch, and what
+# is in it". The launch gate MUST NOT re-derive shippability separately: the
+# fleet controller used to gate on "local HEAD != fetchable base" while
+# create-worktree-patch.sh excluded append-only history ledgers, so a /descend
+# run whose only unpushed commit was its own timing ledger produced an empty
+# patch and the controller aborted the whole fleet (2026-07-27, antibot slice).
+cloudbench_prepare_workspace_patch() {  # <repo-root> <base-ref> <out-file> [generator]
+  local repo="$1" base_ref="$2" out_file="$3"
+  local generator="${4:-$repo/scripts/create-worktree-patch.sh}"
+
+  : > "$out_file" || return 1
+  if ! bash "$generator" "$repo" "$base_ref" > "$out_file"; then
+    : > "$out_file"
+    return 1
+  fi
+  if [ ! -s "$out_file" ]; then
+    : > "$out_file"
+    return "$CLOUDBENCH_PATCH_NO_DELTA"
+  fi
+  return 0
+}
+
 cloudbench_central_hub_runs_root() {  # <port>
   curl --noproxy '*' -fsS --max-time 2 \
     "http://127.0.0.1:$1/hub-meta.json" 2>/dev/null \
@@ -101,6 +130,30 @@ cloudbench_verify_env_file() {
     return 1
   fi
   echo "$label env digest verified: ${actual:0:12}"
+}
+
+# AgentCard Organization MCP cardholder resolution needs both OAuth client
+# credentials. Stale Fly BACKEND_ENV_B64 blobs (names-only verify) have shipped
+# without them and produced guest 502 Missing AGENTCARD_ORG_OAUTH_CLIENT_ID
+# during /descend daily (epoch-3). Fail closed as soon as the decoded .env is
+# written — refresh with: bash scripts/run-bench-cloud --refresh-secrets
+CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN=20
+cloudbench_require_agentcard_org_oauth() {
+  local backend_env="$1"
+  local client_id client_secret
+  client_id="$(cloudbench_env_value "$backend_env" AGENTCARD_ORG_OAUTH_CLIENT_ID)"
+  client_secret="$(cloudbench_env_value "$backend_env" AGENTCARD_ORG_OAUTH_CLIENT_SECRET)"
+  if [ "${#client_id}" -lt "$CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN" ]; then
+    echo "FATAL: back-end/.env missing AGENTCARD_ORG_OAUTH_CLIENT_ID (len=${#client_id})." >&2
+    echo "   Stale BACKEND_ENV_B64 will 502 AgentCard setup. Refresh: bash scripts/run-bench-cloud --refresh-secrets" >&2
+    return 1
+  fi
+  if [ "${#client_secret}" -lt "$CLOUDBENCH_AGENTCARD_ORG_OAUTH_MIN_LEN" ]; then
+    echo "FATAL: back-end/.env missing AGENTCARD_ORG_OAUTH_CLIENT_SECRET (len=${#client_secret})." >&2
+    echo "   Stale BACKEND_ENV_B64 will 502 AgentCard setup. Refresh: bash scripts/run-bench-cloud --refresh-secrets" >&2
+    return 1
+  fi
+  echo "agentcard org oauth verified: id_len=${#client_id} secret_len=${#client_secret}"
 }
 
 cloudbench_validate_browser_provider_contract() {

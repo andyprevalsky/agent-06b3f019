@@ -6,7 +6,7 @@ import {
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
   syncIntegrationCredentials,
-  syncOriginCredentials,
+  syncOriginBlobCredentials,
   syncPasskeyCredentials,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
@@ -15,8 +15,10 @@ import {
   type CookieModel,
   type CookieBundleModel,
   type IntegrationModel,
-  type OriginModel,
+  type OriginMetaRow,
+  type RawSqlClient,
   type SteelSessionAuthModel,
+  type TransactionalSqlClient,
 } from '../../../scripts/seed-local-credentials';
 import {
   PrismaClient,
@@ -24,7 +26,6 @@ import {
   type BrowserPermission,
   type Cookie,
   type CookieBundle,
-  type LocalStorageOrigin,
   type SteelSessionAuth,
 } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
@@ -359,11 +360,10 @@ test('durable browser-auth refs sync by natural identity and preserve local ids'
 
 test('browser-state sync helpers use every schema identity instead of remote primary ids', async () => {
   const now = new Date('2026-07-13T00:00:00Z');
-  const origin: LocalStorageOrigin = {
+  const origin: OriginMetaRow = {
     id: 'remote-origin-id',
     userId: 'seed-user',
     origin: 'https://example.com',
-    entries: [{ key: 'session', value: 'fresh' }],
     hash: 'fresh-origin-hash',
     updatedAt: now,
   };
@@ -390,11 +390,26 @@ test('browser-state sync helpers use every schema identity instead of remote pri
     disabledReason: null,
   };
   const captured: Record<string, Record<string, unknown>> = {};
-  const originModel: OriginModel<LocalStorageOrigin> = {
-    upsert: async (args) => {
-      captured.origin = args as unknown as Record<string, unknown>;
-      return {};
+  const originRemote: RawSqlClient = {
+    $queryRawUnsafe: async (_sql: string, ...params: unknown[]) => {
+      const ids = params[0] as string[];
+      return ids.map((id) => ({
+        id,
+        payload_length: 2,
+        payload: '[]',
+      })) as never;
     },
+    $executeRawUnsafe: async () => {
+      throw new Error('origin source must not be written');
+    },
+  };
+  const originLocal: TransactionalSqlClient = {
+    $queryRawUnsafe: async () => [] as never,
+    $executeRawUnsafe: async (sql: string, ...params: unknown[]) => {
+      captured.origin = { sql, params };
+      return 1;
+    },
+    $transaction: async <T>(fn: (tx: RawSqlClient) => Promise<T>) => fn(originLocal),
   };
   const permissionModel: BrowserPermissionModel = {
     upsert: async (args) => {
@@ -409,15 +424,17 @@ test('browser-state sync helpers use every schema identity instead of remote pri
     },
   };
 
-  await syncOriginCredentials(originModel, [origin]);
+  await syncOriginBlobCredentials(originRemote, originLocal, 'LocalStorageOrigin', [origin]);
   await syncBrowserPermissionCredentials(permissionModel, [permission]);
   await syncBrowserPasswordCredentials(passwordModel, [password]);
 
-  const originWhere = captured.origin.where as {
-    userId_origin?: { userId?: string; origin?: string };
-  };
-  assert(originWhere.userId_origin?.userId === origin.userId, 'expected origin user selector');
-  assert(originWhere.userId_origin?.origin === origin.origin, 'expected origin URL selector');
+  const originParams = captured.origin.params as unknown[];
+  assert(originParams[1] === origin.userId, 'expected origin user selector');
+  assert(originParams[2] === origin.origin, 'expected origin URL selector');
+  assert(
+    String(captured.origin.sql).includes('ON CONFLICT ("userId", origin) DO UPDATE'),
+    'expected origin upsert to use its natural identity'
+  );
   const permissionWhere = captured.permission.where as {
     userId_origin_permission?: { userId?: string; origin?: string; permission?: string };
   };
@@ -432,7 +449,7 @@ test('browser-state sync helpers use every schema identity instead of remote pri
     passwordWhere.userId_origin_username?.username === password.username,
     'expected password identity selector'
   );
-  for (const [name, args] of Object.entries(captured)) {
+  for (const [name, args] of Object.entries(captured).filter(([name]) => name !== 'origin')) {
     const update = args.update as Record<string, unknown>;
     assert(!('id' in update), `expected ${name} update not to rewrite local primary key`);
   }
@@ -507,15 +524,26 @@ test('browser-state natural-key sync crosses the real Prisma uniqueness boundary
         syncedAt: new Date(localCookie.syncedAt.getTime() + 1),
       },
     ]);
-    await syncOriginCredentials(prisma.localStorageOrigin, [
-      {
-        ...localOrigin,
-        id: `remote-origin-${suffix}`,
-        entries: [{ key: 'session', value: 'fresh' }],
-        hash: 'fresh-hash',
-        updatedAt: new Date(localOrigin.updatedAt.getTime() + 1),
+    const remoteOrigin = {
+      ...localOrigin,
+      id: `remote-origin-${suffix}`,
+      hash: 'fresh-hash',
+      updatedAt: new Date(localOrigin.updatedAt.getTime() + 1),
+    } satisfies OriginMetaRow;
+    const remote: RawSqlClient = {
+      $queryRawUnsafe: async (_sql: string, ...params: unknown[]) => {
+        const ids = params[0] as string[];
+        return ids.map((id) => ({
+          id,
+          payload_length: 37,
+          payload: '[{"key":"session","value":"fresh"}]',
+        })) as never;
       },
-    ]);
+      $executeRawUnsafe: async () => {
+        throw new Error('origin source must not be written');
+      },
+    };
+    await syncOriginBlobCredentials(remote, prisma, 'LocalStorageOrigin', [remoteOrigin]);
 
     const cookies = await prisma.cookie.findMany({ where: cookieIdentity });
     const origins = await prisma.localStorageOrigin.findMany({

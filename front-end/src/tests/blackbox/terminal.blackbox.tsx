@@ -145,7 +145,10 @@ describe('Terminal page', () => {
     });
 
     it('opens the name-collecting waitlist modal from the opening CTA', async () => {
-      const user = userEvent.setup();
+      // Avoid setTimeout(0)-scheduled user-event steps: under the fully
+      // concurrent coverage gate they can be starved long enough to hit the
+      // suite timeout even though this interaction is synchronous.
+      const user = userEvent.setup({ delay: null });
       // The CTA is for logged-out/anonymous visitors. Keeping the default
       // authenticated fixture here only exposed it transiently during auth init.
       mockAnonymousSession();
@@ -403,7 +406,7 @@ describe('Terminal page', () => {
                       title: 'Subscribe to let Rose complete purchases',
                       reason:
                         'This checkout needs an active subscription before Rose can mint a payment card.',
-                      cta: 'Subscribe · $20/mo',
+                      cta: 'Subscribe · $30/mo',
                     },
                     action: {
                       kind: 'link',

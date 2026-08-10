@@ -476,12 +476,15 @@ resolve_prod_backend_browser_provider() {
 }
 
 resolve_prod_worker_browser_provider() {
-    local machines
-    machines="$(FLY machines list -a "$PROD_APP" --json)" || {
-        echo "FATAL: could not read production Fly worker configuration" >&2
-        return 1
-    }
-    printf '%s' "$machines" | python3 -c '
+    local machines err
+    # Bench-scoped Fly tokens (Cursor Cloud) can list [REDACTED]-bench but not
+    # the production worker app. Fall back to the local contract provider so
+    # --refresh-secrets can still stage AgentCard OAuth into BACKEND_ENV_B64
+    # (epoch-3 daily: stale B64 missing ORG_OAUTH blocked payment tasks).
+    err="$(mktemp)"
+    if machines="$(FLY machines list -a "$PROD_APP" --json 2>"$err")"; then
+        rm -f "$err"
+        printf '%s' "$machines" | python3 -c '
 import json, sys
 machines = json.load(sys.stdin) or []
 values = [
@@ -495,6 +498,26 @@ if len(providers) != 1:
     raise SystemExit(f"FATAL: production Fly workers do not expose one BROWSER_PROVIDER: {sorted(providers)!r}")
 print(next(iter(providers)))
 '
+        return
+    fi
+    # Only authorization failures (bench-scoped tokens) may fall back to local.
+    # App-not-found / wrong PROD_APP must stay fatal — never treat local .env as prod.
+    if grep -Eiq 'unauthorized|403|401' "$err" 2>/dev/null; then
+        local fallback
+        fallback="$(cloudbench_env_value back-end/.env BROWSER_PROVIDER)"
+        case "$fallback" in
+            kernel|steel)
+                echo "⚠️  production Fly worker list unauthorized for $PROD_APP; using local back-end/.env BROWSER_PROVIDER=$fallback" >&2
+                rm -f "$err"
+                printf '%s\n' "$fallback"
+                return 0
+                ;;
+        esac
+    fi
+    cat "$err" >&2 || true
+    rm -f "$err"
+    echo "FATAL: could not read production Fly worker configuration" >&2
+    return 1
 }
 
 validate_environment_contract() {
@@ -503,6 +526,8 @@ validate_environment_contract() {
     prod_worker="$(resolve_prod_worker_browser_provider)" || exit 1
     cloudbench_validate_browser_provider_contract \
         agents/.env back-end/.env "$prod_backend" "$prod_worker" || exit 1
+    # Refuse to stage a BACKEND_ENV_B64 that cannot run AgentCard payment tasks.
+    cloudbench_require_agentcard_org_oauth back-end/.env || exit 1
     CLOUDBENCH_PROD_BROWSER_PROVIDER="$prod_backend"
     export CLOUDBENCH_PROD_BROWSER_PROVIDER
 }
@@ -892,13 +917,15 @@ ssh_ready() {  # ssh_ready <machine_id>
 # Start the machine and wait until Fly reports it "started".
 start_machine() {  # start_machine <id>
     local id="$1" st now last_start_ts=0
+    local attempts="${CLOUDBENCH_MACHINE_START_ATTEMPTS:-60}"
+    local nap="${CLOUDBENCH_MACHINE_START_SLEEP_SECONDS:-2}"
     st="$(machine_state "$id")"
     if [ "$st" = "started" ]; then
         echo "✅ Machine $id already started"
         return 0
     fi
     echo "▶️  Starting machine $id ..."
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 "$attempts"); do
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
         [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
@@ -908,10 +935,13 @@ start_machine() {  # start_machine <id>
             request_machine_start "$id" || true
             last_start_ts="$now"
         fi
-        sleep 2
+        sleep "$nap"
     done
-    echo "⚠️  Machine $id did not report 'started' in time (state=$st) — continuing; SSH will retry."
-    return 0
+    # FAILS CLOSED. This used to warn and `return 0` on the theory that "SSH will
+    # retry" — but wait_for_ssh also returned 0 on exhaustion, so both gates were
+    # optimistic and the run died later with a misleading error.
+    echo "❌ Machine $id did not report 'started' after $attempts attempts (state=$st)" >&2
+    return 1
 }
 
 # Stop the machine (keep it + volume). Safe default on every per-run exit path.
@@ -951,7 +981,7 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
     FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
-        --skip-start --yes >/dev/null
+        --command "sleep infinity" --skip-start --yes >/dev/null
 }
 
 prepare_warm_source() {
@@ -1042,16 +1072,53 @@ else:
 }
 
 # Wait for SSH to answer on the machine (post-start it can take a few seconds).
+#
+# FAILS CLOSED. This used to warn and `return 0`, so callers exec'd into a
+# machine that was not up and the real constraint resurfaced as an unrelated
+# error ("exact remote checkout failed" / "app has no started VMs"), aborting a
+# whole fleet run before it provisioned anything. Readiness is a precondition,
+# not a hint: if SSH never answers, say so and let the caller decide.
+#
+# A machine can also drop back out of `started` between start and exec (an
+# auto-stop, or a resize-induced restart), so re-assert the start once when the
+# state regressed rather than failing on a recoverable blip.
 wait_for_ssh() {  # wait_for_ssh <id>
-    local id="$1"
-    for _ in $(seq 1 30); do
-        if FLY ssh console -a "$APP" --machine "$id" -C "true" >/dev/null 2>&1; then
+    local id="$1" attempts="${CLOUDBENCH_SSH_WAIT_ATTEMPTS:-30}"
+    local nap="${CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS:-3}"
+    local probe_timeout="${CLOUDBENCH_SSH_PROBE_TIMEOUT_SECONDS:-10}"
+    local state restarted=0
+    for _ in $(seq 1 "$attempts"); do
+        # Reuse the run-start readiness contract and its hard process timeout.
+        # A raw `flyctl ssh` against a stopped machine has hung for hours.
+        if SSH_READ_TRIES=1 SSH_READ_TIMEOUT="$probe_timeout" ssh_ready "$id"; then
             return 0
         fi
-        sleep 3
+        state="$(machine_state "$id")"
+        if [ "$state" = "gone" ]; then
+            echo "❌ Machine $id disappeared while waiting for SSH" >&2
+            return 1
+        fi
+        if [ "$state" != "started" ] && [ "$restarted" -eq 0 ]; then
+            echo "   ↻ $id fell out of 'started' (state=$state) — re-asserting start once"
+            request_machine_start "$id" || true
+            restarted=1
+        fi
+        sleep "$nap"
     done
-    echo "⚠️  SSH did not become reachable on $id — proceeding (the exec below may still succeed)."
-    return 0
+    echo "❌ SSH never became reachable on $id after $attempts attempts (state=${state:-unknown})" >&2
+    return 1
+}
+
+require_machine_ready() {  # require_machine_ready <id>
+    local id="$1"
+    start_machine "$id" || {
+        echo "❌ $id never reached 'started'; refusing remote maintenance." >&2
+        return 1
+    }
+    wait_for_ssh "$id" || {
+        echo "❌ $id never became ssh-ready; refusing remote maintenance." >&2
+        return 1
+    }
 }
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1188,8 +1255,7 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     write_state "$mid"
 
     prepare_warm_source "$mid" || exit 1
-    start_machine "$mid"
-    wait_for_ssh "$mid"
+    require_machine_ready "$mid" || exit 1
 
     # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
     if [ -z "$(resolve_github_token)" ]; then
@@ -1271,8 +1337,7 @@ if [ "$MODE" = "refresh-deps" ]; then
 
     maintenance_mid="$mid"
     prepare_warm_source "$mid" || exit 1
-    start_machine "$mid"
-    wait_for_ssh "$mid"
+    require_machine_ready "$mid" || exit 1
 
     # Sync the repo to the ref whose manifests the trees must match (auth via
     # the box-side GITHUB_TOKEN secret through git http.extraheader).
@@ -1418,8 +1483,7 @@ if [ "$MODE" = "refresh-wmh" ]; then
 
     maintenance_mid="$mid"
     prepare_warm_source "$mid" || exit 1
-    start_machine "$mid"
-    wait_for_ssh "$mid"
+    require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
     # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
@@ -2053,10 +2117,20 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ]; then
         # newly observed value to the expected checksum.
         LOCAL_PATCH_SHA256="$CLOUDBENCH_LOCAL_PATCH_SHA256"
     elif cloudbench_worktree_has_changes "$ROOT_DIR"; then
-        LOCAL_PATCH_FILE="$(mktemp)"
-        STAGED_LOCAL_FILES+=("$LOCAL_PATCH_FILE")
-        if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" > "$LOCAL_PATCH_FILE" \
-            || [ ! -s "$LOCAL_PATCH_FILE" ]; then
+        _candidate_patch="$(mktemp)"
+        STAGED_LOCAL_FILES+=("$_candidate_patch")
+        _local_patch_rc=0
+        cloudbench_prepare_workspace_patch \
+            "$ROOT_DIR" HEAD "$_candidate_patch" \
+            "$ROOT_DIR/scripts/create-worktree-patch.sh" || _local_patch_rc=$?
+        if [ "$_local_patch_rc" -eq 0 ]; then
+            LOCAL_PATCH_FILE="$_candidate_patch"
+        elif [ "$_local_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+            # Only excluded content (append-only history ledgers) changed
+            # between the shippability check and generation, so the base ref
+            # already IS the code under test. Declare no patch, never abort.
+            echo "📦 no shippable workspace delta (append-only ledgers only); guest runs the base ref"
+        else
             echo "❌ could not create the local workspace patch" >&2
             exit 1
         fi
@@ -3119,7 +3193,9 @@ if [ "$RUN_IDENTITY_OK" = "1" ] && [ -s "$RUN_OUT" ]; then
     for task_name in "${BENCH_TASKS[@]}"; do
         validation_args+=(--expected-task "$task_name")
     done
-    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass --allow-claude-code-credential-skip; then
+    # Strict pass only: Claude Code credential SKIPs must not count as PASS.
+    # (epoch-2 daily masked image-handling / files-in-sub-agents that way.)
+    if python3 "$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT" "${validation_args[@]}" --require-pass; then
         RUN_PASS_OK="1"
     fi
 fi

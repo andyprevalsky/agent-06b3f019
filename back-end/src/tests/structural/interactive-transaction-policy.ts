@@ -36,12 +36,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-    file: 'domains/attention-requests/repo.ts',
-    scope: 'appendGateWaiter',
-    fingerprint: '9a86693274e1b66a',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/auth-assistance/repo.ts',
     scope: 'createRequest',
     fingerprint: '363b182fffe86b00',
@@ -72,12 +66,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'explicit 30-second advisory-lock policy',
   },
   {
-    file: 'domains/purchases/repoOpen.ts',
-    scope: 'createPendingPurchaseWithLock',
-    fingerprint: 'e7ec887248397de7',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/purchases/repoSettlement.ts',
     scope: 'settlePurchaseAfterTransactionCleared',
     fingerprint: 'cd1cd0ea80d5cefb',
@@ -87,12 +75,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     file: 'providers/agentcard/sandbox-settlement.ts',
     scope: 'markPurchaseCleared',
     fingerprint: '4e25776d5c66fd9b',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'providers/authOptionsStore.ts',
-    scope: 'markSteelSessionAuthFailed',
-    fingerprint: '8527037205efaa5f',
     reason: 'legacy migration debt',
   },
   {
@@ -147,12 +129,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     file: 'providers/smsSupervisor/proactiveOutreach.ts',
     scope: 'renewJobLease',
     fingerprint: '8ded8431ad196e59',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'providers/smsSupervisor/supervisorTools.ts',
-    scope: 'commitStartNewAgent',
-    fingerprint: '8d87e66763080f0c',
     reason: 'legacy migration debt',
   },
   {

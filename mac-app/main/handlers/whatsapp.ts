@@ -15,6 +15,8 @@ export function registerWhatsAppHandlers(): void {
       const { session, error } = await getLocalMachineDataSession();
       if (!session) return { success: false, error };
       const window = BrowserWindow.fromWebContents(event.sender);
+      // Backend registration is owned by WhatsAppSync.connect() so every
+      // connect path (IPC, SyncManager auto-connect) gets it.
       await WhatsAppSync.connect({
         onQRCode: (qr: string) => window?.webContents.send('whatsapp:qrCode', qr),
       });

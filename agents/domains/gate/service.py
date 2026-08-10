@@ -49,7 +49,7 @@ def build_subscription_gate(
         "presentation": {
             "title": title or "Subscribe to let Rose complete purchases",
             "reason": reason or "You're out of free credit — an active plan lets me finish tasks that cost real money.",
-            "cta": "Subscribe · $20/mo",
+            "cta": "Subscribe · $30/mo",
         },
         "action": {"kind": "link", "url": checkout_url or DEFAULT_SUBSCRIBE_URL},
         "detection": {"method": "stripe_webhook", "probeKey": "subscription"},

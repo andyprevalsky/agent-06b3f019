@@ -8,6 +8,8 @@
  * Usage: DATABASE_URL=<local_url> npx tsx scripts/seed-local.ts
  */
 
+import { writeFileSync } from 'node:fs';
+
 import { PrismaClient } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -16,10 +18,9 @@ import {
   syncBrowserPasswordCredentials,
   syncBrowserPermissionCredentials,
   syncCookieBundleCredentials,
-  syncCookieCredentials,
   syncIntegrationCredentials,
-  syncOriginCredentials,
   syncPagedCredentials,
+  ORIGIN_META_SELECT,
   syncPasskeyCredentialRows,
   syncRequiredCredentialTable,
   syncSteelSessionAuthCredentials,
@@ -36,6 +37,13 @@ import {
   passkeySyncWhere,
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
+import { streamCookies, streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
+import {
+  SEED_PEAK_RSS_BUDGET_MB,
+  SEED_RSS_REPORT_ENV,
+  withinSeedBudget,
+  type SeedRssReport,
+} from '../src/providers/seedMemoryBudget';
 
 const COMPUTE_TOKENS_ONLY = process.argv.includes('--compute-tokens-only');
 const COMPUTE_TOKEN_SOURCE_DATABASE_URL =
@@ -47,19 +55,36 @@ if (COMPUTE_TOKENS_ONLY && !COMPUTE_TOKEN_SOURCE_DATABASE_URL) {
   );
 }
 
-// Parse .env file directly to get remote DB URL
+// Parse .env directly to get the normal remote DB URL. Operators may route
+// that same trusted connection through a local tunnel without editing .env.
 // (process.env.DATABASE_URL is already overridden to local by run.sh). Isolated
 // benchmark runs may explicitly source compute tokens from the already-verified
 // shared workspace DB so a production-side cooldown cannot invalidate a local
 // deploy gate.
 const envPath = resolve(__dirname, '..', '.env');
 const envVars = COMPUTE_TOKENS_ONLY ? {} : dotenv.parse(readFileSync(envPath));
+// SEED_REMOTE_DATABASE_URL overrides the source database.
+//
+// The seed normally reads prod via .env, which makes any measurement of its
+// footprint depend on outbound reachability: on 2026-07-29 every host in .env
+// was TCP-closed locally and 10 consecutive runs died in ~4s, producing a
+// "122MB peak" that was really the cost of failing. Pointing the source at a
+// local restore of the same prod dump exercises the identical code path and row
+// counts with no network in the loop. Never set in prod.
 const REMOTE_URL = COMPUTE_TOKENS_ONLY
   ? COMPUTE_TOKEN_SOURCE_DATABASE_URL
-  : selectRemoteDatabaseUrl(envVars);
+  : selectRemoteDatabaseUrl({
+      ...envVars,
+      SEED_REMOTE_DATABASE_URL: process.env.SEED_REMOTE_DATABASE_URL,
+    });
+const LOCAL_URL = process.env.DATABASE_URL;
 
 if (!REMOTE_URL) {
   console.error('❌ No remote DATABASE_URL found in .env');
+  process.exit(1);
+}
+if (!LOCAL_URL) {
+  console.error('❌ No local DATABASE_URL found in the environment');
   process.exit(1);
 }
 
@@ -94,6 +119,21 @@ const ISOLATED_BENCHMARK_RUN = process.env.BENCHMARK_ISOLATED_RUN === 'true';
 // logic lives in cookie-domain-scope.ts and is pinned by blackbox coverage.
 const SEED_COOKIE_DOMAINS = parseCookieDomains(process.env.SEED_COOKIE_DOMAINS);
 
+function positivePageSize(name: string, fallback: number): number {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer, got ${process.env[name]}`);
+  }
+  return value;
+}
+
+// Cookies are streamed with COPY rather than paged through Prisma, so there is
+// no SEED_COOKIE_PAGE_SIZE knob to honour here; DEFAULT_COOKIE_PAGE_SIZE remains
+// the bounded default for callers that page the cookie selector directly.
+const PERSON_PAGE_SIZE = positivePageSize('SEED_PERSON_PAGE_SIZE', 50);
+const MESSAGE_PAGE_SIZE = positivePageSize('SEED_MESSAGE_PAGE_SIZE', 50);
+const CREDENTIAL_PAGE_SIZE = positivePageSize('SEED_CREDENTIAL_PAGE_SIZE', 50);
+
 const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
   ['--passkeys-only', PASSKEYS_ONLY],
@@ -119,15 +159,26 @@ function pagedArgs(where: unknown, page?: { skip: number; take: number }) {
     : { where: where as never };
 }
 
+/**
+ * Origin pages carry identity + `hash` only. The payload column is fetched
+ * separately, as text, and only for rows whose hash actually changed — see
+ * `syncOriginBlobCredentials`.
+ */
+function pagedOriginArgs(where: unknown, page?: { skip: number; take: number }) {
+  return { ...pagedArgs(where, page), select: ORIGIN_META_SELECT };
+}
+
 const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
   {
     cookie: (where, page) => remote.cookie.findMany(pagedArgs(where, page)),
     cookieBundle: (where, page) => remote.cookieBundle.findMany(pagedArgs(where, page)),
     steelSessionAuth: (where, page) => remote.steelSessionAuth.findMany(pagedArgs(where, page)),
-    localStorageOrigin: (where, page) => remote.localStorageOrigin.findMany(pagedArgs(where, page)),
-    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedArgs(where, page)),
+    localStorageOrigin: (where, page) =>
+      remote.localStorageOrigin.findMany(pagedOriginArgs(where, page)),
+    indexedDBOrigin: (where, page) => remote.indexedDBOrigin.findMany(pagedOriginArgs(where, page)),
     browserPermission: (where, page) => remote.browserPermission.findMany(pagedArgs(where, page)),
-    cacheStorageOrigin: (where, page) => remote.cacheStorageOrigin.findMany(pagedArgs(where, page)),
+    cacheStorageOrigin: (where, page) =>
+      remote.cacheStorageOrigin.findMany(pagedOriginArgs(where, page)),
     browserPassword: (where, page) => remote.browserPassword.findMany(pagedArgs(where, page)),
     passkeyCredential: (where, page) => remote.passkeyCredential.findMany(pagedArgs(where, page)),
   },
@@ -136,24 +187,83 @@ const scopedRemoteBrowserAuth = createScopedBrowserAuthReaders(
 );
 
 /**
- * Page sizes are per-table because the blobs are not uniform. Peak heap is
- * driven by (page size x row size), so the right page is the one that keeps
- * that product bounded — a row count alone is not a memory bound.
+ * Peak RSS seen so far, and the worst table. Sampled around every sync step so
+ * a regression names the table that caused it instead of just the total.
  *
- * LocalStorageOrigin.entries averages ~23KB over ~3.7k prod rows, so a 100-row
- * page is a couple of MB. IndexedDBOrigin.databases averages ~2.5MB over only
- * 16 rows and its largest single row is 38MB uncompressed, so the same 100-row
- * page would read the entire table and reproduce the original OOM.
+ * The seed shares a 4GB fleet primary with Postgres, Temporal, the backend and
+ * a 12-process worker pool. It was SIGKILLed there on 2026-07-29 and the box
+ * was dropped from the fleet as an infra loss, with nothing recording why.
+ * Enforced by src/tests/unit/seed-memory-ratchet.test.ts.
  */
-const ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_ORIGIN_PAGE_SIZE ?? 100);
-// Measured: with a 400MB heap the 38MB row still OOMs at page size 1, and it
-// succeeds at 900MB — so ~0.5-0.9GB is the irreducible cost of parsing that one
-// row. Peak is therefore bounded by the LARGEST SINGLE ROW, which is the best
-// achievable without streaming the blob itself, and fits any bench guest.
-const BLOB_ORIGIN_SYNC_PAGE_SIZE = Number(process.env.SEED_BLOB_ORIGIN_PAGE_SIZE ?? 1);
+/**
+ * Origin tables move Postgres-to-Postgres with COPY: the payload never enters
+ * the Node heap, so peak memory does not scale with row size at all.
+ *
+ * The paged blob path (`syncOriginBlobCredentials`) is retained and still
+ * covered by its own tests, but it is NOT what the seed runs: measured on this
+ * merged tree it peaks at 592MB against a 230MB budget, because a page still
+ * materializes its payload in V8 before writing. COPY measures 197MB.
+ */
+async function syncJsonbOriginTable(table: JsonbOriginTable): Promise<number> {
+  return streamJsonbOrigins({
+    remoteUrl: REMOTE_URL!,
+    localUrl: LOCAL_URL!,
+    userId: DEV_USER_ID,
+    domains: SEED_COOKIE_DOMAINS,
+    table,
+  });
+}
+
+const rssPeaks: Array<{ name: string; peakRssMb: number }> = [];
+let peakRssMb = 0;
+
+function sampleRss(name: string): void {
+  const mb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+  if (mb > peakRssMb) peakRssMb = mb;
+  const existing = rssPeaks.find((entry) => entry.name === name);
+  if (existing === undefined) rssPeaks.push({ name, peakRssMb: mb });
+  else if (mb > existing.peakRssMb) existing.peakRssMb = mb;
+}
+
+export function seedRssReport(): SeedRssReport {
+  return {
+    peakRssMb,
+    budgetMb: SEED_PEAK_RSS_BUDGET_MB,
+    tables: [...rssPeaks].sort((a, b) => b.peakRssMb - a.peakRssMb),
+  };
+}
+
+function writeRssReport(): void {
+  const target = process.env[SEED_RSS_REPORT_ENV];
+  const report = seedRssReport();
+  const worst = report.tables[0];
+  console.log(
+    `  🧠 seed peak RSS: ${report.peakRssMb}MB / budget ${report.budgetMb}MB` +
+      (worst ? ` (worst: ${worst.name} @ ${worst.peakRssMb}MB)` : '')
+  );
+  if (target !== undefined && target !== '') {
+    try {
+      writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`);
+    } catch (err) {
+      console.warn(
+        `  ⚠️ could not write seed RSS report: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  }
+  if (!withinSeedBudget(report.peakRssMb)) {
+    // Loud, but NOT fatal: a seed that succeeded should not be turned into an
+    // infra loss by its own instrumentation. The ratchet test is the gate.
+    console.warn(
+      `  ⚠️ seed peak RSS ${report.peakRssMb}MB exceeds the ${report.budgetMb}MB ratchet — ` +
+        'make the seed leaner rather than raising the budget (see providers/seedMemoryBudget.ts)'
+    );
+  }
+}
 
 async function syncTable(name: string, fn: () => Promise<number>): Promise<void> {
+  sampleRss(name);
   await runSyncStep(name, fn);
+  sampleRss(name);
 }
 
 async function syncRequiredTable(
@@ -161,10 +271,13 @@ async function syncRequiredTable(
   fn: () => Promise<number>,
   failures?: Error[]
 ): Promise<void> {
+  sampleRss(name);
   try {
     const count = await syncRequiredCredentialTable(name, fn);
+    sampleRss(name);
     console.log(`  ✅ ${name}: ${count} synced`);
   } catch (err) {
+    sampleRss(name);
     const failure = err instanceof Error ? err : new Error(String(err));
     console.error(`  ❌ ${failure.message}`);
     if (failures) {
@@ -376,42 +489,33 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   );
 
   // ── Cookies ──
+  // Streamed directly between Postgres processes, like the JSONB origin tables.
+  // A 22k-cookie account made Prisma paging a false choice: small pages needed
+  // ~880 production round trips (over the deploy stack's 120s readiness
+  // contract) and large pages pushed peak RSS past the seed ratchet. One COPY
+  // pays a single round trip and holds no cookie row in the V8 heap. The
+  // target-side merge keeps local-only rows and pre-existing local ids, and only
+  // rewrites rows whose content actually changed — the same rule the Prisma warm
+  // path applied via cookieContent().
   await syncRequiredTable(
     'Cookies',
     async () => {
-      const cookies = await scopedRemoteBrowserAuth.cookie();
+      const synced = await streamCookies({
+        remoteUrl: REMOTE_URL!,
+        localUrl: LOCAL_URL!,
+        userId: DEV_USER_ID,
+        domains: SEED_COOKIE_DOMAINS,
+      });
       if (SEED_COOKIE_DOMAINS.length > 0) {
         process.stdout.write(
           `     scoped to ${SEED_COOKIE_DOMAINS.length} domain(s) [${SEED_COOKIE_DOMAINS.join(
             ', '
-          )}] → ${cookies.length} cookies\n`
+          )}] → ${synced} cookies\n`
         );
+      } else if (synced > 0) {
+        process.stdout.write(`     ${synced} cookies streamed in one COPY round trip\n`);
       }
-      // Fresh local table (the benchmark cold path): one bulk createMany instead of
-      // ~N per-row upsert round-trips (the ~780s bottleneck). On an already-populated
-      // table (warm restore / re-sync) fall back to upsert so refreshed cookie values
-      // overwrite stale rows. skipDuplicates makes the bulk path idempotent against
-      // the natural-key unique constraint.
-      const existingLocal = await local.cookie.count({ where: { userId: DEV_USER_ID } });
-      if (existingLocal === 0 && cookies.length > 0) {
-        for (let i = 0; i < cookies.length; i += 1000) {
-          await local.cookie.createMany({
-            data: cookies.slice(i, i + 1000) as never,
-            skipDuplicates: true,
-          });
-        }
-      } else {
-        for (let i = 0; i < cookies.length; i += 500) {
-          const batch = cookies.slice(i, i + 500);
-          await syncCookieCredentials(local.cookie, batch);
-          if (cookies.length > 500 && i + 500 < cookies.length) {
-            process.stdout.write(
-              `     ${Math.min(i + 500, cookies.length)}/${cookies.length}...\r`
-            );
-          }
-        }
-      }
-      return cookies.length;
+      return synced;
     },
     failures
   );
@@ -419,10 +523,12 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Durable browser-auth references ──
   await syncRequiredTable(
     'Cookie Bundles',
-    async () => {
-      const bundles = await scopedRemoteBrowserAuth.cookieBundle();
-      return syncCookieBundleCredentials(local.cookieBundle, bundles);
-    },
+    async () =>
+      syncPagedCredentials(
+        (page) => scopedRemoteBrowserAuth.cookieBundle(page),
+        (bundles) => syncCookieBundleCredentials(local.cookieBundle, bundles),
+        CREDENTIAL_PAGE_SIZE
+      ),
     failures
   );
 
@@ -436,33 +542,19 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   );
 
   // ── LocalStorage Origins ──
-  // Paged: `entries` holds the encrypted localStorage payload (84MB across
-  // ~3.7k rows in prod today) and parsing it all at once is what exhausted the
-  // heap on every bench guest.
+  // Streamed directly between Postgres processes. Row-count paging is not a
+  // memory bound for JSONB: a single canonical JSON string can still exceed
+  // the seed's entire budget before Prisma parses it.
   await syncRequiredTable(
     'LocalStorage',
-    async () =>
-      syncPagedCredentials(
-        (page) => scopedRemoteBrowserAuth.localStorageOrigin(page),
-        (origins) => syncOriginCredentials(local.localStorageOrigin, origins),
-        ORIGIN_SYNC_PAGE_SIZE
-      ),
+    () => syncJsonbOriginTable('LocalStorageOrigin'),
     failures
   );
 
   // ── IndexedDB Origins ──
-  // Paged: few rows, but `databases` is the single largest blob in the seed
-  // (one prod row is 38MB uncompressed).
-  await syncRequiredTable(
-    'IndexedDB',
-    async () =>
-      syncPagedCredentials(
-        (page) => scopedRemoteBrowserAuth.indexedDBOrigin(page),
-        (origins) => syncOriginCredentials(local.indexedDBOrigin, origins),
-        BLOB_ORIGIN_SYNC_PAGE_SIZE
-      ),
-    failures
-  );
+  // Few rows, but `databases` is the single largest blob in the seed (one prod
+  // row is 41MB uncompressed), so its page is deliberately one row.
+  await syncRequiredTable('IndexedDB', () => syncJsonbOriginTable('IndexedDBOrigin'), failures);
 
   // ── Browser Permissions ──
   await syncRequiredTable(
@@ -477,12 +569,7 @@ async function syncBrowserState(failures?: Error[]): Promise<void> {
   // ── Cache Storage Origins ──
   await syncRequiredTable(
     'Cache Storage',
-    async () =>
-      syncPagedCredentials(
-        (page) => scopedRemoteBrowserAuth.cacheStorageOrigin(page),
-        (caches) => syncOriginCredentials(local.cacheStorageOrigin, caches),
-        ORIGIN_SYNC_PAGE_SIZE
-      ),
+    () => syncJsonbOriginTable('CacheStorageOrigin'),
     failures
   );
 }
@@ -557,25 +644,48 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   return { usable, rateLimited };
 }
 
-async function countUsableClaudeCodeIntegrations(): Promise<number> {
+interface ClaudeCodeAvailability {
+  // Connected, credentialed, bench-available, and NOT currently rate-limited.
+  usable: number;
+  // Connected, credentialed, bench-available, but throttled (rateLimitedUntil in
+  // the future) — present but temporarily blocked by an external quota.
+  rateLimited: number;
+}
+
+async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> {
   const now = new Date();
   const integrations = await local.integration.findMany({
     where: {
       name: 'claude_code',
       status: 'CONNECTED',
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
     },
     select: {
       userId: true,
       poolingEnabled: true,
       config: true,
+      rateLimitedUntil: true,
     },
   });
 
-  return integrations.filter((integration) => {
+  const eligible = integrations.filter((integration) => {
     const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
-  }).length;
+  });
+
+  let usable = 0;
+  let rateLimited = 0;
+  for (const integration of eligible) {
+    if (integration.rateLimitedUntil !== null && integration.rateLimitedUntil > now) {
+      rateLimited += 1;
+    } else {
+      usable += 1;
+    }
+  }
+  return { usable, rateLimited };
+}
+
+async function countUsableClaudeCodeIntegrations(): Promise<number> {
+  return (await inspectClaudeCodeIntegrations()).usable;
 }
 
 async function syncComputeTokensWithRetries(): Promise<void> {
@@ -585,13 +695,25 @@ async function syncComputeTokensWithRetries(): Promise<void> {
     try {
       const count = await syncIntegrations();
       await poolRequiredDevComputeTokensForSyntheticUsers();
-      const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
+      const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
+        await inspectClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
           console.warn(
             `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
               '0 usable claude_code — proceeding because this run requires GPT compute only ' +
               '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt)'
+          );
+        } else if (rateLimitedClaudeCodeCount > 0) {
+          // Mirror gpt_code: a claude_code row that EXISTS but is merely
+          // rate-limited is an external-quota transient, not a missing
+          // credential. Infra-fix deploys and non-Claude Code smoke must not
+          // hard-fail the whole compute-token sync on Anthropic's cooldown;
+          // Claude Code tasks still fail closed at their own credential gate.
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code ` +
+              `(${rateLimitedClaudeCodeCount} present but rate-limited by an external quota) — ` +
+              `proceeding; callers that require Claude Code enforce that separately`
           );
         } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1') {
           console.warn(
@@ -684,10 +806,12 @@ async function syncBrowserCredentials(failures?: Error[]): Promise<void> {
   // ── Browser Passwords ──
   await syncRequiredTable(
     'Browser Passwords',
-    async () => {
-      const passwords = await scopedRemoteBrowserAuth.browserPassword();
-      return syncBrowserPasswordCredentials(local.browserPassword, passwords);
-    },
+    async () =>
+      syncPagedCredentials(
+        (page) => scopedRemoteBrowserAuth.browserPassword(page),
+        (passwords) => syncBrowserPasswordCredentials(local.browserPassword, passwords),
+        CREDENTIAL_PAGE_SIZE
+      ),
     failures
   );
 
@@ -755,7 +879,14 @@ async function syncBrowserAuthForCurrentMode(failures?: Error[]): Promise<void> 
 // `localCookie.upsert()` invocation failed; the identical sync succeeded
 // seconds later). Every sync step is an idempotent upsert, so bounded retries
 // are safe. Mirrors syncComputeTokensWithRetries above.
-const BROWSER_AUTH_SYNC_ATTEMPTS = 3;
+// Retries now live per-table in syncRequiredCredentialTable, which re-runs ONLY
+// the table that failed. Keeping a second multiplier here would restore the
+// exact regression this replaced: a transient error on a late table re-read the
+// whole graph (21k cookies + 3.1k bundles + 3.7k origins + a 38MB blob) up to
+// three times and blew the bench live-fixture budget, so the task produced no
+// verdict at all (descend antibot, browser-biometrics-webdecoy, 2026-07-27).
+// One pass here; the bounded per-table budget absorbs transients.
+const BROWSER_AUTH_SYNC_ATTEMPTS = 1;
 
 async function syncBrowserAuthWithRetries(): Promise<void> {
   let lastError: unknown = null;
@@ -880,8 +1011,22 @@ async function sync() {
 
   // ── People (contacts) ──
   await syncTable('People', async () => {
-    const people = await remote.person.findMany({ where: { userId: DEV_USER_ID } });
-    return upsertById(local.person, people);
+    // Paged for the same reason as Message Records: bound peak heap by page
+    // size, not by contact count. A 2k-contact user is normal here.
+    let peopleSynced = 0;
+    for (let skip = 0; ; skip += PERSON_PAGE_SIZE) {
+      const page = await remote.person.findMany({
+        where: { userId: DEV_USER_ID },
+        orderBy: { id: 'asc' },
+        skip,
+        take: PERSON_PAGE_SIZE,
+      });
+      if (page.length === 0) break;
+      peopleSynced += await upsertById(local.person, page);
+      sampleRss('People');
+      if (page.length < PERSON_PAGE_SIZE) break;
+    }
+    return peopleSynced;
   });
 
   // ── Message Records ──
@@ -896,35 +1041,47 @@ async function sync() {
 
     // Cap at the latest 10k messages across all contacts to keep seed fast and
     // local DB lean; older history isn't needed for dev/testing.
+    //
+    // PAGED, not materialised. `findMany({ take: 10_000 })` held every row AND
+    // its message body in one array before the first write; on a 4GB fleet
+    // primary shared with Postgres + a 12-process worker pool that was the
+    // SIGKILL (rc=137) which dropped a box from the 2026-07-29 fleet run before
+    // its start barrier. Peak heap is now bounded by PAGE x row size, not by the
+    // whole table. Enforced by src/tests/unit/seed-memory-ratchet.test.ts.
     const MESSAGE_LIMIT = 10_000;
-    const messages = await remote.messageRecord.findMany({
-      where: { personId: { in: personIds } },
-      orderBy: { timestamp: 'desc' },
-      take: MESSAGE_LIMIT,
-    });
-
-    // The local benchmark DB runs beside the entire agent stack. Launching 500
-    // Prisma upserts at once repeatedly killed Postgres on 4GB Fly primaries,
-    // leaving every seed retry to fail with P1001. Stay below the configured
-    // 50-connection pool so cold pool replacements can seed without an infra
-    // loss; normal benchmark claims restore the resulting persistent dump.
-    return syncRowsWithConcurrency(
-      messages,
-      25,
-      (m) => {
-        const { id, ...rest } = m;
-        return local.messageRecord.upsert({
-          where: { id },
-          create: m as any,
-          update: rest as any,
-        });
-      },
-      (completed, total) => {
-        if (total > 25 && completed < total) {
-          process.stdout.write(`     ${completed}/${total}...\r`);
+    let messagesSynced = 0;
+    for (let skip = 0; skip < MESSAGE_LIMIT; skip += MESSAGE_PAGE_SIZE) {
+      const page = await remote.messageRecord.findMany({
+        where: { personId: { in: personIds } },
+        orderBy: { timestamp: 'desc' },
+        skip,
+        take: Math.min(MESSAGE_PAGE_SIZE, MESSAGE_LIMIT - skip),
+      });
+      if (page.length === 0) break;
+      // The local benchmark DB runs beside the entire agent stack. Launching 500
+      // Prisma upserts at once repeatedly killed Postgres on 4GB Fly primaries,
+      // leaving every seed retry to fail with P1001. Stay below the configured
+      // 50-connection pool.
+      messagesSynced += await syncRowsWithConcurrency(
+        page,
+        25,
+        (m) => {
+          const { id, ...rest } = m;
+          return local.messageRecord.upsert({
+            where: { id },
+            create: m as any,
+            update: rest as any,
+          });
+        },
+        (completed) => {
+          const done = messagesSynced + completed;
+          if (done < MESSAGE_LIMIT) process.stdout.write(`     ${done}/${MESSAGE_LIMIT}...\r`);
         }
-      }
-    );
+      );
+      sampleRss('Message Records');
+      if (page.length < MESSAGE_PAGE_SIZE) break;
+    }
+    return messagesSynced;
   });
 
   // ── Rose API Keys ──
@@ -1016,6 +1173,11 @@ sync()
     process.exit(1);
   })
   .finally(async () => {
+    // Report BEFORE disconnecting: the peak is what matters and the per-table
+    // attribution is the whole point of the instrument. Defined but never
+    // called on 2026-07-29, which is why the first real measurement (4983MB)
+    // could not say which table produced it.
+    writeRssReport();
     await remote.$disconnect();
     await local.$disconnect();
   });

@@ -1,3 +1,5 @@
+WHEN COMMUNICATING TO THE USER, BE CONCISE, LET THE USER ASK FOR MORE CONTEXT IF THE USER WANTS MORE, OTHERWISE DO NOT OVERCOMMUNICATE. STRICTLY FOLLOWING USER COMMUNICATION PROTOCOL
+
 # Rose Labs
 
 AI agent platform.
@@ -189,7 +191,7 @@ of truth; do not duplicate them into other files.
 
 **The FE query box reads this same catalog** via `GET /api/benchmarks/test-prompts` (adapter in `back-end/src/domains/benchmarks/service.ts`); the dev test-prompts picker cannot drift from the suite.
 
-**Every task runs on a base-image fixture.** Tasks that don't declare `environment.base_images` inherit `base:victoria-prod-sync-v1` (the workspace DB synced from prod via `scripts/setup-db.sh`) at load time; declared environments with empty `base_images` inherit it too. Registry + pg_dump freezer: `agents/benchmarks/fixtures.py` (`ensure_base_image_snapshot()`). Task-specific `db_fixtures` are deltas on top of a base image.
+**Every task runs on a base-image fixture.** Tasks that don't declare `environment.base_images` inherit the canonical `base:victoria-prod-sync-v1` artifact shared by local and cloud runners; declared environments with empty `base_images` inherit it too. That canonical base includes frozen WhatsApp history, while compute tokens are refreshed as a live overlay after restore. Registry + pg_dump freezer: `agents/benchmarks/fixtures.py` (`ensure_base_image_snapshot()`). Task-specific `db_fixtures` are deltas on top of the one canonical base image.
 
 **Every completed run is recorded — pass or fail, local or prod.** `BenchmarkRun.save()` writes the full run record (message transcripts + logs) to `runs/*.json`, appends every attempt to the attempts ledger, and full LLM trajectories land in `.llm-dumps/<agent_id>/` (always-on locally; prod goes to ClickHouse).
 

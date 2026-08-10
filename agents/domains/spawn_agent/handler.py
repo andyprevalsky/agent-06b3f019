@@ -17,6 +17,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.exceptions import CancelledError as TemporalCancelledError
 
+from domains.grep.repo import fetch_local_data_summary
 from domains.spawn_agent.config import (
     EXPLORE_DEFAULT_DEPTH,
     EXPLORE_DEFAULT_MODEL,
@@ -303,6 +304,7 @@ class SpawnAgentManager(ToolManager):
         tool_call_id: str,
         *,
         task_id: Optional[str] = None,
+        local_data_summary: Optional[str] = None,
         display_goal: Optional[str] = None,
         capture_tool_results: Optional[List[str]] = None,
     ) -> AsyncGenerator[ToolEvent, None]:
@@ -316,10 +318,10 @@ class SpawnAgentManager(ToolManager):
         tool-call outputs. This is out-of-band so the 100+ KB trace never gets
         persisted into message metadata or shipped across activity boundaries.
 
-        Contact discovery + message-thread lookup happen inside the explore
-        agent on demand via the grep tool's network / agent_network_* /
-        messages source modes — we no longer prefetch network_metadata or
-        local_data_summary before spawning.
+        Detailed contact discovery + message-thread lookup happen inside the
+        explore agent on demand via grep. A compact aggregate data summary is
+        prefetched into dynamic user context so counts, date ranges, and top
+        threads do not require scanning the full message corpus.
         """
         goal = tool_call.get("goal", "")
         ui_goal = display_goal or goal
@@ -338,6 +340,18 @@ class SpawnAgentManager(ToolManager):
         )
 
         try:
+            context_gates = tool_call.get("context_gates") or {}
+            if local_data_summary is None:
+                if context_gates.get("recent_communications", True):
+                    local_data_summary = await workflow.execute_activity(
+                        fetch_local_data_summary,
+                        args=[workflow_instance.user_id],
+                        start_to_close_timeout=SUB_ACTIVITY_TIMEOUT,
+                        retry_policy=RetryPolicy(maximum_attempts=SUB_ACTIVITY_MAX_ATTEMPTS),
+                    )
+                else:
+                    local_data_summary = ""
+
             # Resolve requested attachments from workflow context
             attachment_texts: List[str] = []
             requested_attachments = tool_call.get("attachments")
@@ -408,6 +422,7 @@ class SpawnAgentManager(ToolManager):
                 if hasattr(workflow_instance, "_active_gpt_pool_id")
                 else getattr(workflow_instance, "gpt_code_token_pool_id", None)
             )
+            world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
             async with span(
                 "explore_activity_wait",
                 agent_id=workflow_instance.agent_id,
@@ -433,10 +448,9 @@ class SpawnAgentManager(ToolManager):
                     getattr(workflow_instance, "max_context_tokens", None) or 200_000,
                     depth,
                     explore_max_iterations,
+                    world_model_mode,
+                    local_data_summary,
                 ]
-                world_model_mode = getattr(workflow_instance, "world_model_mode", "real")
-                if world_model_mode != "real":
-                    activity_args.append(world_model_mode)
                 activity_handle = workflow.start_activity(
                     spawn_explore_agent_activity,
                     args=activity_args,

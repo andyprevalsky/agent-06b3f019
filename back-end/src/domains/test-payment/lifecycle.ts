@@ -5,17 +5,15 @@ import { TestPaymentError } from './errors';
 import {
   agentCardSummaryFromMcpResult,
   asRecord,
-  integerField,
   mcpResultCode,
-  mcpResultRows,
   providerIntegrity,
-  stringField,
 } from './lifecycleProviderRecords';
 import {
   listOrgCardWindow,
   listOrgTransferWindow,
   searchAllStripeHolds,
 } from './lifecyclePagination';
+import { mapOrgTransfer } from './lifecycleOrgTransfer';
 import * as testPaymentRepo from './repo';
 import type {
   LifecycleAttention,
@@ -166,55 +164,6 @@ async function loadCardSummary(
     if (isClosedCardDetailsError(error)) return { status: 'closed', balanceCents: 0 };
     throw error;
   }
-}
-
-function transferReleasedCents(transfer: Record<string, unknown> | undefined): number {
-  return typeof transfer?.released_cents === 'number' ? transfer.released_cents : 0;
-}
-
-/** Higher rank = a more terminal/settled transfer state, used as a stable tie-breaker. */
-function transferStatusRank(transfer: Record<string, unknown> | undefined): number {
-  switch (transfer?.status) {
-    case 'consumed':
-      return 3;
-    case 'reclaimed':
-      return 2;
-    case 'released':
-      return 1;
-    default:
-      return 0;
-  }
-}
-
-function transferId(transfer: Record<string, unknown> | undefined): string {
-  return typeof transfer?.id === 'string' ? transfer.id : '';
-}
-
-function mapOrgTransfer(
-  purchase: LoadedPurchase,
-  transferResults: unknown[]
-): TestPaymentLifecycle['orgTransfer'] {
-  const transfer = transferResults
-    .flatMap((result) => mcpResultRows(result, 'transfers'))
-    .filter((value) => value?.card_id === purchase.cardId)
-    .sort((left, right) => {
-      const releasedDifference = transferReleasedCents(right) - transferReleasedCents(left);
-      if (releasedDifference !== 0) return releasedDifference;
-      const rankDifference = transferStatusRank(right) - transferStatusRank(left);
-      if (rankDifference !== 0) return rankDifference;
-      // Stable ID tie-breaker keeps the selection independent of input ordering.
-      return transferId(left).localeCompare(transferId(right));
-    })[0];
-  if (transfer === undefined) return null;
-  return {
-    id: stringField(transfer, 'id'),
-    status: stringField(transfer, 'status'),
-    amountCents: integerField(transfer, 'amount_cents'),
-    transferredCents: integerField(transfer, 'transferred_cents'),
-    releasedCents: integerField(transfer, 'released_cents'),
-    cardId: typeof transfer.card_id === 'string' ? transfer.card_id : null,
-    livemode: transfer.livemode === true,
-  };
 }
 
 async function buildLoadedLifecycle(

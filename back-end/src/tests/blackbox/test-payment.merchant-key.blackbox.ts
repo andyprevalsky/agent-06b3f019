@@ -454,9 +454,16 @@ const tests: Array<[string, () => Promise<void>]> = [
             'subscriptions, customers, and personal purchase holds live on STRIPE_SECRET_KEY'
         );
       }
+      const billingService = readSource('domains/billing/service.ts');
       assert(
-        readSource('domains/billing/service.ts').includes('stripe.checkout.sessions.create'),
-        'billing subscription checkout must stay on the billing singleton'
+        billingService.includes('checkout.sessions.create'),
+        'billing subscription checkout must still mint Stripe Checkout sessions'
+      );
+      assert(
+        billingService.includes('getStripeClientForSecretKey') ||
+          billingService.includes('stripe.checkout.sessions.create'),
+        'billing subscription checkout must mint via the billing/live Stripe client, ' +
+          'never the merchant acquirer client'
       );
     },
   ],

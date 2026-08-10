@@ -19,10 +19,10 @@ const log = createLogger('SmsSupervisorGrep');
 export interface GrepArgs {
   pattern: string;
   source?: string | null;
+  context?: number | null;
   '-B'?: number | null;
   '-A'?: number | null;
   '-C'?: number | null;
-  context?: number | null;
   '-n'?: boolean | null;
   '-i'?: boolean | null;
   head_limit?: number | null;

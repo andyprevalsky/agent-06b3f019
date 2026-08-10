@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import glob
+import importlib
 import json
 import os
 import re
@@ -80,13 +81,17 @@ MAX_ISOLATED_STACKS = int(os.getenv("AGENT_LATENCY_MAX_ISOLATED_STACKS", "3"))
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from benchmarks.logs import (
-    FlyLogCollector,
-    fetch_clickhouse_worker_logs,
-    load_env_var,
-)
-from benchmarks.span_history import make_observation, record_span_observations
-from benchmarks.span_history import summary as span_history_summary
+_logs_module = importlib.import_module("benchmarks.logs")
+FlyLogCollector = _logs_module.FlyLogCollector
+fetch_clickhouse_worker_logs = _logs_module.fetch_clickhouse_worker_logs
+load_env_var = _logs_module.load_env_var
+_span_history_module = importlib.import_module("benchmarks.span_history")
+make_observation = _span_history_module.make_observation
+record_span_observations = _span_history_module.record_span_observations
+span_history_summary = _span_history_module.summary
+# Batch form: scans the span-history ledger ONCE for every key instead of once
+# per unique key (I-16: per-span rescans blew the 180s diagnostic budget).
+span_history_summaries = _span_history_module.summaries
 
 _AGENTS_ENV = os.path.join(os.path.dirname(__file__), "..", ".env")
 _BACKEND_ENV = os.path.join(os.path.dirname(__file__), "..", "..", "back-end", ".env")
@@ -168,11 +173,11 @@ def isolated_stack_log_dirs() -> List[str]:
     downstream, so scanning extra runs costs parse time, never correctness.
     """
     dirs: List[str] = []
-    explicit = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    explicit = _explicit_benchmark_context_dir()
     if explicit:
         pinned = os.path.join(explicit, "logs")
         if os.path.isdir(pinned):
-            dirs.append(pinned)
+            return [pinned]
     if os.path.isdir(ISOLATED_STACK_ROOT):
         candidates = []
         for name in os.listdir(ISOLATED_STACK_ROOT):
@@ -202,7 +207,26 @@ def _log_paths(shared: str, isolated_glob: str, env_var: str) -> List[str]:
     return paths
 
 
-def _read_worker_raw() -> List[_RawEvent]:
+def _explicit_benchmark_context_dir() -> str:
+    raw = os.getenv("BENCHMARK_CONTEXT_DIR", "").strip()
+    if not raw:
+        return ""
+    if os.path.isabs(raw):
+        return os.path.normpath(raw)
+    return os.path.abspath(os.path.join(REPO_ROOT, raw))
+
+
+def _line_mentions_agent(line: str, agent_ids: Optional[Set[str]]) -> bool:
+    if agent_ids is None:
+        return True
+    if not agent_ids:
+        return False
+    if len(agent_ids) == 1:
+        return next(iter(agent_ids)) in line
+    return not agent_ids.isdisjoint(UUID_RE.findall(line))
+
+
+def _read_worker_raw(agent_ids: Optional[Set[str]] = None) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     # An isolated stack runs several worker processes, each with its own file.
     for path in _log_paths(WORKER_LOG, "worker*.log", "NAVI_WORKER_LOGS"):
@@ -211,7 +235,11 @@ def _read_worker_raw() -> List[_RawEvent]:
         with open(path, errors="replace") as f:
             for line in f:
                 line = line.strip()
-                if not line or not line.startswith("{"):
+                if (
+                    not line
+                    or not line.startswith("{")
+                    or not _line_mentions_agent(line, agent_ids)
+                ):
                     continue
                 try:
                     d = json.loads(line)
@@ -225,7 +253,11 @@ def _read_worker_raw() -> List[_RawEvent]:
     return out
 
 
-def _read_backend_raw() -> List[_RawEvent]:
+def _read_backend_raw(
+    agent_ids: Optional[Set[str]] = None,
+    *,
+    required_substring: str = "",
+) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     # [2026-04-17T21:07:35.352Z] INFO [HTTP] message key=value key=value
     head = re.compile(
@@ -234,15 +266,29 @@ def _read_backend_raw() -> List[_RawEvent]:
     for path in _log_paths(BACKEND_LOG, "backend*.log", "NAVI_BACKEND_LOGS"):
         if not os.path.exists(path):
             continue
-        out.extend(_parse_backend_lines(path, head))
+        out.extend(
+            _parse_backend_lines(
+                path, head, agent_ids=agent_ids, required_substring=required_substring
+            )
+        )
     out.sort(key=lambda event: event.ts)
     return out
 
 
-def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
+def _parse_backend_lines(
+    path: str,
+    head: "re.Pattern[str]",
+    *,
+    agent_ids: Optional[Set[str]] = None,
+    required_substring: str = "",
+) -> List[_RawEvent]:
     out: List[_RawEvent] = []
     with open(path, errors="replace") as f:
         for raw in f:
+            if required_substring and required_substring not in raw:
+                continue
+            if not _line_mentions_agent(raw, agent_ids):
+                continue
             line = ANSI_RE.sub("", raw).rstrip("\n")
             m = head.match(line)
             if not m:
@@ -270,13 +316,15 @@ def _parse_backend_lines(path: str, head: "re.Pattern[str]") -> List[_RawEvent]:
     return out
 
 
-def _read_research_raw() -> List[_RawEvent]:
+def _read_research_raw(agent_ids: Optional[Set[str]] = None) -> List[_RawEvent]:
     if not os.path.exists(RESEARCH_LOG):
         return []
     out: List[_RawEvent] = []
     tail = re.compile(r"(\{.*\})$")
     with open(RESEARCH_LOG, errors="replace") as f:
         for raw in f:
+            if not _line_mentions_agent(raw, agent_ids):
+                continue
             line = ANSI_RE.sub("", raw).strip()
             m = tail.search(line)
             if not m:
@@ -347,6 +395,19 @@ def _discover_sub_agent_ids(backend_raw: List[_RawEvent], root_id: str) -> Set[s
                     new_frontier.add(cid)
         frontier = new_frontier
     return discovered
+
+
+def _read_backend_tree_raw(root_id: str) -> Tuple[List[_RawEvent], Set[str]]:
+    """Read only backend lines that can belong to one transitive agent tree.
+
+    Child ids first appear on a line containing parent_agent_id. Build that
+    lightweight relationship index in one scan, then parse the complete known
+    tree in one more scan, independent of tree depth.
+    """
+    spawn_events = _read_backend_raw(required_substring="parent_agent_id")
+    sub_ids = _discover_sub_agent_ids(spawn_events, root_id)
+    events = _read_backend_raw({root_id, *sub_ids})
+    return events, sub_ids
 
 
 # ---------------------------------------------------------------------------
@@ -739,6 +800,80 @@ def _research_event_spans(events: List[_RawEvent]) -> List[Span]:
 # ---------------------------------------------------------------------------
 
 
+def _time_containment_parents(candidates: List[Span], queries: List[Span]) -> Dict[int, Span]:
+    """Find each query's narrowest enclosing closed span in O(n log² n)."""
+    from bisect import bisect_left, bisect_right
+
+    closed = sorted(
+        [span for span in candidates if span.end is not None],
+        key=lambda span: (span.start, -(span.end - span.start).total_seconds()),
+    )
+    if not closed or not queries:
+        return {}
+
+    starts = sorted({span.start for span in closed})
+    # A Fenwick node retains the two narrowest intervals in its start-time
+    # range. Two are sufficient because a closed query can match itself and
+    # must then fall through to the next enclosing interval.
+    tree: List[List[Tuple[float, int, Span]]] = [[] for _ in range(len(starts) + 1)]
+
+    def keep_two(items: List[Tuple[float, int, Span]]) -> List[Tuple[float, int, Span]]:
+        best: List[Tuple[float, int, Span]] = []
+        seen: Set[int] = set()
+        for item in sorted(items, key=lambda value: (value[0], value[1])):
+            identity = id(item[2])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            best.append(item)
+            if len(best) == 2:
+                break
+        return best
+
+    def update(position: int, item: Tuple[float, int, Span]) -> None:
+        index = position + 1
+        while index < len(tree):
+            tree[index] = keep_two([*tree[index], item])
+            index += index & -index
+
+    def prefix_best(length: int) -> List[Tuple[float, int, Span]]:
+        best: List[Tuple[float, int, Span]] = []
+        index = length
+        while index > 0:
+            best = keep_two([*best, *tree[index]])
+            index -= index & -index
+        return best
+
+    by_end = sorted(
+        enumerate(closed),
+        key=lambda item: item[1].end,
+        reverse=True,
+    )
+    ordered_queries = sorted(
+        queries,
+        key=lambda span: span.end or span.start,
+        reverse=True,
+    )
+    parents: Dict[int, Span] = {}
+    candidate_index = 0
+    for query in ordered_queries:
+        query_end = query.end or query.start
+        while candidate_index < len(by_end) and by_end[candidate_index][1].end >= query_end:
+            order, candidate = by_end[candidate_index]
+            width = (candidate.end - candidate.start).total_seconds()
+            update(
+                bisect_left(starts, candidate.start),
+                (width, order, candidate),
+            )
+            candidate_index += 1
+
+        eligible = prefix_best(bisect_right(starts, query.start))
+        parent = next((item[2] for item in eligible if item[2] is not query), None)
+        if parent is not None:
+            parents[id(query)] = parent
+    return parents
+
+
 def _assemble_tree(spans: List[Span]) -> List[Span]:
     """Link spans into a parent/child tree. Order of precedence:
       1. parent_span_id (authoritative)
@@ -788,35 +923,9 @@ def _assemble_tree(spans: List[Span]) -> List[Span]:
     # Pass 3 — time containment (shortest enclosing span wins). This mostly
     # attaches legacy backend HTTP spans to the worker LLM/spawn that
     # triggered them, and sub-agent spans to their parent's spawn() window.
-    sorted_by_start = sorted(
-        [s for s in spans if s.end is not None],
-        key=lambda s: (s.start, -(s.end - s.start).total_seconds() if s.end else 0),
-    )
-
-    def _enclose(sp: Span) -> Optional[Span]:
-        best: Optional[Span] = None
-        best_width = None
-        for cand in sorted_by_start:
-            if cand is sp:
-                continue
-            if cand.end is None:
-                continue
-            if cand.start > sp.start:
-                break
-            if cand.end < sp.start:
-                continue
-            # cand encloses sp.start; must also enclose end
-            sp_end = sp.end or sp.start
-            if cand.end < sp_end:
-                continue
-            w = (cand.end - cand.start).total_seconds()
-            if best is None or (best_width is not None and w < best_width):
-                best = cand
-                best_width = w
-        return best
-
+    containment_parents = _time_containment_parents(spans, still_unplaced)
     for s in still_unplaced:
-        parent = _enclose(s)
+        parent = containment_parents.get(id(s))
         if parent is not None and parent is not s:
             parent.children.append(s)
         else:
@@ -1138,15 +1247,20 @@ def _span_baseline_map(
     environment: str,
     min_samples: int,
 ) -> Dict[str, Dict[str, Any]]:
-    baselines: Dict[str, Dict[str, Any]] = {}
-    for observation in observations:
-        span_key = str(observation.get("span_key") or "")
-        if not span_key or span_key in baselines:
-            continue
-        stats = span_history_summary(span_key, benchmark=benchmark, environment=environment)
-        if stats and stats["count"] >= min_samples:
-            baselines[span_key] = stats
-    return baselines
+    span_keys = {
+        str(observation.get("span_key") or "")
+        for observation in observations
+        if observation.get("span_key")
+    }
+    return {
+        span_key: stats
+        for span_key, stats in span_history_summaries(
+            span_keys,
+            benchmark=benchmark,
+            environment=environment,
+        ).items()
+        if stats["count"] >= min_samples
+    }
 
 
 # Spans must be at least this slow (absolute) AND past p95 to be flagged
@@ -1376,7 +1490,6 @@ def _render_executive_summary(
         ))
 
     worker_span_names = {s.name for s in all_spans if s.source == "worker"}
-    backend_span_names = {s.name for s in all_spans if s.source == "backend"}
     expected_worker = {
         "run_agent", "execute_iteration", "call_llm", "call_llm_activity",
         "check_progress", "call_planner_llm_activity",
@@ -1861,9 +1974,9 @@ async def _fetch_fly_logs_bulk(
                 await asyncio.sleep(fly_stream_seconds)
                 for aid in all_ids:
                     agent_lines = collector.get_logs_for_agent(aid)
-                    for l in agent_lines:
-                        if not l.startswith("[fly.io]"):
-                            lines.append(l)
+                    for line in agent_lines:
+                        if not line.startswith("[fly.io]"):
+                            lines.append(line)
                 await collector.stop()
                 print(f"  [fly.io] Collected {len(lines)} lines from stream ({collector.total_lines} total streamed)")
     else:
@@ -1993,12 +2106,11 @@ async def _build_trace_prod(
 
 
 def _build_trace_local(agent_id: str) -> Tuple[List[Span], datetime, datetime, Dict[str, Any]]:
-    worker_raw_all = _read_worker_raw()
-    backend_raw_all = _read_backend_raw()
-    research_raw_all = _read_research_raw()
-
-    sub_ids = _discover_sub_agent_ids(backend_raw_all, agent_id)
+    backend_raw_all, sub_ids = _read_backend_tree_raw(agent_id)
     all_ids = {agent_id, *sub_ids}
+
+    worker_raw_all = _read_worker_raw(all_ids)
+    research_raw_all = _read_research_raw(all_ids)
 
     worker_raw = _filter_by_agents(worker_raw_all, all_ids)
     backend_raw = _filter_by_agents(backend_raw_all, all_ids)

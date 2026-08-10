@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 def steel_cdp_connection_url(cdp_url: str) -> str:
     """Materialize a persisted Steel CDP URL without exposing its API key upstream."""
     configured = urlsplit(
-        (os.environ.get("STEEL_CONNECT_URL") or "wss://connect.steelbrowser.com").rstrip("/")
+        (os.environ.get("STEEL_CONNECT_URL") or "wss://connect.steel.dev").rstrip("/")
     )
     parsed = urlsplit(cdp_url)
     steel_hosts = {configured.netloc, "connect.steel.dev", "connect.steelbrowser.com"}

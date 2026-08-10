@@ -23,7 +23,8 @@ import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
 } from '../auth/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
-import { dispatchUpload, resolveStrategy } from './service';
+import { postWhatsAppConnect } from './repo';
+import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';
 import type { UploadResult } from './types';
 
 /** Emit an `upload:progress` event on the supplied renderer window, if any. */
@@ -36,6 +37,28 @@ function emitProgress(
 }
 
 export class Uploader {
+  /**
+   * Mark the WhatsApp integration CONNECTED before any messages exist.
+   *
+   * The uploader refuses to flush until the integration reads as connected,
+   * and the integration row is otherwise only created by an upload — so the
+   * first sync after pairing deadlocks without this call.
+   */
+  static async registerWhatsAppConnected(accessToken: string): Promise<UploadResult> {
+    try {
+      const result = await postWhatsAppConnect(accessToken);
+      if (!result.ok) {
+        throw new Error(`WhatsApp connect failed: ${result.statusText}`);
+      }
+      return { success: true };
+    } catch (error) {
+      return {
+        success: false,
+        message: getErrorMessageOrFallback(error, 'WhatsApp connect failed'),
+      };
+    }
+  }
+
   /**
    * Upload a payload for the given integration type. Route selection,
    * encryption, and payload shaping are delegated to the service layer.
@@ -56,7 +79,12 @@ export class Uploader {
       emitProgress(window, integrationType, UPLOAD_PROGRESS_START_PERCENT);
 
       const strategy = resolveStrategy(integrationType);
-      const result = await dispatchUpload(strategy, integrationType, data, accessToken);
+      const result = await dispatchUploadWithTransportRetry(
+        strategy,
+        integrationType,
+        data,
+        accessToken
+      );
 
       emitProgress(window, integrationType, UPLOAD_PROGRESS_DONE_PERCENT);
 

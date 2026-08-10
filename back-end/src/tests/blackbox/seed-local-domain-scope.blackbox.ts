@@ -30,6 +30,17 @@ test('runtime seed reads prefer the pooled production endpoint', () => {
   );
 });
 
+test('runtime seed reads honor an explicit operator-routed endpoint', () => {
+  assert.equal(
+    selectRemoteDatabaseUrl({
+      SEED_REMOTE_DATABASE_URL: 'postgresql://127.0.0.1:55432/postgres?sslmode=require',
+      DATABASE_URL: 'postgresql://pooler.example.test:6543/postgres?pgbouncer=true',
+      DIRECT_DATABASE_URL: 'postgresql://db.example.test:5432/postgres',
+    }),
+    'postgresql://127.0.0.1:55432/postgres?sslmode=require'
+  );
+});
+
 test('runtime seed reads fall back to the direct endpoint when no pooler is configured', () => {
   assert.equal(
     selectRemoteDatabaseUrl({
@@ -154,17 +165,17 @@ test('the executed browser-auth read boundary scopes every domain-bearing table'
   assert.deepEqual(captured.get('passkeyCredential'), passkeySyncWhere('user-1', ['amazon.com']));
 });
 
-test('seed-local consumes each scoped reader exactly once in the live credential path', () => {
+test('seed-local consumes every scoped reader or streamed equivalent exactly once', () => {
   const source = readFileSync(resolve(__dirname, '../../../scripts/seed-local.ts'), 'utf8');
+  const streamSource = readFileSync(
+    resolve(__dirname, '../../../scripts/seed-jsonb-stream.ts'),
+    'utf8'
+  );
   const occurrences = (needle: string): number => source.split(needle).length - 1;
   for (const table of [
-    'cookie',
     'cookieBundle',
     'steelSessionAuth',
-    'localStorageOrigin',
-    'indexedDBOrigin',
     'browserPermission',
-    'cacheStorageOrigin',
     'browserPassword',
     'passkeyCredential',
   ]) {
@@ -178,6 +189,47 @@ test('seed-local consumes each scoped reader exactly once in the live credential
       `${table} must execute through its scoped reader`
     );
   }
+
+  for (const [reader, table] of [
+    ['localStorageOrigin', 'LocalStorageOrigin'],
+    ['indexedDBOrigin', 'IndexedDBOrigin'],
+    ['cacheStorageOrigin', 'CacheStorageOrigin'],
+  ]) {
+    assert.equal(
+      occurrences(`scopedRemoteBrowserAuth.${reader}(`),
+      0,
+      `${reader} must not materialize JSONB through Prisma`
+    );
+    assert.equal(
+      occurrences(`syncJsonbOriginTable('${table}')`),
+      1,
+      `${table} must execute exactly once through the streamed origin boundary`
+    );
+  }
+  assert(
+    streamSource.includes('originDomainMatches(domains)'),
+    'streamed origin tables must share the exact domain matcher used by the scoped Prisma readers'
+  );
+
+  // Cookies stream too. Paging ~22k cookies through Prisma cost either ~880
+  // production round trips (past the deploy stack's 120s readiness contract) or
+  // a 239MB peak against the 230MB seed ratchet; COPY costs one round trip and
+  // no V8 heap. The scoped Prisma reader must therefore NOT be the seed's cookie
+  // path, and the streamed path must reuse the same domain matcher.
+  assert.equal(
+    occurrences('scopedRemoteBrowserAuth.cookie('),
+    0,
+    'cookies must not be paged back through Prisma'
+  );
+  assert.equal(
+    occurrences('streamCookies({'),
+    1,
+    'Cookie must execute exactly once through the streamed boundary'
+  );
+  assert(
+    streamSource.includes('domainFieldMatches(domains)'),
+    'the streamed cookie read must share the exact domain matcher used by cookieSyncWhere'
+  );
 });
 
 test('authoritative passkey reconciliation is limited to the selected domains', () => {

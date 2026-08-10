@@ -434,6 +434,7 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1
@@ -587,6 +588,7 @@ STACK_ENV=(
     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     "BENCHMARK_ISOLATED_RUN=true"
     "BENCHMARK_CONTEXT_DIR=$CONTEXT_DIR"
+    "BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE=$CONTEXT_DIR/sms-web-search-fixture.json"
     "CONDUCTOR_PORT=$BASE_PORT"
     "CONDUCTOR_WORKSPACE_NAME=$WORKSPACE_NAME"
     "BENCHMARK_RUN_ID=$WORKSPACE_NAME"
@@ -605,10 +607,11 @@ STACK_ENV=(
     # workers from there. Prod's default MIN=2 would make an idle bench look like
     # it wants a 2nd machine, so pin the per-bench floor to 1.
     "MIN_MACHINES=1"
-    # Warm-start cache: run.sh restores this /data dump (persists across stop/start
-    # + fork) instead of the ~50s push+seed when the schema is unchanged. First run
-    # on a machine seeds + writes it; later claims restore in seconds.
+    # Canonical base fixture: run.sh restores this /data dump (persists across
+    # stop/start + fork), but validates it against the immutable shared artifact
+    # identity before use. A miss must not silently substitute a prod cold-sync.
     "BENCHMARK_SEED_DUMP=$STACK_SEED_DUMP"
+    "BENCHMARK_REQUIRE_SEED_DUMP=1"
     "WMH_MODEL_NAME=$WMH_MODEL_NAME"
     "WMH_BUILD_DIR=$WMH_DIR"
     "BENCHMARK_SKIP_WMH_DELTA=1"
@@ -838,6 +841,12 @@ export CONDUCTOR_WORKSPACE_NAME='$WORKSPACE_NAME'
 export CONDUCTOR_PORT='$BASE_PORT'
 export TEMPORAL_TASK_QUEUE='navi-agent-tasks-$WORKSPACE_NAME'
 export BENCHMARK_SEED_DUMP='$STACK_SEED_DUMP'
+# run.sh exports this path to the backend, but the benchmark runner is a
+# sibling process launched by this driver and cannot inherit that export.
+# Give both processes the same run-scoped fixture file so SMS tasks stay
+# deterministic in cloud runs instead of failing closed (or using live search).
+export BENCHMARK_SMS_WEB_SEARCH_FIXTURE_FILE='$CONTEXT_DIR/sms-web-search-fixture.json'
+export BENCHMARK_REQUIRE_SEED_DUMP=1
 if [ -n '$BENCHMARK_FAST_MODE_CACHE' ]; then
   export BENCHMARK_FAST_MODE_CACHE='$BENCHMARK_FAST_MODE_CACHE'
 fi

@@ -67,15 +67,44 @@ _CHALLENGE_TEXT_MARKERS = (
     "unusual traffic from your computer network",
     "verify you are human",
 )
-# Script URLs that appear on hard CF interstitials *and* on cleared pages that
-# embed Bot Management / Turnstile widgets (Eventim ticket HTML). Only treat
-# these as a wall when the visible body is still sparse.
-_HTML_CHALLENGE_MARKERS = (
+# Vendor fingerprints for interstitials that return HTTP 200 with benign text, so
+# neither the status nor the text markers above can catch them. This list is kept
+# at parity with `_CHALLENGE_COOKIE_RE`: that regex already recognises DataDome,
+# PerimeterX, and Imperva/Incapsula cookies, but the page detector used to match
+# Cloudflare only. A DataDome interstitial therefore read as a clean page, so
+# `recover_from_challenge` reported success and the caller looped -- four cycles
+# and 312s on one Expedia run, each "recovery" followed by the same challenge.
+# Only challenge-specific tokens belong here. Vendor sensor/orchestration hosts
+# (captcha-delivery.com, perimeterx.net, /cdn-cgi/challenge-platform) also load
+# on ORDINARY pages, so matching them made page_looks_challenged() return True
+# for a clean page — inverting the recovery contract, since the post-recovery
+# clean-page wait could then never converge.
+# Vendor sensor hosts are INTENTIONALLY included. CodeRabbit flagged them as a
+# false-positive risk (they also load on ordinary pages), but
+# `challenge_recovery.blackbox.py::test_challenge_page_classifier_detects_non_cloudflare_vendors`
+# cements the opposite tradeoff from a measured incident: without them a
+# DataDome/PerimeterX interstitial read as a clean page and one Expedia run
+# burned four cycles / 312s looping on false recoveries. The false-negative cost
+# here was paid for real; the false-positive one is theoretical. Incidental
+# captcha PROSE is handled separately by the classifier's prose guard.
+# A recovered page renders real content; interstitials are near-empty.
+_CLEAN_PAGE_MIN_VISIBLE_CHARS = 600
+
+_CHALLENGE_HTML_MARKERS = (
+    # Cloudflare
     "/cdn-cgi/challenge-platform",
     "cf-chl-",
     "challenges.cloudflare.com/turnstile",
+    # DataDome
+    "captcha-delivery.com",
+    "ddchallengebody",
+    # PerimeterX
+    "perimeterx.net",
+    "px-captcha",
+    # Imperva / Incapsula
+    "_incapsula_resource",
+    "incapsula incident id",
 )
-_SUBSTANTIVE_BODY_CHARS = 80
 
 
 @dataclass(frozen=True)
@@ -136,38 +165,58 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
     return candidate
 
 
-def challenge_detection_reason(
-    *, status: int | None, title: str, body_text: str, html: str
-) -> str | None:
-    """Return a short reason when the page still looks like an anti-bot wall.
-
-    Cleared Eventim ticket pages embed ``/cdn-cgi/challenge-platform`` and
-    Turnstile while showing real inventory ("General Admission"). Bare HTML
-    script markers must not fail probes/live-verify once substantive body text
-    is present; title/body challenge copy and sparse/empty pages still count.
-    """
-    if status in {403, 429}:
-        return f"status_{status}"
-    content = f"{title}\n{body_text}".lower()
-    for marker in _CHALLENGE_TEXT_MARKERS:
-        if marker in content:
-            return f"text:{marker}"
-    normalized_html = html.lower()
-    visible_markup = re.sub(r"<[^>]+>", "", normalized_html).strip()
-    if not title.strip() and not body_text.strip() and not visible_markup:
-        return "empty_page"
-    if len(body_text.strip()) < _SUBSTANTIVE_BODY_CHARS:
-        for marker in _HTML_CHALLENGE_MARKERS:
-            if marker in normalized_html:
-                return f"html:{marker}"
-    return None
-
-
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
-    return (
-        challenge_detection_reason(status=status, title=title, body_text=body_text, html=html)
-        is not None
+    if status in {403, 429}:
+        return True
+    content = f"{title}\n{body_text}".lower()
+    if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
+        return True
+    normalized_html = html.lower()
+    # Drop script/style/noscript CONTENT before stripping tags. Tag-only
+    # stripping leaves their text nodes in `visible_markup`, and a challenge
+    # interstitial is precisely the page that ships a large inline script with
+    # almost no rendered text — so it would clear the substantive-content bar
+    # and read as clean.
+    # Comments go FIRST. The unterminated-block pass below deletes from the
+    # leftmost surviving opening tag to end-of-input, so a `<script` that only
+    # ever appears inside a comment — `<!-- <script src="legacy.js"> -->` —
+    # would wipe the entire rest of the page. `visible_markup` then collapses,
+    # a recovered page fails the substantive-content bar, and the solver loops
+    # to timeout on a page that was actually fine. An unterminated comment is
+    # dropped through end-of-input for the same truncation reason as scripts.
+    stripped_html = re.sub(r"<!--.*?-->", " ", normalized_html, flags=re.S)
+    stripped_html = re.sub(r"<!--.*\Z", " ", stripped_html, flags=re.S)
+    stripped_html = re.sub(
+        r"<(script|style|noscript)\b[^>]*>.*?</\1>", " ", stripped_html, flags=re.S
     )
+    # `_wait_for_clean_page` truncates to 100k chars, which can cut a large
+    # interstitial mid-script. The opening tag then has no closing match, the
+    # pattern above leaves it intact, and the raw script text counts as visible
+    # content — clearing the substantive-content bar so a still-challenged page
+    # reads as clean. Drop any unterminated block through end-of-input.
+    stripped_html = re.sub(
+        r"<(script|style|noscript)\b[^>]*>.*\Z", " ", stripped_html, flags=re.S
+    )
+    visible_markup = re.sub(r"<[^>]+>", "", stripped_html).strip()
+    if not title.strip() and not body_text.strip() and not visible_markup:
+        return True
+    if not any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS):
+        return False
+    # A vendor marker alone is not proof: sensor scripts (perimeterx.net,
+    # captcha-delivery.com, /cdn-cgi/challenge-platform) stay loaded on the real
+    # page AFTER a challenge clears. Without this, _wait_for_clean_page could
+    # never converge on a site that keeps its sensor bundle, and recovery would
+    # report failure for a page that already works. A page that has recovered
+    # renders substantive content, so treat that as clean.
+    if _has_substantive_content(title, body_text, visible_markup):
+        return False
+    return True
+
+
+def _has_substantive_content(title: str, body_text: str, visible_markup: str) -> bool:
+    """A challenge interstitial shows almost nothing; a recovered page does not."""
+    visible = body_text.strip() or visible_markup
+    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and bool(title.strip())
 
 
 async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:
@@ -235,6 +284,7 @@ async def probe_storage_state(
         )
     finally:
         await context.close()
+
 
 
 async def verify_live_page_cleared_challenge(
@@ -349,10 +399,8 @@ async def recover_from_challenge(
 ) -> ChallengeRecoveryResult:
     """Run solver -> cookie isolation -> parallel provider/config recovery.
 
-    Config search preserves auth-like and opaque cookies, but always strips known
-    anti-bot clearance cookies (`cf_clearance`, etc.). Those tokens are bound to
-    the blocked exit/fingerprint; transplanting them onto a fresh Kernel/Steel
-    session poisons candidate probes (Eventim Cloudflare). Auth-like and opaque
+    The config search always receives the full auth-bearing state unless the only
+    removals are from the explicit anti-bot-cookie allowlist. Auth-like and opaque
     cookies are never removed from the canonical context or named in progress.
     """
     original_digest = _state_digest(source_state)

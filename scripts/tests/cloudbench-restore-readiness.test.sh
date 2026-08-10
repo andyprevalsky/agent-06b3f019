@@ -89,4 +89,32 @@ grep -E 'pg_restore' "$RESTORE_HELPER" | grep -qE '2>&1' \
   && fail "restore helper merges pg_restore stderr into /dev/null"
 echo "PASS 4 — pg_restore surfaces stderr (partial-restore failures are visible)"
 
+# ── 5: a plain-SQL base image must restore into a RESET schema ────────────────
+# Same class as cases 1-3: the fast-restore path must be equivalent to a clean
+# seed. pg_restore gets that from `--clean --if-exists`, but a plain-SQL dump
+# replays bare CREATEs, so any object the caller already made collides and
+# ON_ERROR_STOP=1 fails the whole restore. run.sh ensures the Fast Mode cache
+# table BEFORE the restore, which made a canonical base die with
+# `relation "FastModeCacheEntry" already exists` and refuse to boot.
+grep -q 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;' "$RESTORE_HELPER" \
+  || fail "plain-SQL restore must reset the target schema (else pre-created objects collide)"
+PLAIN_BRANCH="$(awk '
+  /^if \[ "\$ARCHIVE_MAGIC" != "PGDMP" \]; then$/ { grab=1; next }
+  grab && /^elif /                                { exit }
+  grab                                            { print }
+' "$RESTORE_HELPER")"
+[ -n "$PLAIN_BRANCH" ] || fail "could not locate the plain-SQL branch in restore-seed-dump.sh"
+echo "$PLAIN_BRANCH" | grep -q 'RESET_SQL' \
+  || fail "plain-SQL branch must apply the schema reset before replaying the dump"
+echo "$PLAIN_BRANCH" | grep -q 'ON_ERROR_STOP=1' \
+  || fail "plain-SQL restore must still fail closed on the first error"
+echo "PASS 5 — plain-SQL base image restores into a reset schema, still fail-closed"
+
+# ── 6: anything ensured before the restore must be re-ensured after it ────────
+# The reset in case 5 drops whatever the dump does not carry, so a dump
+# published before a table existed would otherwise leave it missing at runtime.
+echo "$RESTORE_BRANCH" | grep -q 'ensure-fast-mode-cache-schema.ts' \
+  || fail "fast-restore branch must re-ensure the Fast Mode cache schema after a reset restore"
+echo "PASS 6 — fast-restore re-ensures pre-restore schema (Fast Mode cache)"
+
 echo "ALL PASS: cloudbench restore readiness"

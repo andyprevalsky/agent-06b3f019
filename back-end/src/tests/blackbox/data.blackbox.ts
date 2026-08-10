@@ -93,6 +93,15 @@ const SummaryResponse = z.object({
         from: z.string().nullable(),
         to: z.string().nullable(),
       }),
+      latest_message: z
+        .object({
+          timestamp: z.string(),
+          channel: z.string(),
+          from: z.string(),
+          to: z.string(),
+          text: z.string(),
+        })
+        .nullable(),
       threads: z.array(
         z.object({
           name: z.string(),
@@ -441,6 +450,9 @@ async function testSummary_freshUserEmpty() {
     throw new Error(
       `Expected 0 messages for fresh user, got ${body.sources.messages.total_messages}`
     );
+  }
+  if (body.sources.messages.latest_message !== null) {
+    throw new Error('Expected no latest message for fresh user');
   }
 }
 

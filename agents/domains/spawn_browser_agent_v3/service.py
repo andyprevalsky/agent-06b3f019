@@ -15,7 +15,11 @@ from urllib.parse import urlparse
 import structlog
 
 from browser_tools.schemas import AVAILABLE_ACTIONS
-from domains.spawn_browser_agent_v3.config import KERNEL_COST_CENTS_PER_MS, STEEL_COST_CENTS_PER_MS
+from domains.spawn_browser_agent_v3.config import (
+    BROWSER_USE_PRICING_POOL,
+    KERNEL_COST_CENTS_PER_MS,
+    STEEL_COST_CENTS_PER_MS,
+)
 from domains.spawn_browser_agent_v3.repo import (
     download_session_file,
     list_session_files,
@@ -365,19 +369,38 @@ async def build_browser_verifier_context(
     else:
         files_text += "  (no files downloaded)\n"
 
-    checkpoint_sections = []
-    for checkpoint_number, checkpoint in enumerate(browser_checkpoints or [], 1):
+    pre_write_checkpoint_sections = []
+    preserved_evidence_sections = []
+    pre_write_number = 0
+    preserved_number = 0
+    for checkpoint in browser_checkpoints or []:
         if not isinstance(checkpoint, dict):
             continue
         checkpoint_dom = str(checkpoint.get("dom_tree") or "")
         if not checkpoint_dom:
             continue
-        checkpoint_sections.append(
+        kind = str(checkpoint.get("kind") or "pre_write")
+        if kind == "preserved_evidence":
+            preserved_number += 1
+            section_title = f"### Preserved page evidence {preserved_number}"
+            section_description = (
+                "This snapshot was extracted directly from the browser when the acting agent requested bounded "
+                "evidence retention; it is browser ground truth, not an agent claim."
+            )
+            destination = preserved_evidence_sections
+        else:
+            pre_write_number += 1
+            section_title = f"### Pre-write checkpoint {pre_write_number}"
+            section_description = (
+                "This snapshot was extracted directly from the browser before an irreversible action; "
+                "it is browser ground truth, not an agent claim."
+            )
+            destination = pre_write_checkpoint_sections
+        destination.append(
             "\n\n".join(
                 [
-                    f"### Pre-write checkpoint {checkpoint_number}",
-                    "This snapshot was extracted directly from the browser before an irreversible action; "
-                    "it is browser ground truth, not an agent claim.",
+                    section_title,
+                    section_description,
                     f"URL: {checkpoint.get('url') or 'Unknown'}",
                     f"Title: {checkpoint.get('title') or 'Unknown'}",
                     "DOM Tree:\n" + checkpoint_dom,
@@ -386,10 +409,15 @@ async def build_browser_verifier_context(
         )
 
     checkpoints_text = ""
-    if checkpoint_sections:
+    if pre_write_checkpoint_sections:
         checkpoints_text = (
             "\n\n## Browser Ground Truth (PRE-WRITE CHECKPOINTS)\n"
-            + "\n\n".join(checkpoint_sections)
+            + "\n\n".join(pre_write_checkpoint_sections)
+        )
+    if preserved_evidence_sections:
+        checkpoints_text += (
+            "\n\n## Browser Ground Truth (PRESERVED PAGE EVIDENCE)\n"
+            + "\n\n".join(preserved_evidence_sections)
         )
 
     user_prompt = (
@@ -639,35 +667,194 @@ def build_browser_task_prompt(goal: str) -> str:
 # USAGE CALCULATION
 # ========================================
 
+# Internal-only suffix that splits a model's Fast-Mode replays from its paid
+# calls in the usage ledger. It contains NUL so it can never collide with a real
+# model name, and it must NEVER escape into an emitted usage row.
+_FAST_CACHE_LEDGER_MARKER = "\x00fast_cache"
+
+
+def accumulate_model_usage(
+    usage_by_model: Dict[str, Dict[str, int]],
+    actual_model: Optional[str],
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_input_tokens: int = 0,
+    cache_creation_input_tokens: int = 0,
+    from_fast_cache: bool = False,
+) -> None:
+    """Add one LLM call's tokens to the per-actual-model usage ledger.
+
+    Keyed by the model the inference ACTUALLY ran on (`actual_model`), which is
+    what decides price: the browser pool races several underlying models, and a
+    `-claude`/`-gpt` suffix means the step ran on the user's own compute token
+    (billed $0 by `AgentWorkflow._track_usage`).
+
+    Cached input is tracked in its own buckets because `_track_usage` prices
+    cache reads/writes separately from uncached input; dropping them here bills
+    every cache hit at the full input rate.
+
+    Fast-Mode replays are a SEPARATE bucket from paid calls on the same model,
+    never a sticky flag on a shared one: `_track_usage` zero-prices any row
+    marked `from_fast_cache` and skips pricing entirely, so merging one replay
+    into a model's paid bucket would make every paid token on that model free.
+    The ledger key is therefore (actual_model, from_fast_cache); each bucket
+    carries its own `model` so the emitted row still reports the plain name.
+    """
+    model = str(actual_model or "")
+    # NUL can never occur in a model name, so this cannot collide with a real
+    # model whose name happens to end in the marker text.
+    key = f"{model}{_FAST_CACHE_LEDGER_MARKER}" if from_fast_cache else model
+    bucket = usage_by_model.setdefault(
+        key,
+        {
+            "model": model,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "from_fast_cache": 1 if from_fast_cache else 0,
+        },
+    )
+    bucket["input_tokens"] += int(input_tokens or 0)
+    bucket["output_tokens"] += int(output_tokens or 0)
+    bucket["cache_read_input_tokens"] = int(bucket.get("cache_read_input_tokens") or 0) + int(
+        cache_read_input_tokens or 0
+    )
+    bucket["cache_creation_input_tokens"] = int(bucket.get("cache_creation_input_tokens") or 0) + int(
+        cache_creation_input_tokens or 0
+    )
+
+
+def build_browser_llm_usage_items(
+    total_input_tokens: int,
+    total_output_tokens: int,
+    model_pricing: Dict[str, Any],
+    usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
+) -> List[Dict[str, Any]]:
+    """Build one llm usage row per model that ACTUALLY ran inference.
+
+    `model` must be the real `actual_model` from each LLM call, never a static
+    pool constant: (1) the browser pool races several underlying models at
+    different prices, and (2) `AgentWorkflow._track_usage` routes models whose
+    name ends in `-claude`/`-gpt` to a $0 direct-compute-token branch that a
+    pool name can never match — so a hardcoded pool bills the user's own
+    compute-token steps as paid waterfall usage.
+
+    Callers that genuinely have no per-model breakdown pass `usage_by_model`
+    empty/None and get the historical single aggregate row, priced at the
+    browser pool so the workflow does not fall back to the ROOT agent's pool.
+
+    Token conservation: with a populated ledger the emitted rows sum exactly to
+    the ledger; the `total_*` args are only the single-row fallback's totals.
+    """
+    model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
+    items: List[Dict[str, Any]] = []
+    for ledger_key, usage in model_rows.items():
+        input_tokens = int((usage or {}).get("input_tokens") or 0)
+        output_tokens = int((usage or {}).get("output_tokens") or 0)
+        # The ledger key is (model, from_fast_cache); the bucket carries the
+        # plain model. Test on PRESENCE, not truthiness: a Fast-Mode replay with
+        # no `actual_model` has an empty-but-present `model`, and falling back on
+        # falsiness emitted the raw key — a NUL-bearing "\x00fast_cache" string
+        # that is truthy, so it also defeated the pricing-pool fallback below and
+        # rode into `_track_usage` and the stored usage records.
+        raw_model = (usage or {}).get("model")
+        if raw_model is None:
+            # Hand-built ledger (no `model` key): the key IS the model name.
+            # Strip the marker defensively so it can never reach a usage row.
+            model = str(ledger_key).split(_FAST_CACHE_LEDGER_MARKER, 1)[0]
+        else:
+            model = str(raw_model)
+        items.append(
+            {
+                "type": "llm",
+                # Unattributed tokens still price at the browser pool rather
+                # than falling through to the parent agent's cheaper pool.
+                "model": model or BROWSER_USE_PRICING_POOL,
+                "cost_cents": round(
+                    (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
+                    + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
+                    4,
+                ),
+                "provider": "Rose 1 Browser Use",
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                # Forwarded so `_track_usage` can apply its cache discount and
+                # zero out Fast-Mode replays; omitting them bills every cached
+                # browser step at the full uncached input rate.
+                "cache_read_input_tokens": int((usage or {}).get("cache_read_input_tokens") or 0),
+                "cache_creation_input_tokens": int((usage or {}).get("cache_creation_input_tokens") or 0),
+                "from_fast_cache": bool((usage or {}).get("from_fast_cache")),
+            }
+        )
+    return items
+
 
 def build_usage_items(
     total_input_tokens: int,
     total_output_tokens: int,
     model_pricing: Dict[str, Any],
     execution_time_ms: float,
+    usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Build standardized usage items for cost tracking."""
+    """Build standardized usage items for cost tracking.
+
+    One llm row per ACTUAL inference model (see `build_browser_llm_usage_items`)
+    plus one browser-time `service` row, which is not per-model. `model_pricing`
+    is the browser-pool pricing the caller resolved; the pre-computed
+    `cost_cents` on llm rows is informational only — the workflow recomputes
+    from `model` + tokens and remains the single source of cost truth, applying
+    the cache discount to the `cache_*` counters each row now carries.
+    """
     browser_provider = os.getenv("BROWSER_PROVIDER", "kernel").strip().lower()
     service_provider = "Kernel Browser" if browser_provider == "kernel" else "Steel.dev Browser"
     cost_per_ms = KERNEL_COST_CENTS_PER_MS if browser_provider == "kernel" else STEEL_COST_CENTS_PER_MS
     return [
-        {
-            "type": "llm",
-            "cost_cents": round(
-                (total_input_tokens / 1000) * model_pricing["input_cents_per_1k"]
-                + (total_output_tokens / 1000) * model_pricing["output_cents_per_1k"],
-                4,
-            ),
-            "provider": "Rose 1 Browser Use",
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-        },
+        *build_browser_llm_usage_items(
+            total_input_tokens,
+            total_output_tokens,
+            model_pricing,
+            usage_by_model,
+        ),
         {
             "type": "service",
             "cost_cents": round(execution_time_ms * cost_per_ms, 4),
             "provider": service_provider,
         },
     ]
+
+
+def browser_usage_items_to_tool_usage(usage_items: Optional[List[Dict[str, Any]]]) -> Dict[str, list]:
+    """Map activity `usage_items` onto the workflow `_track_usage` payload shape.
+
+    The workflow is THE single point where LLM cost is computed, so llm rows
+    carry tokens + the model that produced them (never a pre-computed price);
+    only service rows carry `cost_cents`.
+    """
+    tool_usage: Dict[str, list] = {"llm": [], "service": []}
+    for item in usage_items or []:
+        if item.get("type") == "llm":
+            tool_usage["llm"].append(
+                {
+                    "tokens_in": item.get("input_tokens", 0),
+                    "tokens_out": item.get("output_tokens", 0),
+                    "model": item.get("model"),
+                    "provider": item.get("provider", ""),
+                    "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
+                    "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
+                    # Propagate fast-cache replay so replayed browser
+                    # steps bill $0 instead of their replayed tokens.
+                    "from_fast_cache": item.get("from_fast_cache", False),
+                }
+            )
+        else:
+            tool_usage["service"].append(
+                {
+                    "cost_cents": item.get("cost_cents", 0),
+                    "provider": item.get("provider", ""),
+                }
+            )
+    return tool_usage
 
 
 # ========================================

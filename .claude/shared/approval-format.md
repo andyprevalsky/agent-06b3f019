@@ -3,12 +3,22 @@
 This file is the single source of truth for human approval requests emitted by
 `/RCA`, `/deploy`, and `/descend`. Read it completely immediately before
 composing any approval request. Do not replace it with a shorter free-form
-summary, and do not rename, reorder, or omit its four required sections.
+summary, and do not rename, reorder, or omit its five required sections
+(TL;DR, Detail, Before Behavior, After Behavior, Downstream Implications).
 
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
 decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
 scope.
+
+## TL;DR
+
+Open with a `## TL;DR` section: exactly one sentence stating, in plain language,
+what the human is approving and its single most important consequence. It must
+let the reader decide without reading further; the sections below justify it.
+Never omit it, never exceed one sentence, and never hide a cost, risk, or
+irreversibility here that the later sections reveal — if it is in Downstream
+Implications, its headline belongs in the TL;DR.
 
 ## Detail
 
@@ -30,6 +40,16 @@ read-only evidence and post-action verification instead.
 
 List the approval snapshot ID or Git SHA when the approval is snapshot-scoped.
 Then list the complete scope as clickable file-and-line links.
+
+Every approval must include a dedicated line in this exact form:
+`**FE link:** [Open agent](<frontend-agent-url>) — <verification status>`.
+The URL must open the concrete agent run that proves the reported failure or
+outcome, not a generic dashboard. Check it immediately before presenting the
+approval and report `verified rendered`, `verified reachable` (when only an HTTP
+and agent-data probe is available), or `expired/unreachable` honestly.
+Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
+viewer works. If the workflow can restore an archived viewer without rerunning a
+gated action, restore it before requesting approval.
 
 ## Before Behavior
 
@@ -57,6 +77,6 @@ End with one explicit approval question and unambiguous response syntax:
 - **Request an edit** when the owning workflow supports edits:
   `<approval-id> edit: <instruction>`
 
-An approval is invalid if any required section or in-scope file link is
-missing. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a
-new approval ID and present all four sections again.
+An approval is invalid if any required section, in-scope file link, or concrete
+FE agent link is missing. Approval remains snapshot-scoped: if an in-scope hunk
+changes, issue a new approval ID and present all four sections again.

@@ -22,7 +22,7 @@ import time
 import traceback
 import uuid as uuid_module
 from datetime import timedelta
-from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import structlog
 import structlog.contextvars
@@ -72,6 +72,7 @@ from .config import (
     BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
     BROWSER_SUPERVISOR_MAX_RECOVERIES,
     BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS,
+    BROWSER_USE_PRICING_POOL,
     BROWSER_WARMUP_ACTION_TIMEOUT_SECONDS,
     HEARTBEAT_KEEPALIVE_SECONDS,
     HEARTBEAT_TIMEOUT_SECONDS,
@@ -104,6 +105,7 @@ from .repo import (
     fetch_claude_token,
     fetch_session_info,
     init_browser_session,
+    mark_steel_session_auth_failed,
     prepare_browser_auth,
     propagate_browser_run_credentials,
     recover_browser_challenge,
@@ -116,11 +118,14 @@ from .repo import (
 )
 from .service import (
     AuthRuntimeState,
+    accumulate_model_usage,
     append_completion_evidence,
+    browser_usage_items_to_tool_usage,
     build_action_titles,
     build_auth_assistance_resume_user_message,
     build_best_effort_response,
     build_browser_dynamic_system_context,
+    build_browser_llm_usage_items,
     build_browser_task_prompt,
     build_browser_verifier_context,
     build_context_summary,
@@ -160,6 +165,37 @@ _background_browser_cleanup_tasks: set[asyncio.Task] = set()
 def build_browser_user_profile_sections(user_profile: Dict[str, Any]) -> List[str]:
     """Build the identity and delivery context supplied to a browser agent."""
     return build_user_profile_sections(user_profile)
+
+
+async def prepare_optional_realm_credentials(
+    *,
+    target_url: str,
+    current_auth_realm: str,
+    failed_realms: Dict[str, str],
+    prepare_credentials: Callable[[str], Awaitable[Optional[Dict[str, Any]]]],
+) -> Optional[Dict[str, Any]]:
+    """Run one optional cross-realm preparation and quarantine every failure stage."""
+    target_realm = auth_realm_from_url(target_url)
+    if (
+        not target_realm
+        or auth_realm_matches_url(current_auth_realm, target_url)
+        or target_realm in failed_realms
+    ):
+        return None
+    try:
+        return await prepare_credentials(target_url)
+    except Exception as prep_error:
+        error_signature = (
+            f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
+        )
+        failed_realms[target_realm] = error_signature
+        logger.warning(
+            "Optional realm credential preparation failed once; continuing without saved credentials",
+            auth_realm=target_realm,
+            target_url=target_url,
+            error=error_signature,
+        )
+        return None
 
 
 def _normalize_payment_card_last4(value: Any) -> Optional[str]:
@@ -565,6 +601,8 @@ async def _prepare_pending_write_lock_action(
 def _browser_ground_truth_checkpoint(
     browser_state: Dict[str, Any],
     current_url: str,
+    *,
+    kind: str = "pre_write",
 ) -> Optional[Dict[str, str]]:
     """Keep a browser-extracted DOM snapshot across an approval activity boundary."""
     dom_tree = str(browser_state.get("dom_tree") or "")
@@ -574,7 +612,23 @@ def _browser_ground_truth_checkpoint(
         "url": str(browser_state.get("url") or current_url or ""),
         "title": str(browser_state.get("title") or ""),
         "dom_tree": dom_tree,
+        "kind": kind,
     }
+
+
+def _append_bounded_verifier_checkpoint(
+    verifier_checkpoints: List[Dict[str, Any]],
+    checkpoint: Optional[Dict[str, Any]],
+) -> bool:
+    """Append distinct browser ground truth while enforcing the verifier payload cap."""
+    if not checkpoint:
+        return False
+    appended = not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]
+    if appended:
+        verifier_checkpoints.append(checkpoint)
+    verifier_checkpoints[:] = verifier_checkpoints[-3:]
+    return appended
+
 
 
 def _browser_resume_continuity_state(
@@ -1013,6 +1067,20 @@ async def _reap_playwright_driver_process(process: Optional[Any], agent_id: str)
         logger.warning("Failed to kill Playwright driver process", agent_id=agent_id, error=str(e))
 
 
+class BrowserStorageCaptureTimeoutError(RuntimeError):
+    """Raised when auth-preserving browser storage capture exceeds its hard bound."""
+
+
+def _rotation_storage_capture_timeout_seconds(raw_timeout: Any) -> float:
+    try:
+        timeout_seconds = float(raw_timeout)
+    except (TypeError, ValueError):
+        return 15.0
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        return 15.0
+    return min(timeout_seconds, 60.0)
+
+
 async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[str, Any]]:
     """Capture browser auth/storage before rotate_ip replaces the remote browser.
 
@@ -1022,8 +1090,23 @@ async def _capture_rotation_storage_state(page: Optional[Any]) -> Optional[Dict[
     """
     if page is None or getattr(page, "context", None) is None:
         return None
+    timeout_seconds = _rotation_storage_capture_timeout_seconds(
+        os.getenv("BROWSER_ROTATION_STORAGE_CAPTURE_TIMEOUT_SECONDS", "15")
+    )
     try:
-        return await page.context.storage_state(indexed_db=True)
+        return await asyncio.wait_for(
+            page.context.storage_state(indexed_db=True),
+            timeout=timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out capturing browser storage before IP rotation",
+            timeout_seconds=timeout_seconds,
+            capture_scope="cookies_localstorage_indexeddb",
+        )
+        raise BrowserStorageCaptureTimeoutError(
+            f"Browser storage capture timed out after {timeout_seconds:g}s before challenge recovery."
+        )
     except Exception as exc:
         logger.warning("Failed to capture browser storage before IP rotation", error=str(exc))
         return None
@@ -1196,36 +1279,48 @@ async def _reconnect_browser_stack_after_rotation(
     _disable_cdp_websocket_proxy()
     connection_cdp_url = steel_cdp_connection_url(new_cdp_url)
     dom_service = DOMService(cdp_url=connection_cdp_url)
-    await dom_service.connect()
-    dom_page = await dom_service.session.get_current_page()
-
-    from playwright.async_api import async_playwright
-
-    pw_instance = await async_playwright().start()
-    driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
+    pw_instance = None
+    pw_browser = None
+    driver_pid = None
     try:
+        await dom_service.connect()
+        dom_page = await dom_service.session.get_current_page()
+
+        from playwright.async_api import async_playwright
+
+        pw_instance = await async_playwright().start()
+        driver_pid = getattr(_playwright_driver_process(pw_instance), "pid", None)
         pw_browser = await pw_instance.chromium.connect_over_cdp(connection_cdp_url)
+        pw_context = pw_browser.contexts[0]
+        pw_page = await _synchronize_playwright_page_with_agent_focus(
+            dom_service=dom_service,
+            playwright_browser=pw_browser,
+            current_page=pw_context.pages[0],
+        )
+
+        # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
+        if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
+            from helpers.fingerprint_injection import apply_fingerprint_injection
+
+            with contextlib.suppress(Exception):
+                await apply_fingerprint_injection(pw_page, fingerprint_injection)
     except BaseException:
-        driver_process = _playwright_driver_process(pw_instance)
+        # Best-effort, like the disconnect below. Unsuppressed, a failure here
+        # replaces the original attach error (so the caller never learns why the
+        # reconnect failed) AND skips the disconnect, leaking the CDP
+        # connection. `Exception` rather than `BaseException` so cancellation
+        # still propagates.
         with contextlib.suppress(Exception):
-            await pw_instance.stop()
-        await _reap_playwright_driver_process(driver_process, agent_id)
+            await _stop_playwright_resources(
+                pw_browser,
+                pw_instance,
+                agent_id,
+                close_browser=False,
+                driver_pid=driver_pid,
+            )
         with contextlib.suppress(Exception):
             await dom_service.disconnect()
         raise
-    pw_context = pw_browser.contexts[0]
-    pw_page = await _synchronize_playwright_page_with_agent_focus(
-        dom_service=dom_service,
-        playwright_browser=pw_browser,
-        current_page=pw_context.pages[0],
-    )
-
-    # 3. Re-apply the device fingerprint (anti-bot essential on the new IP).
-    if fingerprint_injection and _env_enabled("BROWSER_AGENT_FINGERPRINT_INJECTION_ENABLED", True):
-        from helpers.fingerprint_injection import apply_fingerprint_injection
-
-        with contextlib.suppress(Exception):
-            await apply_fingerprint_injection(pw_page, fingerprint_injection)
 
     logger.info("Reconnected browser stack after proxy rotation", agent_id=agent_id)
     return {
@@ -1236,6 +1331,74 @@ async def _reconnect_browser_stack_after_rotation(
         "playwright_instance": pw_instance,
         "playwright_driver_pid": driver_pid,
     }
+
+
+async def _restart_after_failed_steel_auth(
+    *,
+    config: Any,
+    user_id: str,
+    task_id: str,
+    credential_ref: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Invalidate one proven-signed-out Steel profile and recreate the task.
+
+    Recreating the provider session is the source-isolation boundary: the new
+    session is initialized after the stale marker is disabled, so normal
+    credential selection can choose a CookieBundle without overlaying it onto
+    the failed Steel profile.
+    """
+    credential_id = str(credential_ref.get("id") or "")
+    if credential_ref.get("kind") != "steel_session" or not credential_id:
+        raise ValueError("A concrete Steel session credential is required for auth restart")
+    reason = "All automated authentication options were exhausted and the site remained signed out."
+    await mark_steel_session_auth_failed(
+        config,
+        user_id,
+        credential_id,
+        reason,
+        preserve_browser_session_id=task_id,
+    )
+    replacement = await resume_browser_session(
+        config,
+        task_id,
+        force_fresh_profile=True,
+    )
+    new_cdp_url = replacement.get("ws_url")
+    if not isinstance(new_cdp_url, str) or not new_cdp_url:
+        raise RuntimeError("Replacement browser session did not return a CDP URL")
+    replacement_ref = replacement.get("credential_ref") or replacement.get("auth_credential_ref")
+    if (
+        isinstance(replacement_ref, dict)
+        and replacement_ref.get("kind") == "steel_session"
+        and str(replacement_ref.get("id") or "") == credential_id
+    ):
+        raise RuntimeError("Replacement browser session reused the Steel credential proven signed out")
+    return replacement
+
+
+async def _discard_replacement_browser_stack(
+    *,
+    humanizer: Optional[Any],
+    dom_service: Optional[Any],
+    playwright_browser: Optional[Any],
+    playwright_instance: Optional[Any],
+    playwright_driver_pid: Optional[int],
+    agent_id: str,
+) -> None:
+    """Disconnect a replacement CDP stack without closing its remote session."""
+    if humanizer is not None:
+        with contextlib.suppress(Exception):
+            await humanizer.close()
+    if dom_service is not None:
+        with contextlib.suppress(Exception):
+            await dom_service.disconnect()
+    await _stop_playwright_resources(
+        playwright_browser,
+        playwright_instance,
+        agent_id,
+        close_browser=False,
+        driver_pid=playwright_driver_pid,
+    )
 
 
 async def _synchronize_playwright_page_with_agent_focus(
@@ -1536,7 +1699,18 @@ def _clear_browser_activity_memory_buffers(
                 setattr(browser_recorder, attr, None)
 
     if browser_network_recorder is not None:
-        for attr in ("entries", "_tasks"):
+        for attr in (
+            "entries",
+            "_diagnostic_entries",
+            "console_entries",
+            "_tasks",
+            "_bodies",
+            "_body_byte_sizes",
+            "_provider_exit_rejections",
+            "_rejected_network_generations",
+            "_ignored_request_ids",
+            "_active_request_ids",
+        ):
             value = getattr(browser_network_recorder, attr, None)
             if hasattr(value, "clear"):
                 with contextlib.suppress(Exception):
@@ -1544,6 +1718,8 @@ def _clear_browser_activity_memory_buffers(
         for attr in ("browser_session", "_cdp_client"):
             with contextlib.suppress(Exception):
                 setattr(browser_network_recorder, attr, None)
+        with contextlib.suppress(Exception):
+            browser_network_recorder._body_bytes = 0
 
     for value in mutable_buffers:
         if hasattr(value, "clear"):
@@ -1875,6 +2051,56 @@ def _append_browser_turn_messages(
                 ],
             }
         )
+
+
+async def _capture_recovery_storage_state(
+    page: Any,
+    emit_progress: Callable[[str, str], Awaitable[None]],
+) -> Dict[str, Any]:
+    """Capture auth state for challenge recovery with visible bounded progress."""
+    await emit_progress(
+        "capture_browser_state",
+        "Capturing cookies, local storage, and IndexedDB before challenge recovery",
+    )
+    storage_state = await _capture_rotation_storage_state(page)
+    if storage_state is None:
+        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+    return storage_state
+
+
+async def _finalize_browser_recovery_action_result(
+    *,
+    action_result: Dict[str, Any],
+    dom_service: Optional[Any],
+    action_history: Any,
+    thinking: str,
+    recovery_reason: str,
+    browser_turn_messages: List[Dict[str, Any]],
+    task_prompt: str,
+    browser_state: Dict[str, Any],
+    unified_action: Dict[str, Any],
+    recovery_call_id: str,
+    browser_stream: Any,
+) -> None:
+    """Persist one recovery result and close its streamed tool lifecycle."""
+    if dom_service is not None:
+        await action_history.record_action(
+            dom_service=dom_service,
+            action="recover_from_challenge",
+            thinking=thinking,
+            params={"reason": recovery_reason},
+            result=action_result,
+        )
+    _append_browser_turn_messages(
+        browser_turn_messages,
+        task=task_prompt,
+        browser_state=browser_state,
+        include_screenshot=False,
+        unified_action=unified_action,
+        result=action_result,
+        tool_call_id=recovery_call_id,
+    )
+    await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
 
 
 async def _feed_browser_tool_validation_error_back(
@@ -3018,6 +3244,100 @@ async def _finalize_browser_recording_for_fe_resilient(
         return None
 
 
+async def _finalize_browser_diagnostics_for_fe(
+    *,
+    browser_network_recorder: BrowserNetworkRecorder,
+    agent_id: str,
+    task_id: Optional[str],
+    user_id: str,
+    browser_url: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Persist redacted console/network indexes and expose durable pointers.
+
+    The uploaded ZIP intentionally contains metadata indexes only. Raw response
+    body files remain local/trace-gated and are never included in this broadly
+    discoverable post-run debugging attachment.
+    """
+    if not task_id:
+        return None
+
+    network_index_path = await browser_network_recorder.close()
+    console_index_path = getattr(browser_network_recorder, "console_index_path", None)
+    if not network_index_path and not console_index_path:
+        return None
+
+    trace_archive_refs: Dict[str, str] = {}
+    try:
+        archive_result = await browser_network_recorder.archive_diagnostics_artifacts()
+        if isinstance(archive_result, dict):
+            trace_archive_refs = archive_result
+    except Exception as exc:
+        logger.warning(
+            "Browser diagnostics trace archive failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc)[:300],
+        )
+
+    diagnostics_file_pointer = None
+    bundle_bytes: Optional[bytes] = None
+    try:
+        bundle_bytes = browser_network_recorder.export_diagnostics_bundle_bytes()
+        if bundle_bytes:
+            diagnostics_file_pointer = await asyncio.wait_for(
+                upload_to_storage(
+                    user_id=user_id,
+                    file_content=bundle_bytes,
+                    filename=f"browser-diagnostics-{task_id}.zip",
+                    mime_type="application/zip",
+                ),
+                timeout=15,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Browser diagnostics attachment upload failed",
+            agent_id=agent_id,
+            task_id=task_id,
+            error=repr(exc)[:300],
+        )
+
+    metadata = {
+        "browser_diagnostics_file_pointer": diagnostics_file_pointer,
+        "console_log_path": str(console_index_path) if console_index_path else None,
+        "network_recording_path": str(network_index_path) if network_index_path else None,
+        "trace_archive_refs": trace_archive_refs,
+        "diagnostics_redacted": True,
+        "response_bodies_included": False,
+    }
+    message_saved = False
+    for attempt in range(1, 4):
+        message_saved = await save_browser_action_message(
+            agent_id=agent_id,
+            title="Browser diagnostics saved",
+            task_id=task_id,
+            message="Redacted browser console and network diagnostics are available for post-run inspection.",
+            status=MessageStatus.FINISHED,
+            browser_url=browser_url or "",
+            action_type="diagnostics",
+            tool_call_id=f"browser-diagnostics:{task_id}",
+            extra_metadata=metadata,
+        )
+        if message_saved:
+            break
+        if attempt < 3:
+            await asyncio.sleep(0.2 * attempt)
+    logger.info(
+        "Browser diagnostics pointers saved",
+        agent_id=agent_id,
+        task_id=task_id,
+        bundle_bytes=len(bundle_bytes) if bundle_bytes else 0,
+        has_pointer=bool(diagnostics_file_pointer),
+        message_saved=message_saved,
+        trace_ref_count=len(trace_archive_refs),
+    )
+    return metadata
+
+
 def _schedule_browser_cleanup(
     *,
     agent_id: str,
@@ -3080,19 +3400,13 @@ def _schedule_browser_cleanup(
                     resolved_network_recorder = await asyncio.wait_for(network_recorder_task, timeout=10)
             if resolved_network_recorder:
                 with contextlib.suppress(Exception):
-                    network_index_path = await resolved_network_recorder.close()
-                    if network_index_path and task_id:
-                        await save_browser_action_message(
-                            agent_id=agent_id,
-                            title="Browser network recording saved",
-                            task_id=task_id,
-                            message=f"Local browser network log: {network_index_path}",
-                            status=MessageStatus.FINISHED,
-                            browser_url=browser_url or "",
-                            action_type="network_recording",
-                            tool_call_id=str(uuid_module.uuid4()),
-                            extra_metadata={"network_recording_path": str(network_index_path)},
-                        )
+                    await _finalize_browser_diagnostics_for_fe(
+                        browser_network_recorder=resolved_network_recorder,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                        user_id=user_id,
+                        browser_url=browser_url,
+                    )
             if browser_recorder:
                 await _finalize_browser_recording_for_fe_resilient(
                     browser_recorder=browser_recorder,
@@ -3863,25 +4177,14 @@ def _simulated_browser_usage_items(
     model_pricing: Dict[str, Any],
     usage_by_model: Optional[Dict[str, Dict[str, int]]] = None,
 ) -> List[Dict[str, Any]]:
-    model_rows = usage_by_model or {"": {"input_tokens": total_input_tokens, "output_tokens": total_output_tokens}}
-    items: List[Dict[str, Any]] = []
-    for model, usage in model_rows.items():
-        input_tokens = int(usage.get("input_tokens") or 0)
-        output_tokens = int(usage.get("output_tokens") or 0)
-        items.append(
-            {
-                "type": "llm",
-                "model": model or None,
-                "cost_cents": round(
-                    (input_tokens / 1000) * model_pricing.get("input_cents_per_1k", 0)
-                    + (output_tokens / 1000) * model_pricing.get("output_cents_per_1k", 0),
-                    4,
-                ),
-                "provider": "Rose 1 Browser Use",
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-            }
-        )
+    """Simulated twin of `build_usage_items`: same per-actual-model llm rows,
+    a free World-Model-Harness service row instead of a paid browser row."""
+    items = build_browser_llm_usage_items(
+        total_input_tokens,
+        total_output_tokens,
+        model_pricing,
+        usage_by_model,
+    )
     items.append({"type": "service", "cost_cents": 0, "provider": "World Model Harness"})
     return items
 
@@ -3957,7 +4260,7 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
         else:
             browser_use_mode = None
 
-    model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+    model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
     task_prompt = build_browser_task_prompt(goal)
     dynamic_system_context = build_browser_dynamic_system_context(
         "# Simulated Browser Runtime\n"
@@ -4185,13 +4488,15 @@ async def _spawn_browser_agent_activity_v3_simulated(  # noqa: C901, PLR0915
             output_tokens = int(usage.get("completion_tokens") or 0)
             total_input_tokens += input_tokens
             total_output_tokens += output_tokens
-            actual_model = str(llm_result.get("actual_model") or "")
-            model_usage = usage_by_model.setdefault(
-                actual_model,
-                {"input_tokens": 0, "output_tokens": 0},
+            accumulate_model_usage(
+                usage_by_model,
+                llm_result.get("actual_model"),
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                from_fast_cache=bool(usage.get("from_fast_cache")),
             )
-            model_usage["input_tokens"] += input_tokens
-            model_usage["output_tokens"] += output_tokens
             action = dict(llm_result.get("action") or {})
             action_name = str(action.get("action") or "")
             thinking = str(action.get("thinking") or "")
@@ -4595,6 +4900,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
     total_input_tokens = 0
     total_output_tokens = 0
+    # Per-ACTUAL-model token ledger. The browser pool races several underlying
+    # models at different prices, and `-claude`/`-gpt` steps ran on the user's
+    # own compute token ($0). Usage rows are emitted per entry here so the
+    # workflow prices each model correctly instead of collapsing everything
+    # onto the pool constant.
+    usage_by_model: Dict[str, Dict[str, int]] = {}
     visited_urls: List[str] = []
     reasoning_messages: List[str] = []
     action_summary: List[str] = []
@@ -4702,6 +5013,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     async def record_passkey_usage_once() -> None:
         if dom_service is None:
             return
+        # Any browser action can navigate (links, forms, redirects, history),
+        # and Kernel may reset the target-scoped WebAuthn environment at that
+        # boundary. Revalidate before every counter poll so the next agent
+        # interaction always sees the held credentials on a live authenticator.
+        await sync_passkeys_onto_target(context="before passkey usage readback")
         await record_used_passkey_credentials(
             dom_service=dom_service,
             passkey_ref_by_credential_id=passkey_ref_by_credential_id,
@@ -5215,7 +5531,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 "\n\n# User Context\n\n" + "\n\n".join(_user_context_sections) if _user_context_sections else ""
             )
             _base_custom_instructions = _user_context_section + "\n\n" + _auth_options_section
-            _model_pricing = await get_model_pricing_with_fallback("rose-1-browser-use")
+            _model_pricing = await get_model_pricing_with_fallback(BROWSER_USE_PRICING_POOL)
             _record_timing("parallel.data.instructions", t)
 
             return (
@@ -5489,6 +5805,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
             logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
 
+            # The provider can replace the pre-navigation target/session while
+            # opening the first real page. Revalidate at that exact boundary so
+            # a cached authenticator id cannot hide a lost WebAuthn environment.
+            await sync_passkeys_onto_target(context="after start navigation")
+
             # The interaction layer (humanizer/recorder/logo) ran concurrently
             # with the navigation; both must be complete before the warm-up
             # scroll and the agent loop.
@@ -5545,14 +5866,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         browser_turn_messages.extend(resume_user_messages)
         otp_history_count = 0
         supervisor_recovery_count = 0
+        failed_steel_auth_recovery_ids: set[str] = set()
         task_prompt = build_browser_task_prompt(goal)
         dynamic_system_context = build_browser_dynamic_system_context(
             base_custom_instructions,
             available_files=(list(available_file_paths.keys()) if available_file_paths else None),
             response_schema=response_schema,
         )
+        failed_credential_prep_realms: Dict[str, str] = {}
 
-        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+        async def _prepare_credentials_for_url_unquarantined(
+            target_url: str,
+        ) -> Optional[Dict[str, Any]]:
             """Atomically activate every saved credential type for a new realm."""
             nonlocal auth_realm
             nonlocal auth_options
@@ -5571,20 +5896,34 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             nonlocal secret_refs
             nonlocal session_passkeys
             nonlocal session_passwords
+            nonlocal session_credential_ref
 
             target_realm = auth_realm_from_url(target_url)
             if not target_realm or auth_realm_matches_url(auth_realm, target_url):
+                return None
+            if target_realm in failed_credential_prep_realms:
+                logger.info(
+                    "Skipping a previously failed optional realm credential preparation",
+                    auth_realm=target_realm,
+                    error=failed_credential_prep_realms[target_realm],
+                )
                 return None
             if not session_id:
                 raise RuntimeError(f"Cannot prepare credentials for {target_realm} without a browser session")
 
             activity.heartbeat(f"Preparing saved credentials for {target_realm}")
-            payload = await prepare_browser_auth(
-                config,
-                user_id=user_id,
-                session_id=session_id,
-                target_url=target_url,
-            )
+            try:
+                payload = await prepare_browser_auth(
+                    config,
+                    user_id=user_id,
+                    session_id=session_id,
+                    target_url=target_url,
+                )
+            except Exception as prep_error:
+                failed_credential_prep_realms[target_realm] = (
+                    f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}"
+                )
+                raise
             realm_state = await build_realm_credential_state(
                 payload,
                 decryption_key=config.payment.decryption_key,
@@ -5617,6 +5956,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             secret_refs = {**card_refs, **realm_state.password_secret_refs}
             session_passwords = list(payload.get("passwords") or [])
             session_passkeys = list(payload.get("passkeys") or [])
+            session_credential_ref = realm_state.auth_credential_ref
             base_custom_instructions = user_context_section + "\n\n" + auth_options_section
             dynamic_system_context = build_browser_dynamic_system_context(
                 base_custom_instructions,
@@ -5676,6 +6016,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 "passkey_count": len(realm_state.decrypted_passkeys),
                 "passkeys_newly_injected": injected_passkey_count,
             }
+
+        async def _prepare_credentials_for_url(target_url: str) -> Optional[Dict[str, Any]]:
+            return await prepare_optional_realm_credentials(
+                target_url=target_url,
+                current_auth_realm=auth_realm,
+                failed_realms=failed_credential_prep_realms,
+                prepare_credentials=_prepare_credentials_for_url_unquarantined,
+            )
 
         async def _recover_browser_step(reason: str, *, reload_page: bool) -> bool:
             nonlocal supervisor_recovery_count
@@ -5848,8 +6196,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             # request the agent acts on.
             observed_auth_realm = auth_realm_from_url(current_url)
             if observed_auth_realm and not auth_realm_matches_url(auth_realm, current_url):
-                try:
-                    await _prepare_credentials_for_url(current_url)
+                prepared_realm = await _prepare_credentials_for_url(current_url)
+                if prepared_realm is not None:
                     from browser_use.browser.events import NavigateToUrlEvent
 
                     reload_event = dom_service.session.event_bus.dispatch(
@@ -5864,14 +6212,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         current_url=current_url,
                     )
                     continue
-                except Exception as prep_error:
-                    recovered = await _recover_browser_step(
-                        f"credential_prep_error:{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
-                        reload_page=True,
-                    )
-                    if recovered:
-                        continue
-                    raise
 
             if current_url and (not visited_urls or current_url != visited_urls[-1]):
                 visited_urls.append(current_url)
@@ -5983,10 +6323,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_use_mode = None
 
                 usage = llm_result.get("usage", {})
-                response_mode = llm_result.get("mode", "")
-                if response_mode not in ("claude", "gpt"):
-                    total_input_tokens += usage.get("prompt_tokens", 0)
-                    total_output_tokens += usage.get("completion_tokens", 0)
+                # Record EVERY step against the model that actually ran it —
+                # including claudeAuth/gptAuth steps. `_track_usage` zeroes
+                # `-claude`/`-gpt` rows by model name, so they no longer have
+                # to be dropped here to avoid being billed as paid waterfall.
+                step_input_tokens = usage.get("prompt_tokens", 0) or 0
+                step_output_tokens = usage.get("completion_tokens", 0) or 0
+                total_input_tokens += step_input_tokens
+                total_output_tokens += step_output_tokens
+                accumulate_model_usage(
+                    usage_by_model,
+                    llm_result.get("actual_model"),
+                    step_input_tokens,
+                    step_output_tokens,
+                    cache_read_input_tokens=int(usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(usage.get("from_fast_cache")),
+                )
 
             except asyncio.TimeoutError:
                 consecutive_api_failures += 1
@@ -6237,6 +6590,179 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "Browser agent requested user authentication assistance",
                     base_site=base_site,
                 )
+                steel_credential_id = (
+                    str(session_credential_ref.get("id") or "")
+                    if isinstance(session_credential_ref, dict)
+                    and session_credential_ref.get("kind") == "steel_session"
+                    else ""
+                )
+                if steel_credential_id and steel_credential_id not in failed_steel_auth_recovery_ids:
+                    failed_steel_auth_recovery_ids.add(steel_credential_id)
+                    browser_stack_replacement_started = False
+                    try:
+                        replacement = await _restart_after_failed_steel_auth(
+                            config=config,
+                            user_id=user_id,
+                            task_id=task_id,
+                            credential_ref=session_credential_ref,
+                        )
+                        # Stage the replacement identifiers; do NOT commit them until
+                        # the worker has actually attached to the new browser. If the
+                        # reconnect raises, the handler below discards the stack but
+                        # cannot restore these, and the auth-assistance path would then
+                        # hand the user a live-view session the worker never attached
+                        # to — the user signs in somewhere the agent cannot observe.
+                        new_cdp_url = replacement["ws_url"]
+                        pending_session_id = replacement.get("session_id", session_id)
+                        pending_browser_url = replacement.get("debug_url", browser_url)
+                        pending_fingerprint_injection = (
+                            replacement.get("fingerprint_injection") or fingerprint_injection
+                        )
+                        pending_session_credential_ref = replacement.get(
+                            "credential_ref"
+                        ) or replacement.get("auth_credential_ref")
+                        pending_auth_realm = replacement.get("auth_realm") or auth_realm
+                        pending_browser_session_metadata = _updated_rotation_session_metadata(
+                            browser_session_metadata,
+                            dict(replacement),
+                        )
+                        browser_stack_replacement_started = True
+                        reconnected = await _reconnect_browser_stack_after_rotation(
+                            new_cdp_url=new_cdp_url,
+                            old_dom_service=dom_service,
+                            old_playwright_browser=playwright_browser,
+                            old_playwright_instance=playwright_instance,
+                            old_driver_pid=playwright_driver_pid,
+                            fingerprint_injection=replacement.get("fingerprint_injection")
+                            or pending_fingerprint_injection,
+                            agent_id=agent_id,
+                        )
+                        # Reconnect succeeded: the replacement session is real and
+                        # attached, so the identifiers are now safe to publish.
+                        session_id = pending_session_id
+                        browser_url = pending_browser_url
+                        cdp_url = new_cdp_url
+                        fingerprint_injection = pending_fingerprint_injection
+                        session_credential_ref = pending_session_credential_ref
+                        auth_realm = pending_auth_realm
+                        browser_session_metadata = pending_browser_session_metadata
+                        dom_service = reconnected["dom_service"]
+                        dom_page = reconnected["dom_page"]
+                        input_page = reconnected["input_page"]
+                        playwright_browser = reconnected["playwright_browser"]
+                        playwright_instance = reconnected["playwright_instance"]
+                        playwright_driver_pid = reconnected["playwright_driver_pid"]
+                        if browser_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_recorder.transition_browser(
+                                    page=input_page,
+                                    session_id=session_id,
+                                    browser_url=browser_url or "",
+                                    session_metadata=browser_session_metadata,
+                                )
+                        if browser_network_recorder is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        humanizer = await _replace_browser_humanizer(
+                            current_humanizer=humanizer,
+                            enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
+                            dom_page=dom_page,
+                            input_page=input_page,
+                            cursor_observer=observe_cursor,
+                            humanizer_factory=BrowserHumanizer,
+                        )
+                        browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                        current_url = browser_state.get("url", current_url)
+                        recovery_result = {
+                            "success": True,
+                            "message": (
+                                "The saved Steel session was signed out, so it was replaced with a fresh "
+                                "credential-isolated browser session. Recheck the page before requesting assistance."
+                            ),
+                            "auth_source": replacement.get("auth_source"),
+                            "cookies_injected": int(replacement.get("cookies_count") or 0),
+                        }
+                        await action_history.record_action(
+                            dom_service=dom_service,
+                            action="request_user_assistance_for_authentication",
+                            thinking=thinking,
+                            params={},
+                            result=recovery_result,
+                        )
+                        _append_browser_turn_messages(
+                            browser_turn_messages,
+                            task=task_prompt,
+                            browser_state=browser_state,
+                            include_screenshot=False,
+                            unified_action=unified_action,
+                            result=recovery_result,
+                            tool_call_id=tool_call_id_action,
+                        )
+                        await save_browser_action_message(
+                            agent_id=agent_id,
+                            title="Replaced signed-out saved browser session",
+                            task_id=task_id,
+                            message=recovery_result["message"],
+                            status=MessageStatus.FINISHED,
+                            browser_url=browser_url,
+                            action_type="browser_auth_session_recovery",
+                            tool_call_id=tool_call_id_action,
+                            steps_taken=iteration,
+                            total_steps=MAX_ITERATIONS,
+                            extra_metadata={
+                                "auth_source": replacement.get("auth_source"),
+                                "cookies_injected": int(replacement.get("cookies_count") or 0),
+                            },
+                        )
+                        logger.info(
+                            "Replaced signed-out Steel session before user assistance",
+                            auth_realm=auth_realm or base_site,
+                            steel_session_auth_id=steel_credential_id,
+                            replacement_auth_source=replacement.get("auth_source"),
+                            replacement_credential_ref=session_credential_ref,
+                        )
+                        await browser_stream.finish_tools(status="FINISHED")
+                        continue
+                    except Exception as stale_auth_error:
+                        if browser_stack_replacement_started:
+                            await _discard_replacement_browser_stack(
+                                humanizer=humanizer,
+                                dom_service=dom_service,
+                                playwright_browser=playwright_browser,
+                                playwright_instance=playwright_instance,
+                                playwright_driver_pid=playwright_driver_pid,
+                                agent_id=agent_id,
+                            )
+                            humanizer = None
+                            dom_service = None
+                            dom_page = None
+                            input_page = None
+                            playwright_browser = None
+                            playwright_instance = None
+                            playwright_driver_pid = None
+                            # The backend already swapped the provider session
+                            # (browser_stack_replacement_started only becomes True
+                            # after _restart_after_failed_steel_auth returns), so the
+                            # OLD identifiers now point at a released session. We
+                            # never attached to the replacement, but handing the user
+                            # a live view for the session that actually exists beats
+                            # one the backend has already torn down.
+                            session_id = pending_session_id
+                            browser_url = pending_browser_url
+                            cdp_url = new_cdp_url
+                            fingerprint_injection = pending_fingerprint_injection
+                            session_credential_ref = pending_session_credential_ref
+                            auth_realm = pending_auth_realm
+                            browser_session_metadata = pending_browser_session_metadata
+                        logger.warning(
+                            "Failed to replace signed-out Steel session before user assistance",
+                            auth_realm=auth_realm or base_site,
+                            steel_session_auth_id=steel_credential_id,
+                            error=extract_error_message(stale_auth_error),
+                        )
                 auth_handoff_current_url = select_auth_assistance_current_url(current_url, visited_urls)
                 if auth_handoff_current_url != current_url:
                     logger.info(
@@ -6265,13 +6791,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 )
 
                 success_result = {"success": True, "request_id": request_id}
-                await action_history.record_action(
-                    dom_service=dom_service,
-                    action="request_user_assistance_for_authentication",
-                    thinking=thinking,
-                    params={},
-                    result=success_result,
-                )
+                if dom_service is not None:
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="request_user_assistance_for_authentication",
+                        thinking=thinking,
+                        params={},
+                        result=success_result,
+                    )
                 _append_browser_turn_messages(
                     browser_turn_messages,
                     task=task_prompt,
@@ -6300,6 +6827,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     total_output_tokens,
                     model_pricing,
                     execution_time_ms,
+                    usage_by_model,
                 )
                 await _propagate_browser_credentials_with_progress(
                     config=config,
@@ -6340,6 +6868,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
                 progress_titles = {
+                    "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
                     "known_challenge_cookies": "Testing challenge cookies",
                     "all_target_cookies": "Testing target-site cookies",
@@ -6381,9 +6910,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 try:
                     if playwright_browser is None or input_page is None:
                         raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
-                    recovery_storage_state = await _capture_rotation_storage_state(input_page)
-                    if recovery_storage_state is None:
-                        raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
+                    recovery_storage_state = await _capture_recovery_storage_state(
+                        input_page,
+                        emit_recovery_progress,
+                    )
 
                     provider_exit_rejected = bool(
                         unified_action.get("params", {}).get("provider_exit_rejected")
@@ -6580,24 +7110,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     action_result = {"success": False, "error": error_message}
 
-                if dom_service is not None:
-                    await action_history.record_action(
-                        dom_service=dom_service,
-                        action="recover_from_challenge",
-                        thinking=thinking,
-                        params={"reason": recovery_reason},
-                        result=action_result,
-                    )
-                _append_browser_turn_messages(
-                    browser_turn_messages,
-                    task=task_prompt,
+                await _finalize_browser_recovery_action_result(
+                    action_result=action_result,
+                    dom_service=dom_service,
+                    action_history=action_history,
+                    thinking=thinking,
+                    recovery_reason=recovery_reason,
+                    browser_turn_messages=browser_turn_messages,
+                    task_prompt=task_prompt,
                     browser_state=browser_state,
-                    include_screenshot=False,
                     unified_action=unified_action,
-                    result=action_result,
-                    tool_call_id=recovery_call_id,
+                    recovery_call_id=recovery_call_id,
+                    browser_stream=browser_stream,
                 )
-                await browser_stream.finish_tools(status="FINISHED" if action_result.get("success") else "ERROR")
                 continue
 
             if action_name == "send_message_to_user":
@@ -6626,6 +7151,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     total_output_tokens,
                     model_pricing,
                     execution_time_ms,
+                    usage_by_model,
                 )
                 await browser_stream.finish_tools(status="FINISHED")
 
@@ -6724,12 +7250,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                     v_usage = progress_result.get("usage", {})
-                    verifier_actual_model = v_usage.get("actual_model", "")
-                    if not (
-                        str(verifier_actual_model).endswith("-claude") or str(verifier_actual_model).endswith("-gpt")
-                    ):
-                        total_input_tokens += v_usage.get("prompt_tokens", 0)
-                        total_output_tokens += v_usage.get("completion_tokens", 0)
+                    v_input_tokens = v_usage.get("prompt_tokens", 0) or 0
+                    v_output_tokens = v_usage.get("completion_tokens", 0) or 0
+                    total_input_tokens += v_input_tokens
+                    total_output_tokens += v_output_tokens
+                    accumulate_model_usage(
+                        usage_by_model,
+                        v_usage.get("actual_model"),
+                        v_input_tokens,
+                        v_output_tokens,
+                        cache_read_input_tokens=int(v_usage.get("cache_read_input_tokens") or 0),
+                        cache_creation_input_tokens=int(v_usage.get("cache_creation_input_tokens") or 0),
+                        from_fast_cache=bool(v_usage.get("from_fast_cache")),
+                    )
 
                     score = progress_result.get("score", 0.0)
                     v_reasoning = progress_result.get("reasoning", "")
@@ -6834,6 +7367,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             total_output_tokens,
                             model_pricing,
                             execution_time_ms,
+                            usage_by_model,
                         )
                         await _propagate_browser_credentials_with_progress(
                             config=config,
@@ -7165,8 +7699,7 @@ Based on this feedback, I need to continue working on the task and address the i
                 )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
-                    verifier_checkpoints.append(checkpoint)
+                _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:
                     try:
@@ -7283,8 +7816,7 @@ Based on this feedback, I need to continue working on the task and address the i
                     )
 
                 checkpoint = _browser_ground_truth_checkpoint(browser_state, current_url)
-                if checkpoint and (not verifier_checkpoints or checkpoint != verifier_checkpoints[-1]):
-                    verifier_checkpoints.append(checkpoint)
+                _append_bounded_verifier_checkpoint(verifier_checkpoints, checkpoint)
 
                 if dom_service:
                     try:
@@ -7473,10 +8005,19 @@ Based on this feedback, I need to continue working on the task and address the i
                     start_to_close_timeout=timedelta(seconds=VERIFIER_ULTRA_TIMEOUT_SECONDS),
                 )
                 fv_usage = final_progress.get("usage", {})
-                fv_model = fv_usage.get("actual_model", "")
-                if not (str(fv_model).endswith("-claude") or str(fv_model).endswith("-gpt")):
-                    total_input_tokens += fv_usage.get("prompt_tokens", 0)
-                    total_output_tokens += fv_usage.get("completion_tokens", 0)
+                fv_input_tokens = fv_usage.get("prompt_tokens", 0) or 0
+                fv_output_tokens = fv_usage.get("completion_tokens", 0) or 0
+                total_input_tokens += fv_input_tokens
+                total_output_tokens += fv_output_tokens
+                accumulate_model_usage(
+                    usage_by_model,
+                    fv_usage.get("actual_model"),
+                    fv_input_tokens,
+                    fv_output_tokens,
+                    cache_read_input_tokens=int(fv_usage.get("cache_read_input_tokens") or 0),
+                    cache_creation_input_tokens=int(fv_usage.get("cache_creation_input_tokens") or 0),
+                    from_fast_cache=bool(fv_usage.get("from_fast_cache")),
+                )
                 if final_progress.get("structured_response") is not None:
                     latest_structured_response = final_progress["structured_response"]
             except Exception as final_verifier_error:
@@ -7512,7 +8053,13 @@ Based on this feedback, I need to continue working on the task and address the i
         )
 
         execution_time_ms = (safe_time() - start_time) * 1000
-        usage_items = build_usage_items(total_input_tokens, total_output_tokens, model_pricing, execution_time_ms)
+        usage_items = build_usage_items(
+            total_input_tokens,
+            total_output_tokens,
+            model_pricing,
+            execution_time_ms,
+            usage_by_model,
+        )
         await _propagate_browser_credentials_with_progress(
             config=config,
             agent_id=agent_id,
@@ -7664,6 +8211,37 @@ Based on this feedback, I need to continue working on the task and address the i
         _heartbeat_task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await _heartbeat_task
+        diagnostics_finalized = False
+        if browser_network_recorder is None and network_recorder_task is not None:
+            try:
+                browser_network_recorder = await asyncio.wait_for(
+                    asyncio.shield(network_recorder_task),
+                    timeout=10,
+                )
+            except Exception as diagnostics_resolve_error:
+                logger.warning(
+                    "Browser diagnostics recorder was unavailable before activity return",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(diagnostics_resolve_error),
+                )
+        if browser_network_recorder is not None:
+            try:
+                await _finalize_browser_diagnostics_for_fe(
+                    browser_network_recorder=browser_network_recorder,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    user_id=user_id,
+                    browser_url=browser_url,
+                )
+                diagnostics_finalized = True
+            except Exception as diagnostics_error:
+                logger.warning(
+                    "Browser diagnostics finalization failed before activity return",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    error=extract_error_message(diagnostics_error),
+                )
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
@@ -7675,8 +8253,8 @@ Based on this feedback, I need to continue working on the task and address the i
             cursor_streamer=cursor_streamer,
             interaction_layer_task=interaction_layer_task,
             humanizer=humanizer,
-            browser_network_recorder=browser_network_recorder,
-            network_recorder_task=network_recorder_task,
+            browser_network_recorder=None if diagnostics_finalized else browser_network_recorder,
+            network_recorder_task=None if diagnostics_finalized else network_recorder_task,
             browser_recorder=browser_recorder,
             dom_service=dom_service,
             playwright_browser=playwright_browser,
@@ -7689,6 +8267,7 @@ Based on this feedback, I need to continue working on the task and address the i
         dom_service = None
         _clear_browser_activity_memory_buffers(
             action_history=action_history,
+            browser_network_recorder=browser_network_recorder if diagnostics_finalized else None,
             mutable_buffers=(
                 action_entries,
                 browser_state,
@@ -8531,30 +9110,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                 break
 
-            tool_usage: Dict[str, list] = {"llm": [], "service": []}
-            if result.get("usage_items"):
-                for item in result["usage_items"]:
-                    if item.get("type") == "llm":
-                        tool_usage["llm"].append(
-                            {
-                                "tokens_in": item.get("input_tokens", 0),
-                                "tokens_out": item.get("output_tokens", 0),
-                                "model": item.get("model"),
-                                "provider": item.get("provider", ""),
-                                "cache_read_input_tokens": item.get("cache_read_input_tokens", 0),
-                                "cache_creation_input_tokens": item.get("cache_creation_input_tokens", 0),
-                                # Propagate fast-cache replay so replayed browser
-                                # steps bill $0 instead of their replayed tokens.
-                                "from_fast_cache": item.get("from_fast_cache", False),
-                            }
-                        )
-                    else:
-                        tool_usage["service"].append(
-                            {
-                                "cost_cents": item.get("cost_cents", 0),
-                                "provider": item.get("provider", ""),
-                            }
-                        )
+            tool_usage: Dict[str, list] = browser_usage_items_to_tool_usage(result.get("usage_items"))
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR

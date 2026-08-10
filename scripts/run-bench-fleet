@@ -2258,7 +2258,7 @@ worker_ledger_lock_acquire() {  # worker_ledger_lock_acquire <bench-output-dir>
         sleep "$delay"
     done
     echo "❌ timed out acquiring worker ledger lock: $lock" >&2
-    return 1
+    return 75
 }
 
 worker_ledger_lock_release() {  # worker_ledger_lock_release <bench-output-dir>
@@ -3055,6 +3055,14 @@ require_in_app_hub_visibility() {
     fi
     [ -n "$hub_api_key" ] || {
         echo "❌ BACKEND_API_KEY is required to register benchmark runs in the in-app Hub" >&2
+        echo "   looked in: \$BENCHMARK_HUB_API_KEY, \$BACKEND_API_KEY, $ROOT_DIR/back-end/.env" >&2
+        if [ ! -e "$ROOT_DIR/back-end/.env" ]; then
+            # A plain `git worktree add` copies no credentials, so the fleet used
+            # to burn a full launch before dying here with no way to tell that
+            # the worktree was simply never provisioned.
+            echo "   cause: $ROOT_DIR/back-end/.env does not exist — this worktree was never provisioned." >&2
+            echo "   fix:   bash scripts/prepare-deploy-worktree.sh --worktree $ROOT_DIR --source <controller-workspace>" >&2
+        fi
         return 1
     }
     export BENCHMARK_HUB_UPLOAD_URL="$hub_url"
@@ -3293,6 +3301,34 @@ if ! bash "$RUN_BENCH_CLOUD_BIN" --verify-secrets; then
     echo "   Refresh it explicitly (maintenance op): bash scripts/run-bench-cloud --refresh-secrets" >&2
     exit 1
 fi
+
+# Fail closed BEFORE provisioning N clones when the immutable seed dump for the
+# cloud-guest Postgres major is missing from R2. Guests run system Postgres 15
+# (`cloudbench-run.sh`); a host that only published pg16 leaves every stack
+# failing at the start barrier after machines are already billed.
+# Observed 2026-08-06: 49/49 daily benches excluded for
+# `canonical base fixture is unavailable` on token `…-pg15-victoria-prod-sync-v1-whatsapp-v2`
+# while `…-pg16-…` existed.
+CLOUDBENCH_GUEST_PG_MAJOR="${CLOUDBENCH_GUEST_PG_MAJOR:-15}"
+echo "🔎 Verifying canonical seed dump for cloud-guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}..."
+_SEED_GUEST_TOKEN="$(
+    python3 "$ROOT_DIR/agents/benchmarks/seed_cache_path.py" --cache-token \
+        --pg-major "$CLOUDBENCH_GUEST_PG_MAJOR" \
+        "$ROOT_DIR/back-end/prisma/schema.prisma"
+)"
+_SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
+if ! (
+        cd "$ROOT_DIR/back-end" &&
+            npx tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
+    ) || [ ! -s "$_SEED_GUEST_PROBE" ]; then
+    rm -f "$_SEED_GUEST_PROBE"
+    echo "❌ Missing canonical base fixture for cloud guests: $_SEED_GUEST_TOKEN" >&2
+    echo "   Publish a dump produced by a pg${CLOUDBENCH_GUEST_PG_MAJOR} client before provisioning." >&2
+    echo "   (Host-only pg16 publications are not readable by Fly guest Postgres ${CLOUDBENCH_GUEST_PG_MAJOR}.)" >&2
+    exit 1
+fi
+rm -f "$_SEED_GUEST_PROBE"
+echo "✅ Canonical seed dump present for guest pg${CLOUDBENCH_GUEST_PG_MAJOR}: $_SEED_GUEST_TOKEN"
 
 # ── Resolve the warm machine (clone source) + its volume ────────────────────
 warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
@@ -3837,11 +3873,23 @@ if [ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] \
    && { [ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] \
         || cloudbench_worktree_has_changes "$ROOT_DIR"; }; then
     FLEET_PATCH_FILE="$(mktemp)"
-    if ! bash "$ROOT_DIR/scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF" > "$FLEET_PATCH_FILE" \
-        || [ ! -s "$FLEET_PATCH_FILE" ]; then
+    fleet_patch_rc=0
+    cloudbench_prepare_workspace_patch \
+        "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" \
+        "$ROOT_DIR/scripts/create-worktree-patch.sh" || fleet_patch_rc=$?
+    if [ "$fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA" ]; then
+        # The unpushed HEAD carries only content the patch generator excludes
+        # (append-only history ledgers), so the base ref already IS the code
+        # under test. Shipping nothing is exactly equivalent here.
+        rm -f "$FLEET_PATCH_FILE"
+        FLEET_PATCH_FILE=""
+        echo "📦 no shippable workspace delta beyond $BENCH_REF (append-only ledgers only); guests run the base ref"
+    elif [ "$fleet_patch_rc" -ne 0 ]; then
         echo "❌ could not create the fleet local workspace patch" >&2
         exit 1
     fi
+fi
+if [ -n "$FLEET_PATCH_FILE" ]; then
     FLEET_PATCH_SHA256="$(cloudbench_env_sha256 "$FLEET_PATCH_FILE")"
     [ -n "$FLEET_PATCH_SHA256" ] || {
         echo "❌ could not fingerprint the fleet local workspace patch" >&2
@@ -4248,7 +4296,7 @@ cleanup_failed_worker() {  # cleanup_failed_worker <output-dir> <worker-id>
 # authoritative over stale child outcomes.
 reconcile_worker_ready_outcomes() {  # <bench-output-dir>
     local out="$1" marker name wid rc=0
-    worker_ledger_lock_acquire "$out" || return 1
+    worker_ledger_lock_acquire "$out" || return $?
     for marker in "$out"/worker-*.ready; do
         [ -e "$marker" ] || continue
         name="${marker##*/}"
@@ -4524,6 +4572,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     local bench="$1" cid="$2" ws="$3" sim="$4" out="$5" port_base="$6"
     local pip="" metrics_proxy_pid="" metrics_port="" metrics_url=""
     local metrics_started_at scrape_failures=0 metrics_lease_owner_pid metrics_lease_token
+    local ready_reconcile_rc=0
     # Bash 3.2 preserves $$ from the controller in async function subshells.
     # Controller ownership is intentional: per-autoscaler EXIT releases the
     # exact token, while controller cleanup sweeps the run prefix after SIGKILL.
@@ -4545,7 +4594,7 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     }
     complete_autoscaler_after_child() {
         local completed_tmp="$out/autoscaler.completed-after-child.tmp.$$"
-        local desired_workers tracked_workers ready_workers terminal_deadline
+        local desired_workers tracked_workers ready_workers terminal_deadline ready_reconcile_rc
         [ -e "$out/benchmark-child.finished" ] || return 1
         # Child completion stops new metrics decisions; it does not revoke
         # capacity already committed by a prior desired-count observation. Keep
@@ -4553,7 +4602,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
         # invariant used by final acceptance is stable.
         terminal_deadline=$((SECONDS + AUTOSCALER_FINALIZATION_WAIT_SECONDS))
         while :; do
-            if ! reconcile_worker_ready_outcomes "$out"; then
+            ready_reconcile_rc=0
+            # Finalization owns the retry deadline. Use one ledger-lock attempt
+            # per poll so a nested ten-second acquisition window cannot overrun
+            # the remaining terminal budget.
+            WORKER_LEDGER_LOCK_ATTEMPTS=1 reconcile_worker_ready_outcomes "$out" \
+                || ready_reconcile_rc=$?
+            if [ "$ready_reconcile_rc" -ne 0 ]; then
+                if [ "$ready_reconcile_rc" -ne 75 ]; then
+                    fail_autoscaler "could not reconcile worker readiness outcomes"
+                    return 1
+                fi
                 if [ "$SECONDS" -ge "$terminal_deadline" ]; then
                     fail_autoscaler "could not reconcile worker readiness outcomes"
                     return 1
@@ -4729,11 +4788,23 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
     # lookup failure is not normal termination: a stale/failed publisher must
     # fail closed unless this autoscaler has itself observed child completion.
     while :; do
-        reconcile_worker_ready_outcomes "$out" \
-            || fail_autoscaler "could not reconcile worker readiness outcomes"
         if [ -e "$out/benchmark-child.finished" ]; then
             complete_autoscaler_after_child
             return $?
+        fi
+        ready_reconcile_rc=0
+        reconcile_worker_ready_outcomes "$out" || ready_reconcile_rc=$?
+        if [ "$ready_reconcile_rc" -ne 0 ]; then
+            # The child marker can land between the loop-head lifecycle check
+            # and ledger acquisition. Hand a busy ledger to the bounded terminal
+            # reconciler instead of misclassifying that race as durable failure.
+            if [ "$ready_reconcile_rc" -eq 75 ] \
+                && [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            fail_autoscaler "could not reconcile worker readiness outcomes"
+            return 1
         fi
         if ! inventory_machine_exists "$cid"; then
             if [ -e "$out/benchmark-child.finished" ]; then
@@ -4832,8 +4903,17 @@ bench_autoscaler() {  # bench_autoscaler <bench> <primary_cid> <workspace> <sim0
                 fi
             done
         fi
-        reconcile_worker_ready_outcomes "$out" \
-            || fail_autoscaler "could not reconcile worker readiness outcomes"
+        ready_reconcile_rc=0
+        reconcile_worker_ready_outcomes "$out" || ready_reconcile_rc=$?
+        if [ "$ready_reconcile_rc" -ne 0 ]; then
+            if [ "$ready_reconcile_rc" -eq 75 ] \
+                && [ -e "$out/benchmark-child.finished" ]; then
+                complete_autoscaler_after_child
+                return $?
+            fi
+            fail_autoscaler "could not reconcile worker readiness outcomes"
+            return 1
+        fi
         reconcile_worker_failure_outcomes "$bench" "$out" \
             || fail_autoscaler "could not reconcile worker failure outcomes"
         # The fake-controller regression for terminal proof needs to hold the
@@ -5016,8 +5096,24 @@ for bench in "${BENCHES[@]}"; do
 
     local_sim=0; [ "$mode_label" = "SIM" ] && local_sim=1
     echo "   ⚖️  [$bench] per-bench autoscaler ON (mandatory prod params, max=$AUTOSCALE_MAX, queue=navi-agent-tasks-$local_ws)"
+    rm -f "$out/autoscaler.pid" "$out/autoscaler.acceptance-failed"
     ( bench_autoscaler "$bench" "$cid" "$local_ws" "$local_sim" "$out" "$port" ) >> "$out/autoscaler.log" 2>&1 &
-    AUTOSCALER_PIDS+=("$!")
+    autoscaler_pid="$!"
+    AUTOSCALER_PIDS+=("$autoscaler_pid")
+    autoscaler_pid_tmp="$out/autoscaler.pid.tmp.$$"
+    autoscaler_started=""
+    for _ in $(seq 1 50); do
+        autoscaler_started="$(ps -o lstart= -p "$autoscaler_pid" 2>/dev/null \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)"
+        [ -z "$autoscaler_started" ] || break
+        sleep 0.01
+    done
+    if [ -n "$autoscaler_started" ] \
+        && printf '%s|%s\n' "$autoscaler_pid" "$autoscaler_started" > "$autoscaler_pid_tmp"; then
+        mv "$autoscaler_pid_tmp" "$out/autoscaler.pid" 2>/dev/null || rm -f "$autoscaler_pid_tmp"
+    else
+        rm -f "$autoscaler_pid_tmp"
+    fi
     i=$((i + 1))
 done
 
@@ -5399,6 +5495,8 @@ for j in "${!AUTOSCALER_PIDS[@]}"; do
         # A live process is acceptable during the bounded drain, but never after
         # it. Counts alone are a mutable snapshot; only the autoscaler's causal
         # completion marker proves that no committed transition remains.
+        printf '%s\n' "mandatory autoscaler did not confirm terminal completion" \
+            > "${CHILD_OUT[$j]}/autoscaler.acceptance-failed" 2>/dev/null || true
         echo "❌ [${CHILD_BENCH[$j]}] mandatory autoscaler did not confirm terminal completion" >&2
         AUTOSCALER_FAILURE=1
     fi
@@ -5426,6 +5524,7 @@ p=os.environ["RUN_JSON_PATH"]
 expected=os.environ["EXPECTED_TASK"]
 child_rc=int(os.environ["CHILD_RC"])
 try:
+    # Strict pass only: Claude Code credential SKIPs must not count as PASS.
     check=subprocess.run(
         [
             sys.executable,
@@ -5434,7 +5533,6 @@ try:
             "--expected-task",
             expected,
             "--require-pass",
-            "--allow-claude-code-credential-skip",
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

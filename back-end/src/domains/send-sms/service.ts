@@ -259,7 +259,11 @@ async function dispatchByEventType(
     case 'agent_started':
       await notifyAgentStarted(data.user_id, {
         id: data.agent_id,
-        goal: (payload.goal as string | undefined) ?? 'Unknown goal',
+        // Prefer the payload's goal (the worker may have refined it), but fall
+        // back to the goal already read off the Agent row rather than to the
+        // literal string "Unknown goal" — a caller that omits `goal` otherwise
+        // texts the user `Started: "Unknown goal"` about their own request.
+        goal: (payload.goal as string | undefined) ?? agentGoal,
       });
       break;
 

@@ -479,7 +479,7 @@ const KNOWN_THIRD_PARTY_HOSTS = [
   'stripe.com',
   'e2b.app',
   'verify.twilio.com',
-  'connect.steelbrowser.com',
+  ...'connect.steelbrowser.com|connect.steel.dev|api.steel.dev'.split('|'),
   'parallel.ai',
   'supabase.co',
   'twilio.com',

@@ -43,6 +43,7 @@ GATES = (
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
         "agent-behavior-approval",
@@ -67,10 +68,18 @@ GATES = (
     ),
     Gate("deploy-live-probes", ("python3", "scripts/tests/deploy-live-probes.test.py")),
     Gate("run-process-cleanup", ("bash", "scripts/tests/run-process-cleanup.test.sh")),
+    Gate(
+        "run-isolated-cloud-kill",
+        ("bash", "scripts/tests/run-isolated-cloud-kill.test.sh"),
+    ),
     Gate("run-seed-exit-code", ("bash", "scripts/tests/run-seed-exit-code.test.sh")),
     Gate(
         "run-public-tunnel-routing",
         ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"),
+    ),
+    Gate(
+        "setup-db-concurrency",
+        ("bash", "scripts/tests/setup-db-concurrency.test.sh"),
     ),
 )
 

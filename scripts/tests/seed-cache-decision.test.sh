@@ -35,6 +35,16 @@ check "no dump path → cold-sync" "cold-sync" "$(seed_cache_decision "" "$HASH"
 VALID="$TMP/valid.dump"; printf 'x' > "$VALID"; printf '%s' "$HASH" > "$VALID.schemahash"
 check "valid local dump → restore-local" "restore-local" "$(seed_cache_decision "$VALID" "$HASH" 1)"
 
+# Canonical base restores additionally require the immutable cache-token sidecar.
+# A same-schema daily snapshot is not evidence that the reviewed fixture rows
+# (including WhatsApp history) are present.
+CACHE_TOKEN="$HASH-victoria-prod-sync-v1-whatsapp-v2"
+check "same-schema dump without canonical token → consult-remote" \
+    "consult-remote" "$(seed_cache_decision "$VALID" "$HASH" 1 "$CACHE_TOKEN")"
+printf '%s' "$CACHE_TOKEN" > "$VALID.cachetoken"
+check "schema + canonical token → restore-local" \
+    "restore-local" "$(seed_cache_decision "$VALID" "$HASH" 1 "$CACHE_TOKEN")"
+
 # 3. THE BUG: stale dump (present, sidecar hash mismatched) + cache ON.
 #    Old `[ ! -s ]` guard skipped the cache and cold-synced. Must now consult-remote.
 STALE="$TMP/stale.dump"; printf 'x' > "$STALE"; printf 'OLD-drifted-hash' > "$STALE.schemahash"
@@ -61,16 +71,40 @@ check "zero-byte dump + cache on → consult-remote" "consult-remote" "$(seed_ca
 # Wiring guard: run.sh must actually source the helper and branch on the decision,
 # so the fix can't regress by reverting run.sh to the inline `[ ! -s ]` guard.
 if grep -q 'lib/seed-cache.sh' "$ROOT_DIR/scripts/run.sh" \
-   && grep -q 'seed_cache_decision' "$ROOT_DIR/scripts/run.sh"; then
+   && grep -q 'seed_cache_decision' "$ROOT_DIR/scripts/run.sh" \
+   && grep -q 'benchmark_base_cache_token' "$ROOT_DIR/scripts/run.sh" \
+   && grep -q '\.cachetoken' "$ROOT_DIR/scripts/run.sh"; then
     PASS=$((PASS+1)); echo "  ✅ run.sh sources + calls seed_cache_decision"
 else
-    FAIL=$((FAIL+1)); echo "  ❌ run.sh does not wire seed_cache_decision"
+    FAIL=$((FAIL+1)); echo "  ❌ run.sh does not wire the canonical base cache identity"
 fi
 # And it must NOT reintroduce the buggy guard that skipped the cache on any dump.
 if grep -qE '\[ *! *-s *"\$_SEED_DUMP" *\].*seed-dump-cache|! -s "\$_SEED_DUMP" \] && \[ "\$_SEED_CACHE_ENABLED"' "$ROOT_DIR/scripts/run.sh"; then
     FAIL=$((FAIL+1)); echo "  ❌ run.sh still gates the R2 download on '! -s dump' (the stale-dump bug)"
 else
     PASS=$((PASS+1)); echo "  ✅ run.sh no longer gates the R2 download on '! -s dump'"
+fi
+if grep -q 'BENCHMARK_PUBLISH_SEED_DUMP' "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ ordinary cold syncs cannot overwrite the canonical base artifact"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ canonical base publication is not explicitly gated"
+fi
+# Ubuntu's `pg_dump --version` ends with "...24.04.1)"; a greedy "last X.Y" sed
+# extracts 04 and looks up a nonexistent pg04 cache token. Anchor at the first
+# version number so system-PG hosts keep matching the pg16 (or real major) artifact.
+_PG_MAJOR_SED="$(printf '%s\n' 'pg_dump (PostgreSQL) 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)' \
+  | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+if [ "$_PG_MAJOR_SED" = "16" ] \
+  && grep -q "s/^\\[^0-9\\]*(\\([0-9]\\+\\))\\\\..*/\\\\1/" "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+else
+    # Prefer the literal sed source form used in run.sh.
+    if [ "$_PG_MAJOR_SED" = "16" ] \
+      && grep -F "s/^[^0-9]*([0-9]+)\\..*/\\1/" "$ROOT_DIR/scripts/run.sh"; then
+      PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+    else
+      FAIL=$((FAIL+1)); echo "  ❌ system pg_dump major parsing still vulnerable to Ubuntu package suffix (got '${_PG_MAJOR_SED}')"
+    fi
 fi
 
 echo
@@ -269,6 +303,54 @@ if [ "$FAILED_PUBLISH_STATUS" -ne 0 ] \
     PASS=$((PASS+1)); echo "  ✅ failed publication preserves the prior pair and releases lock/temp state"
 else
     FAIL=$((FAIL+1)); echo "  ❌ failed publication corrupted state or leaked lock/temp files"
+fi
+
+# System-Postgres materialize path (Cloud: ROSE_USE_SYSTEM_PG / Docker overlay
+# mount failures). Must dump via host pg_dump, not docker exec.
+rm -f "$EXPECTED_PATH" "${EXPECTED_PATH}.schemahash"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$SEED_DUMP_TEST_LOG"' \
+    'printf "seed-dump-from-system-pg\n"' \
+    > "$FAKE_BIN/pg_dump"
+chmod +x "$FAKE_BIN/pg_dump"
+: > "${SEED_DUMP_TEST_LOG:=$TMP/system-pg-dump.log}"
+export SEED_DUMP_TEST_LOG
+set +e
+SYSTEM_MATERIALIZED_PATH="$(
+    PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" system 20260723
+)"
+SYSTEM_MATERIALIZE_STATUS=$?
+set -e
+if [ "$SYSTEM_MATERIALIZE_STATUS" -eq 0 ] \
+   && [ "$SYSTEM_MATERIALIZED_PATH" = "$EXPECTED_PATH" ] \
+   && [ "$(cat "$EXPECTED_PATH" 2>/dev/null)" = "seed-dump-from-system-pg" ] \
+   && grep -q -- '-h localhost -p 5432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"; then
+    PASS=$((PASS+1)); echo "  ✅ system token materializes via host pg_dump (no Docker)"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"
+fi
+
+# setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
+SETUP_DB="$ROOT_DIR/scripts/setup-db.sh"
+if grep -q 'ROSE_USE_SYSTEM_PG' "$SETUP_DB" \
+   && grep -q 'SEED_DUMP_SOURCE="system"' "$SETUP_DB" \
+   && grep -q 'use_system_postgres' "$SETUP_DB"; then
+    PASS=$((PASS+1)); echo "  ✅ setup-db.sh owns the system-Postgres sync path"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ setup-db.sh missing ROSE_USE_SYSTEM_PG / system seed source wiring"
+fi
+
+# Fleet must fail closed before provisioning when the cloud-guest (pg15)
+# canonical seed dump is missing — otherwise every clone dies at the barrier.
+FLEET="$ROOT_DIR/scripts/run-bench-fleet"
+if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
+   && grep -q 'Missing canonical base fixture for cloud guests' "$FLEET" \
+   && grep -q 'seed-dump-cache.ts get' "$FLEET"; then
+    PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"
 fi
 
 echo "RESULTS: $PASS passed, $FAIL failed"

@@ -1,5 +1,5 @@
 import type { Prisma } from '@prisma/client';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import type { CreateAttentionRequestInput } from './types';
 
 export async function create(data: CreateAttentionRequestInput) {
@@ -48,7 +48,7 @@ export async function appendGateWaiter(
   workflowId: string,
   agentId: string
 ): Promise<{ pending: boolean; response: string | null }> {
-  return prisma.$transaction(async (tx) => {
+  return runTransactionWithRetry(async (tx) => {
     const locked = await tx.$queryRaw<Array<{ id: string }>>`
       SELECT id FROM "AgentAttentionRequest" WHERE id = ${id} FOR UPDATE`;
     if (locked.length === 0) return { pending: false, response: null };

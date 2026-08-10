@@ -9,7 +9,11 @@
  * No UI rendering, no business logic beyond "get bytes in / get bytes out".
  */
 
-import type { QuickQueryToggleState, QuickQueryPayload } from '../../../shared/types/ipc';
+import type {
+  QuickQueryToggleState,
+  QuickQueryPayload,
+  QuickQueryResizePayload,
+} from '../../../shared/types/ipc';
 
 /**
  * Subscribe to Quick-Query toggle events from the main process.
@@ -55,4 +59,26 @@ export const submitQuickQuery = async (
  */
 export const hideQuickQuery = async (): Promise<{ success: boolean }> => {
   return window.api.hideQuickQuery();
+};
+
+/**
+ * Ask the main process to resize the launcher BrowserWindow content area.
+ *
+ * Used when attachment chips appear/disappear so the fixed-size frameless
+ * window grows just enough to show the chip row without clipping.
+ */
+export const resizeQuickQuery = async (
+  payload: QuickQueryResizePayload
+): Promise<{ success: boolean }> => {
+  return window.api.resizeQuickQuery(payload);
+};
+
+/**
+ * Tell main whether an OS file-drag is over the launcher.
+ *
+ * Starting a Finder/screenshot drag blurs the launcher; main defers blur-hide
+ * and cancels it while this is true so the drop does not land on apps behind.
+ */
+export const setQuickQueryFileDrag = async (active: boolean): Promise<{ success: boolean }> => {
+  return window.api.setQuickQueryFileDrag({ active });
 };

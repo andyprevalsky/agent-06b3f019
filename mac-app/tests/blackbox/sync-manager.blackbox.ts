@@ -3,7 +3,7 @@
  *
  * Domain entry: main/services/sync/index.ts (SyncManager, IntegrationCache).
  * SyncManager orchestrates every per-platform sync service (iMessage, Telegram,
- * WhatsApp, cookies, browser state), the IMessage queue poller, and the shared
+ * WhatsApp, browser state), the IMessage queue poller, and the shared
  * IntegrationCache which is the only component in the domain that hits the
  * backend API (GET {apiUrl}/api/integrations).
  *
@@ -60,12 +60,6 @@ vi.mock('../../main/services/iMessageSync', () => ({
     sync: vi.fn(async () => {}),
     startRealTimeSync: vi.fn(),
     stopRealTimeSync: vi.fn(),
-  },
-}));
-
-vi.mock('../../main/services/cookieSync', () => ({
-  CookieSync: {
-    sync: vi.fn(async () => {}),
   },
 }));
 
@@ -130,7 +124,6 @@ vi.mock('../../main/services/IMessageQueueService', () => ({
 import { SyncManager, IntegrationCache } from '../../main/services/sync';
 import { AuthService } from '../../main/services/auth';
 import { IMessageSync } from '../../main/services/iMessageSync';
-import { CookieSync } from '../../main/services/cookieSync';
 import { BrowserStateSync } from '../../main/services/browserStateSync';
 import { ClaudeCredentialSync } from '../../main/services/claudeCredentialSync';
 import { GptCredentialSync } from '../../main/services/gptCredentialSync';
@@ -222,7 +215,6 @@ describe('sync-manager blackbox', () => {
 
       // No per-platform sync should run.
       expect(vi.mocked(IMessageSync.sync)).not.toHaveBeenCalled();
-      expect(vi.mocked(CookieSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
       // No backend fetch to /api/integrations should happen when unauthenticated.
       expect(integrationCalls()).toHaveLength(0);
@@ -248,10 +240,8 @@ describe('sync-manager blackbox', () => {
 
       await SyncManager.startAll();
 
-      // iMessage + browser-state + cookies all have syncOnStartup=true and match
-      // the connected set (imessage + chrome).
+      // Chrome state has one startup owner: BrowserStateSync includes cookies.
       expect(vi.mocked(IMessageSync.sync)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(CookieSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(BrowserStateSync.sync)).toHaveBeenCalledTimes(1);
       expect(
         vi.mocked(ClaudeCredentialSync.syncExistingCredentialsIfChanged)
@@ -368,7 +358,6 @@ describe('sync-manager blackbox', () => {
       await SyncManager.startAll();
 
       expect(vi.mocked(IMessageSync.sync)).not.toHaveBeenCalled();
-      expect(vi.mocked(CookieSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(TelegramSync.connectWithExistingSession)).not.toHaveBeenCalled();
       expect(vi.mocked(WhatsAppSync.connect)).not.toHaveBeenCalled();
@@ -399,7 +388,6 @@ describe('sync-manager blackbox', () => {
 
       // Empty integration set means no sync work.
       expect(vi.mocked(IMessageSync.sync)).not.toHaveBeenCalled();
-      expect(vi.mocked(CookieSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
 
       // Queue + realtime still initialize so user recovery is possible.
@@ -417,7 +405,6 @@ describe('sync-manager blackbox', () => {
       await expect(SyncManager.startAll()).resolves.toBeUndefined();
 
       // Other connected platforms still ran.
-      expect(vi.mocked(CookieSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(BrowserStateSync.sync)).toHaveBeenCalledTimes(1);
     });
 
@@ -538,7 +525,6 @@ describe('sync-manager blackbox', () => {
       await SyncManager.syncNow('imessage');
 
       expect(vi.mocked(IMessageSync.sync)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(CookieSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
     });
 
@@ -562,7 +548,6 @@ describe('sync-manager blackbox', () => {
       await SyncManager.syncNow();
 
       expect(vi.mocked(IMessageSync.sync)).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(CookieSync.sync)).toHaveBeenCalledTimes(1);
       expect(vi.mocked(BrowserStateSync.sync)).toHaveBeenCalledTimes(1);
     });
 
@@ -573,7 +558,6 @@ describe('sync-manager blackbox', () => {
       await SyncManager.syncNow();
 
       expect(vi.mocked(IMessageSync.sync)).not.toHaveBeenCalled();
-      expect(vi.mocked(CookieSync.sync)).not.toHaveBeenCalled();
       expect(vi.mocked(BrowserStateSync.sync)).not.toHaveBeenCalled();
       expect(fetchCaptures).toHaveLength(0);
     });
@@ -605,7 +589,7 @@ describe('sync-manager blackbox', () => {
 
 /**
  * Every sync below uploads data harvested from THIS machine — the operator's
- * iMessage history, browser cookies and passwords, and compute credentials —
+ * iMessage history, consolidated browser state, and compute credentials —
  * authenticated as the current session. While an admin is impersonating, that
  * session belongs to the TARGET user, so an unguarded sync writes the operator's
  * personal data into someone else's account. That is silent cross-account
@@ -657,12 +641,10 @@ describe('sync-manager refuses to sync while impersonating', () => {
     vi.mocked(AuthService.getSession).mockResolvedValue(impersonatedSession);
 
     await SyncManager.syncNow('imessage');
-    await SyncManager.syncNow('cookies');
     await SyncManager.syncNow('browserState');
     await SyncManager.syncNow('compute');
 
     expect(IMessageSync.sync).not.toHaveBeenCalled();
-    expect(CookieSync.sync).not.toHaveBeenCalled();
     expect(BrowserStateSync.sync).not.toHaveBeenCalled();
     expect(ClaudeCredentialSync.syncExistingCredentialsIfChanged).not.toHaveBeenCalled();
     expect(GptCredentialSync.syncExistingCredentialsIfChanged).not.toHaveBeenCalled();

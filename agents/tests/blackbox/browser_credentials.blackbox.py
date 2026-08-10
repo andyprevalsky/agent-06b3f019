@@ -20,7 +20,7 @@ def test_steel_cdp_key_is_materialized_only_at_connection_boundary() -> None:
     previous = os.environ.get("STEEL_API_KEY")
     os.environ["STEEL_API_KEY"] = "worker-steel-secret"
     try:
-        public_url = "wss://connect.steelbrowser.com?sessionId=session-1"
+        public_url = "wss://connect.steel.dev?sessionId=session-1"
         connected = steel_cdp_connection_url(public_url)
         query = parse_qs(urlsplit(connected).query)
         assert query == {"sessionId": ["session-1"], "apiKey": ["worker-steel-secret"]}
@@ -116,6 +116,78 @@ async def test_cross_realm_goto_prepares_complete_credentials_before_navigation(
         "credential_payload",
     ):
         assert sensitive_key not in serialized_result
+
+
+async def test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fails() -> None:
+    from domains.spawn_browser_agent_v3.service_actions import _execute_goto
+
+    events: list[str] = []
+
+    class FakeEvent:
+        def __await__(self):
+            async def done():
+                return None
+
+            return done().__await__()
+
+        async def event_result(self, **_kwargs):
+            return None
+
+    class FakeEventBus:
+        def dispatch(self, _event):
+            events.append("navigate")
+            return FakeEvent()
+
+    async def fail_optional_credentials(_target_url: str):
+        events.append("prepare_credentials")
+        raise RuntimeError("realm state decode failed")
+
+    action_history = SimpleNamespace(record_action=AsyncMock())
+    result = await _execute_goto(
+        session=SimpleNamespace(event_bus=FakeEventBus()),
+        dom_service=SimpleNamespace(),
+        action_history=action_history,
+        params={"url": "https://www.google.com/search?q=movie+genre"},
+        thinking="compare showtimes",
+        session_id="session-1",
+        config=SimpleNamespace(),
+        current_auth_realm="amctheatres.com",
+        prepare_credentials_for_url=fail_optional_credentials,
+        wait_for_navigation=AsyncMock(),
+    )
+
+    assert events == ["prepare_credentials", "navigate"], events
+    assert result == {
+        "success": True,
+        "message": "",
+        "current_url": "https://www.google.com/search?q=movie+genre",
+    }
+    action_history.record_action.assert_awaited_once()
+
+
+async def test_redirected_realm_failure_is_quarantined_after_any_prep_stage() -> None:
+    from domains.spawn_browser_agent_v3.handler import prepare_optional_realm_credentials
+
+    failed_realms: dict[str, str] = {}
+    calls: list[str] = []
+
+    async def fail_after_prepare_auth(target_url: str):
+        calls.append(target_url)
+        raise ValueError("credential realm mismatch after payload decode")
+
+    for _attempt in range(2):
+        prepared = await prepare_optional_realm_credentials(
+            target_url="https://www.google.com/search?q=movie+genre",
+            current_auth_realm="amctheatres.com",
+            failed_realms=failed_realms,
+            prepare_credentials=fail_after_prepare_auth,
+        )
+        assert prepared is None
+
+    assert calls == ["https://www.google.com/search?q=movie+genre"]
+    assert failed_realms == {
+        "google.com": "ValueError:credential realm mismatch after payload decode"
+    }
 
 
 def test_worker_and_backend_use_the_same_canonical_auth_realms() -> None:
@@ -396,6 +468,67 @@ async def test_passkeys_from_multiple_realms_share_one_live_authenticator() -> N
     ]
 
 
+async def test_passkey_injection_recovers_after_virtual_environment_loss() -> None:
+    """A navigation-reset WebAuthn environment must be rebuilt before passkey use."""
+    from browser_tools.dom_service import DOMService
+
+    calls: list[str] = []
+    credentials: list[dict] = []
+    webauthn_enabled = False
+    authenticator_number = 0
+
+    async def send(method: str, params: dict):
+        nonlocal authenticator_number, webauthn_enabled
+        calls.append(method)
+        if method == "WebAuthn.enable":
+            webauthn_enabled = True
+            return {}
+        if method == "WebAuthn.addVirtualAuthenticator":
+            if not webauthn_enabled:
+                raise AssertionError("authenticator created before WebAuthn.enable")
+            authenticator_number += 1
+            return {"authenticatorId": f"authenticator-{authenticator_number}"}
+        if method == "WebAuthn.addCredential":
+            if not webauthn_enabled:
+                raise AssertionError("credential added before WebAuthn.enable")
+            credentials.append(dict(params["credential"]))
+            return {}
+        if method == "WebAuthn.getCredentials":
+            if not webauthn_enabled:
+                raise RuntimeError(
+                    {
+                        "code": -32000,
+                        "message": "The Virtual Authenticator Environment has not been enabled for this session",
+                    }
+                )
+            return {"credentials": list(credentials)}
+        raise AssertionError(method)
+
+    dom = DOMService(cdp_url="")
+    dom._webauthn_cdp = SimpleNamespace(send=send)
+    passkeys = [
+        {
+            "credentialId": "credential-amazon",
+            "privateKey": "private-amazon",
+            "rpId": "amazon.com",
+            "signCount": 7,
+        }
+    ]
+
+    assert await dom.inject_passkeys(passkeys) == 1
+
+    # Reproduce the live boundary: the target navigation invalidated WebAuthn,
+    # while DOMService retained the old authenticator id and seed cache.
+    webauthn_enabled = False
+    credentials.clear()
+
+    assert await dom.inject_passkeys(passkeys) == 1
+    assert calls.count("WebAuthn.enable") == 2
+    assert calls.count("WebAuthn.addVirtualAuthenticator") == 2
+    assert calls.count("WebAuthn.addCredential") == 2
+    assert await dom.read_passkey_signcounts() == {"credential-amazon": 7}
+
+
 async def run_all_tests():
     print("browser-credentials blackbox tests:")
     runner = BlackboxResult()
@@ -406,6 +539,14 @@ async def run_all_tests():
     await runner.record_async(
         "cross_realm_goto_prepares_complete_credentials_before_navigation",
         test_cross_realm_goto_prepares_complete_credentials_before_navigation,
+    )
+    await runner.record_async(
+        "cross_realm_goto_continues_guest_navigation_when_optional_prep_fails",
+        test_cross_realm_goto_continues_guest_navigation_when_optional_prep_fails,
+    )
+    await runner.record_async(
+        "redirected_realm_failure_is_quarantined_after_any_prep_stage",
+        test_redirected_realm_failure_is_quarantined_after_any_prep_stage,
     )
     runner.record(
         "worker_and_backend_use_the_same_canonical_auth_realms",
@@ -430,5 +571,9 @@ async def run_all_tests():
     await runner.record_async(
         "passkeys_from_multiple_realms_share_one_live_authenticator",
         test_passkeys_from_multiple_realms_share_one_live_authenticator,
+    )
+    await runner.record_async(
+        "passkey_injection_recovers_after_virtual_environment_loss",
+        test_passkey_injection_recovers_after_virtual_environment_loss,
     )
     return runner.all_passed

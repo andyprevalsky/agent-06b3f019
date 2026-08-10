@@ -220,11 +220,14 @@ export async function closeSession(
   await closeSteelSession(sessionId, pause, currentUrl);
 }
 
-export async function resumeSession(taskId: string): Promise<BrowserProviderResumeSession> {
+export async function resumeSession(
+  taskId: string,
+  options: { forceFreshProfile?: boolean } = {}
+): Promise<BrowserProviderResumeSession> {
   const provider = await providerForTask(taskId);
   if (provider === 'kernel') return resumeKernelSession(taskId);
 
-  const replacement = await resumeSteelSession(taskId);
+  const replacement = await resumeSteelSession(taskId, options);
   const { previousSessionId, previousProvider, ...session } = replacement;
   await releaseSupersededBrowser({
     taskId,

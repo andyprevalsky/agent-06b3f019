@@ -10,6 +10,8 @@ import base64
 import inspect
 import json
 import time as time_module
+from contextlib import suppress
+from dataclasses import dataclass
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlparse
@@ -25,6 +27,7 @@ from domains.spawn_browser_agent_v3.service_crypto import (
     auth_realm_matches_url,
     has_payment_card_secret_refs,
 )
+from utils.error_utils import extract_error_message
 from utils.purchase_approval import validate_product_url_for_pages
 
 if TYPE_CHECKING:
@@ -129,6 +132,74 @@ def get_domain_from_url(url: str) -> str:
         return ""
 
 
+async def _wait_for_navigation_content(page: Any, deadline: float) -> Dict[str, Any]:
+    last_state: Dict[str, Any] = {}
+    while time_module.monotonic() < deadline:
+        try:
+            wait_for_load_state = getattr(page, "wait_for_load_state", None)
+            if wait_for_load_state:
+                with suppress(Exception):
+                    wait_result = wait_for_load_state("domcontentloaded", timeout=1500)
+                    if inspect.isawaitable(wait_result):
+                        await wait_result
+
+            evaluate = getattr(page, "evaluate", None)
+            if not evaluate:
+                return {"ready": False, "reason": "no_page_evaluate", "state": last_state}
+            evaluate_result = evaluate(
+                """() => {
+                    const body = document.body;
+                    const roots = Array.from(document.querySelectorAll('#root, #__next, [data-reactroot]'));
+                    const rootStats = roots.map((root) => ({
+                        children: root.children ? root.children.length : 0,
+                        textLength: ((root.innerText || root.textContent || '').trim()).length,
+                        controls: root.querySelectorAll
+                          ? root.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
+                          : 0,
+                    }));
+                    const rootChildren = rootStats.reduce((sum, item) => sum + item.children, 0);
+                    const rootTextLength = rootStats.reduce((sum, item) => sum + item.textLength, 0);
+                    const rootControls = rootStats.reduce((sum, item) => sum + item.controls, 0);
+                    const bodyTextLength = body ? ((body.innerText || '').trim()).length : 0;
+                    const bodyChildren = body && body.children ? body.children.length : 0;
+                    const bodyControls = body && body.querySelectorAll
+                      ? body.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
+                      : 0;
+                    const hasAppRoot = roots.length > 0;
+                    const appRootReady = hasAppRoot && (rootChildren > 0 || rootTextLength > 0 || rootControls > 0);
+                    const plainPageReady = !hasAppRoot && (bodyTextLength > 0 || bodyControls > 0);
+                    return {
+                        readyState: document.readyState,
+                        href: location.href,
+                        title: document.title,
+                        hasAppRoot,
+                        appRootReady,
+                        plainPageReady,
+                        bodyTextLength,
+                        bodyChildren,
+                        bodyControls,
+                        rootChildren,
+                        rootTextLength,
+                        rootControls,
+                        blankSpaShell: hasAppRoot && !appRootReady,
+                    };
+                }"""
+            )
+            if not inspect.isawaitable(evaluate_result):
+                return {"ready": False, "reason": "page_evaluate_not_awaitable", "state": last_state}
+            state = await evaluate_result
+            if isinstance(state, str):
+                with suppress(Exception):
+                    state = json.loads(state)
+            last_state = state if isinstance(state, dict) else {"raw": state}
+            if last_state.get("appRootReady") or last_state.get("plainPageReady"):
+                return {"ready": True, "state": last_state}
+        except Exception as error:
+            last_state = {"error": str(error)}
+        await asyncio.sleep(0.25)
+    return {"ready": False, "state": last_state}
+
+
 async def wait_for_navigation_ready(
     dom_service: DOMService,
     *,
@@ -149,78 +220,7 @@ async def wait_for_navigation_ready(
         logger.warning("Navigation readiness could not get current page", url=url, error=str(exc))
         return {"ready": False, "reason": "get_current_page_failed", "error": str(exc)}
 
-    async def _wait_for_content(deadline: float) -> Dict[str, Any]:
-        last_state: Dict[str, Any] = {}
-        while time_module.monotonic() < deadline:
-            try:
-                wait_for_load_state = getattr(page, "wait_for_load_state", None)
-                if wait_for_load_state:
-                    try:
-                        wait_result = wait_for_load_state("domcontentloaded", timeout=1500)
-                        if inspect.isawaitable(wait_result):
-                            await wait_result
-                    except Exception:
-                        pass
-
-                evaluate = getattr(page, "evaluate", None)
-                if not evaluate:
-                    return {"ready": False, "reason": "no_page_evaluate", "state": last_state}
-                evaluate_result = evaluate(
-                    """() => {
-                        const body = document.body;
-                        const roots = Array.from(document.querySelectorAll('#root, #__next, [data-reactroot]'));
-                        const rootStats = roots.map((root) => ({
-                            children: root.children ? root.children.length : 0,
-                            textLength: ((root.innerText || root.textContent || '').trim()).length,
-                            controls: root.querySelectorAll
-                              ? root.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
-                              : 0,
-                        }));
-                        const rootChildren = rootStats.reduce((sum, item) => sum + item.children, 0);
-                        const rootTextLength = rootStats.reduce((sum, item) => sum + item.textLength, 0);
-                        const rootControls = rootStats.reduce((sum, item) => sum + item.controls, 0);
-                        const bodyTextLength = body ? ((body.innerText || '').trim()).length : 0;
-                        const bodyChildren = body && body.children ? body.children.length : 0;
-                        const bodyControls = body && body.querySelectorAll
-                          ? body.querySelectorAll('button, input, select, textarea, a[href], [role="button"]').length
-                          : 0;
-                        const hasAppRoot = roots.length > 0;
-                        const appRootReady = hasAppRoot && (rootChildren > 0 || rootTextLength > 0 || rootControls > 0);
-                        const plainPageReady = !hasAppRoot && (bodyTextLength > 0 || bodyControls > 0);
-                        return {
-                            readyState: document.readyState,
-                            href: location.href,
-                            title: document.title,
-                            hasAppRoot,
-                            appRootReady,
-                            plainPageReady,
-                            bodyTextLength,
-                            bodyChildren,
-                            bodyControls,
-                            rootChildren,
-                            rootTextLength,
-                            rootControls,
-                            blankSpaShell: hasAppRoot && !appRootReady,
-                        };
-                    }"""
-                )
-                if not inspect.isawaitable(evaluate_result):
-                    return {"ready": False, "reason": "page_evaluate_not_awaitable", "state": last_state}
-                state = await evaluate_result
-                if isinstance(state, str):
-                    try:
-                        state = json.loads(state)
-                    except Exception:
-                        pass
-                last_state = state if isinstance(state, dict) else {"raw": state}
-                if last_state.get("appRootReady") or last_state.get("plainPageReady"):
-                    return {"ready": True, "state": last_state}
-            except Exception as exc:
-                last_state = {"error": str(exc)}
-            await asyncio.sleep(0.25)
-        return {"ready": False, "state": last_state}
-
-    first = await _wait_for_content(time_module.monotonic() + timeout_seconds)
+    first = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if first.get("ready") or not reload_blank_spa_once:
         if not first.get("ready"):
             logger.warning("Navigation finished without usable page content", url=url, state=first.get("state"))
@@ -256,7 +256,7 @@ async def wait_for_navigation_ready(
         logger.warning("Blank SPA shell reload failed", url=url, error=str(exc))
         return {"ready": False, "reason": "reload_failed", "state": state, "error": str(exc)}
 
-    second = await _wait_for_content(time_module.monotonic() + timeout_seconds)
+    second = await _wait_for_navigation_content(page, time_module.monotonic() + timeout_seconds)
     if not second.get("ready"):
         logger.warning("Page still lacked usable content after reload", url=url, state=second.get("state"))
     return second
@@ -294,7 +294,422 @@ def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url
 # ========================================
 
 
-async def execute_action(  # noqa: C901
+@dataclass
+class _ActionContext:
+    dom_service: DOMService
+    action_history: ActionHistory
+    session: Any
+    action_name: str
+    index: Any
+    params: Dict[str, Any]
+    thinking: Any
+    coords: Any
+    element: Any
+    available_file_paths: Optional[Dict[str, str]]
+    session_id: Optional[str]
+    config: Any
+    humanizer: Optional[BrowserHumanizer]
+    secret_refs: Optional[Dict[str, str]]
+    password_origins: Optional[Dict[str, str]]
+    credential_refs_by_secret_ref: Optional[Dict[str, Dict[str, str]]]
+    current_url: str
+    trusted_page_urls: Optional[List[str]]
+    write_lock_enabled: bool
+    write_lock_approvals: Optional[Dict[str, Dict]]
+    system_name: str
+    browser_network_recorder: Optional[Any]
+    current_auth_realm: str
+    prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
+
+
+_INTERACTION_ACTIONS = {
+    "click",
+    "input_text",
+    "press_key",
+    "scroll",
+    "dropdown_options",
+    "select_dropdown",
+    "upload_file",
+}
+_NAVIGATION_ACTIONS = {"goto", "navback", "wait", "switch_tab", "close_tab", "open_new_tab"}
+_INSPECTION_ACTIONS = {"read_network_requests", "evaluate", "extract", "screenshot"}
+_TERMINAL_ACTIONS = {
+    "request_payment_card",
+    "done",
+    "attempt_completion",
+    "send_message_to_user",
+    "generate_write_lock_notification",
+}
+
+
+async def _execute_request_payment_card_action(context: _ActionContext) -> Dict[str, Any]:
+    if has_payment_card_secret_refs(context.secret_refs):
+        return {
+            "success": False,
+            "error": (
+                "Payment approval is already complete. Do not call request_payment_card again. "
+                "Type the existing secret refs card_number, card_name, card_expiry, and card_cvv "
+                "into the payment fields, then submit the checkout form."
+            ),
+        }
+    try:
+        payment_request = RequestPaymentCardBrowserTool.model_validate(
+            {"tool": context.action_name, **context.params}
+        )
+        for item in payment_request.line_items:
+            validate_product_url_for_pages(
+                item.product_url,
+                [*(context.trusted_page_urls or []), context.current_url],
+            )
+    except ValueError as error:
+        hint = ""
+        if any(term in str(error).lower() for term in ("rating", "review")):
+            hint = (
+                " If this page genuinely has no rating/reviews (e.g. a service, ticket, "
+                "or event booking), pass rating '0 stars' and review_count '0 reviews', "
+                "do not use 'N/A', 'none', or a made-up number, and do not keep searching "
+                "for a rating that is not shown."
+            )
+        return {"success": False, "error": f"request_payment_card receipt is incomplete: {error}.{hint}"}
+    return {
+        "status": "awaiting_payment_card_approval",
+        "payment_request": context.params,
+        "current_url": context.current_url,
+    }
+
+
+async def _execute_read_network_requests_action(context: _ActionContext) -> Dict[str, Any]:
+    recorder = context.browser_network_recorder
+    if recorder is None:
+        return {
+            "success": False,
+            "error": (
+                "Network capture is not attached to this browser session, so there is "
+                "nothing to read. Rely on the DOM tree and screenshots instead."
+            ),
+        }
+    params = context.params
+    include_bodies = bool(params.get("include_bodies"))
+    requests = recorder.query_requests(
+        url_pattern=str(params.get("url_pattern") or ""),
+        method=str(params.get("method") or ""),
+        status=str(params.get("status") or ""),
+        resource_type=str(params.get("resource_type") or ""),
+        limit=int(params.get("limit") or 100),
+        clear=bool(params.get("clear")),
+        include_query=bool(params.get("include_query")),
+        include_headers=bool(params.get("include_headers")),
+        include_bodies=include_bodies,
+        max_body_chars=int(params.get("max_body_chars") or 4000),
+    )
+    with_bodies = sum(1 for row in requests if row.get("body_available"))
+    message = f"Captured {len(requests)} network request(s)."
+    if requests and not include_bodies and with_bodies:
+        message += (
+            f" {with_bodies} have a captured response body - re-run with include_bodies=true"
+            " (optionally narrowed by url_pattern) to read them."
+        )
+    recorded_params = {
+        key: params[key]
+        for key in (
+            "url_pattern",
+            "method",
+            "status",
+            "resource_type",
+            "limit",
+            "clear",
+            "include_query",
+            "include_headers",
+            "include_bodies",
+            "max_body_chars",
+        )
+        if key in params
+    }
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="read_network_requests",
+        thinking=context.thinking,
+        params=recorded_params,
+        result={"success": True, "count": len(requests)},
+    )
+    return {"success": True, "message": message, "requests": requests}
+
+
+async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]:
+    from browser_use.browser.events import (
+        GetDropdownOptionsEvent,
+        ScrollEvent,
+        SelectDropdownOptionEvent,
+        SendKeysEvent,
+    )
+
+    if context.action_name == "click":
+        return await _execute_click(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            element=context.element,
+            index=context.index,
+            coords=context.coords,
+            thinking=context.thinking,
+            humanizer=context.humanizer,
+            write_lock_enabled=context.write_lock_enabled,
+            write_lock_approvals=context.write_lock_approvals,
+            current_url=context.current_url,
+            system_name=context.system_name,
+        )
+    if context.action_name == "input_text":
+        return await _execute_input_text(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            element=context.element,
+            index=context.index,
+            coords=context.coords,
+            params=context.params,
+            thinking=context.thinking,
+            humanizer=context.humanizer,
+            secret_refs=context.secret_refs,
+            password_origins=context.password_origins,
+            credential_refs_by_secret_ref=context.credential_refs_by_secret_ref,
+            current_url=context.current_url,
+            write_lock_enabled=context.write_lock_enabled,
+            write_lock_approvals=context.write_lock_approvals,
+            system_name=context.system_name,
+        )
+    if context.action_name == "press_key":
+        key = context.params.get("key", "")
+        if context.humanizer:
+            await context.humanizer.press_key(key)
+        else:
+            logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
+            event = context.session.event_bus.dispatch(SendKeysEvent(keys=key))
+            await event
+            await event.event_result(raise_if_any=True, raise_if_none=False)
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="press_key",
+            thinking=context.thinking,
+            params={"key": key},
+            result={"success": True},
+        )
+        return {"success": True, "message": ""}
+    if context.action_name == "scroll":
+        direction = context.params.get("direction", "down")
+        amount = context.params.get("amount", 300)
+        delta_y = amount if direction == "down" else -amount
+        if context.humanizer:
+            await context.humanizer.scroll(delta_y)
+        else:
+            logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use ScrollEvent")
+            event = context.session.event_bus.dispatch(
+                ScrollEvent(
+                    direction=direction,
+                    amount=amount,
+                    node=context.element if context.index is not None else None,
+                )
+            )
+            await event
+            await event.event_result(raise_if_any=True, raise_if_none=False)
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="scroll",
+            thinking=context.thinking,
+            index=context.index,
+            params={"direction": direction, "amount": amount},
+            result={"success": True},
+        )
+        return {"success": True, "message": ""}
+    if context.action_name == "dropdown_options":
+        if not context.element:
+            return {"success": False, "error": "Dropdown requires an element index"}
+        event = context.session.event_bus.dispatch(GetDropdownOptionsEvent(node=context.element))
+        await event
+        options = await event.event_result(raise_if_any=True, raise_if_none=False)
+        return {"success": True, "message": f"Dropdown options: {options}", "options": options}
+    if context.action_name == "select_dropdown":
+        if not context.element:
+            return {"success": False, "error": "Dropdown requires an element index"}
+        value = context.params.get("value", "")
+        event = context.session.event_bus.dispatch(
+            SelectDropdownOptionEvent(node=context.element, text=value)
+        )
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="select_dropdown",
+            thinking=context.thinking,
+            index=context.index,
+            params={"value": value},
+            result={"success": True},
+        )
+        return {"success": True, "message": ""}
+    return await _execute_upload_file(
+        session=context.session,
+        dom_service=context.dom_service,
+        action_history=context.action_history,
+        element=context.element,
+        index=context.index,
+        params=context.params,
+        thinking=context.thinking,
+        humanizer=context.humanizer,
+        available_file_paths=context.available_file_paths,
+    )
+
+
+async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
+    from browser_use.browser.events import GoBackEvent, NavigateToUrlEvent, WaitEvent
+
+    if context.action_name == "goto":
+        return await _execute_goto(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            params=context.params,
+            thinking=context.thinking,
+            session_id=context.session_id,
+            config=context.config,
+            current_auth_realm=context.current_auth_realm,
+            prepare_credentials_for_url=context.prepare_credentials_for_url,
+        )
+    if context.action_name == "navback":
+        event = context.session.event_bus.dispatch(GoBackEvent())
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="navback",
+            thinking=context.thinking,
+            result={"success": True},
+        )
+        return {"success": True, "message": ""}
+    if context.action_name == "wait":
+        try:
+            time_ms = normalize_browser_wait_ms(context.params.get("time_ms"), default=1000)
+        except ValueError as error:
+            return {"success": False, "error": str(error)}
+        event = context.session.event_bus.dispatch(WaitEvent(seconds=time_ms / 1000.0))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="wait",
+            thinking=context.thinking,
+            params={"time_ms": time_ms},
+            result={"success": True},
+        )
+        return {"success": True, "message": ""}
+    if context.action_name == "switch_tab":
+        return await _execute_switch_tab(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            params=context.params,
+            thinking=context.thinking,
+        )
+    if context.action_name == "close_tab":
+        return await _execute_close_tab(
+            session=context.session,
+            dom_service=context.dom_service,
+            action_history=context.action_history,
+            params=context.params,
+            thinking=context.thinking,
+        )
+
+    url = context.params.get("url") or "about:blank"
+    event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
+    await event
+    await event.event_result(raise_if_any=True, raise_if_none=False)
+    focused = context.session.get_focused_target()
+    new_tab_id = focused.target_id[-4:] if focused else None
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action="open_new_tab",
+        thinking=context.thinking,
+        params={"url": url},
+        result={"success": True, "new_tab_id": new_tab_id},
+    )
+    logger.info(f"➕ Opened new tab {new_tab_id} with URL: {url}")
+    return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
+
+
+async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "read_network_requests":
+        return await _execute_read_network_requests_action(context)
+    if context.action_name == "evaluate":
+        code = context.params.get("code", "")
+        cdp_session = await context.session.get_or_create_cdp_session(focus=True)
+        result = await cdp_session.cdp_client.send.Runtime.evaluate(
+            params={"expression": code, "returnByValue": True},
+            session_id=cdp_session.session_id,
+        )
+        value = result.get("result", {}).get("value")
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="evaluate",
+            thinking=context.thinking,
+            params={"code": code},
+            result={"success": True, "value": value},
+        )
+        return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
+    if context.action_name == "extract":
+        return {"success": False, "error": "extract is disabled. Use evaluate to read DOM/page content directly."}
+    return await _execute_screenshot(
+        session=context.session,
+        dom_service=context.dom_service,
+        action_history=context.action_history,
+        thinking=context.thinking,
+        session_id=context.session_id,
+        config=context.config,
+    )
+
+
+async def _execute_terminal_action(context: _ActionContext) -> Dict[str, Any]:
+    if context.action_name == "request_payment_card":
+        return await _execute_request_payment_card_action(context)
+    if context.action_name == "done":
+        text = context.params.get("text", "")
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="done",
+            thinking=context.thinking,
+            params={"text": text},
+            result={"success": True},
+        )
+        return {"success": True, "done": True, "message": text}
+    if context.action_name == "attempt_completion":
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="attempt_completion",
+            thinking=context.thinking,
+            params={},
+            result={"success": True},
+        )
+        return {"success": True, "attempt_completion": True}
+    if context.action_name == "send_message_to_user":
+        message = context.params.get("message", "")
+        reason = context.params.get("reason", "other")
+        await context.action_history.record_action(
+            dom_service=context.dom_service,
+            action="send_message_to_user",
+            thinking=context.thinking,
+            params={"message": message, "reason": reason},
+            result={"success": True},
+        )
+        return {"success": True, "message_to_user": True, "message": message, "reason": reason}
+    return {
+        "success": False,
+        "error": (
+            "Tool call error: generate_write_lock_notification is only for write-lock "
+            "notification forks. Do not call this tool unless the latest user message "
+            'explicitly contains the keyword "WRITE_LOCK_NOTIFICATION_FORK_REQUEST". '
+            "Continue the browser task with a normal browser action."
+        ),
+    }
+
+
+async def execute_action(
     dom_service: DOMService,
     action_history: ActionHistory,
     action: Dict[str, Any],
@@ -323,16 +738,6 @@ async def execute_action(  # noqa: C901
         Result dict with success, message, and any additional data.
         May return {"status": "needs_write_approval", ...} if write lock triggered.
     """
-    from browser_use.browser.events import (
-        GetDropdownOptionsEvent,
-        GoBackEvent,
-        NavigateToUrlEvent,
-        ScrollEvent,
-        SelectDropdownOptionEvent,
-        SendKeysEvent,
-        WaitEvent,
-    )
-
     session = dom_service.session
     if not session:
         return {"success": False, "error": "Browser not connected"}
@@ -350,387 +755,43 @@ async def execute_action(  # noqa: C901
             if not element:
                 return {"success": False, "error": f"Element with index {index} not found"}
 
-        if action_name == "click":
-            return await _execute_click(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                element=element,
-                index=index,
-                coords=coords,
-                thinking=thinking,
-                humanizer=humanizer,
-                write_lock_enabled=write_lock_enabled,
-                write_lock_approvals=write_lock_approvals,
-                current_url=current_url,
-                system_name=system_name,
-            )
-
-        elif action_name == "input_text":
-            return await _execute_input_text(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                element=element,
-                index=index,
-                coords=coords,
-                params=params,
-                thinking=thinking,
-                humanizer=humanizer,
-                secret_refs=secret_refs,
-                password_origins=password_origins,
-                credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                current_url=current_url,
-                write_lock_enabled=write_lock_enabled,
-                write_lock_approvals=write_lock_approvals,
-                system_name=system_name,
-            )
-
-        elif action_name == "request_payment_card":
-            if has_payment_card_secret_refs(secret_refs):
-                return {
-                    "success": False,
-                    "error": (
-                        "Payment approval is already complete. Do not call request_payment_card again. "
-                        "Type the existing secret refs card_number, card_name, card_expiry, and card_cvv "
-                        "into the payment fields, then submit the checkout form."
-                    ),
-                }
-            try:
-                payment_request = RequestPaymentCardBrowserTool.model_validate({"tool": action_name, **params})
-                for item in payment_request.line_items:
-                    validate_product_url_for_pages(
-                        item.product_url,
-                        [*(trusted_page_urls or []), current_url],
-                        current_page_url=current_url,
-                    )
-            except ValueError as error:
-                hint = ""
-                if any(term in str(error).lower() for term in ("rating", "review")):
-                    hint = (
-                        " If this page genuinely has no rating/reviews (e.g. a service, ticket, "
-                        "or event booking), pass rating '0 stars' and review_count '0 reviews', "
-                        "do not use 'N/A', 'none', or a made-up number, and do not keep searching "
-                        "for a rating that is not shown."
-                    )
-                return {
-                    "success": False,
-                    "error": f"request_payment_card receipt is incomplete: {error}.{hint}",
-                }
-            return {
-                "status": "awaiting_payment_card_approval",
-                "payment_request": params,
-                "current_url": current_url,
-            }
-
-        elif action_name == "read_network_requests":
-            if browser_network_recorder is None:
-                return {
-                    "success": False,
-                    "error": (
-                        "Network capture is not attached to this browser session, so there is "
-                        "nothing to read. Rely on the DOM tree and screenshots instead."
-                    ),
-                }
-            include_bodies = bool(params.get("include_bodies"))
-            requests = browser_network_recorder.query_requests(
-                url_pattern=str(params.get("url_pattern") or ""),
-                method=str(params.get("method") or ""),
-                status=str(params.get("status") or ""),
-                resource_type=str(params.get("resource_type") or ""),
-                limit=int(params.get("limit") or 100),
-                clear=bool(params.get("clear")),
-                include_query=bool(params.get("include_query")),
-                include_headers=bool(params.get("include_headers")),
-                include_bodies=include_bodies,
-                max_body_chars=int(params.get("max_body_chars") or 4000),
-            )
-            with_bodies = sum(1 for row in requests if row.get("body_available"))
-            message = f"Captured {len(requests)} network request(s)."
-            if requests and not include_bodies and with_bodies:
-                # The single most common failure mode is the model concluding
-                # "this tool doesn't return response bodies" from a summary row.
-                # Say so on the row itself instead of letting it guess.
-                message += (
-                    f" {with_bodies} have a captured response body - re-run with include_bodies=true"
-                    " (optionally narrowed by url_pattern) to read them."
-                )
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="read_network_requests",
-                thinking=thinking,
-                params={
-                    key: params[key]
-                    for key in (
-                        "url_pattern",
-                        "method",
-                        "status",
-                        "resource_type",
-                        "limit",
-                        "clear",
-                        "include_query",
-                        "include_headers",
-                        "include_bodies",
-                        "max_body_chars",
-                    )
-                    if key in params
-                },
-                result={"success": True, "count": len(requests)},
-            )
-            return {
-                "success": True,
-                "message": message,
-                "requests": requests,
-            }
-
-        elif action_name == "press_key":
-            key = params.get("key", "")
-            if humanizer:
-                await humanizer.press_key(key)
-            else:
-                logger.warning(
-                    "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent"
-                )
-                event = session.event_bus.dispatch(SendKeysEvent(keys=key))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="press_key",
-                thinking=thinking,
-                params={"key": key},
-                result={"success": True},
-            )
-            return {"success": True, "message": ""}
-
-        elif action_name == "scroll":
-            direction = params.get("direction", "down")
-            amount = params.get("amount", 300)
-            delta_y = amount if direction == "down" else -amount
-
-            if humanizer:
-                await humanizer.scroll(delta_y)
-            else:
-                logger.warning(
-                    "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use ScrollEvent"
-                )
-                event = session.event_bus.dispatch(
-                    ScrollEvent(direction=direction, amount=amount, node=element if index is not None else None)
-                )
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="scroll",
-                thinking=thinking,
-                index=index,
-                params={"direction": direction, "amount": amount},
-                result={"success": True},
-            )
-            return {"success": True, "message": ""}
-
-        elif action_name == "goto":
-            return await _execute_goto(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                params=params,
-                thinking=thinking,
-                session_id=session_id,
-                config=config,
-                current_auth_realm=current_auth_realm,
-                prepare_credentials_for_url=prepare_credentials_for_url,
-            )
-
-        elif action_name == "navback":
-            event = session.event_bus.dispatch(GoBackEvent())
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            await action_history.record_action(
-                dom_service=dom_service, action="navback", thinking=thinking, result={"success": True}
-            )
-            return {"success": True, "message": ""}
-
-        elif action_name == "wait":
-            try:
-                time_ms = normalize_browser_wait_ms(params.get("time_ms"), default=1000)
-            except ValueError as exc:
-                return {"success": False, "error": str(exc)}
-            seconds = time_ms / 1000.0
-            event = session.event_bus.dispatch(WaitEvent(seconds=seconds))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="wait",
-                thinking=thinking,
-                params={"time_ms": time_ms},
-                result={"success": True},
-            )
-            return {"success": True, "message": ""}
-
-        elif action_name == "dropdown_options":
-            if not element:
-                return {"success": False, "error": "Dropdown requires an element index"}
-            event = session.event_bus.dispatch(GetDropdownOptionsEvent(node=element))
-            await event
-            options = await event.event_result(raise_if_any=True, raise_if_none=False)
-            return {"success": True, "message": f"Dropdown options: {options}", "options": options}
-
-        elif action_name == "select_dropdown":
-            if not element:
-                return {"success": False, "error": "Dropdown requires an element index"}
-            value = params.get("value", "")
-            event = session.event_bus.dispatch(SelectDropdownOptionEvent(node=element, text=value))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="select_dropdown",
-                thinking=thinking,
-                index=index,
-                params={"value": value},
-                result={"success": True},
-            )
-            return {"success": True, "message": ""}
-
-        elif action_name == "evaluate":
-            code = params.get("code", "")
-            cdp_session = await session.get_or_create_cdp_session(focus=True)
-            result = await cdp_session.cdp_client.send.Runtime.evaluate(
-                params={"expression": code, "returnByValue": True}, session_id=cdp_session.session_id
-            )
-            value = result.get("result", {}).get("value")
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="evaluate",
-                thinking=thinking,
-                params={"code": code},
-                result={"success": True, "value": value},
-            )
-            return {"success": True, "message": f"Executed JS, result: {value}", "value": value}
-
-        elif action_name == "extract":
-            return {
-                "success": False,
-                "error": "extract is disabled. Use evaluate to read DOM/page content directly.",
-            }
-
-        elif action_name == "done":
-            text = params.get("text", "")
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="done",
-                thinking=thinking,
-                params={"text": text},
-                result={"success": True},
-            )
-            return {"success": True, "done": True, "message": text}
-
-        elif action_name == "attempt_completion":
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="attempt_completion",
-                thinking=thinking,
-                params={},
-                result={"success": True},
-            )
-            return {"success": True, "attempt_completion": True}
-
-        elif action_name == "send_message_to_user":
-            message = params.get("message", "")
-            reason = params.get("reason", "other")
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="send_message_to_user",
-                thinking=thinking,
-                params={"message": message, "reason": reason},
-                result={"success": True},
-            )
-            return {"success": True, "message_to_user": True, "message": message, "reason": reason}
-
-        elif action_name == "upload_file":
-            return await _execute_upload_file(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                element=element,
-                index=index,
-                params=params,
-                thinking=thinking,
-                humanizer=humanizer,
-                available_file_paths=available_file_paths,
-            )
-
-        elif action_name == "switch_tab":
-            return await _execute_switch_tab(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                params=params,
-                thinking=thinking,
-            )
-
-        elif action_name == "close_tab":
-            return await _execute_close_tab(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                params=params,
-                thinking=thinking,
-            )
-
-        elif action_name == "open_new_tab":
-            url = params.get("url") or "about:blank"
-            event = session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-
-            focused = session.get_focused_target()
-            new_tab_id = focused.target_id[-4:] if focused else None
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="open_new_tab",
-                thinking=thinking,
-                params={"url": url},
-                result={"success": True, "new_tab_id": new_tab_id},
-            )
-            logger.info(f"\u2795 Opened new tab {new_tab_id} with URL: {url}")
-            return {"success": True, "message": "", "new_tab_id": new_tab_id, "url": url}
-
-        elif action_name == "screenshot":
-            return await _execute_screenshot(
-                session=session,
-                dom_service=dom_service,
-                action_history=action_history,
-                thinking=thinking,
-                session_id=session_id,
-                config=config,
-            )
-
-        elif action_name == "generate_write_lock_notification":
-            return {
-                "success": False,
-                "error": (
-                    "Tool call error: generate_write_lock_notification is only for write-lock "
-                    "notification forks. Do not call this tool unless the latest user message "
-                    'explicitly contains the keyword "WRITE_LOCK_NOTIFICATION_FORK_REQUEST". '
-                    "Continue the browser task with a normal browser action."
-                ),
-            }
-
-        else:
-            return {"success": False, "error": f"Unknown action: {action_name}"}
-
-    except Exception as e:
-        logger.error(f"Action {action_name} failed: {e}")
+        context = _ActionContext(
+            dom_service=dom_service,
+            action_history=action_history,
+            session=session,
+            action_name=action_name,
+            index=index,
+            params=params,
+            thinking=thinking,
+            coords=coords,
+            element=element,
+            available_file_paths=available_file_paths,
+            session_id=session_id,
+            config=config,
+            humanizer=humanizer,
+            secret_refs=secret_refs,
+            password_origins=password_origins,
+            credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+            current_url=current_url,
+            trusted_page_urls=trusted_page_urls,
+            write_lock_enabled=write_lock_enabled,
+            write_lock_approvals=write_lock_approvals,
+            system_name=system_name,
+            browser_network_recorder=browser_network_recorder,
+            current_auth_realm=current_auth_realm,
+            prepare_credentials_for_url=prepare_credentials_for_url,
+        )
+        if action_name in _INTERACTION_ACTIONS:
+            return await _execute_interaction_action(context)
+        if action_name in _NAVIGATION_ACTIONS:
+            return await _execute_navigation_action(context)
+        if action_name in _INSPECTION_ACTIONS:
+            return await _execute_inspection_action(context)
+        if action_name in _TERMINAL_ACTIONS:
+            return await _execute_terminal_action(context)
+        return {"success": False, "error": f"Unknown action: {action_name}"}
+    except Exception as error:
+        logger.error(f"Action {action_name} failed: {error}")
         await action_history.record_action(
             dom_service=dom_service,
             action=action_name,
@@ -738,9 +799,9 @@ async def execute_action(  # noqa: C901
             index=index,
             coordinates=coords,
             params=params,
-            result={"success": False, "error": str(e)},
+            result={"success": False, "error": str(error)},
         )
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": str(error)}
 
 
 # ========================================
@@ -749,16 +810,23 @@ async def execute_action(  # noqa: C901
 
 
 def _element_write_lock_signal(element: Any) -> str:
-    """Collect local DOM-node text and action-bearing attributes."""
+    """Collect a DOM target's action signal, including its nearest bounded ancestor label."""
     if not element:
         return ""
 
-    parts = []
-    try:
-        if hasattr(element, "get_all_children_text"):
-            parts.append(element.get_all_children_text() or "")
-    except Exception:
-        pass
+    parts: list[str] = []
+
+    def node_text(node: Any) -> str:
+        try:
+            if hasattr(node, "get_all_children_text"):
+                return str(node.get_all_children_text() or "").strip()
+        except Exception:
+            pass
+        return ""
+
+    local_text = node_text(element)
+    if local_text:
+        parts.append(local_text)
 
     attrs = getattr(element, "attributes", None) or {}
     if not isinstance(attrs, dict):
@@ -769,7 +837,30 @@ def _element_write_lock_signal(element: Any) -> str:
         if value:
             parts.append(str(value))
 
-    return "\n".join(part for part in parts if part)
+    # Browser controls implemented inside shadow DOM commonly expose a textless
+    # input while rendering the accessible action label as a sibling. The DOM
+    # tree preserves that relationship through parent_node, so take only the
+    # first short ancestor label instead of absorbing a whole checkout page.
+    has_local_label = bool(local_text) or any(
+        attrs.get(attr_name) for attr_name in ("value", "aria-label", "title", "alt")
+    )
+    if not has_local_label:
+        current = getattr(element, "parent_node", None)
+        depth = 1
+        while current is not None and depth < 4:
+            node_name = str(getattr(current, "node_name", "") or "").lower()
+            if node_name in {"html", "body", "main"}:
+                break
+
+            ancestor_text = node_text(current)
+            if ancestor_text and len(ancestor_text) <= 500:
+                parts.append(ancestor_text)
+                break
+
+            current = getattr(current, "parent_node", None)
+            depth += 1
+
+    return "\n".join(part for part in parts if part)[:20000]
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -781,6 +872,8 @@ async def _maybe_await(value: Any) -> Any:
 async def _refresh_element_coordinates(
     dom_service: Any,
     index: Any,
+    *,
+    for_click: bool = False,
 ) -> Optional[tuple[int, int]]:
     """Refresh DOM state once and retry coordinate resolution for stale selector entries."""
     if index is None:
@@ -795,7 +888,8 @@ async def _refresh_element_coordinates(
         except Exception as exc:
             logger.debug("DOM refresh before coordinate retry failed", index=index, error=str(exc))
 
-    coords = getattr(dom_service, "get_element_coordinates", None)
+    coordinate_method = "get_click_coordinates" if for_click else "get_element_coordinates"
+    coords = getattr(dom_service, coordinate_method, None)
     if not callable(coords):
         return None
 
@@ -1187,12 +1281,15 @@ async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[s
                         };
 
                         const addElement = (el, includeText) => {
-                            if (!el || seen.has(el)) return;
+                            if (!el || seen.has(el)) return false;
                             seen.add(el);
+                            let addedText = false;
 
                             if (includeText && !isPageContainer(el)) {
+                                const before = parts.length;
                                 addText(el.innerText);
                                 if (el.textContent !== el.innerText) addText(el.textContent);
+                                addedText = parts.length > before;
                             }
 
                             for (const attrName of attrNames) {
@@ -1201,17 +1298,22 @@ async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[s
 
                             if (el.labels) {
                                 for (const label of el.labels) {
+                                    const before = parts.length;
                                     add(label.innerText);
                                     add(label.textContent);
+                                    addedText = addedText || parts.length > before;
                                 }
                             }
+                            return addedText;
                         };
 
                         const walkAncestors = (start, includeStartText) => {
                             let current = start;
                             let depth = 0;
+                            let seekNearestText = includeStartText;
                             while (current && depth < maxDepth) {
-                                addElement(current, depth === 0 && includeStartText);
+                                const addedText = addElement(current, seekNearestText);
+                                if (addedText) seekNearestText = false;
                                 if (isPageContainer(current)) break;
                                 if (current.assignedSlot) {
                                     current = current.assignedSlot;
@@ -1246,7 +1348,95 @@ async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[s
         return ""
 
 
-async def _execute_click(  # noqa: C901
+async def _click_write_lock_result(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    element: Any,
+    index: Any,
+    coords: Any,
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+    system_name: str,
+) -> Optional[Dict[str, Any]]:
+    from browser_tools.write_lock import (
+        get_write_lock_approval_question,
+        is_email_send_button,
+        is_purchase_button,
+        is_social_domain,
+        is_submit_button,
+    )
+
+    coordinate_click = element is None
+    if coordinate_click:
+        element_text = "\n".join(
+            part
+            for part in (
+                await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))),
+                await _browser_click_write_lock_signal(session, coords),
+            )
+            if part
+        )
+        logger.info(
+            "Write lock coord click check",
+            element_text=element_text[:100] if element_text else "(empty)",
+            coords=coords,
+            url=current_url[:80] if current_url else None,
+        )
+    else:
+        element_text = "\n".join(
+            part
+            for part in (
+                _element_write_lock_signal(element),
+                await _browser_click_write_lock_signal(session, coords),
+            )
+            if part
+        )
+        logger.info(
+            "Write lock click check",
+            element_text=element_text[:100] if element_text else "(empty)",
+            index=index,
+            url=current_url[:80] if current_url else None,
+        )
+
+    checks = (
+        ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
+        ("email_send", is_email_send_button(element_text), "email send"),
+        ("purchase", is_purchase_button(element_text), "purchase button"),
+    )
+    suffix = " (coordinate click)" if coordinate_click else ""
+    for approval_type, detected, description in checks:
+        if not detected:
+            continue
+        if is_approval_valid(write_lock_approvals, approval_type, current_url):
+            logger.info(
+                f"Write lock bypassed: existing approval valid{suffix}",
+                approval_type=approval_type,
+                url=current_url,
+            )
+            continue
+        logger.info(
+            f"Write lock triggered: {description} detected{suffix}",
+            url=current_url,
+            element_text=element_text[:50],
+            **({"coords": coords} if coordinate_click else {}),
+        )
+        return {
+            "status": "needs_write_approval",
+            "approval_type": approval_type,
+            "question": get_write_lock_approval_question(
+                action_type=approval_type,
+                url=current_url,
+                element_text=element_text[:100],
+                system_name=system_name,
+            ),
+            "element_text": element_text[:100],
+            "url": current_url,
+        }
+    return None
+
+
+async def _execute_click(
     *,
     session: Any,
     dom_service: DOMService,
@@ -1264,105 +1454,26 @@ async def _execute_click(  # noqa: C901
     """Execute a click action with write lock checks."""
     from browser_use.browser.events import ClickCoordinateEvent, ClickElementEvent
 
-    from browser_tools.write_lock import (
-        get_write_lock_approval_question,
-        is_email_send_button,
-        is_purchase_button,
-        is_social_domain,
-        is_submit_button,
-    )
-
     element_coords = None
     if element:
-        coord_tuple = await _maybe_await(dom_service.get_element_coordinates(index))
+        coord_tuple = await _maybe_await(dom_service.get_click_coordinates(index))
         if not coord_tuple:
-            coord_tuple = await _refresh_element_coordinates(dom_service, index)
+            coord_tuple = await _refresh_element_coordinates(dom_service, index, for_click=True)
         element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
 
-    # Write lock checks for index-based clicks
-    if write_lock_enabled and element:
-        element_text = "\n".join(
-            part
-            for part in (
-                _element_write_lock_signal(element),
-                await _browser_click_write_lock_signal(session, element_coords),
-            )
-            if part
-        )
-        logger.info(
-            "Write lock click check",
-            element_text=element_text[:100] if element_text else "(empty)",
+    if write_lock_enabled and (element or coords):
+        write_lock_result = await _click_write_lock_result(
+            session=session,
+            dom_service=dom_service,
+            element=element,
             index=index,
-            url=current_url[:80] if current_url else None,
+            coords=element_coords if element else coords,
+            write_lock_approvals=write_lock_approvals,
+            current_url=current_url,
+            system_name=system_name,
         )
-
-        if is_social_domain(current_url) and is_submit_button(element_text):
-            if not is_approval_valid(write_lock_approvals, "social_post", current_url):
-                logger.info(
-                    "Write lock triggered: social posting detected", url=current_url, element_text=element_text[:50]
-                )
-                return {
-                    "status": "needs_write_approval",
-                    "approval_type": "social_post",
-                    "question": get_write_lock_approval_question(
-                        action_type="social_post",
-                        url=current_url,
-                        element_text=element_text[:100],
-                        system_name=system_name,
-                    ),
-                    "element_text": element_text[:100],
-                    "url": current_url,
-                }
-            else:
-                logger.info(
-                    "Write lock bypassed: existing approval valid", approval_type="social_post", url=current_url
-                )
-
-        if is_email_send_button(element_text):
-            if not is_approval_valid(write_lock_approvals, "email_send", current_url):
-                logger.info(
-                    "Write lock triggered: email send detected",
-                    url=current_url,
-                    element_text=element_text[:50],
-                )
-                return {
-                    "status": "needs_write_approval",
-                    "approval_type": "email_send",
-                    "question": get_write_lock_approval_question(
-                        action_type="email_send",
-                        url=current_url,
-                        element_text=element_text[:100],
-                        system_name=system_name,
-                    ),
-                    "element_text": element_text[:100],
-                    "url": current_url,
-                }
-            else:
-                logger.info(
-                    "Write lock bypassed: existing approval valid",
-                    approval_type="email_send",
-                    url=current_url,
-                )
-
-        if is_purchase_button(element_text):
-            if not is_approval_valid(write_lock_approvals, "purchase", current_url):
-                logger.info(
-                    "Write lock triggered: purchase button detected", url=current_url, element_text=element_text[:50]
-                )
-                return {
-                    "status": "needs_write_approval",
-                    "approval_type": "purchase",
-                    "question": get_write_lock_approval_question(
-                        action_type="purchase",
-                        url=current_url,
-                        element_text=element_text[:100],
-                        system_name=system_name,
-                    ),
-                    "element_text": element_text[:100],
-                    "url": current_url,
-                }
-            else:
-                logger.info("Write lock bypassed: existing approval valid", approval_type="purchase", url=current_url)
+        if write_lock_result:
+            return write_lock_result
 
     if element:
         asyncio.create_task(session.highlight_interaction_element(element))
@@ -1398,112 +1509,6 @@ async def _execute_click(  # noqa: C901
         return {"success": True, "message": ""}
 
     elif coords:
-        # Write lock check for coordinate-based clicks
-        if write_lock_enabled:
-            coord_element_text = "\n".join(
-                part
-                for part in (
-                    await _maybe_await(dom_service.get_text_at_coordinates(int(coords["x"]), int(coords["y"]))),
-                    await _browser_click_write_lock_signal(session, coords),
-                )
-                if part
-            )
-            logger.info(
-                "Write lock coord click check",
-                element_text=coord_element_text[:100] if coord_element_text else "(empty)",
-                coords=coords,
-                url=current_url[:80] if current_url else None,
-            )
-
-            from browser_tools.write_lock import (
-                get_write_lock_approval_question,
-                is_email_send_button,
-                is_purchase_button,
-                is_social_domain,
-                is_submit_button,
-            )
-
-            if is_social_domain(current_url) and is_submit_button(coord_element_text):
-                if not is_approval_valid(write_lock_approvals, "social_post", current_url):
-                    logger.info(
-                        "Write lock triggered: social posting detected (coordinate click)",
-                        url=current_url,
-                        element_text=coord_element_text[:50],
-                        coords=coords,
-                    )
-                    return {
-                        "status": "needs_write_approval",
-                        "approval_type": "social_post",
-                        "question": get_write_lock_approval_question(
-                            action_type="social_post",
-                            url=current_url,
-                            element_text=coord_element_text[:100],
-                            system_name=system_name,
-                        ),
-                        "element_text": coord_element_text[:100],
-                        "url": current_url,
-                    }
-                else:
-                    logger.info(
-                        "Write lock bypassed: existing approval valid (coordinate click)",
-                        approval_type="social_post",
-                        url=current_url,
-                    )
-
-            if is_email_send_button(coord_element_text):
-                if not is_approval_valid(write_lock_approvals, "email_send", current_url):
-                    logger.info(
-                        "Write lock triggered: email send detected (coordinate click)",
-                        url=current_url,
-                        element_text=coord_element_text[:50],
-                        coords=coords,
-                    )
-                    return {
-                        "status": "needs_write_approval",
-                        "approval_type": "email_send",
-                        "question": get_write_lock_approval_question(
-                            action_type="email_send",
-                            url=current_url,
-                            element_text=coord_element_text[:100],
-                            system_name=system_name,
-                        ),
-                        "element_text": coord_element_text[:100],
-                        "url": current_url,
-                    }
-                else:
-                    logger.info(
-                        "Write lock bypassed: existing approval valid (coordinate click)",
-                        approval_type="email_send",
-                        url=current_url,
-                    )
-
-            if is_purchase_button(coord_element_text):
-                if not is_approval_valid(write_lock_approvals, "purchase", current_url):
-                    logger.info(
-                        "Write lock triggered: purchase button detected (coordinate click)",
-                        url=current_url,
-                        element_text=coord_element_text[:50],
-                        coords=coords,
-                    )
-                    return {
-                        "status": "needs_write_approval",
-                        "approval_type": "purchase",
-                        "question": get_write_lock_approval_question(
-                            action_type="purchase",
-                            url=current_url,
-                            element_text=coord_element_text[:100],
-                            system_name=system_name,
-                        ),
-                        "element_text": coord_element_text[:100],
-                        "url": current_url,
-                    }
-                else:
-                    logger.info(
-                        "Write lock bypassed: existing approval valid (coordinate click)",
-                        approval_type="purchase",
-                        url=current_url,
-                    )
-
         asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
 
         if humanizer:
@@ -1531,7 +1536,280 @@ async def _execute_click(  # noqa: C901
         return {"success": False, "error": "Click requires either element index or coordinates"}
 
 
-async def _execute_input_text(  # noqa: C901
+def _input_success_result(display_text: str, credential_ref: Optional[Dict[str, str]]) -> Dict[str, Any]:
+    result: Dict[str, Any] = {"success": True, "message": "", "typed_text": display_text}
+    if credential_ref:
+        result["credential_ref"] = credential_ref
+    return result
+
+
+async def _payment_input_write_lock_error(
+    *,
+    session: Any,
+    element: Any,
+    index: Any,
+    write_lock_enabled: bool,
+    is_payment_card_secret_ref: bool,
+    secret_refs: Optional[Dict[str, str]],
+    secret_ref_name: Optional[str],
+    write_lock_approvals: Optional[Dict],
+    current_url: str,
+) -> Optional[Dict[str, Any]]:
+    from browser_tools.write_lock import is_payment_field
+
+    if not write_lock_enabled or not element or index is None:
+        return None
+    if not await is_payment_field(session, element, index):
+        return None
+    if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
+        logger.info(
+            "Write lock bypassed: approved payment card secret ref",
+            ref_name=secret_ref_name,
+            url=current_url,
+        )
+        return None
+    if is_approval_valid(write_lock_approvals, "payment", current_url):
+        logger.info("Write lock bypassed: existing approval valid", approval_type="payment", url=current_url)
+        return None
+
+    element_text = getattr(element, "text_content", "") or ""
+    tag_name = getattr(element, "tag_name", "") or getattr(element, "node_name", "input")
+    field_description = f"{tag_name}: {element_text[:50]}" if element_text else f"{tag_name} field"
+    logger.info("Write lock triggered: payment field detected", url=current_url, field_desc=field_description)
+    return {
+        "success": False,
+        "error": (
+            "Payment fields require a one-time virtual card. Extract the full itemized receipt "
+            "from the checkout page, call request_payment_card, then type the returned refs "
+            "card_number, card_name, card_expiry, and card_cvv."
+        ),
+        "field_description": field_description,
+        "url": current_url,
+    }
+
+
+async def _try_direct_payment_ref_fill(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    index: Any,
+    thinking: Any,
+    clear_before_typing: bool,
+    secret_refs: Dict[str, str],
+    secret_ref_name: str,
+    text: str,
+    display_text: str,
+    credential_ref: Optional[Dict[str, str]],
+    current_url: str,
+) -> Optional[Dict[str, Any]]:
+    fill_result = await _fill_payment_ref_directly(session, secret_ref_name, text)
+    if not fill_result:
+        readiness = await wait_for_navigation_ready(
+            dom_service,
+            url=current_url,
+            timeout_seconds=3.0,
+            reload_blank_spa_once=True,
+        )
+        logger.debug(
+            "Retried approved payment card direct fill after page readiness",
+            ref_name=secret_ref_name,
+            readiness=readiness,
+        )
+        fill_result = await _fill_payment_ref_directly(session, secret_ref_name, text)
+    if not fill_result:
+        return None
+
+    filled_refs = [secret_ref_name]
+    for other_ref in PAYMENT_CARD_SECRET_REFS:
+        other_value = secret_refs.get(other_ref)
+        if other_ref == secret_ref_name or not other_value:
+            continue
+        if await _fill_payment_ref_directly(session, other_ref, other_value):
+            filled_refs.append(other_ref)
+
+    element_coords = None
+    if isinstance(fill_result.get("x"), (int, float)) and isinstance(fill_result.get("y"), (int, float)):
+        element_coords = {"x": int(fill_result["x"]), "y": int(fill_result["y"])}
+    await action_history.record_action(
+        dom_service=dom_service,
+        action="input_text",
+        thinking=thinking,
+        index=index,
+        coordinates=element_coords,
+        params={"text": display_text, "clear": clear_before_typing},
+        result={
+            "success": True,
+            "payment_ref_direct_fill": True,
+            "payment_refs_filled": filled_refs,
+            "selector": fill_result.get("selector"),
+        },
+    )
+    logger.info(
+        "Filled approved payment card secret ref directly",
+        ref_name=secret_ref_name,
+        filled_refs=filled_refs,
+        selector=fill_result.get("selector"),
+    )
+    result = _input_success_result(display_text, credential_ref)
+    result.update({"payment_ref_direct_fill": True, "payment_refs_filled": filled_refs})
+    return result
+
+
+async def _clear_input_with_events(session: Any) -> None:
+    from browser_use.browser.events import SendKeysEvent
+
+    for keys in ("Control+a", "Backspace"):
+        event = session.event_bus.dispatch(SendKeysEvent(keys=keys))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+
+
+async def _execute_indexed_input_text(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    element: Any,
+    index: Any,
+    thinking: Any,
+    humanizer: Optional[BrowserHumanizer],
+    text: str,
+    display_text: str,
+    clear_before_typing: bool,
+    is_payment_card_secret_ref: bool,
+    secret_ref_name: Optional[str],
+    credential_ref: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    from browser_use.browser.events import TypeTextEvent
+
+    coord_tuple = await dom_service.get_element_coordinates(index)
+    if humanizer and not coord_tuple:
+        coord_tuple = await _refresh_element_coordinates(dom_service, index)
+    if humanizer and not coord_tuple and is_payment_card_secret_ref:
+        coord_tuple = await _resolve_payment_ref_coordinates(session, secret_ref_name or "")
+    element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
+    asyncio.create_task(session.highlight_interaction_element(element))
+
+    if humanizer and not element_coords:
+        logger.error(
+            "HUMANIZATION BLOCKED: indexed input_text has no coordinates; refusing TypeTextEvent fallback",
+            index=index,
+        )
+        return {
+            "success": False,
+            "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
+        }
+    if humanizer:
+        await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
+        if clear_before_typing:
+            await humanizer.press_key("Control+a")
+            await humanizer.press_key("Backspace")
+        await humanizer.type_text(text)
+    else:
+        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
+        if clear_before_typing:
+            await _clear_input_with_events(session)
+        event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=clear_before_typing))
+        await event
+        await event.event_result(raise_if_any=True, raise_if_none=False)
+
+    await action_history.record_action(
+        dom_service=dom_service,
+        action="input_text",
+        thinking=thinking,
+        index=index,
+        coordinates=element_coords,
+        params={"text": display_text, "clear": clear_before_typing},
+        result={"success": True},
+    )
+    return _input_success_result(display_text, credential_ref)
+
+
+async def _execute_coordinate_input_text(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    coords: Dict[str, Any],
+    thinking: Any,
+    humanizer: Optional[BrowserHumanizer],
+    text: str,
+    display_text: str,
+    clear_before_typing: bool,
+    credential_ref: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    from browser_use.browser.events import ClickCoordinateEvent, SendKeysEvent
+
+    x, y = int(coords["x"]), int(coords["y"])
+    asyncio.create_task(session.highlight_coordinate_click(x, y))
+    if humanizer:
+        await humanizer.click_at_coords(x, y)
+        if clear_before_typing:
+            await humanizer.press_key("Control+a")
+            await humanizer.press_key("Backspace")
+        await humanizer.type_text(text)
+    else:
+        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use events")
+        click_event = session.event_bus.dispatch(ClickCoordinateEvent(coordinate_x=x, coordinate_y=y))
+        await click_event
+        await click_event.event_result(raise_if_any=True, raise_if_none=False)
+        await asyncio.sleep(0.1)
+        if clear_before_typing:
+            await _clear_input_with_events(session)
+        type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
+        await type_event
+        await type_event.event_result(raise_if_any=True, raise_if_none=False)
+
+    await action_history.record_action(
+        dom_service=dom_service,
+        action="input_text",
+        thinking=thinking,
+        coordinates=coords,
+        params={"text": display_text, "clear": clear_before_typing},
+        result={"success": True},
+    )
+    return _input_success_result(display_text, credential_ref)
+
+
+async def _execute_focused_input_text(
+    *,
+    session: Any,
+    dom_service: DOMService,
+    action_history: ActionHistory,
+    thinking: Any,
+    humanizer: Optional[BrowserHumanizer],
+    text: str,
+    display_text: str,
+    clear_before_typing: bool,
+    credential_ref: Optional[Dict[str, str]],
+) -> Dict[str, Any]:
+    from browser_use.browser.events import SendKeysEvent
+
+    if humanizer:
+        if clear_before_typing:
+            await humanizer.press_key("Control+a")
+            await humanizer.press_key("Backspace")
+        await humanizer.type_text(text)
+    else:
+        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent")
+        if clear_before_typing:
+            await _clear_input_with_events(session)
+        type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
+        await type_event
+        await type_event.event_result(raise_if_any=True, raise_if_none=False)
+
+    await action_history.record_action(
+        dom_service=dom_service,
+        action="input_text",
+        thinking=thinking,
+        params={"text": display_text, "clear": clear_before_typing},
+        result={"success": True},
+    )
+    return _input_success_result(display_text, credential_ref)
+
+
+async def _execute_input_text(
     *,
     session: Any,
     dom_service: DOMService,
@@ -1551,10 +1829,6 @@ async def _execute_input_text(  # noqa: C901
     system_name: str,
 ) -> Dict[str, Any]:
     """Execute an input_text action with secret decryption and write lock checks."""
-    from browser_use.browser.events import ClickCoordinateEvent, SendKeysEvent, TypeTextEvent
-
-    from browser_tools.write_lock import is_payment_field
-
     text = params.get("text", "")
     clear_before_typing = params.get("clear", True) is not False
     display_text = text
@@ -1581,225 +1855,79 @@ async def _execute_input_text(  # noqa: C901
         text = secret_refs[secret_ref_name]
         logger.info("\U0001f510 Typing encrypted credential (password/card)", redacted=True)
 
-    # Write lock check for payment fields
-    if write_lock_enabled and element and index is not None and await is_payment_field(session, element, index):
-        if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
-            logger.info(
-                "Write lock bypassed: approved payment card secret ref",
-                ref_name=secret_ref_name,
-                url=current_url,
-            )
-        elif not is_approval_valid(write_lock_approvals, "payment", current_url):
-            element_text = getattr(element, "text_content", "") or ""
-            tag_name = getattr(element, "tag_name", "") or getattr(element, "node_name", "input")
-            field_desc = f"{tag_name} field"
-            if element_text:
-                field_desc = f"{tag_name}: {element_text[:50]}"
-
-            logger.info("Write lock triggered: payment field detected", url=current_url, field_desc=field_desc)
-            return {
-                "success": False,
-                "error": (
-                    "Payment fields require a one-time virtual card. Extract the full itemized receipt "
-                    "from the checkout page, call request_payment_card, then type the returned refs "
-                    "card_number, card_name, card_expiry, and card_cvv."
-                ),
-                "field_description": field_desc,
-                "url": current_url,
-            }
-        else:
-            logger.info("Write lock bypassed: existing approval valid", approval_type="payment", url=current_url)
+    write_lock_error = await _payment_input_write_lock_error(
+        session=session,
+        element=element,
+        index=index,
+        write_lock_enabled=write_lock_enabled,
+        is_payment_card_secret_ref=is_payment_card_secret_ref,
+        secret_refs=secret_refs,
+        secret_ref_name=secret_ref_name,
+        write_lock_approvals=write_lock_approvals,
+        current_url=current_url,
+    )
+    if write_lock_error:
+        return write_lock_error
 
     if is_payment_card_secret_ref and has_payment_card_secret_refs(secret_refs):
-        fill_result = await _fill_payment_ref_directly(session, secret_ref_name or "", text)
-        if not fill_result:
-            readiness = await wait_for_navigation_ready(
-                dom_service,
-                url=current_url,
-                timeout_seconds=3.0,
-                reload_blank_spa_once=True,
-            )
-            logger.debug(
-                "Retried approved payment card direct fill after page readiness",
-                ref_name=secret_ref_name,
-                readiness=readiness,
-            )
-            fill_result = await _fill_payment_ref_directly(session, secret_ref_name or "", text)
-        if fill_result:
-            filled_refs = [secret_ref_name] if secret_ref_name else []
-            for other_ref in PAYMENT_CARD_SECRET_REFS:
-                if other_ref == secret_ref_name:
-                    continue
-                other_value = (secret_refs or {}).get(other_ref)
-                if not other_value:
-                    continue
-                other_result = await _fill_payment_ref_directly(session, other_ref, other_value)
-                if other_result:
-                    filled_refs.append(other_ref)
-
-            element_coords = None
-            if isinstance(fill_result.get("x"), (int, float)) and isinstance(fill_result.get("y"), (int, float)):
-                element_coords = {"x": int(fill_result["x"]), "y": int(fill_result["y"])}
-
-            await action_history.record_action(
-                dom_service=dom_service,
-                action="input_text",
-                thinking=thinking,
-                index=index,
-                coordinates=element_coords,
-                params={"text": display_text, "clear": clear_before_typing},
-                result={
-                    "success": True,
-                    "payment_ref_direct_fill": True,
-                    "payment_refs_filled": filled_refs,
-                    "selector": fill_result.get("selector"),
-                },
-            )
-            logger.info(
-                "Filled approved payment card secret ref directly",
-                ref_name=secret_ref_name,
-                filled_refs=filled_refs,
-                selector=fill_result.get("selector"),
-            )
-            result = {
-                "success": True,
-                "message": "",
-                "typed_text": display_text,
-                "payment_ref_direct_fill": True,
-                "payment_refs_filled": filled_refs,
-            }
-            if credential_ref:
-                result["credential_ref"] = credential_ref
-            return result
+        direct_fill_result = await _try_direct_payment_ref_fill(
+            session=session,
+            dom_service=dom_service,
+            action_history=action_history,
+            index=index,
+            thinking=thinking,
+            clear_before_typing=clear_before_typing,
+            secret_refs=secret_refs or {},
+            secret_ref_name=secret_ref_name or "",
+            text=text,
+            display_text=display_text,
+            credential_ref=credential_ref,
+            current_url=current_url,
+        )
+        if direct_fill_result:
+            return direct_fill_result
 
     if element:
-        coord_tuple = await dom_service.get_element_coordinates(index)
-        if humanizer and not coord_tuple:
-            coord_tuple = await _refresh_element_coordinates(dom_service, index)
-        if humanizer and not coord_tuple and is_payment_card_secret_ref:
-            coord_tuple = await _resolve_payment_ref_coordinates(session, secret_ref_name or "")
-        element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
-
-        asyncio.create_task(session.highlight_interaction_element(element))
-
-        if humanizer and element_coords:
-            await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
-            if clear_before_typing:
-                await humanizer.press_key("Control+a")
-                await humanizer.press_key("Backspace")
-            await humanizer.type_text(text)
-        else:
-            if humanizer:
-                logger.error(
-                    "HUMANIZATION BLOCKED: indexed input_text has no coordinates; refusing TypeTextEvent fallback",
-                    index=index,
-                )
-                return {
-                    "success": False,
-                    "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
-                }
-            if not humanizer:
-                logger.warning(
-                    "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent"
-                )
-            if clear_before_typing:
-                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-                await clear_event
-                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
-                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
-                await delete_event
-                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
-            event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=clear_before_typing))
-            await event
-            await event.event_result(raise_if_any=True, raise_if_none=False)
-
-        await action_history.record_action(
+        return await _execute_indexed_input_text(
+            session=session,
             dom_service=dom_service,
-            action="input_text",
-            thinking=thinking,
+            action_history=action_history,
+            element=element,
             index=index,
-            coordinates=element_coords,
-            params={"text": display_text, "clear": clear_before_typing},
-            result={"success": True},
-        )
-        result = {"success": True, "message": "", "typed_text": display_text}
-        if credential_ref:
-            result["credential_ref"] = credential_ref
-        return result
-
-    elif coords:
-        asyncio.create_task(session.highlight_coordinate_click(int(coords["x"]), int(coords["y"])))
-
-        if humanizer:
-            await humanizer.click_at_coords(int(coords["x"]), int(coords["y"]))
-            if clear_before_typing:
-                await humanizer.press_key("Control+a")
-                await humanizer.press_key("Backspace")
-            await humanizer.type_text(text)
-        else:
-            logger.warning("\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use events")
-            click_event = session.event_bus.dispatch(
-                ClickCoordinateEvent(coordinate_x=int(coords["x"]), coordinate_y=int(coords["y"]))
-            )
-            await click_event
-            await click_event.event_result(raise_if_any=True, raise_if_none=False)
-            await asyncio.sleep(0.1)
-            if clear_before_typing:
-                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-                await clear_event
-                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
-                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
-                await delete_event
-                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
-            type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
-            await type_event
-            await type_event.event_result(raise_if_any=True, raise_if_none=False)
-
-        await action_history.record_action(
-            dom_service=dom_service,
-            action="input_text",
             thinking=thinking,
-            coordinates=coords,
-            params={"text": display_text, "clear": clear_before_typing},
-            result={"success": True},
+            humanizer=humanizer,
+            text=text,
+            display_text=display_text,
+            clear_before_typing=clear_before_typing,
+            is_payment_card_secret_ref=is_payment_card_secret_ref,
+            secret_ref_name=secret_ref_name,
+            credential_ref=credential_ref,
         )
-        result = {"success": True, "message": "", "typed_text": display_text}
-        if credential_ref:
-            result["credential_ref"] = credential_ref
-        return result
 
-    else:
-        if humanizer:
-            if clear_before_typing:
-                await humanizer.press_key("Control+a")
-                await humanizer.press_key("Backspace")
-            await humanizer.type_text(text)
-        else:
-            logger.warning(
-                "\u26a0\ufe0f HUMANIZATION FALLBACK: No humanizer available, using browser-use SendKeysEvent"
-            )
-            if clear_before_typing:
-                clear_event = session.event_bus.dispatch(SendKeysEvent(keys="Control+a"))
-                await clear_event
-                await clear_event.event_result(raise_if_any=True, raise_if_none=False)
-                delete_event = session.event_bus.dispatch(SendKeysEvent(keys="Backspace"))
-                await delete_event
-                await delete_event.event_result(raise_if_any=True, raise_if_none=False)
-            type_event = session.event_bus.dispatch(SendKeysEvent(keys=text))
-            await type_event
-            await type_event.event_result(raise_if_any=True, raise_if_none=False)
-
-        await action_history.record_action(
+    if coords:
+        return await _execute_coordinate_input_text(
+            session=session,
             dom_service=dom_service,
-            action="input_text",
+            action_history=action_history,
+            coords=coords,
             thinking=thinking,
-            params={"text": display_text, "clear": clear_before_typing},
-            result={"success": True},
+            humanizer=humanizer,
+            text=text,
+            display_text=display_text,
+            clear_before_typing=clear_before_typing,
+            credential_ref=credential_ref,
         )
-        result = {"success": True, "message": "", "typed_text": display_text}
-        if credential_ref:
-            result["credential_ref"] = credential_ref
-        return result
+    return await _execute_focused_input_text(
+        session=session,
+        dom_service=dom_service,
+        action_history=action_history,
+        thinking=thinking,
+        humanizer=humanizer,
+        text=text,
+        display_text=display_text,
+        clear_before_typing=clear_before_typing,
+        credential_ref=credential_ref,
+    )
 
 
 async def _execute_goto(
@@ -1831,7 +1959,16 @@ async def _execute_goto(
         and target_auth_realm
         and not auth_realm_matches_url(current_auth_realm, url)
     ):
-        prepared = await prepare_credentials_for_url(url)
+        try:
+            prepared = await prepare_credentials_for_url(url)
+        except Exception as prep_error:
+            logger.warning(
+                "Optional goto credential preparation failed; continuing guest navigation",
+                auth_realm=target_auth_realm,
+                target_url=url,
+                error=f"{type(prep_error).__name__}:{extract_error_message(prep_error)[:160]}",
+            )
+            prepared = None
         if prepared is not None:
             credential_summary = {
                 key: prepared[key]

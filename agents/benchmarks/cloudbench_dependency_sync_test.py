@@ -1068,13 +1068,20 @@ def test_cloudbench_result_allows_only_approved_claude_credential_skip(tmp_path:
     assert "task results are not all passing" in rejected_wrong_reason.stderr
 
 
-def test_cloudbench_wrappers_accept_approved_claude_credential_skip() -> None:
+def test_cloudbench_wrappers_require_strict_pass_without_claude_credential_skip() -> None:
+    """Fleet/cloud must not count Claude Code credential SKIPs as PASS.
+
+    The opt-in flag remains on cloudbench_result.py for explicit callers, but
+    the daily/cloud wrappers must stay strict so missing Claude Code tokens
+    surface as failures (INFRA), not green SKIPs.
+    """
     cloud = CLOUD_SCRIPT.read_text()
     fleet = FLEET_SCRIPT.read_text()
 
     cloud_validation = cloud.split('"$ROOT_DIR/scripts/cloudbench_result.py" "$RUN_OUT"', 1)[1].split("then", 1)[0]
-    assert "--require-pass --allow-claude-code-credential-skip" in cloud_validation
-    assert '"--allow-claude-code-credential-skip"' in fleet
+    assert "--require-pass" in cloud_validation
+    assert "--allow-claude-code-credential-skip" not in cloud_validation
+    assert '"--allow-claude-code-credential-skip"' not in fleet
 
 
 def test_deploy_smoke_gate_uses_the_local_isolated_runner(monkeypatch) -> None:
@@ -1166,15 +1173,33 @@ def test_cloud_patch_includes_tracked_and_untracked_changes() -> None:
     fleet = FLEET_SCRIPT.read_text()
     fleet_normalized = " ".join(line.strip().rstrip("\\").strip() for line in fleet.splitlines())
 
-    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in cloud
-    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR" "$BENCH_REF"' in fleet
+    cloud_normalized = " ".join(line.strip().rstrip("\\").strip() for line in cloud.splitlines())
+
+    # Both controllers build their payload through the one shared helper, so the
+    # launch gate can never disagree with what the generator actually emits.
+    assert (
+        'cloudbench_prepare_workspace_patch "$ROOT_DIR" HEAD "$_candidate_patch" '
+        '"$ROOT_DIR/scripts/create-worktree-patch.sh"' in cloud_normalized
+    )
+    assert (
+        'cloudbench_prepare_workspace_patch "$ROOT_DIR" "$BENCH_REF" "$FLEET_PATCH_FILE" '
+        '"$ROOT_DIR/scripts/create-worktree-patch.sh"' in fleet_normalized
+    )
     assert (
         '[ "${CLOUDBENCH_SKIP_LOCAL_PATCH:-0}" != "1" ] && { '
         '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ] '
         '|| cloudbench_worktree_has_changes "$ROOT_DIR"; }; then' in fleet_normalized
     )
     assert "cloudbench_fetchable_ref" in fleet
+    # LOCAL_PATCH_FILE keeps exactly one initializer: it is only ever assigned
+    # once a real, non-empty payload was produced.
     assert cloud.count('LOCAL_PATCH_FILE=""') == 1
+    assert cloud.count('_local_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA"') == 1
+    assert cloud.count('fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA"') == 0
+    assert fleet.count('fleet_patch_rc" -eq "$CLOUDBENCH_PATCH_NO_DELTA"') == 1
+    # A genuinely broken generation must still abort both controllers.
+    assert "could not create the local workspace patch" in cloud
+    assert "could not create the fleet local workspace patch" in fleet
     assert cloud.count("STAGED_LOCAL_FILES=()") == 1
     assert '[ "$REQUESTED_BENCH_REF" != "$BENCH_REF" ]' in fleet
     assert fleet.index("worker_ledger_lock_acquire() {") < fleet.index("clone_machine_target() {")
@@ -1235,6 +1260,7 @@ def test_fleet_patch_packages_clean_unpushed_head_from_fetchable_base(
     local = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
 
     script = f"""set -euo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
 ROOT_DIR={shlex.quote(str(repo))}
 BENCH_REF={shlex.quote(base)}
 REQUESTED_BENCH_REF={shlex.quote(local)}
@@ -1257,6 +1283,62 @@ cp "$FLEET_PATCH_FILE" {shlex.quote(str(output_patch))}
         capture_output=True,
     )
     assert (checkout / "tracked.txt").read_text() == "clean unpushed commit\n"
+
+
+def test_fleet_launch_survives_a_ledger_only_unpushed_head(tmp_path: Path) -> None:
+    """/descend commits its append-only timing ledger before every sync, so a
+    descent from a clean branch has exactly one unpushed commit touching only
+    agents/benchmarks/history/*.jsonl. The fleet gate fired on "HEAD != base"
+    while create-worktree-patch.sh excludes those ledgers, so the patch came out
+    empty and the controller aborted every bench (2026-07-27, antibot slice):
+    "could not create the fleet local workspace patch". Nothing to ship must run
+    the base ref instead of killing the fleet.
+    """
+    fleet = FLEET_SCRIPT.read_text()
+    patch_setup = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip() {", 1)[0]
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "agents/benchmarks/history").mkdir(parents=True)
+    patch_script = repo / "scripts/create-worktree-patch.sh"
+    patch_script.write_text(WORKTREE_PATCH_SCRIPT.read_text())
+    patch_script.chmod(0o755)
+    ledger = repo / "agents/benchmarks/history/descend_steps.jsonl"
+    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "bench@example.com"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Bench"], check=True)
+    (repo / "tracked.txt").write_text("base\n")
+    ledger.write_text('{"run":"a"}\n')
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-m", "base"], check=True, capture_output=True)
+    base = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+
+    # The only unpushed commit is the descend timing ledger.
+    ledger.write_text('{"run":"a"}\n{"run":"b"}\n')
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-am", "chore(descend): timing rows"],
+        check=True,
+        capture_output=True,
+    )
+    local = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    assert local != base
+
+    script = f"""set -euo pipefail
+source {shlex.quote(str(ENV_HELPER_SCRIPT))}
+ROOT_DIR={shlex.quote(str(repo))}
+BENCH_REF={shlex.quote(base)}
+REQUESTED_BENCH_REF={shlex.quote(local)}
+CLOUDBENCH_SKIP_LOCAL_PATCH=0
+cloudbench_worktree_has_changes() {{ return 1; }}
+cloudbench_env_sha256() {{ shasum -a 256 "$1" | awk '{{print $1}}'; }}
+FLEET_PATCH_FILE=""
+{patch_setup}
+# The launch must continue with no declared patch payload.
+[ -z "$FLEET_PATCH_FILE" ] || {{ echo "declared a patch for a ledger-only delta" >&2; exit 3; }}
+[ -z "$FLEET_PATCH_SHA256" ] || {{ echo "fingerprinted an undeclared patch" >&2; exit 4; }}
+"""
+    result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, f"stdout={result.stdout} stderr={result.stderr}"
+    assert "no shippable workspace delta" in result.stdout
 
 
 def test_boot_launch_wires_ipv6_status_server_and_driver_health() -> None:
@@ -1584,7 +1666,8 @@ def test_cloud_patch_can_be_disabled_for_a_pinned_committed_ref() -> None:
     patch_block = cloud.split('LOCAL_PATCH_FILE=""', 1)[1].split("# Proxy the box BACKEND", 1)[0]
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in patch_block
     assert '!= "1"' in patch_block
-    assert 'scripts/create-worktree-patch.sh" "$ROOT_DIR"' in patch_block
+    assert 'create-worktree-patch.sh"' in patch_block
+    assert "cloudbench_prepare_workspace_patch" in patch_block
     fleet = FLEET_SCRIPT.read_text()
     fleet_patch_block = fleet.split('FLEET_PATCH_FILE=""', 1)[1].split("_machine_priv_ip()", 1)[0]
     assert "CLOUDBENCH_SKIP_LOCAL_PATCH:-0" in fleet_patch_block
@@ -2904,7 +2987,8 @@ def test_boot_launch_delivers_the_advertised_local_workspace_patch() -> None:
     setup = cloud[:branch_start]
     branch = cloud[branch_start:]
 
-    assert 'LOCAL_PATCH_FILE="$(mktemp)"' in setup
+    assert '_candidate_patch="$(mktemp)"' in setup
+    assert 'LOCAL_PATCH_FILE="$_candidate_patch"' in setup
     assert '--env "LOCAL_PATCH_FILE=/cloudbench-local.patch"' in branch
     assert '--file-local "/cloudbench-local.patch=$LOCAL_PATCH_FILE"' in branch
     assert '--env "LOCAL_PATCH_FILE="' in branch
@@ -4038,7 +4122,13 @@ activate_owned_machine_images registry.fly.io/bench:new
     setup_start = cloud.index('if [ "$MODE" = "setup" ]; then')
     setup_end = cloud.index("# MODE: --refresh-wmh", setup_start)
     setup = cloud[setup_start:setup_end]
-    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index('start_machine "$mid"')
+    # The image must be activated before the machine is brought up, or it boots the
+    # stale one. The inline `start_machine "$mid"` was centralized into
+    # `require_machine_ready`, which now owns start + readiness; the ordering
+    # invariant is unchanged and is still exactly what this asserts.
+    assert setup.index('activate_owned_machine_images "$IMAGE_REF"') < setup.index(
+        'require_machine_ready "$mid"'
+    )
 
 
 def test_warm_resolver_ignores_live_cached_pool_machine(tmp_path: Path) -> None:

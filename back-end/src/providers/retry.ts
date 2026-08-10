@@ -16,7 +16,7 @@ const log = createLogger('Retry');
 
 // ── Types ──
 
-export interface RetryOptions {
+export interface RetryOptions<T = unknown> {
   /** Maximum number of attempts (default: 3) */
   maxRetries?: number;
   /** Initial backoff delay in ms (default: 1000). Doubles each attempt. */
@@ -29,6 +29,10 @@ export interface RetryOptions {
   retryableStatusCodes?: Set<number>;
   /** Predicate to decide if an error is retryable. Overrides default behavior if provided. */
   isRetryable?: (error: unknown) => boolean;
+  /** Predicate to retry a resolved result, such as a transient HTTP response. */
+  shouldRetryResult?: (result: T) => boolean | Promise<boolean>;
+  /** Cleanup performed before retrying a resolved result, such as draining a response body. */
+  beforeRetryResult?: (result: T) => void | Promise<void>;
   /** Component name for log messages (default: 'Retry') */
   component?: string;
 }
@@ -67,14 +71,27 @@ function normalizeDelayMs(value: number): number | null {
   return Math.min(Math.max(0, value), MAX_BACKOFF_DELAY_MS);
 }
 
-function getBackoffDelay(error: unknown, attempt: number, opts: RetryOptions): number {
+function getBackoffDelay<T>(error: unknown, attempt: number, opts: RetryOptions<T>): number {
   if (opts.getBackoffDelayMs) {
     const dynamic = normalizeDelayMs(opts.getBackoffDelayMs(error, attempt));
     if (dynamic !== null) return dynamic;
     log.warn(
       `${opts.component ?? 'Retry'}: discarding non-finite dynamic backoff delay on attempt ${attempt}, falling back to exponential backoff`
     );
-  } else if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
+  } else {
+    return errorlessBackoffDelay(attempt, opts);
+  }
+  return errorlessBackoffDelay(attempt, opts);
+}
+
+/**
+ * The delay schedule that does not depend on an error: `fixedDelays` when the
+ * caller configured one, else exponential backoff. Shared by the error and
+ * result retry paths so a caller's `fixedDelays` contract cannot apply to one
+ * and not the other.
+ */
+function errorlessBackoffDelay<T>(attempt: number, opts: RetryOptions<T>): number {
+  if (opts.fixedDelays && attempt - 1 < opts.fixedDelays.length) {
     const fixed = normalizeDelayMs(opts.fixedDelays[attempt - 1]);
     if (fixed !== null) return fixed;
   }
@@ -105,7 +122,7 @@ function defaultIsRetryable(error: unknown): boolean {
  */
 export async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  opts: RetryOptions = {}
+  opts: RetryOptions<T> = {}
 ): Promise<T> {
   const maxRetries = opts.maxRetries ?? 3;
   const component = opts.component ?? 'Retry';
@@ -114,14 +131,13 @@ export async function retryWithBackoff<T>(
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    // Only the operation itself belongs in this try. Result-path callbacks run
+    // after it so a bug in `shouldRetryResult`/`beforeRetryResult` surfaces as
+    // itself instead of being caught below and reclassified as an operation
+    // failure (which would discard an already-resolved result).
+    let result: T;
     try {
-      const result = await fn();
-
-      if (attempt > 1) {
-        log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
-      }
-
-      return result;
+      result = await fn();
     } catch (error) {
       lastError = error;
 
@@ -136,6 +152,28 @@ export async function retryWithBackoff<T>(
 
       throw error;
     }
+
+    const retryableResult = opts.shouldRetryResult && (await opts.shouldRetryResult(result));
+
+    if (retryableResult && attempt < maxRetries) {
+      await opts.beforeRetryResult?.(result);
+      // There is no error on the result path, so the dynamic `getBackoffDelayMs`
+      // hook is deliberately skipped rather than invoked with `undefined` -- but
+      // `fixedDelays` still applies, so share the errorless schedule instead of
+      // recomputing only the exponential branch.
+      const delay = errorlessBackoffDelay(attempt, opts);
+      log.warn(
+        `${component}: attempt ${attempt}/${maxRetries} returned a retryable result, retrying in ${delay}ms`
+      );
+      await sleep(delay);
+      continue;
+    }
+
+    if (!retryableResult && attempt > 1) {
+      log.info(`${component}: succeeded on attempt ${attempt}/${maxRetries}`);
+    }
+
+    return result;
   }
 
   throw lastError;
