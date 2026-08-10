@@ -181,17 +181,21 @@ function candidateScore(
   candidate: SuccessfulRecoveryCandidate,
   avoidConfigKey?: string
 ): [number, number, number, number, number, number] {
-  // Prefer CF-stable, then full payment-CDN reachability (js+api.stripe.com),
-  // then partial host clears, then avoid the currently-failing exit. When we
-  // are rotating off a known-bad exit and nobody cleared Stripe, prefer Steel
-  // managed (historical payment-tunnel winner) before raw probe latency.
+  // Prefer CF-stable, then leave the currently-failing exit (must beat partial
+  // Stripe host clears — Eventim re-promoted steel_managed on js-only while
+  // avoidConfigKey=steel_managed), then full payment-CDN reachability
+  // (js+api.stripe.com), then partial host clears. When rotating off a
+  // non-avoided exit and nobody cleared Stripe, prefer Steel managed
+  // (historical payment-tunnel winner) before raw probe latency.
   const rotatingOffFailedExit = Boolean(avoidConfigKey);
+  const isAvoided = Boolean(avoidConfigKey && candidate.config.key === avoidConfigKey);
   return [
     -candidate.probe.stablePasses,
+    isAvoided ? 1 : 0,
     candidate.probe.paymentCdnOk ? 0 : 1,
     -paymentHostsOkCount(candidate.probe),
-    avoidConfigKey && candidate.config.key === avoidConfigKey ? 1 : 0,
     rotatingOffFailedExit &&
+    !isAvoided &&
     !candidate.probe.paymentCdnOk &&
     candidate.config.key === 'steel_managed'
       ? 0

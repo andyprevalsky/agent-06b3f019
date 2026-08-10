@@ -292,6 +292,44 @@ async function testPrefersPartialPaymentHostClearOverSteelBias(): Promise<void> 
   assert.strictEqual(winner.config.key, 'kernel_residential_city');
 }
 
+async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
+  // Eventim guest checkout (agent 48ef13f0, 2026-08-10): recover-challenge logged
+  // avoidConfigKey=steel_managed then re-promoted steel_managed because js.stripe.com
+  // alone outranked the avoid penalty. Live tab stayed challenged / customer-api
+  // ERR_FAILED; no payment_approval.
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'CA',
+    city: 'SAN FRANCISCO',
+  });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs:
+          config.key === 'steel_managed' ? 26850 : config.key === 'kernel_isp' ? 5855 : 8000,
+        paymentCdnOk: false,
+        paymentCdnHosts:
+          config.key === 'steel_managed'
+            ? { 'js.stripe.com': true, 'api.stripe.com': false }
+            : { 'js.stripe.com': false, 'api.stripe.com': false },
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'steel_managed' }
+  );
+  assert.notStrictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, [winner.config.key]);
+  assert.strictEqual(winner.config.key, 'kernel_isp');
+}
+
 function testRecoveryConfigKeyForSession(): void {
   assert.strictEqual(recoveryConfigKeyForSession('kernel', 'isp_city'), 'kernel_isp');
   assert.strictEqual(
@@ -740,6 +778,7 @@ async function main(): Promise<void> {
   await testPrefersPaymentCdnReachableWinnerWhenStablePassesTie();
   await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
   await testPrefersPartialPaymentHostClearOverSteelBias();
+  await testAvoidConfigKeyBeatsPartialPaymentHostClear();
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
   await testCandidateProbeUsesThePromotedDefaultContext();
