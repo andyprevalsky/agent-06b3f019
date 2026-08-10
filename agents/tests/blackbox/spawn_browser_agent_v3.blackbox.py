@@ -9933,6 +9933,32 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
 
+
+def test_write_lock_purchase_button_excludes_terms_consent_prose():
+    """Terms copy that quotes Buy Now must not trip the purchase write lock.
+
+    Eventim checkout (2026-08-10 agent e20e5a4e): clicking the legal line
+    'By clicking "Buy Now," you agree to our Terms of Purchase…' was classified
+    as a purchase button, forced generate_write_lock_notification, and blocked
+    request_payment_card. Real Buy Now / Place Order controls stay locked.
+    """
+    from browser_tools.write_lock import is_purchase_button
+
+    terms = (
+        'By clicking "Buy Now," you agree to our\n'
+        "Terms of Purchase\n"
+        "and acknowledge our privacy practices as described in our\n"
+        "Privacy Policy."
+    )
+    assert not is_purchase_button(terms)
+    assert not is_purchase_button(
+        "By clicking Place Order you agree to the Terms of Service"
+    )
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("Place Order")
+    assert is_purchase_button("Pay Now")
+
+
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
     """Marketing opt-in checkboxes never trigger the outbound-send write lock.
 
@@ -15213,6 +15239,10 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
+    )
+    r.record(
+        "write_lock_purchase_button_excludes_terms_consent_prose",
+        test_write_lock_purchase_button_excludes_terms_consent_prose,
     )
     r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",

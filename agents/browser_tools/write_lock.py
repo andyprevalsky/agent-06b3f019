@@ -219,6 +219,20 @@ PURCHASE_BUTTON_PHRASES = [
     "submit return",
 ]
 
+# Legal/consent copy often quotes the purchase button ("By clicking Buy Now, you
+# agree…"). That prose is not a submit control. Eventim checkout (2026-08-10
+# agent e20e5a4e) matched "buy now" inside Terms of Purchase text, forced a
+# purchase write-lock notification, and blocked request_payment_card.
+PURCHASE_CONSENT_PROSE_PATTERNS = [
+    "by clicking",
+    "you agree",
+    "terms of purchase",
+    "terms of service",
+    "privacy policy",
+    "privacy practices",
+    "acknowledge our",
+]
+
 
 def normalize_write_lock_text(text: str) -> str:
     """Normalize text for write-lock phrase matching."""
@@ -374,6 +388,11 @@ def is_purchase_button(element_text: str) -> bool:
         return False
 
     text_lower = normalize_write_lock_text(element_text)
+
+    # Consent/legal prose that merely mentions the purchase verb is not a button.
+    if any(normalize_write_lock_text(pattern) in text_lower for pattern in PURCHASE_CONSENT_PROSE_PATTERNS):
+        logger.debug(f"Element text '{element_text}' matched purchase consent-prose exclusion")
+        return False
 
     for phrase in PURCHASE_BUTTON_PHRASES:
         if normalize_write_lock_text(phrase) in text_lower:
