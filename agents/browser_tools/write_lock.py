@@ -177,6 +177,26 @@ ONE_TIME_CODE_PATTERNS = (
     "passcode",
 )
 
+# Marketing / newsletter opt-in checkboxes ask the site to send info TO the
+# shopper. That is not an outbound message the agent composed, so it must not
+# trip the email_send write lock. Eventim checkout labels like
+# "Send me info about other shows by this organizer" previously parked the
+# agent on write_lock approval and blocked request_payment_card.
+MARKETING_OPT_IN_PATTERNS = (
+    "send me info",
+    "send me update",
+    "send me news",
+    "send me email",
+    "send me offer",
+    "send me deal",
+    "send me promo",
+    "email me about",
+    "email me info",
+    "keep me informed",
+    "subscribe to",
+    "sign me up for",
+)
+
 # Purchase/order button text patterns (case-insensitive)
 # These are matched as full phrases to avoid false positives (e.g. "place" alone)
 PURCHASE_BUTTON_PHRASES = [
@@ -305,11 +325,21 @@ def _is_email_otp_retry(normalized: str) -> bool:
     )
 
 
+def _is_marketing_opt_in_action(normalized: str) -> bool:
+    """Return True when the label opts into receiving marketing/info from the site.
+
+    Content test, anywhere in the label. Opting in asks the merchant to email the
+    shopper later; it is not composing and sending an outbound message now.
+    """
+    return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
+
+
 def is_email_send_button(element_text: str) -> bool:
     """Check whether any local action signal is an outbound send.
 
-    Two independent exemptions clear a signal: asking for a one-time code
-    (content, anywhere in the label) and resending (positional prefix). Each
+    Three independent exemptions clear a signal: asking for a one-time code
+    (content, anywhere in the label), marketing/newsletter opt-in (content,
+    anywhere in the label), and resending (positional prefix). Each
     newline-delimited signal is still classified on its own, so an exempt label
     can never unlock a neighbouring send control or action-bearing attribute.
     """
@@ -320,7 +350,11 @@ def is_email_send_button(element_text: str) -> bool:
         normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
         if not normalized:
             continue
-        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
+        if (
+            _is_one_time_code_action(normalized)
+            or _is_email_otp_retry(normalized)
+            or _is_marketing_opt_in_action(normalized)
+        ):
             continue
         if any(pattern == normalized or pattern in normalized for pattern in EMAIL_SEND_BUTTON_PATTERNS):
             return True

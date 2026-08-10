@@ -8161,7 +8161,7 @@ def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
     )
 
 
-def test_api_challenge_html_triggers_provider_exit_rejection():
+async def test_api_challenge_html_triggers_provider_exit_rejection():
     """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
     from domains.spawn_browser_agent_v3.recording import (
         BrowserNetworkRecorder,
@@ -8229,9 +8229,7 @@ def test_api_challenge_html_triggers_provider_exit_rejection():
                 async def getResponseBody(params=None, session_id=None):
                     return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
 
-    import asyncio
-
-    asyncio.run(recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp()))
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
     assert recorder.pop_provider_exit_rejection() == {
         "reason": _API_CHALLENGE_HTML_REASON,
         "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
@@ -9934,6 +9932,32 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+
+def test_write_lock_email_send_excludes_marketing_opt_in_controls():
+    """Marketing opt-in checkboxes never trigger the outbound-send write lock.
+
+    Eventim checkout (2026-08-10 agent 317bd635): clicking the label
+    "Send me info about other shows by this organizer" was classified as
+    email_send, parked the agent on write_lock approval, and blocked
+    request_payment_card. Opting into merchant emails is not composing an
+    outbound message.
+    """
+    from browser_tools.write_lock import is_email_send_button
+
+    assert not is_email_send_button("Send me info about other shows by this organizer")
+    assert not is_email_send_button("Send me updates about upcoming events")
+    assert not is_email_send_button("Email me about other shows")
+    assert not is_email_send_button("Subscribe to the organizer newsletter")
+    assert not is_email_send_button("Sign me up for promotional emails")
+
+    # Ordinary outbound sends stay locked.
+    assert is_email_send_button("Send")
+    assert is_email_send_button("Send email")
+    assert is_email_send_button("Send message")
+
+    # An opt-in label must not unlock a neighbouring real send control.
+    assert is_email_send_button("Send me info about other shows\nSend message")
+
 
 def test_write_lock_email_send_excludes_resend_controls():
     """Code requests and resends never trigger the outbound-send write lock.
@@ -14161,7 +14185,8 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "pop_provider_exit_rejection()" in activity_source
     assert '"provider_exit_rejected": True' in activity_source
-    assert "provider_exit_rejected=bool(" in recovery_branch
+    # Assignment form (main): provider_exit_rejected = bool(unified_action...)
+    assert "provider_exit_rejected = bool(" in recovery_branch
     assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -15032,7 +15057,7 @@ async def run_all_tests():
         "api_challenge_html_large_cart_interstitial",
         test_api_challenge_html_large_cart_interstitial_without_classic_markers,
     )
-    r.record(
+    await r.record_async(
         "api_challenge_html_provider_exit",
         test_api_challenge_html_triggers_provider_exit_rejection,
     )
@@ -15188,6 +15213,10 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
+    )
+    r.record(
+        "write_lock_email_send_excludes_marketing_opt_in_controls",
+        test_write_lock_email_send_excludes_marketing_opt_in_controls,
     )
     r.record(
         "write_lock_email_send_excludes_resend_controls",
