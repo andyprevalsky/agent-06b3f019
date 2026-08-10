@@ -2998,6 +2998,44 @@ def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
     assert _run_declared_static_check(evaluator, unsuccessful)[0] is False
 
 
+def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
+    """Antibot staged recoveries may ERROR then continue to payment; do not fail closed.
+
+    Local repro: browser-1015-eventim-request-card agent
+    0a9eeef6-bd96-4dfc-b52b-007451fd059c reached a grounded payment_approval after
+    provider-exit-recovery ERROR, then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "browser_challenge_recovery",
+                    "toolCallId": "provider-exit-recovery-25b95b85-0e54-4e6f-80f6-d035da21428e",
+                    "title": "Browser challenge recovery failed",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_01FjeGZhyXsMihYSLNRkAyb9",
+                    "title": "Payment card requested ($25.05)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy

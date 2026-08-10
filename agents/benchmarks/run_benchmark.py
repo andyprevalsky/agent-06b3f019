@@ -7758,6 +7758,8 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
+            if _is_intermediate_challenge_recovery_failure(candidate):
+                continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -7920,6 +7922,22 @@ def _validate_agent_class_min_steps(
     return None
 
 
+def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
+    """Staged antibot recoveries often ERROR then continue; those are not tool failures.
+
+    `recover_from_challenge` emits `action_type=browser_challenge_recovery` rows (often
+    under synthetic `provider-exit-recovery-*` toolCallIds). A later successful payment
+    boundary can follow after one or more of these ERRORs. Counting them in
+    `no_tool_failures` / `no_browser_agent_failures` makes antibot benches fail closed
+    on expected recovery noise.
+    """
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    if action_type == "browser_challenge_recovery":
+        return True
+    call_id = str(candidate.get("toolCallId") or candidate.get("tool_call_id") or "")
+    return call_id.startswith("provider-exit-recovery-")
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -7933,6 +7951,8 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         for candidate in candidates:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
+                continue
+            if _is_intermediate_challenge_recovery_failure(candidate):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
