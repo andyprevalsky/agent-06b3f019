@@ -295,8 +295,10 @@ SITE_WRITE_LOCK_APPROVAL_KEY = "site"
 
 # Browser live-view / provider hosts must not become the site-unlock domain —
 # Place order is checked against the real merchant page (e.g. roselabs.ai).
+# Kernel exposes both *.onkernel.com and *.kernel.sh live-view hosts.
 _BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
     "onkernel.com",
+    "kernel.sh",
     "steel.dev",
     "browserbase.com",
     "hyperbrowser.ai",
@@ -313,9 +315,11 @@ def _is_browser_provider_domain(domain: str) -> bool:
 def resolve_site_write_lock_grant_url(result: Optional[Dict]) -> str:
     """Pick the merchant checkout URL for a payment-card site unlock.
 
-    Prefer payment-request product URLs / write-lock notification service URL over
-    ``current_url``, which on Kernel can be the live-view proxy host. Unlocking the
-    proxy domain would leave Place order on the real merchant site locked.
+    Prefer payment-request product URLs / write-lock notification service URL /
+    spawn ``start_url`` / visited merchant URLs over ``current_url``, which on
+    Kernel can be the live-view proxy host (``*.onkernel.com`` / ``*.kernel.sh``).
+    Unlocking the proxy domain would leave Place order on the real merchant site
+    locked.
     """
     payload = result if isinstance(result, dict) else {}
     candidates: list[str] = []
@@ -340,6 +344,16 @@ def resolve_site_write_lock_grant_url(result: Optional[Dict]) -> str:
             domain = service.get("domain")
             if domain:
                 candidates.append(f"https://{domain}/")
+
+    start_url = payload.get("start_url")
+    if start_url:
+        candidates.append(str(start_url))
+
+    visited = payload.get("visited_urls") or []
+    if isinstance(visited, list):
+        for url in visited:
+            if url:
+                candidates.append(str(url))
 
     current_url = payload.get("current_url")
     if current_url:

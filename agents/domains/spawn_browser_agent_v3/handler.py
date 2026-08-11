@@ -133,6 +133,7 @@ from .service import (
     select_auth_assistance_current_url,
 )
 from .service_actions import (
+    SITE_WRITE_LOCK_APPROVAL_KEY,
     execute_action,
     get_domain_from_url,
     get_element_description,
@@ -4859,7 +4860,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
-        write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
+        write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
@@ -4874,6 +4875,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
         ][-3:]
+        # H-06 heal: payment-card resume must unlock the merchant domain. Older
+        # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
+        # re-resolve from start_url / visited merchant URLs when needed.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            merchant_grant_url = resolve_site_write_lock_grant_url(
+                {
+                    "start_url": start_url,
+                    "visited_urls": visited_urls,
+                    "current_url": "",
+                }
+            )
+            merchant_domain = get_domain_from_url(merchant_grant_url)
+            site_entry = write_lock_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}
+            if merchant_domain and site_entry.get("domain") != merchant_domain:
+                write_lock_approvals = grant_site_write_lock_approvals(
+                    write_lock_approvals,
+                    merchant_grant_url,
+                    time.time(),
+                )
+                logger.info(
+                    "Browser payment site write-lock unlock healed on resume",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grant_url=merchant_grant_url,
+                    unlock_domain=merchant_domain,
+                    prior_domain=site_entry.get("domain"),
+                )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -8846,13 +8876,30 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
                     # Payment-card approval unlocks write locks on the merchant
                     # checkout domain for THIS browser activity only (resume state).
-                    # Resolve URL from payment_request / notification first —
-                    # Kernel live-view current_url can be a proxy host, which must
-                    # not become the unlock domain. New spawns start empty.
+                    # Prefer normalized payment_payload product URLs + spawn
+                    # start_url — Kernel live-view current_url is often a proxy
+                    # host (*.kernel.sh / *.onkernel.com) and must not become the
+                    # unlock domain. New spawns start empty.
+                    grant_source = {
+                        **(result if isinstance(result, dict) else {}),
+                        "payment_request": payment_payload,
+                        "start_url": current_start_url or start_url,
+                    }
+                    grant_url = resolve_site_write_lock_grant_url(grant_source)
                     current_approvals = grant_site_write_lock_approvals(
                         result.get("write_lock_approvals", {}),
-                        resolve_site_write_lock_grant_url(result),
+                        grant_url,
                         workflow.now().timestamp(),
+                    )
+                    logger.info(
+                        "Browser payment site write-lock unlock",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        grant_url=grant_url,
+                        unlock_domain=(current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}).get(
+                            "domain"
+                        ),
+                        current_url=result.get("current_url"),
                     )
 
                     write_lock_resume_state = {

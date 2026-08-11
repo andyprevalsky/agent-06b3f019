@@ -7353,6 +7353,35 @@ def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_ur
     )
     assert SITE_WRITE_LOCK_APPROVAL_KEY not in proxy_only
 
+    # Fleet 20260811-010703: live-view host is *.kernel.sh (not onkernel.com).
+    # When product URLs are absent, spawn start_url must still unlock merchant.
+    kernel_sh = {
+        "current_url": "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/5GgNkgp6OZ2g?readOnly=true",
+        "payment_request": {
+            "merchant": "Rose Labs Test Payment",
+            "lineItems": [{"name": "Agent Card Lifecycle Probe", "quantity": 1}],
+        },
+        "start_url": "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+    }
+    grant_url_sh = resolve_site_write_lock_grant_url(kernel_sh)
+    assert "roselabs.ai" in grant_url_sh
+    assert "kernel.sh" not in grant_url_sh
+    approvals_sh = grant_site_write_lock_approvals({}, grant_url_sh, time_module.time())
+    assert approvals_sh[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals_sh,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    kernel_sh_only = grant_site_write_lock_approvals(
+        {},
+        "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in kernel_sh_only
 
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
