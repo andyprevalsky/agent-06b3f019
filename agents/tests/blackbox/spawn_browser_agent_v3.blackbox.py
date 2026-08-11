@@ -7312,6 +7312,55 @@ def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
     assert is_approval_valid(fresh_session_approvals, "purchase", "https://roselabs.ai/test_payment") is False
 
 
+@pytest.mark.asyncio
+async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present():
+    """H-06: minted card refs unlock Place order even if site approval bookkeeping missed."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.text_content = "Place order\n$1.00"
+    element.tag_name = "button"
+    element.attributes = {}
+    secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+        AsyncMock(return_value="Place order $1.00"),
+    ), patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place order $1.00",
+    ):
+        locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},  # empty site unlock — secret refs must still unlock
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs=secret_refs,
+        )
+        assert locked is None
+        still_locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs={},
+        )
+        assert still_locked is not None
+        assert still_locked["status"] == "needs_write_approval"
+        assert still_locked["approval_type"] == "purchase"
+
+
 def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url():
     """H-06 outcome: Kernel live-view current_url must not become the unlock domain."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -14852,6 +14901,10 @@ async def run_all_tests():
     r.record(
         "site_write_lock_grant_prefers_merchant_over_kernel_proxy",
         test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url,
+    )
+    await r.record_async(
+        "purchase_write_lock_bypassed_when_payment_card_secret_refs_present",
+        test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present,
     )
     r.record("get_element_description_none", test_get_element_description_none)
     r.record("get_element_description_text", test_get_element_description_with_text)

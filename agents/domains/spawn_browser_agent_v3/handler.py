@@ -8519,26 +8519,35 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         reusable=lookup_result.get("reusable"),
                     )
 
-                    approval_response = {"attention_request_id": None}
-                    if not lookup_result.get("reusable"):
-                        approval_response = await request_user_approval_direct(
-                            workflow_instance,
-                            question=build_payment_question(payment_payload),
-                            metadata={
-                                "toolApproval": True,
-                                "writePermission": True,
-                                "url": result.get("current_url", ""),
-                                "requestPaymentCard": payment_payload,
-                                "writeLockNotification": result.get("write_lock_notification"),
-                                "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
-                            },
-                        )
-                        logger.info(
-                            "Browser payment approval granted",
-                            agent_id=workflow_instance.agent_id,
-                            task_id=result.get("task_id"),
-                            attention_request_id=approval_response.get("attention_request_id"),
-                        )
+                    # Always surface payment_approval attention — even when a held
+                    # purchase is reusable. Skipping it left fleets with
+                    # attentionRequestId=null, so Place-order write_lock became the
+                    # first observed attention ("Expected payment_approval, observed
+                    # write_lock") and H-06 site unlock was never gated on a real
+                    # approval. Reuse still applies at mint; this only restores the
+                    # approval UX / benchmark contract.
+                    approval_response = await request_user_approval_direct(
+                        workflow_instance,
+                        question=build_payment_question(payment_payload),
+                        metadata={
+                            "toolApproval": True,
+                            "writePermission": True,
+                            "url": result.get("current_url", "")
+                            or current_start_url
+                            or start_url,
+                            "requestPaymentCard": payment_payload,
+                            "writeLockNotification": result.get("write_lock_notification"),
+                            "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
+                            "reusablePurchase": bool(lookup_result.get("reusable")),
+                        },
+                    )
+                    logger.info(
+                        "Browser payment approval granted",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        attention_request_id=approval_response.get("attention_request_id"),
+                        reusable=bool(lookup_result.get("reusable")),
+                    )
 
                     funding_retry_deadline = None
 

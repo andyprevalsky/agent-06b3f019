@@ -583,6 +583,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             write_lock_approvals=context.write_lock_approvals,
             current_url=context.current_url,
             system_name=context.system_name,
+            secret_refs=context.secret_refs,
         )
     if context.action_name == "input_text":
         return await _execute_input_text(
@@ -1484,6 +1485,7 @@ async def _click_write_lock_result(
     write_lock_approvals: Optional[Dict],
     current_url: str,
     system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
@@ -1531,6 +1533,7 @@ async def _click_write_lock_result(
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
+    minted_card_unlocks_purchase = has_payment_card_secret_refs(secret_refs)
     for approval_type, detected, description in checks:
         if not detected:
             continue
@@ -1538,6 +1541,16 @@ async def _click_write_lock_result(
             logger.info(
                 f"Write lock bypassed: existing approval valid{suffix}",
                 approval_type=approval_type,
+                url=current_url,
+            )
+            continue
+        # H-06: a minted one-time card in THIS browser activity unlocks Place
+        # order / purchase write locks (same ephemeral scope as site unlock).
+        # Payment-field typing already bypasses via secret refs; purchase must
+        # too or Place order re-prompts after Payment card ready.
+        if approval_type == "purchase" and minted_card_unlocks_purchase:
+            logger.info(
+                f"Write lock bypassed: minted payment card unlocks purchase{suffix}",
                 url=current_url,
             )
             continue
@@ -1576,6 +1589,7 @@ async def _execute_click(
     write_lock_approvals: Optional[Dict],
     current_url: str,
     system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Execute a click action with write lock checks."""
     from browser_use.browser.events import ClickCoordinateEvent, ClickElementEvent
@@ -1597,6 +1611,7 @@ async def _execute_click(
             write_lock_approvals=write_lock_approvals,
             current_url=current_url,
             system_name=system_name,
+            secret_refs=secret_refs,
         )
         if write_lock_result:
             return write_lock_result
