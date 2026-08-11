@@ -1,16 +1,25 @@
 import type { Prisma } from '@prisma/client';
-import type { Browser, Cookie, Page, Response } from 'playwright';
+import type { Browser, Cookie } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
 import { createSteelRecoverySession, releaseSteelRemoteSession } from '../steel/session';
+import { waitForProviderSolver } from './challengePageDetect';
 import {
   createKernelRecoverySession,
   releaseKernelRemoteSession,
   type KernelRecoveryProxySpecificity,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
+import {
+  probePaymentCdnReachable,
+  targetLooksLikePaymentDocument,
+} from './paymentCdnProbe';
+import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import type { BrowserProviderName } from './types';
+
+export { challengeDetectionReason, pageLooksChallenged } from './challengePageDetect';
+export { targetLooksLikePaymentDocument } from './paymentCdnProbe';
 
 const log = createLogger('BrowserChallengeRecovery');
 
@@ -50,9 +59,12 @@ export interface CandidateProbeResult {
   stablePasses: number;
   attempts: number;
   latencyMs: number;
-  /** True when the candidate can fetch js.stripe.com AND api.stripe.com (Elements). */
+  /**
+   * True when the candidate can fetch js.stripe.com + api.stripe.com AND load
+   * Stripe.js (window.Stripe). Fetch-only clears are not enough for Elements.
+   */
   paymentCdnOk: boolean;
-  /** Per-host tunnel reachability from the candidate page (for ranking + logs). */
+  /** Per-host tunnel + stripe.js script-load results (for ranking + logs). */
   paymentCdnHosts?: Record<string, boolean>;
 }
 
@@ -79,29 +91,6 @@ export interface BrowserConfigSearchRuntimeDependencies {
   releaseSteel: typeof releaseSteelRemoteSession;
   probe: typeof probeCandidateBrowser;
 }
-
-const CHALLENGE_TEXT = [
-  'access denied',
-  'attention required! | cloudflare',
-  'checking your browser',
-  'enable javascript and cookies to continue',
-  'just a moment',
-  'performing security verification',
-  'please verify you are a human',
-  'sorry, you have been blocked',
-  "this site can't be reached",
-  'too many requests',
-  'unusual traffic from your computer network',
-  'verify you are human',
-];
-// Present on hard CF walls *and* on cleared pages that embed Bot Management /
-// Turnstile (Eventim ticket HTML). Only count when visible body is still sparse.
-const HTML_CHALLENGE_MARKERS = [
-  '/cdn-cgi/challenge-platform',
-  'cf-chl-',
-  'challenges.cloudflare.com/turnstile',
-];
-const SUBSTANTIVE_BODY_CHARS = 80;
 
 function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
   if (location.city) return 'city';
@@ -173,7 +162,8 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
 
 function paymentHostsOkCount(probe: CandidateProbeResult): number {
   const hosts = probe.paymentCdnHosts;
-  if (!hosts) return probe.paymentCdnOk ? 2 : 0;
+  // js.stripe.com + api.stripe.com + stripe.js script load
+  if (!hosts) return probe.paymentCdnOk ? 3 : 0;
   return Object.values(hosts).filter(Boolean).length;
 }
 
@@ -232,6 +222,11 @@ export function recoveryConfigKeyForSession(
 export interface ParallelConfigSearchOptions {
   /** Deprioritize this candidate key (e.g. the live exit that just failed payment CDN). */
   avoidConfigKey?: string;
+  /**
+   * When true (checkout / payment URLs), refuse to promote a winner that did not
+   * clear Stripe.js — CF-only clears are not recovery success for payment docs.
+   */
+  requirePaymentCdn?: boolean;
 }
 
 /** Create/probe all candidates concurrently, then atomically promote one winner. */
@@ -241,6 +236,7 @@ export async function runParallelBrowserConfigSearch(
   options: ParallelConfigSearchOptions = {}
 ): Promise<SuccessfulRecoveryCandidate> {
   const avoidConfigKey = options.avoidConfigKey;
+  const requirePaymentCdn = Boolean(options.requirePaymentCdn);
   const attempts = await Promise.allSettled(
     configs.map(async (config) => {
       try {
@@ -284,6 +280,7 @@ export async function runParallelBrowserConfigSearch(
   );
   const ranked = successful
     .filter((candidate) => candidate.probe.stablePasses > 0)
+    .filter((candidate) => !requirePaymentCdn || candidate.probe.paymentCdnOk)
     .sort((left, right) => {
       const leftScore = candidateScore(left, avoidConfigKey);
       const rightScore = candidateScore(right, avoidConfigKey);
@@ -295,19 +292,35 @@ export async function runParallelBrowserConfigSearch(
     });
   // Prefer fully-stable (passes === attempts). If Cloudflare only clears one of
   // two probe loads, still promote the best partial winner — the agent live
-  // navigation verify remains the hard gate before recovery success.
+  // navigation verify remains the hard gate before recovery success. On payment
+  // documents, Stripe.js must also have loaded (requirePaymentCdn).
   const winner =
     ranked.find((candidate) => candidate.probe.stablePasses === candidate.probe.attempts) ??
     ranked[0];
   if (winner === undefined) {
+    const stableWithoutStripe = successful.filter(
+      (candidate) => candidate.probe.stablePasses > 0 && !candidate.probe.paymentCdnOk
+    );
     log.error('Challenge recovery found no stable browser configuration', {
       candidateCount: configs.length,
       successfulProbeCount: successful.length,
+      requirePaymentCdn,
+      stableWithoutStripeCount: stableWithoutStripe.length,
       configKeys: configs.map((config) => config.key),
+      paymentCdnHosts: stableWithoutStripe.map((candidate) => ({
+        configKey: candidate.config.key,
+        hosts: candidate.probe.paymentCdnHosts ?? {},
+      })),
     });
     await Promise.allSettled(
       successful.map((candidate) => dependencies.release(candidate.config, candidate.session))
     );
+    if (requirePaymentCdn && stableWithoutStripe.length > 0) {
+      throw new Error(
+        'No browser configuration cleared the challenge with Stripe.js loaded ' +
+          `(${stableWithoutStripe.length} CF-stable candidate(s) failed payment CDN / Stripe.js)`
+      );
+    }
     throw new Error('No stable browser configuration cleared the challenge');
   }
 
@@ -319,6 +332,7 @@ export async function runParallelBrowserConfigSearch(
     attempts: winner.probe.attempts,
     paymentCdnOk: winner.probe.paymentCdnOk,
     paymentCdnHosts: winner.probe.paymentCdnHosts ?? {},
+    requirePaymentCdn,
     avoidConfigKey: avoidConfigKey ?? null,
     partial: winner.probe.stablePasses < winner.probe.attempts,
     latencyMs: winner.probe.latencyMs,
@@ -337,188 +351,6 @@ export async function runParallelBrowserConfigSearch(
       .map((candidate) => dependencies.release(candidate.config, candidate.session))
   );
   return winner;
-}
-
-export function challengeDetectionReason(input: {
-  status: number | null;
-  title: string;
-  bodyText: string;
-  html: string;
-}): string | null {
-  if (input.status === 403 || input.status === 429) return `status_${input.status}`;
-  const content = `${input.title}\n${input.bodyText}`.toLowerCase();
-  for (const marker of CHALLENGE_TEXT) {
-    if (content.includes(marker)) return `text:${marker}`;
-  }
-  const html = input.html.toLowerCase();
-  const visibleMarkup = html.replace(/<[^>]+>/g, '').trim();
-  if (!input.title.trim() && !input.bodyText.trim() && !visibleMarkup) return 'empty_page';
-  // Cleared Eventim pages embed challenge-platform/Turnstile beside real
-  // inventory copy — do not treat those script URLs as a wall once body text
-  // is substantive.
-  if (input.bodyText.trim().length < SUBSTANTIVE_BODY_CHARS) {
-    for (const marker of HTML_CHALLENGE_MARKERS) {
-      if (html.includes(marker)) return `html:${marker}`;
-    }
-  }
-  return null;
-}
-
-export function pageLooksChallenged(input: {
-  status: number | null;
-  title: string;
-  bodyText: string;
-  html: string;
-}): boolean {
-  return challengeDetectionReason(input) !== null;
-}
-
-async function challengeSnapshot(page: Page, response: Response | null) {
-  const [title, bodyText, html] = await Promise.all([
-    page.title().catch(() => ''),
-    page
-      .locator('body')
-      .innerText({ timeout: 2_000 })
-      .catch(() => ''),
-    page.content().catch(() => ''),
-  ]);
-  return {
-    status: response?.status() ?? null,
-    title: title.slice(0, 1_000),
-    bodyText: bodyText.slice(0, 20_000),
-    html: html.slice(0, 100_000),
-  };
-}
-
-async function waitForProviderSolver(
-  page: Page,
-  response: Response | null
-): Promise<{ clean: boolean; reason: string | null; title: string }> {
-  // Both candidate factories explicitly enable their provider-native solver.
-  // Give it the first chance on every attempt, polling the page instead of
-  // assuming a fixed solve duration. A clean page exits immediately.
-  const deadline = Date.now() + 45_000;
-  let currentResponse = response;
-  let lastReason: string | null = 'probe_timeout';
-  let lastTitle = '';
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(2_000);
-    const snapshot = await challengeSnapshot(page, currentResponse);
-    lastTitle = snapshot.title;
-    lastReason = challengeDetectionReason(snapshot);
-    if (lastReason === null) return { clean: true, reason: null, title: lastTitle };
-    currentResponse = null;
-  }
-  return { clean: false, reason: lastReason, title: lastTitle };
-}
-
-function recoveryOriginStorageScript(storageState: Record<string, unknown>): string {
-  const origins = Array.isArray(storageState.origins) ? storageState.origins : [];
-  return `
-(() => {
-  const originStates = ${JSON.stringify(origins).replaceAll('</', '<\\/')};
-  const completionKey = '__naviRecoveryStorageRestoredV1';
-  let restorePromise;
-  const restoreCurrentOrigin = async () => {
-    const state = originStates.find((entry) => entry.origin === location.origin);
-    if (!state) return;
-    try { if (sessionStorage.getItem(completionKey) === '1') return; } catch {}
-    localStorage.clear();
-    for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
-    for (const database of state.indexedDB || []) {
-      await new Promise((resolve, reject) => {
-        const request = indexedDB.open(database.name, database.version);
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          for (const store of database.stores || []) {
-            if (!db.objectStoreNames.contains(store.name)) {
-              db.createObjectStore(store.name, {
-                keyPath: store.keyPath === undefined ? null : store.keyPath,
-                autoIncrement: Boolean(store.autoIncrement),
-              });
-            }
-          }
-        };
-        request.onerror = () => reject(request.error);
-        request.onsuccess = () => {
-          const db = request.result;
-          const storeNames = (database.stores || [])
-            .map((store) => store.name)
-            .filter((name) => db.objectStoreNames.contains(name));
-          if (storeNames.length === 0) { db.close(); resolve(); return; }
-          const transaction = db.transaction(storeNames, 'readwrite');
-          for (const storeState of database.stores || []) {
-            if (!storeNames.includes(storeState.name)) continue;
-            const store = transaction.objectStore(storeState.name);
-            store.clear();
-            for (const record of storeState.records || []) {
-              if (store.keyPath === null && Object.hasOwn(record, 'key')) {
-                store.put(record.value, record.key);
-              } else {
-                store.put(record.value);
-              }
-            }
-          }
-          transaction.oncomplete = () => { db.close(); resolve(); };
-          transaction.onerror = () => { db.close(); reject(transaction.error); };
-          transaction.onabort = () => { db.close(); reject(transaction.error); };
-        };
-      });
-    }
-    try { sessionStorage.setItem(completionKey, '1'); } catch {}
-  };
-  globalThis.__naviRestoreRecoveryStorage = () => {
-    restorePromise ||= restoreCurrentOrigin();
-    return restorePromise;
-  };
-  void globalThis.__naviRestoreRecoveryStorage().catch(() => undefined);
-})();`;
-}
-
-async function probePaymentCdnReachable(
-  page: Page
-): Promise<{ paymentCdnOk: boolean; paymentCdnHosts: Record<string, boolean> }> {
-  // Run inside the candidate page so the fetch uses the same proxy tunnel the
-  // checkout card fields will need. js.stripe.com alone is insufficient —
-  // Eventim Elements stay empty when api.stripe.com tunnels fail after a
-  // js-only paymentCdnOk promote (agent baf33041-…). Record per-host results so
-  // ranking can prefer partial clears and logs show which host failed.
-  const paymentCdnHosts = await page
-    .evaluate(async () => {
-      const targets: Array<{ host: string; url: string }> = [
-        { host: 'js.stripe.com', url: 'https://js.stripe.com/v3/' },
-        { host: 'api.stripe.com', url: 'https://api.stripe.com/healthcheck' },
-      ];
-      const hosts: Record<string, boolean> = {};
-      for (const target of targets) {
-        try {
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 8_000);
-          await fetch(target.url, {
-            method: 'GET',
-            signal: controller.signal,
-            credentials: 'omit',
-          });
-          clearTimeout(timer);
-          // Any HTTP response means the proxy tunnel reached the host.
-          // Stripe may return 401/404 on probe paths; treating only
-          // response.ok as success false-negatives reachable tunnels and
-          // leaves Elements empty after a CF-only promote.
-          hosts[target.host] = true;
-        } catch {
-          hosts[target.host] = false;
-        }
-      }
-      return hosts;
-    })
-    .catch(() => ({
-      'js.stripe.com': false,
-      'api.stripe.com': false,
-    }));
-  const paymentCdnOk = Boolean(
-    paymentCdnHosts['js.stripe.com'] && paymentCdnHosts['api.stripe.com']
-  );
-  return { paymentCdnOk, paymentCdnHosts };
 }
 
 export async function probeCandidateBrowser(
@@ -747,7 +579,10 @@ export async function searchAndPromoteBrowserConfig(
       else await dependencies.releaseSteel(session.sessionId);
     },
     },
-    { avoidConfigKey }
+    {
+      avoidConfigKey,
+      requirePaymentCdn: targetLooksLikePaymentDocument(input.targetUrl),
+    }
   );
 
   return {
@@ -762,7 +597,9 @@ export async function searchAndPromoteBrowserConfig(
     storage_state_preloaded: true,
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
-    recovery_message: `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
+    recovery_message: targetLooksLikePaymentDocument(input.targetUrl)
+      ? `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes with Stripe.js loaded.`
+      : `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
     browser_session_metadata: {
       provider: winner.config.provider,
       proxy_source: winner.session.proxySource,

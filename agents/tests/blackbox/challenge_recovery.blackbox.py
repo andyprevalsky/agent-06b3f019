@@ -16,7 +16,9 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     is_auth_cookie,
     page_looks_challenged,
     recover_from_challenge,
+    target_looks_like_payment_document,
     verify_live_page_cleared_challenge,
+    verify_live_stripe_js_loads,
 )
 
 
@@ -396,6 +398,30 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
     assert false_stable.goto_count == 1
 
 
+def test_payment_document_url_detection():
+    assert target_looks_like_payment_document("https://checkout.eventim.us/?afflky=1015Folsom")
+    assert target_looks_like_payment_document("https://shop.example/cart")
+    assert not target_looks_like_payment_document("https://wl.eventim.us/event/lyny/692405")
+
+
+async def test_live_stripe_js_verify_requires_window_stripe():
+    class FakePage:
+        def __init__(self, stripe_ok: bool):
+            self.stripe_ok = stripe_ok
+            self.evaluate_calls = 0
+
+        async def evaluate(self, _script, _timeout_ms=None):
+            self.evaluate_calls += 1
+            return self.stripe_ok
+
+    ok = FakePage(True)
+    bad = FakePage(False)
+    assert await verify_live_stripe_js_loads(ok)
+    assert not await verify_live_stripe_js_loads(bad)
+    assert ok.evaluate_calls == 1
+    assert bad.evaluate_calls == 1
+
+
 def test_challenge_page_classifier_detects_non_cloudflare_vendors():
     """HTTP-200 interstitials from non-Cloudflare vendors are still challenges.
 
@@ -634,6 +660,11 @@ async def run_all_tests():
     await result.record_async(
         "live_tab_verify_access_denied",
         test_live_tab_verify_accepts_clean_and_rejects_access_denied,
+    )
+    result.record("payment_document_url_detection", test_payment_document_url_detection)
+    await result.record_async(
+        "live_stripe_js_verify",
+        test_live_stripe_js_verify_requires_window_stripe,
     )
     await result.record_async(
         "live_cookie_commit_two_passes",

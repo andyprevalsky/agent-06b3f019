@@ -88,7 +88,10 @@ _CHALLENGE_TEXT_MARKERS = (
 # here was paid for real; the false-positive one is theoretical. Incidental
 # captcha PROSE is handled separately by the classifier's prose guard.
 # A recovered page renders real content; interstitials are near-empty.
-_CLEAN_PAGE_MIN_VISIBLE_CHARS = 600
+# Keep at parity with back-end SUBSTANTIVE_BODY_CHARS (80). Cleared Eventim
+# ticket pages embed Turnstile next to short inventory copy (~80 chars) — a
+# 600-char bar false-positived those as still challenged.
+_CLEAN_PAGE_MIN_VISIBLE_CHARS = 80
 
 _CHALLENGE_HTML_MARKERS = (
     # Cloudflare
@@ -307,6 +310,63 @@ async def verify_live_page_cleared_challenge(
         attempts=attempts,
         solver_timeout_seconds=solver_timeout_seconds,
     )
+
+
+_PAYMENT_DOCUMENT_URL_MARKERS = (
+    "checkout",
+    "payment",
+    "billing",
+    "/pay",
+    "purchase",
+    "/cart",
+)
+
+
+def target_looks_like_payment_document(url: str) -> bool:
+    """True when recovery should also require Stripe.js to load on the live tab."""
+    lowered = (url or "").lower()
+    return any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS)
+
+
+async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
+    """Require Stripe.js to define window.Stripe via a real <script> load.
+
+    Fetch reachability to js.stripe.com can succeed while the script tag fails
+    (ERR_BLOCKED_BY_ORB / "Failed to load Stripe.js"). Checkout recovery must
+    not report success until the script path the page uses actually works.
+    """
+    try:
+        return bool(
+            await page.evaluate(
+                """async (timeoutMs) => {
+                  if (typeof globalThis.Stripe === 'function') return true;
+                  return await new Promise((resolve) => {
+                    const script = document.createElement('script');
+                    script.src = 'https://js.stripe.com/v3';
+                    script.async = true;
+                    const timer = setTimeout(() => {
+                      script.remove();
+                      resolve(false);
+                    }, timeoutMs);
+                    script.onload = () => {
+                      clearTimeout(timer);
+                      const ok = typeof globalThis.Stripe === 'function';
+                      script.remove();
+                      resolve(ok);
+                    };
+                    script.onerror = () => {
+                      clearTimeout(timer);
+                      script.remove();
+                      resolve(false);
+                    };
+                    document.head.appendChild(script);
+                  });
+                }""",
+                timeout_ms,
+            )
+        )
+    except Exception:
+        return False
 
 
 async def commit_cookie_removals(

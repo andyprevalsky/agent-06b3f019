@@ -65,8 +65,13 @@ the LLM — observation pipeline gap, or page truth?
    - Missing auto-vision (`get_browser_state(include_screenshot=False)`):
      explicit screenshot tool still delivered the empty shell to the model.
 
-Cluster: **External Dependency Failure** (Eventim checkout mounts an empty
-payment/billing shell). Not a Broken Tool in our DOM/screenshot path for this
+7. **Post–H-03 rerun (ce52f350):** later in checkout the agent saw Stripe
+   Address/Payment Element iframes mounted at `h:1` (1px tall) — still no usable
+   card/country inputs for the LLM. Same outcome: waited for fields, never called
+   `request_payment_card`.
+
+Cluster: **External Blocker** (Eventim/Stripe checkout never surfaces usable
+billing/payment inputs). Not a Broken Tool in our DOM/screenshot path for this
 symptom. Distinct from H-02 (agent deferred `request_payment_card` despite
 knowing it was the payment step).
 

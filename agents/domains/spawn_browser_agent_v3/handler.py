@@ -63,7 +63,9 @@ from .challenge_recovery import (
     page_looks_challenged,
     probe_storage_state,
     recover_from_challenge,
+    target_looks_like_payment_document,
     verify_live_page_cleared_challenge,
+    verify_live_stripe_js_loads,
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
@@ -7056,6 +7058,21 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 f"Promoted {config_key} passed candidate probes but the live tab "
                                 "is still challenged"
                             )
+                        if target_looks_like_payment_document(current_url):
+                            await emit_recovery_progress(
+                                "live_verify",
+                                "Verifying Stripe.js loads on the promoted checkout tab.",
+                            )
+                            if not await verify_live_stripe_js_loads(input_page):
+                                provider = config_result.get("provider")
+                                proxy_tier = config_result.get("proxy_tier")
+                                config_key = (
+                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                                )
+                                raise RuntimeError(
+                                    f"Promoted {config_key} cleared the challenge but Stripe.js "
+                                    "failed to load on the live checkout tab"
+                                )
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)
@@ -7064,8 +7081,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         proxy_tier = config_result.get("proxy_tier")
                         config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
                         recovery_message = (
-                            f"Recovered by selecting {config_key}; live tab verified clean; "
-                            "signed-in state was preserved."
+                            f"Recovered by selecting {config_key}; live tab verified clean"
+                            + (
+                                "; Stripe.js loaded"
+                                if target_looks_like_payment_document(current_url)
+                                else ""
+                            )
+                            + "; signed-in state was preserved."
                         )
                     else:
                         recovery_message = (

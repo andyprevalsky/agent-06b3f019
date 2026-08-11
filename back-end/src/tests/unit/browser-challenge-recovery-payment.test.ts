@@ -1,0 +1,400 @@
+#!/usr/bin/env tsx
+/**
+ * Payment-CDN / Stripe.js ranking + probe gates for challenge recovery.
+ * Companion to browser-challenge-recovery.test.ts (keeps each file under max-lines).
+ */
+import assert from 'node:assert';
+import type { Browser } from 'playwright';
+import {
+  browserRecoveryCandidates,
+  probeCandidateBrowser,
+  runParallelBrowserConfigSearch,
+  targetLooksLikePaymentDocument,
+  type BrowserRecoveryConfig,
+  type RecoveryCandidateSession,
+} from '../../providers/browser/challengeRecovery';
+
+function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
+  return {
+    provider: config.provider,
+    sessionId: `session-${config.key}`,
+    debugUrl: `https://debug/${config.key}`,
+    wsUrl: `wss://cdp/${config.key}`,
+    proxySource: config.proxyMode,
+    proxyLocation: { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
+    profileId: null,
+    profileSource: 'challenge_candidate_ephemeral',
+    validationBrowser: {} as Browser,
+  };
+}
+
+async function testPrefersPaymentCdnReachableWinnerWhenStablePassesTie(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(configs, {
+    create: async (config) => fakeSession(config),
+    probe: async (config) => ({
+      stablePasses: 2,
+      attempts: 2,
+      // steel_managed is slower but payment-CDN reachable — must win over a
+      // faster CF-only clear (Eventim card fields need js+api.stripe.com).
+      latencyMs: config.key === 'steel_managed' ? 500 : 1,
+      paymentCdnOk: config.key === 'steel_managed',
+    }),
+    promote: async (candidate) => {
+      promoted.push(candidate.config.key);
+    },
+    release: async () => undefined,
+  });
+  assert.strictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, ['steel_managed']);
+}
+
+async function testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable(): Promise<void> {
+  // Eventim checkout: kernel_isp cleared CF but Stripe tunnel failed. Re-search
+  // with avoidConfigKey must not re-promote the same fastest Kernel exit.
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: config.key === 'kernel_isp' ? 1 : config.key === 'steel_managed' ? 9000 : 100,
+        paymentCdnOk: false,
+        paymentCdnHosts: { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false },
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'kernel_isp' }
+  );
+  assert.strictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, ['steel_managed']);
+}
+
+async function testPrefersPartialPaymentHostClearOverSteelBias(): Promise<void> {
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'CA',
+    city: 'SAN FRANCISCO',
+  });
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: 50,
+        paymentCdnOk: false,
+        paymentCdnHosts:
+          config.key === 'kernel_residential_city'
+            ? { 'js.stripe.com': true, 'api.stripe.com': false, 'stripe.js': false }
+            : { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false },
+      }),
+      promote: async () => undefined,
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'kernel_isp' }
+  );
+  assert.strictEqual(winner.config.key, 'kernel_residential_city');
+}
+
+async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
+  // Eventim guest checkout (agent 48ef13f0, 2026-08-10): recover-challenge logged
+  // avoidConfigKey=steel_managed then re-promoted steel_managed because js.stripe.com
+  // alone outranked the avoid penalty. Live tab stayed challenged / customer-api
+  // ERR_FAILED; no payment_approval.
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'CA',
+    city: 'SAN FRANCISCO',
+  });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs:
+          config.key === 'steel_managed' ? 26850 : config.key === 'kernel_isp' ? 5855 : 8000,
+        paymentCdnOk: false,
+        paymentCdnHosts:
+          config.key === 'steel_managed'
+            ? { 'js.stripe.com': true, 'api.stripe.com': false, 'stripe.js': false }
+            : { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false },
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'steel_managed' }
+  );
+  assert.notStrictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, [winner.config.key]);
+  assert.strictEqual(winner.config.key, 'kernel_isp');
+}
+
+async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> {
+  const cookies = [
+    {
+      name: 'authState',
+      value: 'opaque',
+      domain: '.order.online',
+      path: '/',
+    },
+  ];
+  let defaultPageVisits = 0;
+  let disposablePageVisits = 0;
+  let newContextCalls = 0;
+  let defaultContextCloseCalls = 0;
+  let browserCloseCalls = 0;
+  const addedCookies: unknown[] = [];
+  const initScripts: string[] = [];
+  let originStorageRestores = 0;
+  let originAuthVisible = false;
+
+  const fakePage = (onVisit: () => void) => ({
+    goto: async () => {
+      onVisit();
+      originAuthVisible = false;
+      return { status: () => 200 };
+    },
+    waitForTimeout: async () => undefined,
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
+        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': true };
+      }
+      if (source.includes('js.stripe.com') || source.includes('api.stripe.com')) {
+        return { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false };
+      }
+      assert.ok(initScripts.some((script) => script.includes('signedInCart')));
+      assert.strictEqual(
+        typeof pageFunction,
+        'function',
+        'storage restore must be invoked as a page function'
+      );
+      const recoveryGlobal = globalThis as typeof globalThis & {
+        __naviRestoreRecoveryStorage?: () => Promise<void>;
+      };
+      recoveryGlobal.__naviRestoreRecoveryStorage = async () => {
+        originStorageRestores += 1;
+        originAuthVisible = true;
+      };
+      try {
+        await pageFunction();
+      } finally {
+        delete recoveryGlobal.__naviRestoreRecoveryStorage;
+      }
+      return undefined;
+    },
+    title: async () => {
+      assert.ok(originAuthVisible, 'origin auth state must be restored before challenge probing');
+      return 'Blue Bottle Coffee';
+    },
+    locator: () => ({ innerText: async () => 'Order drinks and pastries' }),
+    content: async () => '<main>Order drinks and pastries</main>',
+  });
+  const defaultPage = fakePage(() => {
+    defaultPageVisits += 1;
+  });
+  const disposablePage = fakePage(() => {
+    disposablePageVisits += 1;
+  });
+  const defaultContext = {
+    pages: () => [defaultPage],
+    newPage: async () => defaultPage,
+    addCookies: async (value: unknown[]) => {
+      addedCookies.push(...value);
+    },
+    addInitScript: async (script: string) => {
+      initScripts.push(script);
+    },
+    close: async () => {
+      defaultContextCloseCalls += 1;
+    },
+  };
+  const disposableContext = {
+    newPage: async () => disposablePage,
+    close: async () => undefined,
+  };
+  const browser = {
+    contexts: () => [defaultContext],
+    newContext: async () => {
+      newContextCalls += 1;
+      return disposableContext;
+    },
+    close: async () => {
+      browserCloseCalls += 1;
+    },
+  } as unknown as Browser;
+  const session = {
+    ...fakeSession({ key: 'test', provider: 'kernel', proxyMode: 'isp' }),
+    validationBrowser: browser,
+  };
+
+  const result = await probeCandidateBrowser(session, 'https://order.online/store/blue-bottle', {
+    cookies,
+    origins: [
+      {
+        origin: 'https://order.online',
+        localStorage: [{ name: 'signedInCart', value: 'keep' }],
+        indexedDB: [],
+      },
+    ],
+  });
+
+  assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
+  assert.strictEqual(newContextCalls, 0, 'the disposable incognito context is not promoted');
+  assert.strictEqual(disposablePageVisits, 0);
+  assert.strictEqual(defaultPageVisits, 2, 'the exact promoted context must pass twice');
+  assert.strictEqual(initScripts.length, 1, 'origin state is installed on the promoted context');
+  assert.strictEqual(originStorageRestores, 2, 'origin auth is awaited before both clean probes');
+  assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
+  assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
+  assert.deepStrictEqual(result, {
+    stablePasses: 2,
+    attempts: 2,
+    latencyMs: result.latencyMs,
+    paymentCdnOk: true,
+    paymentCdnHosts: { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': true },
+  });
+}
+
+async function testPaymentCdnOkRequiresStripeJsScriptLoad(): Promise<void> {
+  // Eventim (5d59430b / 7f91554e): fetch(js.stripe.com) can succeed while
+  // <script src=js.stripe.com/v3> fails (ORB / "Failed to load Stripe.js").
+  // paymentCdnOk must stay false until the script-load probe clears.
+  const fakePage = {
+    goto: async () => ({ status: () => 200 }),
+    waitForTimeout: async () => undefined,
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('stripe.js') || source.includes("createElement('script')")) {
+        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': false };
+      }
+      if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
+        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': false };
+      }
+      return undefined;
+    },
+    title: async () => 'Guest Checkout',
+    locator: () => ({ innerText: async () => 'Billing Address' }),
+    content: async () => '<main>Billing Address</main>',
+  };
+  const browser = {
+    contexts: () => [
+      {
+        pages: () => [fakePage],
+        newPage: async () => fakePage,
+        addCookies: async () => undefined,
+        addInitScript: async () => undefined,
+        close: async () => undefined,
+      },
+    ],
+    newContext: async () => {
+      throw new Error('unexpected newContext');
+    },
+    close: async () => undefined,
+  } as unknown as Browser;
+  const session = {
+    ...fakeSession({ key: 'steel_managed', provider: 'steel', proxyMode: 'managed' }),
+    validationBrowser: browser,
+  };
+  const result = await probeCandidateBrowser(
+    session,
+    'https://checkout.eventim.us/?afflky=1015Folsom',
+    {}
+  );
+  assert.strictEqual(result.paymentCdnOk, false);
+  assert.deepStrictEqual(result.paymentCdnHosts, {
+    'js.stripe.com': true,
+    'api.stripe.com': true,
+    'stripe.js': false,
+  });
+}
+
+async function testRequirePaymentCdnRejectsCfOnlyWinners(): Promise<void> {
+  // Checkout recovery must not promote a CF-stable winner that failed Stripe.js.
+  assert.ok(targetLooksLikePaymentDocument('https://checkout.eventim.us/?afflky=1015Folsom'));
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  await assert.rejects(
+    () =>
+      runParallelBrowserConfigSearch(
+        configs,
+        {
+          create: async (config) => fakeSession(config),
+          probe: async () => ({
+            stablePasses: 2,
+            attempts: 2,
+            latencyMs: 10,
+            paymentCdnOk: false,
+            paymentCdnHosts: {
+              'js.stripe.com': true,
+              'api.stripe.com': true,
+              'stripe.js': false,
+            },
+          }),
+          promote: async (candidate) => {
+            promoted.push(candidate.config.key);
+          },
+          release: async () => undefined,
+        },
+        { requirePaymentCdn: true }
+      ),
+    /Stripe\.js loaded/
+  );
+  assert.deepStrictEqual(promoted, []);
+}
+
+async function testRequirePaymentCdnPromotesStripeJsWinner(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: config.key === 'steel_managed' ? 9000 : 10,
+        paymentCdnOk: config.key === 'steel_managed',
+        paymentCdnHosts:
+          config.key === 'steel_managed'
+            ? { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': true }
+            : { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': false },
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { requirePaymentCdn: true }
+  );
+  assert.strictEqual(winner.config.key, 'steel_managed');
+  assert.deepStrictEqual(promoted, ['steel_managed']);
+}
+
+async function main(): Promise<void> {
+  await testPrefersPaymentCdnReachableWinnerWhenStablePassesTie();
+  await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
+  await testPrefersPartialPaymentHostClearOverSteelBias();
+  await testAvoidConfigKeyBeatsPartialPaymentHostClear();
+  await testCandidateProbeUsesThePromotedDefaultContext();
+  await testPaymentCdnOkRequiresStripeJsScriptLoad();
+  await testRequirePaymentCdnRejectsCfOnlyWinners();
+  await testRequirePaymentCdnPromotesStripeJsWinner();
+  process.stdout.write('PASS staged browser challenge recovery payment gates\n');
+}
+
+void main();
