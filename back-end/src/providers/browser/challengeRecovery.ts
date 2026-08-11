@@ -11,10 +11,7 @@ import {
   type KernelRecoveryProxySpecificity,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
-import {
-  probePaymentCdnReachable,
-  targetLooksLikePaymentDocument,
-} from './paymentCdnProbe';
+import { probePaymentCdnReachable } from './paymentCdnProbe';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import type { BrowserProviderName } from './types';
 
@@ -582,7 +579,11 @@ export async function searchAndPromoteBrowserConfig(
     },
     {
       avoidConfigKey,
-      requirePaymentCdn: targetLooksLikePaymentDocument(input.targetUrl),
+      // Hard resource re-verify is failure-driven on the agent (blocked URL from
+      // the provider-exit rejection). Do not require Stripe.js from URL heuristics
+      // here — that false-negatives non-Stripe /cart recoveries. paymentCdnOk
+      // remains a soft ranking signal when candidates otherwise tie.
+      requirePaymentCdn: false,
     }
   );
 
@@ -598,8 +599,8 @@ export async function searchAndPromoteBrowserConfig(
     storage_state_preloaded: true,
     recovery_action:
       winner.config.provider === current.provider ? 'config_selected' : 'provider_switched',
-    recovery_message: targetLooksLikePaymentDocument(input.targetUrl)
-      ? `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes with Stripe.js loaded.`
+    recovery_message: winner.probe.paymentCdnOk
+      ? `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes (payment CDN reachable).`
       : `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
     browser_session_metadata: {
       provider: winner.config.provider,

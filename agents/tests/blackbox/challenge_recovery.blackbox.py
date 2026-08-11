@@ -11,14 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_recovery import (
+    blocked_resource_urls_for_verify,
     commit_cookie_removals,
     cookie_key,
     is_auth_cookie,
     page_looks_challenged,
     recover_from_challenge,
     target_looks_like_payment_document,
+    verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
-    verify_live_stripe_js_loads,
 )
 
 
@@ -404,22 +405,45 @@ def test_payment_document_url_detection():
     assert not target_looks_like_payment_document("https://wl.eventim.us/event/lyny/692405")
 
 
-async def test_live_stripe_js_verify_requires_window_stripe():
+def test_blocked_resource_urls_for_verify_dedupes_and_strips_query():
+    assert blocked_resource_urls_for_verify(
+        [
+            "https://js.stripe.com/v3?foo=1",
+            "https://js.stripe.com/v3/",
+            "not-a-url",
+            "https://cdn.example/app.js#x",
+        ]
+    ) == (
+        "https://js.stripe.com/v3",
+        "https://js.stripe.com/v3/",
+        "https://cdn.example/app.js",
+    )
+
+
+async def test_live_blocked_resource_verify_is_failure_driven():
+    """Empty blocked list must not false-negative plain CF recovery."""
+
     class FakePage:
-        def __init__(self, stripe_ok: bool):
-            self.stripe_ok = stripe_ok
+        def __init__(self, result: bool):
+            self.result = result
             self.evaluate_calls = 0
+            self.last_args = None
 
-        async def evaluate(self, _script, _timeout_ms=None):
+        async def evaluate(self, _script, args=None):
             self.evaluate_calls += 1
-            return self.stripe_ok
+            self.last_args = args
+            return self.result
 
+    # No blocked URLs => vacuously OK, no page evaluate.
+    assert await verify_live_blocked_resources(FakePage(False), [])
     ok = FakePage(True)
     bad = FakePage(False)
-    assert await verify_live_stripe_js_loads(ok)
-    assert not await verify_live_stripe_js_loads(bad)
+    assert await verify_live_blocked_resources(ok, ["https://js.stripe.com/v3"])
+    assert not await verify_live_blocked_resources(bad, ["https://js.stripe.com/v3"])
     assert ok.evaluate_calls == 1
     assert bad.evaluate_calls == 1
+    assert ok.last_args["targets"] == ["https://js.stripe.com/v3"]
+    assert ok.last_args["scriptFlags"] == [True]
 
 
 def test_challenge_page_classifier_detects_non_cloudflare_vendors():
@@ -662,9 +686,13 @@ async def run_all_tests():
         test_live_tab_verify_accepts_clean_and_rejects_access_denied,
     )
     result.record("payment_document_url_detection", test_payment_document_url_detection)
+    result.record(
+        "blocked_resource_url_normalize",
+        test_blocked_resource_urls_for_verify_dedupes_and_strips_query,
+    )
     await result.record_async(
-        "live_stripe_js_verify",
-        test_live_stripe_js_verify_requires_window_stripe,
+        "live_blocked_resource_verify",
+        test_live_blocked_resource_verify_is_failure_driven,
     )
     await result.record_async(
         "live_cookie_commit_two_passes",

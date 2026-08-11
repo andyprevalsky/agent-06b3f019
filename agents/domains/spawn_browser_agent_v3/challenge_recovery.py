@@ -323,50 +323,119 @@ _PAYMENT_DOCUMENT_URL_MARKERS = (
 
 
 def target_looks_like_payment_document(url: str) -> bool:
-    """True when recovery should also require Stripe.js to load on the live tab."""
+    """URL heuristic for payment/checkout documents (network-exit scoping)."""
     lowered = (url or "").lower()
     return any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS)
 
 
-async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
-    """Require Stripe.js to define window.Stripe via a real <script> load.
+def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
+    """Deduped absolute http(s) URLs from the failures that triggered recovery."""
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw in urls or ():
+        value = str(raw or "").strip()
+        if not value.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(value)
+        if not parsed.hostname:
+            continue
+        # Drop query/fragment noise; keep path so script probes stay accurate.
+        normalized = f"{parsed.scheme}://{parsed.hostname.lower()}{parsed.path or '/'}"
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return tuple(cleaned)
 
-    Fetch reachability to js.stripe.com can succeed while the script tag fails
-    (ERR_BLOCKED_BY_ORB / "Failed to load Stripe.js"). Checkout recovery must
-    not report success until the script path the page uses actually works.
+
+def _url_looks_like_script(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    host = (urlparse(url).hostname or "").lower()
+    if path.endswith(".js") or "/js/" in path or path.endswith("/v3") or path.endswith("/v3/"):
+        return True
+    # js.* CDN hosts almost always serve executable scripts (js.stripe.com, …).
+    return host.startswith("js.")
+
+
+async def verify_live_blocked_resources(
+    page: Any,
+    urls: Sequence[str],
+    *,
+    timeout_ms: int = 12_000,
+) -> bool:
+    """Re-verify that the resources which triggered recovery now load.
+
+    Failure-driven and page-agnostic: only the blocked URLs from the provider-exit
+    rejection are checked. Script-like URLs require a real <script> onload (fetch
+    can succeed while ORB blocks script execution). Other URLs need no-cors fetch
+    success. Empty list => vacuously true so plain CF recovery never false-negatives.
     """
+    targets = blocked_resource_urls_for_verify(urls)
+    if not targets:
+        return True
+    script_flags = [_url_looks_like_script(url) for url in targets]
     try:
         return bool(
             await page.evaluate(
-                """async (timeoutMs) => {
-                  if (typeof globalThis.Stripe === 'function') return true;
-                  return await new Promise((resolve) => {
-                    const script = document.createElement('script');
-                    script.src = 'https://js.stripe.com/v3';
-                    script.async = true;
-                    const timer = setTimeout(() => {
-                      script.remove();
-                      resolve(false);
-                    }, timeoutMs);
-                    script.onload = () => {
+                """async ({ targets, scriptFlags, timeoutMs }) => {
+                  const probe = async (url, scriptLike) => {
+                    try {
+                      const controller = new AbortController();
+                      const timer = setTimeout(() => controller.abort(), timeoutMs);
+                      await fetch(url, {
+                        method: 'GET',
+                        mode: 'no-cors',
+                        signal: controller.signal,
+                        credentials: 'omit',
+                      });
                       clearTimeout(timer);
-                      const ok = typeof globalThis.Stripe === 'function';
-                      script.remove();
-                      resolve(ok);
-                    };
-                    script.onerror = () => {
-                      clearTimeout(timer);
-                      script.remove();
-                      resolve(false);
-                    };
-                    document.head.appendChild(script);
-                  });
+                    } catch {
+                      return false;
+                    }
+                    if (!scriptLike) return true;
+                    // Fetch can succeed while <script> is ORB-blocked.
+                    return await new Promise((resolve) => {
+                      const script = document.createElement('script');
+                      script.src = url;
+                      script.async = true;
+                      const timer = setTimeout(() => {
+                        script.remove();
+                        resolve(false);
+                      }, timeoutMs);
+                      script.onload = () => {
+                        clearTimeout(timer);
+                        script.remove();
+                        resolve(true);
+                      };
+                      script.onerror = () => {
+                        clearTimeout(timer);
+                        script.remove();
+                        resolve(false);
+                      };
+                      document.head.appendChild(script);
+                    });
+                  };
+                  for (let i = 0; i < targets.length; i += 1) {
+                    if (!(await probe(targets[i], scriptFlags[i]))) return false;
+                  }
+                  return true;
                 }""",
-                timeout_ms,
+                {
+                    "targets": list(targets),
+                    "scriptFlags": script_flags,
+                    "timeoutMs": timeout_ms,
+                },
             )
         )
     except Exception:
         return False
+
+
+async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
+    """Deprecated Stripe helper — prefer verify_live_blocked_resources."""
+    return await verify_live_blocked_resources(
+        page, ("https://js.stripe.com/v3",), timeout_ms=timeout_ms
+    )
 
 
 async def commit_cookie_removals(

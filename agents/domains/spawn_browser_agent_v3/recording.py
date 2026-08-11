@@ -2013,7 +2013,9 @@ def provider_exit_monitoring_enabled() -> bool:
 
 
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+# Kept for log/search continuity; new exits use CRITICAL_RESOURCE_BLOCK_REASON.
 _PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
+_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
 _API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
 _PAYMENT_TUNNEL_HOST_MARKERS = (
     "js.stripe.com",
@@ -2022,10 +2024,35 @@ _PAYMENT_TUNNEL_HOST_MARKERS = (
     "m.stripe.com",
     "m.stripe.network",
 )
-_TUNNEL_FAILURE_MARKERS = (
+# Network failures that mean "this exit cannot fetch the resource" — includes
+# ORB (Eventim Stripe.js) and classic proxy tunnel deaths.
+_RESOURCE_BLOCK_MARKERS = (
     "err_tunnel_connection_failed",
     "err_proxy_connection_failed",
     "err_proxy_connection_refused",
+    "err_blocked_by_orb",
+    "err_blocked_by_response",
+    "err_blocked_by_client",
+)
+# Alias used by older call sites / tests.
+_TUNNEL_FAILURE_MARKERS = _RESOURCE_BLOCK_MARKERS
+# Optional noise: blocked analytics must not rotate the browser exit.
+_OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "doubleclick.net",
+    "facebook.net",
+    "facebook.com",
+    "hotjar.com",
+    "segment.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "sentry.io",
+    "newrelic.com",
+    "nr-data.net",
+    "clarity.ms",
 )
 _API_CHALLENGE_HTML_MARKERS = (
     "access denied",
@@ -2057,12 +2084,36 @@ _MAX_PAYMENT_CDN_PROVIDER_EXITS = 1
 
 
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
-    """True when a payment CDN request dies inside the provider proxy tunnel."""
+    """Backward-compatible Stripe-host check (tests + older call sites)."""
     err = (error_text or "").lower()
-    if not any(marker in err for marker in _TUNNEL_FAILURE_MARKERS):
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
         return False
     lowered = (url or "").lower()
     return any(host in lowered for host in _PAYMENT_TUNNEL_HOST_MARKERS)
+
+
+def _is_critical_resource_block(
+    url: str,
+    error_text: str,
+    *,
+    resource_type: str = "",
+) -> bool:
+    """True when a page-critical third-party request is blocked on this exit.
+
+    Generalizes Stripe-only tunnel detection: any payment-CDN host OR any
+    non-analytics script that dies with tunnel/ORB/client-block errors can
+    trigger recovery. Soft third-parties (analytics/ads) never rotate.
+    """
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    lowered = (url or "").lower()
+    host = (urlparse(url).hostname or "").lower()
+    if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
+        return False
+    if any(marker in lowered for marker in _PAYMENT_TUNNEL_HOST_MARKERS):
+        return True
+    return (resource_type or "").lower() == "script"
 
 
 _API_CHALLENGE_CART_URL_MARKERS = (
@@ -2954,14 +3005,15 @@ class BrowserNetworkRecorder:
             if (
                 entry_generation == current_generation
                 and entry_generation not in rejected_generations
-                and _is_payment_cdn_tunnel_failure(
+                and _is_critical_resource_block(
                     str(entry.get("url") or ""),
                     str(event.get("errorText") or ""),
+                    resource_type=str(entry.get("resource_type") or ""),
                 )
             ):
                 if not _document_warrants_payment_cdn_exit(document_url):
                     logger.info(
-                        "Ignoring payment CDN tunnel failure on non-checkout document",
+                        "Ignoring critical resource block on non-checkout document",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=entry_generation,
@@ -2970,7 +3022,7 @@ class BrowserNetworkRecorder:
                     )
                 elif int(getattr(self, "_payment_cdn_provider_exits", 0)) >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
                     logger.warning(
-                        "Payment CDN tunnel failure ignored: provider-exit cap reached",
+                        "Critical resource block ignored: provider-exit cap reached",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=entry_generation,
@@ -2982,18 +3034,19 @@ class BrowserNetworkRecorder:
                     rejected_generations.add(entry_generation)
                     self._rejected_network_generations = rejected_generations
                     self._payment_cdn_provider_exits = int(getattr(self, "_payment_cdn_provider_exits", 0)) + 1
+                    blocked_url = str(entry.get("url") or "")
                     rejections = getattr(self, "_provider_exit_rejections", [])
                     rejections.append(
                         {
-                            "reason": _PAYMENT_TUNNEL_FAILURE_REASON,
-                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                            "url": _redact_url_query(blocked_url),
                             "browser_generation": entry_generation,
                             "document_url": _redact_url_query(document_url),
                         }
                     )
                     self._provider_exit_rejections = rejections
                     logger.warning(
-                        "Browser provider exit rejected: payment CDN proxy tunnel failure",
+                        "Browser provider exit rejected: critical third-party resource blocked",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=entry_generation,

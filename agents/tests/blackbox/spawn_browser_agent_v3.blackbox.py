@@ -8239,16 +8239,32 @@ async def test_api_challenge_html_triggers_provider_exit_rejection():
 
 
 def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
-    """js.stripe.com ERR_TUNNEL must rotate the provider exit (Eventim card fields)."""
+    """js.stripe.com ERR_TUNNEL / ORB must rotate the provider exit (Eventim card fields)."""
     from domains.spawn_browser_agent_v3.recording import (
         BrowserNetworkRecorder,
         _document_warrants_payment_cdn_exit,
+        _is_critical_resource_block,
         _is_payment_cdn_tunnel_failure,
     )
 
     assert _is_payment_cdn_tunnel_failure(
         "https://js.stripe.com/v3/",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+    )
+    assert not _is_critical_resource_block(
+        "https://www.google-analytics.com/analytics.js",
+        "net::ERR_BLOCKED_BY_CLIENT",
+        resource_type="script",
     )
     assert not _is_payment_cdn_tunnel_failure(
         "https://wl.eventim.us/asset.js",
@@ -8285,7 +8301,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         generation=3,
     )
     assert recorder.pop_provider_exit_rejection() == {
-        "reason": "payment CDN blocked by proxy tunnel",
+        "reason": "critical third-party resource blocked",
         "url": "https://js.stripe.com/v3/",
         "browser_generation": 3,
         "document_url": "https://wl.eventim.us/checkout/order-1",

@@ -63,9 +63,8 @@ from .challenge_recovery import (
     page_looks_challenged,
     probe_storage_state,
     recover_from_challenge,
-    target_looks_like_payment_document,
+    verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
-    verify_live_stripe_js_loads,
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
@@ -6439,12 +6438,22 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     (provider_exit_rejection or {}).get("reason")
                     or "The current provider IP was explicitly rejected."
                 )
+                blocked_resource_url = str(
+                    (provider_exit_rejection or {}).get("url") or ""
+                ).strip()
                 unified_action = {
                     "action": "recover_from_challenge",
                     "thinking": "",
                     "params": {
                         "reason": rejection_reason,
                         "provider_exit_rejected": True,
+                        # Failure-driven re-verify: only this URL must load after
+                        # promote. Plain CF recoveries leave it empty.
+                        **(
+                            {"blocked_resource_url": blocked_resource_url}
+                            if blocked_resource_url
+                            else {}
+                        ),
                     },
                 }
                 llm_result = {
@@ -7058,20 +7067,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                 f"Promoted {config_key} passed candidate probes but the live tab "
                                 "is still challenged"
                             )
-                        if target_looks_like_payment_document(current_url):
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
+                        if blocked_resource_url:
                             await emit_recovery_progress(
                                 "live_verify",
-                                "Verifying Stripe.js loads on the promoted checkout tab.",
+                                "Verifying the blocked third-party resource loads on the "
+                                "promoted tab.",
                             )
-                            if not await verify_live_stripe_js_loads(input_page):
+                            if not await verify_live_blocked_resources(
+                                input_page, [blocked_resource_url]
+                            ):
                                 provider = config_result.get("provider")
                                 proxy_tier = config_result.get("proxy_tier")
                                 config_key = (
                                     config_result.get("config_key") or f"{provider}/{proxy_tier}"
                                 )
                                 raise RuntimeError(
-                                    f"Promoted {config_key} cleared the challenge but Stripe.js "
-                                    "failed to load on the live checkout tab"
+                                    f"Promoted {config_key} cleared the challenge but blocked "
+                                    f"resource still fails: {blocked_resource_url}"
                                 )
 
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
@@ -7080,11 +7095,14 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         provider = config_result.get("provider")
                         proxy_tier = config_result.get("proxy_tier")
                         config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
                         recovery_message = (
                             f"Recovered by selecting {config_key}; live tab verified clean"
                             + (
-                                "; Stripe.js loaded"
-                                if target_looks_like_payment_document(current_url)
+                                f"; blocked resource cleared ({blocked_resource_url})"
+                                if blocked_resource_url
                                 else ""
                             )
                             + "; signed-in state was preserved."
