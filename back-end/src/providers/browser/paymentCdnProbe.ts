@@ -41,13 +41,17 @@ export async function probePaymentCdnReachable(page: Page): Promise<PaymentCdnPr
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 8_000);
+          // mode:'no-cors' is required: api.stripe.com (and some js paths) do not
+          // send ACAO for checkout.eventim.us, so a default-cors fetch throws even
+          // when the proxy tunnel reached the host. Opaque success => tunnel OK.
+          // Real Elements traffic runs inside Stripe iframes (stripe.com origin).
           await fetch(target.url, {
             method: 'GET',
+            mode: 'no-cors',
             signal: controller.signal,
             credentials: 'omit',
           });
           clearTimeout(timer);
-          // Any HTTP response means the proxy tunnel reached the host.
           hosts[target.host] = true;
         } catch {
           hosts[target.host] = false;

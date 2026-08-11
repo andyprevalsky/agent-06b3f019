@@ -4,6 +4,7 @@
  * Companion to browser-challenge-recovery.test.ts (keeps each file under max-lines).
  */
 import assert from 'node:assert';
+import { readFileSync } from 'node:fs';
 import type { Browser } from 'playwright';
 import {
   browserRecoveryCandidates,
@@ -270,6 +271,17 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
   });
 }
 
+function testPaymentCdnProbeUsesNoCorsForHostFetches(): void {
+  // api.stripe.com does not send ACAO for Eventim; default-cors fetch throws
+  // even when the proxy tunnel works (false-negative api=false on steel_managed).
+  const source = readFileSync(
+    new URL('../../providers/browser/paymentCdnProbe.ts', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /mode:\s*['"]no-cors['"]/);
+  assert.match(source, /createElement\('script'\)/);
+}
+
 async function testPaymentCdnOkRequiresStripeJsScriptLoad(): Promise<void> {
   // Eventim (5d59430b / 7f91554e): fetch(js.stripe.com) can succeed while
   // <script src=js.stripe.com/v3> fails (ORB / "Failed to load Stripe.js").
@@ -391,6 +403,7 @@ async function main(): Promise<void> {
   await testPrefersPartialPaymentHostClearOverSteelBias();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
   await testCandidateProbeUsesThePromotedDefaultContext();
+  testPaymentCdnProbeUsesNoCorsForHostFetches();
   await testPaymentCdnOkRequiresStripeJsScriptLoad();
   await testRequirePaymentCdnRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesStripeJsWinner();
