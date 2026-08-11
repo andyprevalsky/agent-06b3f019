@@ -172,11 +172,21 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     waitForTimeout: async () => undefined,
     evaluate: async (pageFunction: () => Promise<unknown>) => {
       const source = Function.prototype.toString.call(pageFunction);
-      if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
-        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': true };
+      if (source.includes('js.stripe.com') && source.includes('createElement')) {
+        return {
+          'js.stripe.com': true,
+          'api.stripe.com': true,
+          'm.stripe.com': true,
+          'stripe.js': true,
+        };
       }
       if (source.includes('js.stripe.com') || source.includes('api.stripe.com')) {
-        return { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false };
+        return {
+          'js.stripe.com': false,
+          'api.stripe.com': false,
+          'm.stripe.com': false,
+          'stripe.js': false,
+        };
       }
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
@@ -267,7 +277,12 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     attempts: 2,
     latencyMs: result.latencyMs,
     paymentCdnOk: true,
-    paymentCdnHosts: { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': true },
+    paymentCdnHosts: {
+      'js.stripe.com': true,
+      'api.stripe.com': true,
+      'm.stripe.com': true,
+      'stripe.js': true,
+    },
   });
 }
 
@@ -291,11 +306,13 @@ async function testPaymentCdnOkRequiresStripeJsScriptLoad(): Promise<void> {
     waitForTimeout: async () => undefined,
     evaluate: async (pageFunction: () => Promise<unknown>) => {
       const source = Function.prototype.toString.call(pageFunction);
-      if (source.includes('stripe.js') || source.includes("createElement('script')")) {
-        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': false };
-      }
-      if (source.includes('js.stripe.com') && source.includes('api.stripe.com')) {
-        return { 'js.stripe.com': true, 'api.stripe.com': true, 'stripe.js': false };
+      if (source.includes('js.stripe.com') && source.includes('createElement')) {
+        return {
+          'js.stripe.com': true,
+          'api.stripe.com': true,
+          'm.stripe.com': true,
+          'stripe.js': false,
+        };
       }
       return undefined;
     },
@@ -331,8 +348,60 @@ async function testPaymentCdnOkRequiresStripeJsScriptLoad(): Promise<void> {
   assert.deepStrictEqual(result.paymentCdnHosts, {
     'js.stripe.com': true,
     'api.stripe.com': true,
+    'm.stripe.com': true,
     'stripe.js': false,
   });
+}
+
+async function testPaymentCdnOkWhenStripeJsLoadsWithoutApi(): Promise<void> {
+  // Live steel_managed @ Dallas: Stripe.js + js/m.stripe.com OK, api.stripe.com
+  // Failed to fetch even with no-cors. Checkout recovery must still accept this.
+  const fakePage = {
+    goto: async () => ({ status: () => 200 }),
+    waitForTimeout: async () => undefined,
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('js.stripe.com') && source.includes('createElement')) {
+        return {
+          'js.stripe.com': true,
+          'api.stripe.com': false,
+          'm.stripe.com': true,
+          'stripe.js': true,
+        };
+      }
+      return undefined;
+    },
+    title: async () => 'Eventim Checkout',
+    locator: () => ({ innerText: async () => 'Billing Address' }),
+    content: async () => '<main>Billing Address</main>',
+  };
+  const browser = {
+    contexts: () => [
+      {
+        pages: () => [fakePage],
+        newPage: async () => fakePage,
+        addCookies: async () => undefined,
+        addInitScript: async () => undefined,
+        close: async () => undefined,
+      },
+    ],
+    newContext: async () => {
+      throw new Error('unexpected newContext');
+    },
+    close: async () => undefined,
+  } as unknown as Browser;
+  const session = {
+    ...fakeSession({ key: 'steel_managed', provider: 'steel', proxyMode: 'managed' }),
+    validationBrowser: browser,
+  };
+  const result = await probeCandidateBrowser(
+    session,
+    'https://checkout.eventim.us/?afflky=1015Folsom',
+    {}
+  );
+  assert.strictEqual(result.paymentCdnOk, true);
+  assert.strictEqual(result.paymentCdnHosts?.['api.stripe.com'], false);
+  assert.strictEqual(result.paymentCdnHosts?.['stripe.js'], true);
 }
 
 async function testRequirePaymentCdnRejectsCfOnlyWinners(): Promise<void> {
@@ -405,6 +474,7 @@ async function main(): Promise<void> {
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPaymentCdnProbeUsesNoCorsForHostFetches();
   await testPaymentCdnOkRequiresStripeJsScriptLoad();
+  await testPaymentCdnOkWhenStripeJsLoadsWithoutApi();
   await testRequirePaymentCdnRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesStripeJsWinner();
   process.stdout.write('PASS staged browser challenge recovery payment gates\n');

@@ -60,8 +60,9 @@ export interface CandidateProbeResult {
   attempts: number;
   latencyMs: number;
   /**
-   * True when the candidate can fetch js.stripe.com + api.stripe.com AND load
-   * Stripe.js (window.Stripe). Fetch-only clears are not enough for Elements.
+   * True when the candidate can fetch js.stripe.com AND load Stripe.js
+   * (window.Stripe). api.stripe.com is ranked via paymentCdnHosts but not
+   * required — live steel_managed loads Stripe.js while api.stripe.com fails.
    */
   paymentCdnOk: boolean;
   /** Per-host tunnel + stripe.js script-load results (for ranking + logs). */
@@ -162,8 +163,8 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
 
 function paymentHostsOkCount(probe: CandidateProbeResult): number {
   const hosts = probe.paymentCdnHosts;
-  // js.stripe.com + api.stripe.com + stripe.js script load
-  if (!hosts) return probe.paymentCdnOk ? 3 : 0;
+  // Prefer candidates that clear more Stripe hosts (js/api/m + stripe.js).
+  if (!hosts) return probe.paymentCdnOk ? 2 : 0;
   return Object.values(hosts).filter(Boolean).length;
 }
 
