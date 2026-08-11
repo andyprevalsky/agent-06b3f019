@@ -74,6 +74,14 @@ else
   BACKEND_PORT="${BACKEND_PORT:-3001}"
   FRONTEND_PORT="${FRONTEND_PORT:-3002}"
   export BACKEND_PORT FRONTEND_PORT
+  # Cloud/injected envs often export BACKEND_URL to local port 3001 (and the
+  # matching VITE_/API aliases). Playwright helpers prefer BACKEND_URL over
+  # BACKEND_PORT, so a stale injection makes create/delete/poll hit a dead port
+  # even when CONDUCTOR_PORT health checks pass. Force local-mode URLs to the
+  # ports under test.
+  export BACKEND_URL="http://localhost:${BACKEND_PORT}"
+  export BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
+  export VITE_BACKEND_API_URL="http://localhost:${BACKEND_PORT}"
 
   if ! curl -sf "http://localhost:$BACKEND_PORT/health" > /dev/null 2>&1; then
     echo "FAIL: Backend not healthy at http://localhost:$BACKEND_PORT/health" >&2

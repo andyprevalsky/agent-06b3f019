@@ -40,6 +40,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -400,7 +401,7 @@ def _expected_attention_kind(task: BenchmarkTask, observed_count: int) -> Option
         return f"exactly one of {alternatives}"
     sequence = task.expected_attention_kinds
     if sequence:
-        return sequence[observed_count] if observed_count < len(sequence) else None
+        return sequence[observed_count] if observed_count < len(sequence) else "no further attention request"
     return task.expected_attention_kind
 
 
@@ -414,6 +415,8 @@ def _attention_request_matches_task(
     alternatives = getattr(task, "expected_attention_kind_any_of", [])
     if alternatives:
         return observed_count == 0 and _attention_request_kind(req) in alternatives
+    if task.expected_attention_kinds and observed_count >= len(task.expected_attention_kinds):
+        return False
     expected_kind = _expected_attention_kind(task, observed_count)
     if not expected_kind:
         return True
@@ -687,34 +690,211 @@ def _payment_receipt_from_attention_request(req: dict) -> dict:
     return {}
 
 
-def _normalize_receipt_items(receipt: dict) -> dict:
-    out = {}
+# ---------------------------------------------------------------------------
+# Shared prose matching for benchmark evaluators
+#
+# WHY THIS EXISTS: several evaluator assertions compare a human-readable string
+# the agent copied off a live page ("Sales Tax", "The Rocky Sandwich (Half)",
+# "Nopa Fish - Toast online ordering", "4821 Maplewood Dr, Austin, TX 78731")
+# against a label pinned in tasks.json. NOTHING teaches the agent the pinned
+# wording -- browser_tools/schemas.py documents these fields only as "Item name
+# shown on the checkout page" / "Fee label shown on the checkout page" /
+# "Merchant or site name" -- so a byte-for-byte comparison scores the merchant's
+# copy-writing, not whether the agent completed the task. Each site used to
+# hand-roll its own matching (exact dict-key equality, `casefold() ==` plus a
+# bespoke `startswith("tax (")` escape hatch, a fixed via/on/through/by
+# connector regex, a punctuation-squashed substring). This module-level helper
+# replaces all of them with one normalizer + one token matcher.
+#
+# WHAT STAYS EXACT (deliberately NOT routed through here, because these are the
+# real grounding for "did the agent buy the right thing, at the right price, on
+# the right site"): unitPriceCents, lineTotalCents, quantity, fee amountCents,
+# subtotalCents/totalCents, currency, the fingerprint hash, and the
+# approval-URL host check in _validate_payment_merchant_identity.
+# ---------------------------------------------------------------------------
+
+# Street-suffix / unit abbreviations. Applied to every token: both sides of a
+# comparison normalize identically, so an entry can never introduce a false
+# negative -- only collapse two spellings of the same word.
+_PROSE_ABBREVIATIONS = {
+    "st": "street",
+    "str": "street",
+    "rd": "road",
+    "dr": "drive",
+    "drv": "drive",
+    "ave": "avenue",
+    "av": "avenue",
+    "blvd": "boulevard",
+    "ln": "lane",
+    "ct": "court",
+    "cir": "circle",
+    "pl": "place",
+    "plz": "plaza",
+    "pkwy": "parkway",
+    "pky": "parkway",
+    "hwy": "highway",
+    "sq": "square",
+    "ter": "terrace",
+    "trl": "trail",
+    "apt": "apartment",
+    "ste": "suite",
+    "bldg": "building",
+    "fl": "floor",
+    "n": "north",
+    "s": "south",
+    "e": "east",
+    "w": "west",
+    "ne": "northeast",
+    "nw": "northwest",
+    "se": "southeast",
+    "sw": "southwest",
+}
+
+# US state/territory abbreviations. Applied ONLY to tokens that were written as
+# uppercase two-letter codes in the source ("Austin, TX"), which is how postal
+# abbreviations are conventionally rendered. That guard keeps ordinary lowercase
+# words like "in", "or", "me", "hi", "ok" from being rewritten as states.
+_US_STATE_ABBREVIATIONS = {
+    "al": "alabama", "ak": "alaska", "az": "arizona", "ar": "arkansas", "ca": "california",
+    "co": "colorado", "ct": "connecticut", "de": "delaware", "fl": "florida", "ga": "georgia",
+    "hi": "hawaii", "id": "idaho", "il": "illinois", "in": "indiana", "ia": "iowa",
+    "ks": "kansas", "ky": "kentucky", "la": "louisiana", "me": "maine", "md": "maryland",
+    "ma": "massachusetts", "mi": "michigan", "mn": "minnesota", "ms": "mississippi",
+    "mo": "missouri", "mt": "montana", "ne": "nebraska", "nv": "nevada", "nh": "new hampshire",
+    "nj": "new jersey", "nm": "new mexico", "ny": "new york", "nc": "north carolina",
+    "nd": "north dakota", "oh": "ohio", "ok": "oklahoma", "or": "oregon", "pa": "pennsylvania",
+    "ri": "rhode island", "sc": "south carolina", "sd": "south dakota", "tn": "tennessee",
+    "tx": "texas", "ut": "utah", "vt": "vermont", "va": "virginia", "wa": "washington",
+    "wv": "west virginia", "wi": "wisconsin", "wy": "wyoming", "dc": "district of columbia",
+    "pr": "puerto rico",
+}
+
+# Filler words that carry no identity. Dropping them lets "The Rocky Sandwich"
+# and "Rocky Sandwich" agree without weakening any content word.
+_PROSE_STOPWORDS = frozenset({"the", "a", "an", "and", "of", "for", "with"})
+
+
+def normalize_prose_tokens(value: object) -> tuple[str, ...]:
+    """Casefold, strip punctuation/accents/whitespace, expand abbreviations, drop filler.
+
+    'The Rocky  Sandwich (Half)' -> ('rocky', 'sandwich', 'half')
+    '4821 Maplewood Dr, Austin, TX 78731' -> ('4821','maplewood','drive','austin','texas','78731')
+    """
+    if not isinstance(value, str):
+        return ()
+    decomposed = unicodedata.normalize("NFKD", value)
+    tokens: list[str] = []
+    for raw in re.findall(r"[A-Za-z0-9]+", decomposed):
+        if len(raw) == 2 and raw.isupper() and raw.casefold() in _US_STATE_ABBREVIATIONS:
+            expanded = _US_STATE_ABBREVIATIONS[raw.casefold()]
+        else:
+            lowered = raw.casefold()
+            expanded = _PROSE_ABBREVIATIONS.get(lowered, lowered)
+        for token in expanded.split():
+            if token not in _PROSE_STOPWORDS:
+                tokens.append(token)
+    return tuple(tokens)
+
+
+def normalize_prose(value: object) -> str:
+    """Canonical space-joined form of `value` (see normalize_prose_tokens)."""
+    return " ".join(normalize_prose_tokens(value))
+
+
+def prose_tokens_contain(container: object, contained: object) -> bool:
+    """True when every normalized token of `contained` appears in `container`.
+
+    Order-insensitive, so 'Sales Tax' contains 'Tax' and 'Nopa Fish ordered
+    through Toast' contains 'Nopa Fish'. Empty on either side never matches.
+    """
+    container_tokens = set(normalize_prose_tokens(container))
+    contained_tokens = set(normalize_prose_tokens(contained))
+    if not container_tokens or not contained_tokens:
+        return False
+    return contained_tokens <= container_tokens
+
+
+def prose_match_rank(expected: object, actual: object) -> Optional[tuple[int, int]]:
+    """Sortable match quality between two prose strings, or None when they disagree.
+
+    (0, 0)  identical token sets
+    (1, n)  `actual` is a superset -- the page carried n extra words ('Sales Tax')
+    (2, n)  `actual` is a subset -- the page carried n fewer words ('Rocky Sandwich')
+    Lower sorts better, so callers pick the least-surprising candidate deterministically
+    rather than the one that happens to make an amount assertion pass.
+    """
+    expected_tokens = set(normalize_prose_tokens(expected))
+    actual_tokens = set(normalize_prose_tokens(actual))
+    if not expected_tokens or not actual_tokens:
+        return None
+    if expected_tokens == actual_tokens:
+        return (0, 0)
+    if expected_tokens <= actual_tokens:
+        return (1, len(actual_tokens - expected_tokens))
+    if actual_tokens <= expected_tokens:
+        return (2, len(expected_tokens - actual_tokens))
+    return None
+
+
+def best_prose_match(expected: object, candidates: List[tuple[str, object]]) -> Optional[object]:
+    """Pick the best-ranked `(label, payload)` candidate for `expected`, else None."""
+    ranked = [
+        (rank, index, payload)
+        for index, (label, payload) in enumerate(candidates)
+        if (rank := prose_match_rank(expected, label)) is not None
+    ]
+    if not ranked:
+        return None
+    return min(ranked, key=lambda entry: (entry[0], entry[1]))[2]
+
+
+def prose_contains_phrase(haystack: object, needle: object) -> bool:
+    """True when `needle`'s normalized tokens appear contiguously inside `haystack`.
+
+    Adjacency-preserving variant used where the pinned fact is a multi-part
+    phrase (a full mailing address) and scattered tokens must not count.
+    """
+    normalized_needle = normalize_prose(needle)
+    if not normalized_needle:
+        return False
+    return f" {normalized_needle} " in f" {normalize_prose(haystack)} "
+
+
+def _normalize_receipt_items(receipt: dict) -> List[tuple[str, dict]]:
+    """(name, amounts) pairs preserving receipt order; names matched as prose, amounts exact."""
+    out: List[tuple[str, dict]] = []
     for item in receipt.get("lineItems") or receipt.get("line_items") or []:
         if not isinstance(item, dict):
             continue
         name = item.get("name")
         if not isinstance(name, str) or not name:
             continue
-        out[name] = {
-            "image_url": item.get("imageUrl")
-            or item.get("image_url")
-            or item.get("productImageUrl")
-            or item.get("product_image_url"),
-            "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
-            "quantity": item.get("quantity"),
-            "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
-        }
+        out.append(
+            (
+                name,
+                {
+                    "image_url": item.get("imageUrl")
+                    or item.get("image_url")
+                    or item.get("productImageUrl")
+                    or item.get("product_image_url"),
+                    "unit_price_cents": item.get("unitPriceCents") or item.get("unit_price_cents"),
+                    "quantity": item.get("quantity"),
+                    "line_total_cents": item.get("lineTotalCents") or item.get("line_total_cents"),
+                },
+            )
+        )
     return out
 
 
-def _normalize_receipt_fees(receipt: dict) -> dict:
-    out = {}
+def _normalize_receipt_fees(receipt: dict) -> List[tuple[str, object]]:
+    """(label, amountCents) pairs preserving receipt order; labels matched as prose."""
+    out: List[tuple[str, object]] = []
     for fee in receipt.get("fees") or []:
         if not isinstance(fee, dict):
             continue
         label = fee.get("label") or fee.get("name")
         if isinstance(label, str) and label:
-            out[label.lower()] = fee.get("amountCents") or fee.get("amount_cents")
+            out.append((label, fee.get("amountCents") or fee.get("amount_cents")))
     return out
 
 
@@ -729,15 +909,10 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
     r"(?P<host>(?:[a-z0-9-]+\.)+[a-z0-9-]+)\s*\)\s*$",
     re.IGNORECASE,
 )
-_CONNECTED_MERCHANT_IDENTITY = re.compile(
-    r"^\s*(?P<business>.+?)\s+(?:via|on|through|by|/)\s+(?P<platform>.+?)\s*$",
-    re.IGNORECASE,
-)
+# NOTE: there is deliberately no "connected merchant" regex here any more. It only accepted the
+# fixed connector vocabulary "via|on|through|by|/", which no prompt or tool schema teaches;
+# free-form merchant strings are now matched with prose_tokens_contain (see above).
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
-
-
-def _merchant_identity_tokens(value: str) -> tuple[str, ...]:
-    return tuple(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
 def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
@@ -880,40 +1055,34 @@ def _validate_payment_merchant_identity(
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
 
-    expected_businesses = {_merchant_identity_tokens(expected_match.group("business"))}
+    expected_businesses = [expected_match.group("business")]
     if isinstance(business_aliases, list):
-        expected_businesses.update(
-            _merchant_identity_tokens(alias) for alias in business_aliases if isinstance(alias, str) and alias.strip()
-        )
-    expected_platform = _merchant_identity_tokens(expected_match.group("platform"))
-    expected_host = expected_match.group("host").casefold().rstrip(".")
-    actual_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    if actual_match is None:
-        actual_match = _CONNECTED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
-    direct_merchant = (
-        expected_platform == ("direct",) and _merchant_identity_tokens(actual_merchant) in expected_businesses
-    )
-    if not direct_merchant:
+        expected_businesses.extend(alias for alias in business_aliases if isinstance(alias, str) and alias.strip())
+    expected_platform = expected_match.group("platform")
+    structured_actual = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(actual_merchant)
+    if structured_actual is not None:
+        # An actual that DOES adopt the "Business (Platform - host)" convention is making an
+        # explicit platform + host claim, so it is still held to that claim exactly.
         if (
-            actual_match is None
-            or _merchant_identity_tokens(actual_match.group("business")) not in expected_businesses
-            or _merchant_identity_tokens(actual_match.group("platform")) != expected_platform
+            not any(
+                prose_match_rank(business, structured_actual.group("business")) is not None
+                for business in expected_businesses
+            )
+            or prose_match_rank(expected_platform, structured_actual.group("platform")) is None
         ):
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
-    if actual_match is not None and "host" in actual_match.groupdict():
-        actual_host = actual_match.group("host").casefold().rstrip(".")
-        if not _merchant_host_matches(expected_host, actual_host):
-            return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
+    elif not any(prose_tokens_contain(actual_merchant, business) for business in expected_businesses):
+        # The request_payment_card schema only asks for a "Merchant or site name", so ANY free-form
+        # phrasing that carries the expected business ("Nopa Fish", "Nopa Fish via Toast", "Nopa
+        # Fish — Toast online ordering") is a legitimate emission; the "Business (Platform - host)"
+        # wording is benchmark bookkeeping that is never taught to the agent, and the old fixed
+        # via/on/through/by connector vocabulary is not taught either.
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
-    # The approval URL is the terminal payment boundary the benchmark observes.
-    # Prefer it over inferred browser history: click-driven redirects may not emit a
-    # separate navigation tool event, and a prior visit must not rescue a wrong
-    # checkout URL. Legacy attention payloads without an approval URL retain the
-    # scoped, completed-navigation fallback.
-    grounded_hosts = _payment_approval_hosts(req) or _grounded_payment_navigation_hosts(messages)
-    if not any(_merchant_host_matches(expected_host, host) for host in grounded_hosts):
-        observed = ", ".join(sorted(grounded_hosts)) or "none"
-        return f"merchant host not grounded: expected {expected_host}, observed {observed}"
+    # URL matching is deliberately absent. Comparing the approval-URL host against an
+    # expected host was the last URL string match in this evaluator; it is removed by
+    # decision, so the merchant assertion rests on the business name alone. A run that
+    # transacts with the right-named business on a different site now scores as a pass.
     return None
 
 
@@ -997,7 +1166,10 @@ def _validate_payment_receipt(
     actual_items = _normalize_receipt_items(receipt)
     for expected_item in expected.get("lineItems", []):
         name = expected_item.get("name")
-        actual = actual_items.get(name)
+        # The tool schema documents `name` only as "Item name shown on the checkout page",
+        # so the pinned wording is benchmark bookkeeping, not a taught format: match the
+        # name as prose. Every amount below still compares EXACTLY.
+        actual = best_prose_match(name, actual_items)
         if not actual:
             return f"missing receipt line item: {name}"
         for actual_key, expected_key in (
@@ -1016,13 +1188,12 @@ def _validate_payment_receipt(
 
     actual_fees = _normalize_receipt_fees(receipt)
     for expected_fee in expected.get("fees", []):
-        label = expected_fee.get("label", "").lower()
-        actual_fee = actual_fees.get(label)
-        if actual_fee is None and label == "tax":
-            actual_fee = next(
-                (amount for actual_label, amount in actual_fees.items() if actual_label.startswith("tax (")),
-                None,
-            )
+        # The tool schema documents `label` only as "Fee label shown on the checkout page"
+        # and gives no vocabulary, so "Sales Tax"/"Tax (8.25%)"/"Estimated Tax" are all
+        # legitimate renderings of a pinned "Tax". The general prose rule subsumes the old
+        # bespoke `startswith("tax (")` escape hatch, which is now deleted. amountCents
+        # still compares EXACTLY.
+        actual_fee = best_prose_match(expected_fee.get("label", ""), actual_fees)
         if actual_fee != expected_fee.get("amountCents"):
             return (
                 f"{expected_fee.get('label')} fee mismatch: "
@@ -1248,6 +1419,26 @@ async def validate_agent_payment_confirmation_contract(data: dict, root_agent_id
     )
 
 
+def _missing_final_findings(findings: List[str], haystack: str) -> List[str]:
+    """expected_final_findings the agent's final answer failed to report.
+
+    `expected_final_findings` pins prose facts (a full mailing address) that the agent only ever
+    heard spoken aloud on a phone call; nothing tells it to echo the benchmark's exact spelling, so
+    "4821 Maplewood Dr, Austin, TX 78731" is the same fact as "4821 Maplewood Drive, Austin, Texas
+    78731". `missing_call_findings` (punctuation-squashed substring, spoken-digit aware) is tried
+    first and its acceptances are preserved verbatim; anything it rejects gets a second, purely
+    deterministic chance via the shared prose normalizer, which expands street-suffix and state
+    abbreviations. Adjacency is preserved (prose_contains_phrase, not token-set containment), so a
+    wrong street number/name/zip -- or the right words scattered across unrelated sentences --
+    still fails.
+    """
+    return [
+        finding
+        for finding in missing_call_findings(findings, haystack)
+        if not prose_contains_phrase(haystack, finding)
+    ]
+
+
 async def _evaluate_phone_call_task(
     task: BenchmarkTask,
     data: dict,
@@ -1259,7 +1450,7 @@ async def _evaluate_phone_call_task(
     missing = missing_call_findings(expected_findings, phone_search_text(data))
     if missing:
         return False, f"agent output missing pinned/expected call findings: {missing}"
-    final_missing = missing_call_findings(task.expected_final_findings or [], phone_final_result_text(data))
+    final_missing = _missing_final_findings(task.expected_final_findings or [], phone_final_result_text(data))
     if final_missing:
         return False, f"final output missing expected returned findings: {final_missing}"
     if task.callee_checks:
@@ -1770,6 +1961,56 @@ async def get_tool_usage(base_url: str, agent_id: str) -> dict:
         return {}
 
 
+async def _get_settled_tool_usage(
+    base_url: str,
+    agent_id: str,
+    *,
+    max_attempts: int = 10,
+    retry_delay_seconds: float = 2,
+    fetch_usage: Callable[[str, str], Awaitable[dict]] = get_tool_usage,
+) -> dict:
+    """Snapshot tree tool usage only after late ToolUsage writes have settled.
+
+    Terminal agent status is broadcast before every agent in the tree has persisted its
+    ToolUsage row: on agent 8a5ff1db the cost-limit flip landed 12.0s ahead of the browser
+    explore_agent's 430.44c row, so the single-read snapshot recorded 5c / llm_call_count=1
+    instead of the real 435.86c subtree cost. Poll — bounded, like
+    ``_get_initial_payment_lifecycle_with_retry`` — until the LLM call count stops growing
+    and covers every agent in the tree (each agent makes at least one LLM call, and
+    ``agent_count`` is derived from the busId tree rather than from the usage rows, so it is
+    an independent completeness signal).
+    """
+    if max_attempts < 1:
+        raise ValueError("max_attempts must be at least 1")
+    best: Optional[dict] = None
+    best_calls = -1
+    previous_calls: Optional[int] = None
+    last_error: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            await asyncio.sleep(retry_delay_seconds)
+        try:
+            usage = await fetch_usage(base_url, agent_id)
+        except Exception as error:
+            last_error = error
+            print(f"    ⚠ Transient tree tool-usage read failed ({attempt}/{max_attempts}): {error}")
+            continue
+        calls = _as_nonnegative_int(usage.get("llm_call_count"))
+        if calls > best_calls:
+            best, best_calls = usage, calls
+        tree_covered = best_calls >= max(_as_nonnegative_int(usage.get("agent_count")), 1)
+        if previous_calls == calls and tree_covered:
+            return best if best is not None else usage
+        previous_calls = calls
+    if best is None:
+        raise RuntimeError(f"Tree tool usage remained unavailable after {max_attempts} reads: {last_error}")
+    print(
+        f"    ⚠ Tree tool usage never settled after {max_attempts} reads "
+        f"(llm_call_count={best_calls}, agent_count={_as_nonnegative_int(best.get('agent_count'))})"
+    )
+    return best
+
+
 async def get_agent_tool_usage(base_url: str, agent_id: str) -> dict:
     """GET raw per-agent usage items for provider/model attribution."""
     headers = await _api_headers()
@@ -1882,7 +2123,19 @@ async def _wait_for_expected_payment_lifecycle(
             and isinstance(wallet_funding, dict)
             and wallet_funding.get("status") in {"RECLAIMING", "RECLAIMED"}
         )
-        if status not in retryable_statuses and not compensation_pending:
+        # When the task expects a purchase but abandon returned an empty lifecycle (e.g. mint
+        # reused another agent's HELD row), keep polling until timeout instead of treating the
+        # empty snapshot as a successful terminal state.
+        expected_lifecycle = task.expected_payment_lifecycle or {}
+        expected_purchase = expected_lifecycle.get("purchase")
+        missing_expected_purchase = (
+            isinstance(expected_purchase, dict) and not isinstance(purchase, dict)
+        )
+        if (
+            status not in retryable_statuses
+            and not compensation_pending
+            and not missing_expected_purchase
+        ):
             return lifecycle
         if time.monotonic() >= deadline:
             if last_fetch_error is not None:
@@ -3360,6 +3613,29 @@ async def poll_agent(
         if fetch_approvals_now:
             try:
                 pending = _pending_attention
+                if task.expected_attention_kind_any_of:
+                    unseen_open = [
+                        req
+                        for req in pending
+                        if (req.get("agentId") or req.get("agent_id", "")) in tree_agent_ids
+                        and _attention_request_is_open(req)
+                        and req.get("id")
+                        and req.get("id") not in seen_attention_ids
+                    ]
+                    if len(unseen_open) > 1:
+                        observed = [*seen_attention_kinds, *(_attention_request_kind(req) for req in unseen_open)]
+                        data["_benchmark"] = {
+                            **data.get("_benchmark", {}),
+                            "expected_attention_kind_any_of": list(task.expected_attention_kind_any_of),
+                            "attention_kinds_observed": observed,
+                        }
+                        return (
+                            data,
+                            approvals_triggered,
+                            approvals_resolved,
+                            f"Expected exactly one attention request of kind one of "
+                            f"{task.expected_attention_kind_any_of}, observed {observed}",
+                        )
                 for req in pending:
                     req_agent_id = req.get("agentId") or req.get("agent_id", "")
                     if req_agent_id in tree_agent_ids and _attention_request_is_open(req):
@@ -3452,21 +3728,22 @@ async def poll_agent(
                                 }
                                 print(f"    ✅ Expected gate observed {req_id[:8]}")
                                 return data, approvals_triggered, approvals_resolved, None
-                            receipt_error = _validate_payment_receipt(task, req, messages=messages)
-                            if receipt_error:
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "payment_receipt_validation_error": receipt_error,
-                                    "payment_receipt_request_id": req_id,
-                                }
-                                return data, approvals_triggered, approvals_resolved, receipt_error
-                            if task.expected_payment_receipt:
-                                validated_payment_receipt_request_id = req_id
-                                data["_benchmark"] = {
-                                    **data.get("_benchmark", {}),
-                                    "expected_payment_receipt_seen": True,
-                                    "expected_payment_receipt_request_id": req_id,
-                                }
+                            if observed_kind == "payment_approval":
+                                receipt_error = _validate_payment_receipt(task, req, messages=messages)
+                                if receipt_error:
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "payment_receipt_validation_error": receipt_error,
+                                        "payment_receipt_request_id": req_id,
+                                    }
+                                    return data, approvals_triggered, approvals_resolved, receipt_error
+                                if task.expected_payment_receipt:
+                                    validated_payment_receipt_request_id = req_id
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "expected_payment_receipt_seen": True,
+                                        "expected_payment_receipt_request_id": req_id,
+                                    }
                             if task.success_on_payment_card_request and task.payment_card_request_action is None:
                                 if task.approval_handling == "count_only":
                                     await respond_to_attention_request(base_url, req_id, _count_only_release_response())
@@ -5090,6 +5367,10 @@ class LiveFixtureContext:
     # sync is scoped to just those cookie domains (seconds, not ~13 min). Empty →
     # full cookie sync with a raised budget.
     cookie_domains: tuple[str, ...] = ()
+    # Only these scoped domains require an injectable CookieBundle at dispatch.
+    # Guest-checkout tasks still scope their sync via cookie_domains, but an
+    # absent CookieBundle must not prevent them from reaching the public flow.
+    required_injectable_cookie_domains: tuple[str, ...] = ()
     tolerate_claude_code_unavailable: bool = False
 
 
@@ -5106,6 +5387,180 @@ def _anthropic_family_excluded() -> bool:
         "yes",
         "on",
     }
+
+
+# Chrome/WebKit cookie timestamps count microseconds from 1601-01-01; the offset
+# to the unix epoch matches back-end/src/providers/steel/injection.ts.
+_CHROME_EPOCH_OFFSET_SECONDS = 11644473600
+
+
+def _live_cookie_domain_credential_summary(user_id: str, domain: str) -> dict:
+    """Count the browser credentials the injection path could actually consume.
+
+    This mirrors back-end/src/providers/steel/injection.ts exactly:
+    ``selectTopCookieBundle`` only returns a ``CookieBundle`` that is enabled AND
+    holds at least one ``Cookie`` row in the same (browserSource, browserProfile)
+    whose domain satisfies ``cookieDomainWhere(authRealm)`` — an enabled marker
+    with no matching cookie row "is not an authentication source". Loose cookie
+    rows with no bundle are never injected, because selection is bundle-keyed.
+
+    ``SteelSessionAuth`` is counted for diagnostics but is NOT treated as proof of
+    provisioning: ``resolveBrowserAuthCredentialSource`` only prefers that marker
+    when the LIVE Steel session already carries unexpired realm cookies
+    (``steelSessionHasRealmCookies !== false``), and otherwise logs "Steel auth
+    marker exists but current session has no realm cookies" and falls through to
+    the CookieBundle. That liveness is runtime state no pre-flight can observe —
+    no session exists yet — so the DB-verifiable requirement injection lands on is
+    the bundle.
+
+    Realm scoping matches back-end/scripts/cookie-domain-scope.ts
+    ``authRealmSyncWhere``/``cookieSyncWhere`` (exact host, leading-dot host, or a
+    dot-boundary subdomain) so the preflight asks about precisely the rows the
+    scoped sync was asked to deliver.
+
+    Expiry is reported but deliberately NOT part of the predicate: injection maps
+    an already-expired ``expiresUtc`` to ``undefined`` and still injects the
+    cookie as a session cookie, so treating expiry as disqualifying would be
+    stricter than the code under test.
+    """
+    normalized = domain.strip().lower()
+    user = _sql_literal(user_id)
+    target = _sql_literal(normalized)
+    sql = f"""
+WITH bundles AS (
+    SELECT b.id,
+           b."browserSource",
+           b."browserProfile",
+           b."disabledAt",
+           regexp_replace(lower(btrim(b."authRealm")), '^\\.+', '') AS realm
+    FROM "CookieBundle" b
+    WHERE b."userId" = {user}
+      AND (
+        lower(btrim(b."authRealm")) = {target}
+        OR lower(btrim(b."authRealm")) = '.' || {target}
+        OR right(lower(btrim(b."authRealm")), length({target}) + 1) = '.' || {target}
+      )
+),
+bundle_realms AS (
+    SELECT bundles.*,
+           CASE WHEN left(realm, 4) = 'www.' THEN substr(realm, 5) ELSE realm END AS parent_realm
+    FROM bundles
+),
+injectable AS (
+    SELECT r.id
+    FROM bundle_realms r
+    WHERE r."disabledAt" IS NULL
+      AND EXISTS (
+        SELECT 1
+        FROM "Cookie" c
+        WHERE c."userId" = {user}
+          AND c."browserSource" = r."browserSource"
+          AND c."browserProfile" = r."browserProfile"
+          AND (
+            lower(c.domain) IN (r.realm, '.' || r.realm, r.parent_realm, '.' || r.parent_realm)
+            OR right(lower(c.domain), length(r.realm) + 1) = '.' || r.realm
+            OR right(lower(c.domain), length(r.parent_realm) + 1) = '.' || r.parent_realm
+          )
+      )
+),
+domain_cookies AS (
+    SELECT c."expiresUtc", c."syncedAt"
+    FROM "Cookie" c
+    WHERE c."userId" = {user}
+      AND (
+        lower(c.domain) = {target}
+        OR lower(c.domain) = '.' || {target}
+        OR right(lower(c.domain), length({target}) + 1) = '.' || {target}
+      )
+),
+steel AS (
+    SELECT s.id
+    FROM "SteelSessionAuth" s
+    WHERE s."userId" = {user}
+      AND s."disabledAt" IS NULL
+      AND (
+        lower(btrim(s."authRealm")) = {target}
+        OR lower(btrim(s."authRealm")) = '.' || {target}
+        OR right(lower(btrim(s."authRealm")), length({target}) + 1) = '.' || {target}
+      )
+)
+SELECT json_build_object(
+    'domain', {target},
+    'bundles_total', (SELECT count(*) FROM bundle_realms),
+    'bundles_enabled', (SELECT count(*) FROM bundle_realms WHERE "disabledAt" IS NULL),
+    'bundles_injectable', (SELECT count(*) FROM injectable),
+    'steel_sessions_enabled', (SELECT count(*) FROM steel),
+    'cookies_total', (SELECT count(*) FROM domain_cookies),
+    'cookies_unexpired', (
+        SELECT count(*) FROM domain_cookies
+        WHERE "expiresUtc" IS NULL
+           OR "expiresUtc" <= 0
+           OR ("expiresUtc" / 1000000 - {_CHROME_EPOCH_OFFSET_SECONDS}) > extract(epoch FROM now())
+    ),
+    'newest_cookie_synced_at', (
+        SELECT to_char(max("syncedAt") AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        FROM domain_cookies
+    )
+)::text;
+""".strip()
+    return json.loads(_run_local_victoria_sql(sql).strip())
+
+
+def _live_cookie_domain_is_usable(summary: dict) -> bool:
+    """A domain is provisioned when selectTopCookieBundle would return a bundle."""
+    return int(summary.get("bundles_injectable") or 0) > 0
+
+
+def _describe_unusable_cookie_domain(summary: dict) -> str:
+    """Counts, domains, and timestamps only — never cookie values or tokens."""
+    return (
+        f"{summary.get('domain')}: "
+        f"{summary.get('bundles_total') or 0} CookieBundle row(s) "
+        f"({summary.get('bundles_enabled') or 0} enabled, "
+        f"{summary.get('bundles_injectable') or 0} with matching cookie rows), "
+        f"{summary.get('steel_sessions_enabled') or 0} enabled SteelSessionAuth marker(s) "
+        "(not injectable on their own), "
+        f"{summary.get('cookies_total') or 0} cookie row(s) "
+        f"({summary.get('cookies_unexpired') or 0} unexpired), "
+        f"newest cookie syncedAt={summary.get('newest_cookie_synced_at') or 'never'}"
+    )
+
+
+def _assert_live_cookie_domains_usable(user_id: str, cookie_domains: tuple[str, ...]) -> None:
+    """Fail the fixture — loudly, as infra — when the scoped sync produced nothing usable.
+
+    ``_sync_browser_credentials`` only reports whether the sync COMMAND succeeded.
+    A domain whose prod auth is stale/orphaned (cookies present, but zero
+    CookieBundle rows) syncs "successfully" and injects nothing, so the agent runs
+    signed-out for the full task budget and gets scored as a capability failure.
+    """
+    if not cookie_domains:
+        return
+    summaries = [_live_cookie_domain_credential_summary(user_id, domain) for domain in cookie_domains]
+    unusable = [s for s in summaries if not _live_cookie_domain_is_usable(s)]
+    if not unusable:
+        for summary in summaries:
+            print(
+                f"    🍪 {summary.get('domain')}: {summary.get('bundles_injectable')} injectable CookieBundle(s), "
+                f"{summary.get('steel_sessions_enabled')} Steel session(s), "
+                f"{summary.get('cookies_total')} cookie row(s)"
+            )
+        return
+    names = ", ".join(str(s.get("domain")) for s in unusable)
+    details = " | ".join(_describe_unusable_cookie_domain(s) for s in unusable)
+    actions = "; ".join(
+        f"log into {s.get('domain')} in a currently-syncing browser profile so the mac-app sync uploads a fresh bundle"
+        for s in unusable
+    )
+    raise RuntimeError(
+        f"Live fixture preflight: no injectable browser credential for {names} after the scoped "
+        f"browser-credential sync. {details}. Cookie injection is bundle-keyed "
+        "(back-end/src/providers/steel/injection.ts selects one enabled CookieBundle that has matching "
+        "cookie rows, or an enabled SteelSessionAuth), so this task would run signed-out and be misscored "
+        f"as an agent capability failure. This is an INFRA/fixture failure, not a task result. Fix: {actions}, "
+        "then re-run. (An enabled SteelSessionAuth marker does not count: injection discards it whenever the "
+        "live session carries no realm cookies and falls through to the CookieBundle.)"
+    )
 
 
 def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
@@ -5150,15 +5605,31 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         raise RuntimeError("Live fixture could not refresh compute tokens")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
+    # A green sync only proves the command exited 0. For domains whose task
+    # contract explicitly requires authentication, assert that the post-sync DB
+    # holds a credential the injection path can select. live_cookie_domains alone
+    # is a performance scope and may describe a valid guest-checkout task.
+    _assert_live_cookie_domains_usable(ctx.user_id, ctx.required_injectable_cookie_domains)
     return {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
 
 
-async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
+async def _refresh_local_compute_tokens_for_run(
+    base_url: str,
+    *,
+    require_claude_code: bool = False,
+) -> None:
     """Refresh agent-infrastructure compute credentials once before local tasks.
 
     Real local tasks refresh from the verified shared workspace. Simulated cloud
     stacks already restore the canonical base fixture and deliberately have no
     second source DB endpoint, so they use that restored credential state.
+
+    When ``require_claude_code`` is set (the run includes tasks with
+    ``requires_claude_code``), never tolerate a missing claude_code sync just
+    because the shared Anthropic API-key fallback looks healthy — that path
+    made cloud guests print "Refreshed compute tokens" then skip
+    image-handling / files-in-sub-agents, which fleet then counted as PASS via
+    ``--allow-claude-code-credential-skip``.
     """
     if not _is_local_base_url(base_url):
         return
@@ -5166,6 +5637,10 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
         print("    🌍 simulate mode — using compute tokens from the restored seed DB")
         return
     if _anthropic_family_excluded():
+        if require_claude_code:
+            raise RuntimeError(
+                "Claude Code tasks cannot run when ROSE_EXCLUDE_ANTHROPIC_FAMILY is set"
+            )
         if not _sync_compute_tokens(
             tolerate_gpt_code_unavailable=True,
             required_token_types=("gpt",),
@@ -5190,12 +5665,34 @@ async def _refresh_local_compute_tokens_for_run(base_url: str) -> None:
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
+    # Claude-Code-required tasks must not inherit the Anthropic API-key
+    # tolerance — spawn_claude_code_agent cannot use that fallback.
+    tolerate_missing_claude = False
+    required_token_types: tuple[str, ...] | None = None
+    # Probed at most ONCE per run and reused for the cost warning below. Asking
+    # again is a second live HTTP round-trip and breaks the awaited-once contract
+    # its tests pin.
+    has_anthropic_key_fallback = False
+    if require_claude_code:
+        required_token_types = ("claude",)
+    else:
+        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+        tolerate_missing_claude = has_anthropic_key_fallback
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
+        required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
+    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
+    # on a real claude token above, so it always has a claudeAuth path and this
+    # warning would be false.
+    if not require_claude_code and not has_anthropic_key_fallback:
+        print(
+            "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
+            "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
+            "to a token-backed run."
+        )
     database_url = _local_victoria_database_url()
     if database_url:
         _refresh_local_claude_token_from_keychain(database_url)
@@ -5464,12 +5961,27 @@ async def _apply_live_fixtures(task: "BenchmarkTask", base_url: str) -> list[dic
     auth_realm = os.environ.get("BENCHMARK_BROWSER_AUTH_REALM") or "amazon.com"
     raw_domains = (task.environment or {}).get("live_cookie_domains") or []
     cookie_domains = tuple(str(d).strip() for d in raw_domains if str(d).strip())
+    raw_required_domains = (task.environment or {}).get("required_injectable_cookie_domains") or []
+    required_cookie_domains = tuple(str(d).strip() for d in raw_required_domains if str(d).strip())
+    # Same reasoning as the blanket pre-flight above: a missing Claude compute
+    # token degrades cost, it does not remove a capability the task needs. Live
+    # fixtures never require claudeAuth, so this path only ever takes the
+    # tolerant branch — it derives tolerance the same way the pre-flight does so
+    # the two cannot disagree about whether a run may proceed.
+    #
+    # Epoch 4 of the ecommerce descent died here on the fail-closed form (the dev
+    # claude_code row was EXPIRED and the rest rate-limited, so three tasks died
+    # on "No usable claude_code integrations after sync" at $0.00, before an
+    # agent existed). That is now narrower — an Anthropic key satisfies it — but
+    # "no token AND no key" still aborts. See the residual-exposure note in
+    # `test_live_fixture_tolerates_missing_claude_compute_token`.
     tolerate_missing_claude = await _has_usable_anthropic_api_key_fallback(base_url)
     ctx = LiveFixtureContext(
         base_url=base_url,
         user_id=USER_ID,
         auth_realm=auth_realm,
         cookie_domains=cookie_domains,
+        required_injectable_cookie_domains=required_cookie_domains,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
     )
     manifests: list[dict] = []
@@ -7469,12 +7981,70 @@ _APPROVAL_AMOUNT_RE = re.compile(
     r"(?:\$\s*\d+(?:,\d{3})*(?:\.\d{2})?|\bUSD\s*\d+(?:,\d{3})*(?:\.\d{2})?\b|\b\d+(?:\.\d{2})?\s*USD\b)",
     re.IGNORECASE,
 )
-_APPROVAL_SEAT_RE = re.compile(
-    r"(?:\bseat(?:s)?(?:\s+(?:number|assignment))?\s*[:#-]?\s*[a-z]{1,2}\s*-?\s*\d{1,3}\b|"
-    r"\brow\s+[a-z]{1,2}\s*,?\s+seat\s+\d{1,3}\b|"
-    r"[\"\']seat[\"\']\s*:\s*[\"\']?[a-z]{1,2}\s*-?\s*\d{1,3}\b)",
-    re.IGNORECASE,
-)
+_APPROVAL_SEAT_TOKEN_RE = re.compile(r"\b[a-z]{1,2}\s*-?\s*\d{1,3}\b", re.IGNORECASE)
+
+
+def _approval_user_visible_text(request: dict) -> str:
+    """Return only approval copy shown to the user, excluding opaque IDs."""
+    return " ".join(
+        str(request.get(key) or "")
+        for key in ("question", "message", "description")
+    ).lower()
+
+
+def _approval_request_satisfies_detail_check(
+    request: dict,
+    check: dict,
+    *,
+    user_visible_only: bool = False,
+) -> bool:
+    evidence = (
+        _approval_user_visible_text(request)
+        if user_visible_only
+        else json.dumps(request, default=str).lower()
+    )
+    required_strings = check.get("required_strings") or []
+    if not all(str(value).lower() in evidence for value in required_strings):
+        return False
+    require_date = check.get("require_date") is True
+    minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
+    if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
+        return False
+    if check.get("require_time") is True and not _APPROVAL_CLOCK_RE.search(evidence):
+        return False
+    if check.get("require_amount") is True and not _APPROVAL_AMOUNT_RE.search(evidence):
+        return False
+    minimum_seat_count = int(check.get("minimum_seat_count", 1 if check.get("require_seat") is True else 0))
+    if minimum_seat_count:
+        seat_tokens = {
+            re.sub(r"\s+|-", "", token.lower())
+            for token in _APPROVAL_SEAT_TOKEN_RE.findall(evidence)
+        }
+        if len(seat_tokens) < minimum_seat_count:
+            return False
+    return True
+
+
+def _approval_request_detail_failure(check: dict) -> str:
+    required_strings = check.get("required_strings") or []
+    minimum_date_count = int(check.get("minimum_date_count", 1 if check.get("require_date") is True else 0))
+    minimum_seat_count = int(check.get("minimum_seat_count", 1 if check.get("require_seat") is True else 0))
+    missing = ", ".join(str(value) for value in required_strings) or "required details"
+    if minimum_date_count == 1:
+        date_suffix = " and a calendar date"
+    elif minimum_date_count > 1:
+        date_suffix = f" and {minimum_date_count} calendar dates"
+    else:
+        date_suffix = ""
+    time_suffix = " and a reservation time" if check.get("require_time") is True else ""
+    amount_suffix = " and a monetary amount" if check.get("require_amount") is True else ""
+    if minimum_seat_count == 1:
+        seat_suffix = " and a seat assignment"
+    elif minimum_seat_count > 1:
+        seat_suffix = f" and {minimum_seat_count} distinct seat assignments"
+    else:
+        seat_suffix = ""
+    return f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
 
 
 def _run_declared_static_check(
@@ -7618,39 +8188,26 @@ def _run_declared_static_check(
             continue
         if check_type == "approval_request_details":
             requests = benchmark_state.get("attention_requests_seen") or []
-            required_strings = check.get("required_strings") or []
-            require_date = check.get("require_date") is True
-            minimum_date_count = int(check.get("minimum_date_count", 1 if require_date else 0))
-            require_time = check.get("require_time") is True
-            require_amount = check.get("require_amount") is True
-            require_seat = check.get("require_seat") is True
             for request in requests:
-                evidence = json.dumps(request, default=str).lower()
-                if not all(str(value).lower() in evidence for value in required_strings):
-                    continue
-                if len(_APPROVAL_DATE_RE.findall(evidence)) < minimum_date_count:
-                    continue
-                if require_time and not _APPROVAL_CLOCK_RE.search(evidence):
-                    continue
-                if require_amount and not _APPROVAL_AMOUNT_RE.search(evidence):
-                    continue
-                if require_seat and not _APPROVAL_SEAT_RE.search(evidence):
-                    continue
-                break
+                if _approval_request_satisfies_detail_check(request, check):
+                    break
             else:
-                missing = ", ".join(str(value) for value in required_strings) or "required details"
-                if minimum_date_count == 1:
-                    date_suffix = " and a calendar date"
-                elif minimum_date_count > 1:
-                    date_suffix = f" and {minimum_date_count} calendar dates"
-                else:
-                    date_suffix = ""
-                time_suffix = " and a reservation time" if require_time else ""
-                amount_suffix = " and a monetary amount" if require_amount else ""
-                seat_suffix = " and a seat assignment" if require_seat else ""
-                return False, (
-                    f"Approval request did not include {missing}{date_suffix}{time_suffix}{amount_suffix}{seat_suffix}"
-                )
+                return False, _approval_request_detail_failure(check)
+            continue
+        if check_type == "approval_request_details_by_kind":
+            requests = benchmark_state.get("attention_requests_seen") or []
+            details_by_kind = check.get("details_by_kind") or {}
+            for kind, kind_check in details_by_kind.items():
+                matching = [request for request in requests if _attention_request_kind(request) == kind]
+                if not any(
+                    _approval_request_satisfies_detail_check(
+                        request,
+                        kind_check,
+                        user_visible_only=True,
+                    )
+                    for request in matching
+                ):
+                    return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
             continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
@@ -8026,7 +8583,7 @@ async def run_single_task(
         tokens_in = 0
         tokens_out = 0
         try:
-            usage = await get_tool_usage(base_url, agent_id)
+            usage = await _get_settled_tool_usage(base_url, agent_id)
             cost_cents = usage.get("total_cost_cents", 0)
             cache_read_input_tokens = usage.get("cache_read_input_tokens", 0)
             cache_creation_input_tokens = usage.get("cache_creation_input_tokens", 0)
@@ -9452,18 +10009,48 @@ async def main_async(args):
                 print("  ⚠ Temporal stale-workflow cleanup timed out after 30s; continuing")
             await _fail_stale_active_agents()
         await _warmup_edge_functions(base_url)
-        await _refresh_local_compute_tokens_for_run(base_url)
+        claude_code_tasks_for_refresh = [t for t in tasks if t.requires_claude_code]
+        # Deploy smoke may opt into credential SKIP for Claude Code tasks when
+        # the pool is rate-limited/missing (BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP).
+        # Fleet/cloud require-pass stays fail-closed and must not set that flag.
+        allow_claude_code_credential_skip = (
+            os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+        )
+        await _refresh_local_compute_tokens_for_run(
+            base_url,
+            require_claude_code=bool(claude_code_tasks_for_refresh)
+            and not allow_claude_code_credential_skip,
+        )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
+    # Default (fleet/cloud): missing Claude Code credentials after a required
+    # refresh is a hard failure — never SKIP+PASS via cloudbench_result's
+    # --allow-claude-code-credential-skip (epoch-2 daily masked
+    # image-handling / files-in-sub-agents that way).
+    # Deploy smoke sets BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1 so
+    # infra-fix deploys are not blocked on Anthropic pool cooldowns; the
+    # Claude Code tasks become the deploy-approved loud SKIP.
     skipped_claude_tasks: List[BenchmarkTask] = []
     claude_code_tasks = [t for t in tasks if t.requires_claude_code]
+    allow_claude_code_credential_skip = (
+        os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP", "").strip() == "1"
+    )
     if claude_code_tasks:
         has_claude_creds = await _check_claude_code_credentials(base_url)
         if not has_claude_creds:
             skipped_names = [t.name for t in claude_code_tasks]
-            print(f"  ⚠ Claude Code credentials unavailable — skipping: {', '.join(skipped_names)}")
-            skipped_claude_tasks = claude_code_tasks
-            tasks = [t for t in tasks if not t.requires_claude_code]
+            if allow_claude_code_credential_skip:
+                print(
+                    "  ⚠ Claude Code credentials unavailable — skipping: "
+                    + ", ".join(skipped_names)
+                )
+                skipped_claude_tasks = claude_code_tasks
+                tasks = [t for t in tasks if not t.requires_claude_code]
+            else:
+                raise RuntimeError(
+                    "Claude Code credentials unavailable after compute-token refresh: "
+                    + ", ".join(skipped_names)
+                )
 
     await _update_world_model_before_simulation(args)
 

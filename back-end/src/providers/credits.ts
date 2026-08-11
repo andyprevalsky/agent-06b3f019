@@ -250,19 +250,14 @@ export function getUpgradeOptions(currentTier: number | null): Array<{
 }> {
   const isProduction = process.env.NODE_ENV === 'production';
 
-  // Use test links in development, prod links in production
+  // Canonical Rose Labs Pro ($30/mo) Payment Links on the Rose Labs Stripe
+  // account. Higher tiers keep legacy ladder URLs for existing upgrade paths.
   const allTiers = isProduction
     ? [
-        // Production payment links
-        {
-          tier: 20,
-          name: 'Agent Mini Cluster',
-          url: 'https://buy.stripe.com/cNi7sL7HCfa59nPeBn5kk04',
-        },
         {
           tier: 30,
-          name: 'Agent Mini Cluster Pro',
-          url: 'https://buy.stripe.com/eVq4gze607HD57zgJv5kk05',
+          name: 'Rose Labs Pro',
+          url: 'https://buy.stripe.com/6oU00k2kK1vi8bLdL8bQY00',
         },
         { tier: 40, name: 'Agent Cluster', url: 'https://buy.stripe.com/28E4gz1je3rndE5bpb5kk06' },
         {
@@ -282,16 +277,10 @@ export function getUpgradeOptions(currentTier: number | null): Array<{
         },
       ]
     : [
-        // Test payment links for development
-        {
-          tier: 20,
-          name: 'Agent Mini Cluster',
-          url: 'https://buy.stripe.com/test_00w5kDge8e618jL1OB5kk00',
-        },
         {
           tier: 30,
-          name: 'Agent Mini Cluster Pro',
-          url: 'https://buy.stripe.com/test_6oU9AT1je3rn9nPgJv5kk01',
+          name: 'Rose Labs Pro',
+          url: 'https://buy.stripe.com/test_5kQcN64tX2PccvS6dM9ws00',
         },
         {
           tier: 40,
@@ -316,11 +305,14 @@ export function getUpgradeOptions(currentTier: number | null): Array<{
       ];
 
   if (currentTier === null || currentTier === 0) {
-    // Free tier: show 20, 50, 100
-    return allTiers.filter((t) => [20, 50, 100].includes(t.tier));
+    // Free tier: base plan is $30/mo Rose Labs Pro
+    return allTiers.filter((t) => [30, 50, 100].includes(t.tier));
   } else if (currentTier === 20) {
-    // $20 tier: show 30, 40, 50
+    // Legacy $20 subscribers can move onto the current $30 base or higher.
     return allTiers.filter((t) => [30, 40, 50].includes(t.tier));
+  } else if (currentTier === 30) {
+    // Current base plan: show next ladder steps
+    return allTiers.filter((t) => [40, 50, 100].includes(t.tier));
   } else if (currentTier === 40) {
     // $40 tier: show 50, 100, 200
     return allTiers.filter((t) => [50, 100, 200].includes(t.tier));
@@ -332,6 +324,6 @@ export function getUpgradeOptions(currentTier: number | null): Array<{
     return [];
   }
 
-  // For 30, 50, or other tiers, show next available options
+  // For 50 or other tiers, show next available options
   return allTiers.filter((t) => t.tier > currentTier);
 }

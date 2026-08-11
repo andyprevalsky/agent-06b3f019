@@ -424,15 +424,17 @@ def test_sync_fails_before_seed_when_no_explicit_source_exists():
 
 
 def test_blanket_preflight_uses_tolerant_sync():
-    captured: dict[str, bool] = {}
+    captured: dict[str, object] = {}
 
     def fake_sync(
         *,
         tolerate_gpt_code_unavailable: bool = False,
         tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
     ) -> bool:
         captured["gpt"] = tolerate_gpt_code_unavailable
         captured["claude"] = tolerate_claude_code_unavailable
+        captured["required"] = required_token_types
         return True
 
     with (
@@ -447,7 +449,74 @@ def test_blanket_preflight_uses_tolerant_sync():
     ):
         asyncio.run(rb._refresh_local_compute_tokens_for_run("http://127.0.0.1:3999"))
 
-    assert captured == {"gpt": True, "claude": True}
+    assert captured == {"gpt": True, "claude": True, "required": None}
+
+
+def test_claude_code_required_preflight_is_strict():
+    """Claude Code tasks must not inherit ANTHROPIC_API_KEY tolerance."""
+    captured: dict[str, object] = {}
+
+    def fake_sync(
+        *,
+        tolerate_gpt_code_unavailable: bool = False,
+        tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
+    ) -> bool:
+        captured["gpt"] = tolerate_gpt_code_unavailable
+        captured["claude"] = tolerate_claude_code_unavailable
+        captured["required"] = required_token_types
+        return True
+
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(
+            rb,
+            "_has_usable_anthropic_api_key_fallback",
+            new=AsyncMock(side_effect=AssertionError("Anthropic fallback must not gate Claude Code")),
+        ),
+        patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_local_victoria_database_url", return_value="postgresql://local/victoria"),
+        patch.object(rb, "_refresh_local_claude_token_from_keychain", return_value=False),
+    ):
+        asyncio.run(
+            rb._refresh_local_compute_tokens_for_run(
+                "http://127.0.0.1:3999",
+                require_claude_code=True,
+            )
+        )
+
+    assert captured == {"gpt": True, "claude": False, "required": ("claude",)}
+
+
+def test_claude_code_required_preflight_fails_closed_when_sync_fails():
+    with (
+        patch.object(rb, "_is_local_base_url", return_value=True),
+        patch.object(rb, "_sync_compute_tokens", return_value=False),
+    ):
+        try:
+            asyncio.run(
+                rb._refresh_local_compute_tokens_for_run(
+                    "http://127.0.0.1:3999",
+                    require_claude_code=True,
+                )
+            )
+            raise AssertionError("expected RuntimeError when Claude Code sync fails")
+        except RuntimeError as exc:
+            assert "compute tokens" in str(exc).lower()
+
+
+def test_deploy_smoke_may_opt_into_claude_code_credential_skip():
+    """Infra-fix /deploy smoke sets the skip flag; fleet/cloud must not."""
+    predeploy = (Path(__file__).resolve().parents[2] / "scripts" / "run-predeploy-local").read_text()
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" in predeploy
+    cloud = (Path(__file__).resolve().parents[2] / "scripts" / "run-bench-cloud").read_text()
+    fleet = (Path(__file__).resolve().parents[2] / "scripts" / "run-bench-fleet").read_text()
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" not in cloud
+    assert "BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1" not in fleet
+    source = Path(rb.__file__).read_text()
+    assert 'os.environ.get("BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP"' in source
+    assert "Claude Code credentials unavailable — skipping:" in source
+    assert "Claude Code credentials unavailable after compute-token refresh:" in source
 
 
 def test_keychain_refresh_targets_only_the_isolated_database():
@@ -846,15 +915,17 @@ def test_simulation_preflight_uses_restored_seed_without_prod_sync():
 
 
 def test_live_fixture_sync_tolerates_missing_gpt_code():
-    captured: dict[str, bool] = {}
+    captured: dict[str, object] = {}
 
     def fake_sync(
         *,
         tolerate_gpt_code_unavailable: bool = False,
         tolerate_claude_code_unavailable: bool = False,
+        required_token_types: tuple[str, ...] | None = None,
     ) -> bool:
         captured["gpt"] = tolerate_gpt_code_unavailable
         captured["claude"] = tolerate_claude_code_unavailable
+        captured["required"] = required_token_types
         return True
 
     ctx = rb.LiveFixtureContext(
@@ -872,7 +943,8 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
 
     # The live overlay serves browser/credential tasks (claude_code); an exhausted
     # Codex quota must NOT fail them here. Was strict → 0/8 ecommerce slice.
-    assert captured == {"gpt": True, "claude": True}
+    assert captured["gpt"] is True
+    assert captured["claude"] is True
 
 
 def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():

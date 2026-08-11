@@ -1,4 +1,9 @@
-import { isCardLive, type CardProviderDetailsResult } from '../../providers/card-provider';
+import {
+  isCardLive,
+  type CardProvider,
+  type CardProviderDetailsResult,
+  type CardProviderMintResult,
+} from '../../providers/card-provider';
 import { PurchaseError } from './errors';
 
 export function sanitizeDescriptorSuffix(merchant: string): string {
@@ -25,4 +30,38 @@ export function assertIssuedCardIsSpendable(
       }
     );
   }
+}
+
+/** Drop PAN/CVV before persisting mint evidence to the archive boundary. */
+export function mintResponseForArchive(
+  minted: CardProviderMintResult
+): Omit<CardProviderMintResult, 'pan' | 'cvv'> {
+  const safe: CardProviderMintResult = { ...minted };
+  delete safe.pan;
+  delete safe.cvv;
+  return safe;
+}
+
+/** Prefer secrets already fetched during mint; only call getDetails when mint omitted them. */
+export async function resolveIssuedCardDetails(
+  minted: CardProviderMintResult,
+  cardProvider: CardProvider
+): Promise<CardProviderDetailsResult> {
+  if (
+    typeof minted.pan === 'string' &&
+    minted.pan.trim() !== '' &&
+    typeof minted.cvv === 'string' &&
+    minted.cvv.trim() !== '' &&
+    typeof minted.balanceCents === 'number' &&
+    Number.isFinite(minted.balanceCents)
+  ) {
+    return {
+      pan: minted.pan,
+      cvv: minted.cvv,
+      expiry: minted.expiry,
+      balanceCents: minted.balanceCents,
+      status: minted.status,
+    };
+  }
+  return cardProvider.getDetails(minted.cardId);
 }

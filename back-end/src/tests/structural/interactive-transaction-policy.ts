@@ -66,12 +66,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'explicit 30-second advisory-lock policy',
   },
   {
-    file: 'domains/purchases/repoOpen.ts',
-    scope: 'createPendingPurchaseWithLock',
-    fingerprint: 'e7ec887248397de7',
-    reason: 'legacy migration debt',
-  },
-  {
     file: 'domains/purchases/repoSettlement.ts',
     scope: 'settlePurchaseAfterTransactionCleared',
     fingerprint: 'cd1cd0ea80d5cefb',
@@ -81,12 +75,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     file: 'providers/agentcard/sandbox-settlement.ts',
     scope: 'markPurchaseCleared',
     fingerprint: '4e25776d5c66fd9b',
-    reason: 'legacy migration debt',
-  },
-  {
-    file: 'providers/authOptionsStore.ts',
-    scope: 'markSteelSessionAuthFailed',
-    fingerprint: '8527037205efaa5f',
     reason: 'legacy migration debt',
   },
   {
@@ -144,7 +132,6 @@ const RAW_INTERACTIVE_TRANSACTION_ALLOWLIST: AllowlistEntry[] = [
     reason: 'legacy migration debt',
   },
   {
-
     file: 'providers/traceArchiveFixture.ts',
     scope: 'collectFixtureSnapshot',
     fingerprint: '5e0daf8438d614b5',

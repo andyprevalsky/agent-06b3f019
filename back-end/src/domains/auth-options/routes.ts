@@ -45,6 +45,7 @@ router.post(
       const userId = req.userId;
       const body = req.body as Record<string, unknown>;
       const reason = body.reason;
+      const preserveBrowserSessionId = body.preserve_browser_session_id;
       if (typeof userId !== 'string' || userId === '') {
         res.status(401).json({ error: 'Unauthorized' });
         return;
@@ -53,8 +54,23 @@ router.post(
         res.status(400).json({ error: 'reason is required' });
         return;
       }
+      if (
+        preserveBrowserSessionId !== undefined &&
+        (typeof preserveBrowserSessionId !== 'string' || preserveBrowserSessionId.trim() === '')
+      ) {
+        res.status(400).json({ error: 'preserve_browser_session_id must be a non-empty string' });
+        return;
+      }
 
-      const result = await markSteelSessionAuthFailed(userId, req.params.id, reason);
+      const result = await markSteelSessionAuthFailed(
+        userId,
+        req.params.id,
+        reason,
+        // Forward the trimmed value the guard above validated. Passing the raw
+        // string sends a padded id like " abc " downstream, where it fails the
+        // binding check and surfaces as a 500 instead of the 400 we just proved.
+        typeof preserveBrowserSessionId === 'string' ? preserveBrowserSessionId.trim() : undefined
+      );
       if (result === null) {
         res.status(404).json({ error: 'Steel session auth not found' });
         return;

@@ -5,8 +5,14 @@
     "prompt": "I'm building a personal brand for health, longevity, technology, founder journey [I'll refine the angle]. Analyze the top 50 creators in this niche across YouTube, IG, TikTok, and Substack.\n\nUse a for_each agent run for the per-creator analysis: first identify the top 50 creators, then use spawn_general_purpose_agent_for_each / for_each so one agent analyzes each creator with the same template.\n\nFor each creator, pull their posting cadence, hook formulas, top 5 performing pieces of the last 90 days, and the gaps in what they cover. Then give me: (a) a positioning statement, (b) a 90-day content calendar across all 4 platforms, (c) 30 hook-tested video script openings, and (d) the 20 creators I should engage with weekly to get on their radar.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["mass-agent", "load-test", "research"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "mass-agent",
+      "load-test",
+      "research"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -23,8 +29,12 @@
     "prompt": "You are analyzing ONE creator for Aman Gottumukkala, a technology founder building a personal brand at the intersection of health, longevity, technology, and founder journey (exact angle still being refined). The attached item is a JSON object describing your assigned creator (name, niche/archetype, primary platforms, handles/URLs, rank). Analyze ONLY that creator.\n\nResearch the creator's public activity in the last 90 days (approximately 2026-04-04 through 2026-07-03) across YouTube, Instagram, TikTok, and Substack where applicable. Use web searches and public pages. Do NOT fabricate metrics — if exact data is unavailable, say so and use the best available public proxy (e.g., typical view counts, subscriber counts, engagement patterns, older representative content).\n\nReturn a structured creator analysis with these fields:\n1. creator_name — the creator's name.\n2. rank_from_initial_list — the rank number from the item.\n3. platform_handles_and_urls — string listing known handles/URLs for YouTube, Instagram, TikTok, Substack (mark N/A where not present).\n4. posting_cadence_by_platform — per-platform posting frequency with observed dates/examples and a confidence note (high/medium/low).\n5. hook_formulas — 3 to 7 recurring hook formulas the creator uses, each with a concrete example title/opening from their actual content.\n6. top_5_performing_pieces_last_90_days — 5 pieces from roughly the last 90 days, each with platform, title/caption/topic, URL if available, approximate date, publicly visible metrics or best-available proxy, and a one-line hypothesis for why it performed. If 90-day data is unavailable for a platform, clearly mark it as a proxy/older representative piece.\n7. core_content_pillars — the creator's main recurring topics.\n8. audience_persona — who they serve.\n9. monetization_funnels — visible offers, products, sponsorships, memberships, newsletters, courses, supplements, etc.\n10. content_gaps — what they do NOT cover well (topics, formats, audiences).\n11. opportunities_for_aman — how Aman (founder-led health/longevity/tech brand) could exploit those gaps without copying.\n12. engagement_approach — how Aman should engage with this creator (comments, replies, collab angles) to get on their radar.\n13. citations_sources — URLs/source notes used.\n14. confidence_level — high/medium/low overall confidence with a brief note on what was estimated.\n\nBe specific and grounded. Prefer real titles, real URLs, and real observed patterns over generic statements.\n\nUse this row context for the task below.\nRow item:\n{\"creator_name\": \"Andrew Huberman\", \"handles\": \"YouTube: @hubermanlab, IG: @hubermanlab, TikTok: @hubermanlab, Newsletter: hubermanlab.com Neural Network\", \"niche\": \"Neuroscience & health protocols\", \"platforms\": \"YouTube, Instagram, TikTok, Substack/newsletter\", \"rank\": 1}",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["load-test"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "load-test"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -42,7 +52,10 @@
     "timeout_seconds": 120,
     "is_chat_mode": true,
     "expected_tools": [],
-    "tags": ["chat", "smoke"],
+    "tags": [
+      "chat",
+      "smoke"
+    ],
     "price_limit_cents": 25,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -58,8 +71,12 @@
     "prompt": "Find the current population of Tokyo and the current population of New York City. You MUST use spawn_general_purpose_agent exactly twice - once per city. Each general-purpose agent should use explore-agent web research, MUST NOT use a browser agent, Claude Code, or code sandbox, and should return only the numeric population value. After both agents complete, multiply the two populations together and report the final product.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent"],
-    "tags": ["smoke"],
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -84,8 +101,12 @@
     "prompt": "I'm comparing three cities to live in: Austin TX, Denver CO, and Lisbon Portugal. For each city, search the web for: cost of living, best neighborhoods, and weather. Synthesize your findings into a comparison table.\n\nStart in execute phase. Use explore sub-agents: spawn one explore sub-agent per city, preferably in parallel. Do NOT use Claude Code, a browser agent, or any code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "no_anthropic_price_limit_cents": 200,
     "requires_browser_agent": false,
@@ -111,8 +132,13 @@
     "prompt": "Research the current official population estimates for Tokyo and New York City. Spawn exactly two explore agents in parallel, one per city. Each explore agent must find a recent authoritative population figure and its source URL. After both return, provide a concise comparison containing each city name, population, estimate date or year, and source URL. Do not finish until both explore agents have returned.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["response-schema", "regression"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "response-schema",
+      "regression"
+    ],
     "price_limit_cents": 75,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -122,7 +148,10 @@
     "min_tool_counts": {
       "spawn_agent": 2
     },
-    "forbidden_tools": ["spawn_browser_agent", "spawn_claude_code_agent"],
+    "forbidden_tools": [
+      "spawn_browser_agent",
+      "spawn_claude_code_agent"
+    ],
     "mid_run_feedback": {
       "after_root_message_count": 2,
       "message": "Please keep going. Keep the final prose concise and easy to scan."
@@ -135,9 +164,13 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["web_search"],
+      "services": [
+        "web_search"
+      ],
       "secrets": [],
-      "live_targets": ["public web"],
+      "live_targets": [
+        "public web"
+      ],
       "context_notes": "The benchmark captures the generated response schema, injects non-goal USER feedback after work begins, and compares the final persisted schema plus hidden schema-update messages."
     },
     "evaluators": [
@@ -156,7 +189,9 @@
         ]
       }
     ],
-    "source": ["regression:mid-run-response-schema-non-goal-feedback"],
+    "source": [
+      "regression:mid-run-response-schema-non-goal-feedback"
+    ],
     "group": "daily"
   },
   {
@@ -165,8 +200,12 @@
     "prompt": "Run a comprehensive local-data Grep validation using only explore agents.\n\nCritical execution rules:\n- Do not call send_message_to_user_execute_phase or any progress-message tool. Your first actions must be spawn_agent calls.\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn the explore agents below, wait for them, then provide one final checklist report.\n\nA deterministic benchmark fixture has been seeded into local data with these named records:\n\nMessages:\n- \"Quarterly Lighthouse Brief\" contains a regex-searchable line about the Aurora budget.\n- \"Multiline Incident Note\" contains a multiline block where START and END are on different lines.\n- \"Pagination Ledger\" contains many numbered ledger entries.\n\nNetwork:\n- \"Mara Voss\" has contact details where the match appears in company, title, relation, and communication frequency fields.\n\nAgent network:\n- This agent tree already contains seeded USER, ASSISTANT, TOOL, and SYSTEM messages about the Atlas handoff.\n\nSpawn separate explore agents with these exact assignments. Each explore agent must use grep directly and return exact evidence from the Grep tool result:\n\n1. Omitted-source coverage: call grep without source and find evidence from messages, network, and agent_network.\n2. Messages regex: source=\"messages\", regex pattern for Aurora budget evidence in \"Quarterly Lighthouse Brief\".\n3. Network regex: source=\"network\", use pattern \"Northstar Calibration Group|Principal Signal Cartographer|benchmark verification contact\" and return exact matches for all three non-name fields.\n4. Agent-network roles: source=\"agent_network\", find USER, ASSISTANT, and TOOL Atlas handoff evidence, including location metadata and role.\n5. Case-insensitive: source=\"messages\", use \"-i\": true for mixed-case evidence.\n6. Multiline: source=\"messages\", use multiline: true for a match spanning START to END in \"Multiline Incident Note\".\n7. After context: source=\"messages\", use \"-A\" to return following logical lines.\n8. Before/context: source=\"messages\", use \"-B\" plus either \"-C\" or context to return surrounding logical lines.\n9. No line numbers: source=\"messages\", use \"-n\": false and prove line numbers are suppressed.\n10. Pagination: source=\"messages\", use pattern \"Ledger entry\", head_limit: 3, and offset: 20 so the result includes exact evidence \"Ledger entry 21: offset target confirmed\".\n\nAfter all explore agents complete, synthesize a final report with PASS or FAIL for each assignment. Include source searched, grep flags used, exact matched evidence, and for agent_network matches, the message role and location metadata returned by Grep. Only mark PASS when the explore agent found exact evidence from Grep.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["grep"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "grep"
+    ],
     "price_limit_cents": 450,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -194,8 +233,13 @@
     "prompt": "Run a real prod-data validation of my synced user documents using only local-data Grep through spawned explore agents.\n\nCritical execution rules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents using spawn_agent with type=\"explore\". Do not use type=\"general_purpose\", type=\"for_each\", output_schema, or any structured sub-agent schema.\n- An explore agent must call grep directly four times with source=\"documents\", once for each filters.document_source value: chatgpt, claude, apple_notes, and obsidian.\n- For each provider, find one concrete, human-verifiable fact or state clearly that no document evidence is currently synced for that provider.\n- Prefer high-signal recent project, preference, tool, or goal evidence. Use grep flags and filters as needed, but cite exact grep evidence and the returned document path/source.\n- Final answer must include a PASS/VERIFY checklist with one row per provider: provider, grep filters used, exact evidence snippet, document path, and whether it appears verified from prod data.\n\nThis benchmark intentionally runs against my prod account/data. Do not fabricate expected answers; the user will manually verify the cited facts.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["grep", "attachment"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "grep",
+      "attachment"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -216,9 +260,13 @@
     "bench": "pipeline-e2e",
     "environment": {
       "mode": "hybrid",
-      "db_fixtures": ["user_data_prod_grep_v1"],
+      "db_fixtures": [
+        "user_data_prod_grep_v1"
+      ],
       "base_images": [],
-      "services": ["grep"],
+      "services": [
+        "grep"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Frozen user-data documents (apple_notes, chatgpt, claude, obsidian) seeded by back-end/scripts/user-data-benchmark-fixture.ts from .context/benchmarks/user-data-grep-fixture.json — real prod docs frozen once (gitignored, re-derivable via BENCHMARK_USER_DATA_SOURCE_DATABASE_URL). grep source=documents is the required data path."
@@ -231,8 +279,14 @@
     "prompt": "Answer this using only local transaction data through an explore agent: What is my monthly spend for September 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use nested filters with since=\"2025-09-01\", until=\"2025-09-30\", status=\"posted\", include_pending_in_totals=false.\n- Use the transaction aggregate totals by currency from grep; monthly spend means posted USD outflow, excluding pending and excluding income/refunds.\n- Final answer must include the exact USD spend number and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["plaid", "transactions", "grep"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "plaid",
+      "transactions",
+      "grep"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -253,9 +307,14 @@
     ],
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "db_fixtures": [
+        "plaid_transactions_benchmark_v1"
+      ],
       "base_images": [],
-      "services": ["plaid_transactions", "grep"],
+      "services": [
+        "plaid_transactions",
+        "grep"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
@@ -272,7 +331,9 @@
         "checks": [
           {
             "type": "string_match",
-            "expected_strings": ["2184.42"]
+            "expected_strings": [
+              "2184.42"
+            ]
           }
         ]
       }
@@ -290,8 +351,14 @@
     "prompt": "Answer this using only local transaction data through an explore agent: How many posted DoorDash orders did I have in 2025?\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn one explore agent and have it call grep with source=\"transactions\".\n- Use pattern=\"doordash\" with -i=true.\n- Use nested filters with since=\"2025-01-01\", until=\"2025-12-31\", status=\"posted\".\n- Count matched transaction rows, not just returned snippets. Use head_limit and offset if pagination is needed.\n- Final answer must include the exact count and cite the transaction grep evidence.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["plaid", "transactions", "grep"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "plaid",
+      "transactions",
+      "grep"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -312,9 +379,14 @@
     ],
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "db_fixtures": [
+        "plaid_transactions_benchmark_v1"
+      ],
       "base_images": [],
-      "services": ["plaid_transactions", "grep"],
+      "services": [
+        "plaid_transactions",
+        "grep"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
@@ -331,7 +403,9 @@
         "checks": [
           {
             "type": "string_match",
-            "expected_strings": ["7"]
+            "expected_strings": [
+              "7"
+            ]
           }
         ]
       }
@@ -349,8 +423,14 @@
     "prompt": "Using only local transaction data through explore agents, identify subscriptions that look unused or dead and propose refund targets.\n\nRules:\n- Do not use web_search, web_fetch, browser agents, Claude Code agents, message_person, or public web tools.\n- Spawn explore agents that call grep with source=\"transactions\".\n- Search for subscription-like transactions using patterns such as subscription|premium|annual|membership|prime|netflix|spotify and use nested filters with status=\"posted\".\n- Do not actually contact merchants or request refunds. Return a refund prep list only.\n- Current date for recency decisions is 2026-07-03.\n- Classify monthly subscriptions with no posted charge in 2026 as stopped billing / dead candidates. Include them even when the refund case is weak.\n- Stopped billing / dead candidates belong in refund_prep_candidates; do not move them to excluded_subscription_candidates just because transaction data cannot prove current billing or current usage.\n- Classify annual subscriptions with a posted charge in the last 400 days as active/recent, not dead.\n- Treat Amazon Prime and Amazon Prime Video as separate merchants. A recent annual Amazon Prime charge means Amazon Prime is active/recent; it does not make older Amazon Prime Video channel billing active.\n- Exclude active/recent recurring services and developer-tool subscriptions from refund_prep_candidates. Put those only in excluded_subscription_candidates with the exclusion reason.\n- Exclude developer-tool subscriptions and explicitly distinguish \"stopped billing\" from \"still active and should cancel\" when transaction data cannot prove usage.\n- Final answer must include merchant name, charge evidence, why it looks like a refund candidate from transaction data, and which candidates were excluded as active/recent or developer tools.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["plaid", "transactions", "grep"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "plaid",
+      "transactions",
+      "grep"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -399,9 +479,14 @@
     ],
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["plaid_transactions_benchmark_v1"],
+      "db_fixtures": [
+        "plaid_transactions_benchmark_v1"
+      ],
       "base_images": [],
-      "services": ["plaid_transactions", "grep"],
+      "services": [
+        "plaid_transactions",
+        "grep"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Local Plaid transaction fixture seeded by back-end/scripts/plaid-transactions-benchmark-fixture.ts; grep source=transactions is the required data path."
@@ -442,12 +527,16 @@
     "prompt": "Send a short, friendly iMessage to 972-977-7432 saying this is the Rose iMessage send bench. Do not use email.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
-    "expected_tools": ["message_person"],
+    "expected_tools": [
+      "message_person"
+    ],
     "expected_tool_counts": {
       "message_person": 1
     },
     "tool_count_scope": "root",
-    "tags": ["approval"],
+    "tags": [
+      "approval"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -464,7 +553,9 @@
         "macOS Messages bridge"
       ],
       "secrets": [],
-      "live_targets": ["Apple Messages via the authenticated Mac app"],
+      "live_targets": [
+        "Apple Messages via the authenticated Mac app"
+      ],
       "context_notes": "The runner preflights a fresh heartbeat from an updated, authenticated Mac polling the exact benchmark backend. The evaluator requires FINISHED metadata with queue_id and sent_at written only after AppleScript success. Product behavior keeps an unacknowledged message queued indefinitely, but this online-relay benchmark passes only on a confirmed send."
     },
     "evaluators": [
@@ -502,12 +593,16 @@
     "prompt": "Send a short, friendly text to 972-977-7432 saying this is the Rose agent SMS send bench. Use the agent_sms channel from your own agent phone. Do not use the user's iMessage relay and do not use email.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
-    "expected_tools": ["message_person"],
+    "expected_tools": [
+      "message_person"
+    ],
     "expected_tool_counts": {
       "message_person": 1
     },
     "tool_count_scope": "root",
-    "tags": ["approval"],
+    "tags": [
+      "approval"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -518,9 +613,16 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["message_person", "AgentPhone outbound messages"],
-      "secrets": ["AGENTPHONE_API_KEY"],
-      "live_targets": ["AgentPhone POST /v1/messages"],
+      "services": [
+        "message_person",
+        "AgentPhone outbound messages"
+      ],
+      "secrets": [
+        "AGENTPHONE_API_KEY"
+      ],
+      "live_targets": [
+        "AgentPhone POST /v1/messages"
+      ],
       "context_notes": "The evaluator requires a FINISHED agent_sms receipt with provider=agentphone, provider_channel, and message_id, and rejects any iMessage queue_id. AgentPhone acceptance is immediate but does not guarantee recipient-device delivery."
     },
     "evaluators": [
@@ -559,7 +661,11 @@
     "timeout_seconds": 120,
     "is_chat_mode": false,
     "expected_tools": [],
-    "tags": ["gate", "subscription", "local-only"],
+    "tags": [
+      "gate",
+      "subscription",
+      "local-only"
+    ],
     "price_limit_cents": 25,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -577,9 +683,15 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["free_credit_subscription_gate_v1"],
+      "db_fixtures": [
+        "free_credit_subscription_gate_v1"
+      ],
       "base_images": [],
-      "services": ["credits", "billing", "attention_requests"],
+      "services": [
+        "credits",
+        "billing",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Local synthetic fixture in back-end/scripts/free-credit-subscription-gate-fixture.ts seeds a dedicated benchmark user with one cent of credit, one cent of ToolUsage spend, and no Subscription row."
@@ -614,8 +726,16 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["gate", "subscription", "payment", "browser", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "subscription",
+      "payment",
+      "browser",
+      "local-only"
+    ],
     "price_limit_cents": 75,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -629,7 +749,9 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["purchase_subscription_gate_v1"],
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -672,7 +794,9 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
     "tags": [
       "gate",
       "subscription",
@@ -689,7 +813,9 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["purchase_subscription_gate_v1"],
+      "db_fixtures": [
+        "purchase_subscription_gate_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -736,8 +862,16 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 360,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["gate", "kyc", "payment", "browser", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "kyc",
+      "payment",
+      "browser",
+      "local-only"
+    ],
     "price_limit_cents": 75,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -755,7 +889,9 @@
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["purchase_kyc_gate_v1"],
+      "db_fixtures": [
+        "purchase_kyc_gate_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -798,8 +934,14 @@
     "prompt": "Search my Gmail source for the latest message about the renewal clause and summarize the renewal clause. This task explicitly requires Gmail source access.",
     "timeout_seconds": 180,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["gate", "source", "local-only"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "gate",
+      "source",
+      "local-only"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -807,18 +949,30 @@
     "approval_handling": "ignore",
     "expected_gate": {
       "type": "source_connect",
-      "gateKey": ["source_connect:gmail", "source_connect:email"],
+      "gateKey": [
+        "source_connect:gmail",
+        "source_connect:email"
+      ],
       "severity": "blocking",
       "context": {
-        "sourceKey": ["gmail", "email"]
+        "sourceKey": [
+          "gmail",
+          "email"
+        ]
       }
     },
     "start_phase": "execute",
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["source_connect_gmail_gate_v1"],
+      "db_fixtures": [
+        "source_connect_gmail_gate_v1"
+      ],
       "base_images": [],
-      "services": ["data", "integrations", "attention_requests"],
+      "services": [
+        "data",
+        "integrations",
+        "attention_requests"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Local synthetic fixture in back-end/scripts/gate-benchmark-fixture.ts seeds a dedicated benchmark user with a NOT_CONNECTED Gmail integration and enough free credits."
@@ -853,8 +1007,13 @@
     "prompt": "Buy me a black beanie on Amazon that costs less than $35 and looks well-made. Avoid using the Buy Now button as the purchase path, but make sure purchase is completed.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -918,12 +1077,26 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amazon.com", "write_lock"],
-      "secrets": ["live_browser_auth"],
-      "live_targets": ["https://www.amazon.com"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
       "context_notes": "Live Amazon with real account/auth state and payment/write-lock controls. The live fixture refreshes compute tokens and the complete browser-auth graph from prod, including CookieBundles. A synthetic digital-twin variant of this scenario lives in the idea bank (black-beanie).",
-      "live_cookie_domains": ["amazon.com"]
+      "live_cookie_domains": [
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -951,8 +1124,15 @@
     "prompt": "Buy me a black beanie on Amazon that costs less than $35. Do not use the Buy Now button.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "antibot"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "antibot"
+    ],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -973,12 +1153,26 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amazon.com", "write_lock"],
-      "secrets": ["live_browser_auth"],
-      "live_targets": ["https://www.amazon.com"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
       "context_notes": "Live Amazon via synced-prod browser auth. The live fixture refreshes compute tokens and the complete browser-auth graph, including the CookieBundle used to reach the final Amazon purchase write lock. The runner leaves that request unresolved and does not place the order.",
-      "live_cookie_domains": ["amazon.com"]
+      "live_cookie_domains": [
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1005,7 +1199,9 @@
           },
           {
             "type": "approval_request_details",
-            "required_strings": ["beanie"],
+            "required_strings": [
+              "beanie"
+            ],
             "require_amount": true
           }
         ]
@@ -1032,15 +1228,24 @@
     "prompt": "Open https://www.amazon.com and first confirm the page visibly shows the signed-out 'Hello, sign in' state. Click that signed-out Account & Lists control, then sign in using the saved Amazon passkey. Do not use a password, OTP, cookie/session authentication, or ask me to sign in. Once Amazon shows 'Hello, Andy', click that authenticated Account & Lists greeting once so the state is recorded, then stop and report success.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "expected_credential_ref_kind": "passkey",
-    "forbidden_credential_ref_kinds": ["password", "email_otp", "sms_otp"],
+    "forbidden_credential_ref_kinds": [
+      "password",
+      "email_otp",
+      "sms_otp"
+    ],
     "expected_browser_provider": "kernel",
     "expected_browser_session_metadata_values": {
       "profile_source": "new_user_persistent",
@@ -1052,20 +1257,35 @@
       "permission_grant_count": 0,
       "cache_storage_origin_count": 0
     },
-    "expected_pre_credential_message_contains": ["Hello, sign in"],
-    "expected_post_credential_message_contains": ["Hello, Andy"],
+    "expected_pre_credential_message_contains": [
+      "Hello, sign in"
+    ],
+    "expected_post_credential_message_contains": [
+      "Hello, Andy"
+    ],
     "success_on_browser_auth_evidence": true,
     "start_phase": "execute",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amazon.com", "kernel"],
-      "secrets": ["amazon_passkey"],
-      "live_targets": ["https://www.amazon.com"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amazon.com",
+        "kernel"
+      ],
+      "secrets": [
+        "amazon_passkey"
+      ],
+      "live_targets": [
+        "https://www.amazon.com"
+      ],
       "context_notes": "The live fixture refreshes all current credentials. Task-specific passkey isolation then deletes Amazon cookies and origin storage, disables saved-session/password alternatives, and detaches the local Kernel profile mapping so the run proves CDP passkey injection from a fresh profile.",
-      "live_cookie_domains": ["amazon.com"]
+      "live_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1100,7 +1320,9 @@
           {
             "type": "message_before_credential_contains",
             "credential_kind": "passkey",
-            "value": ["Hello, sign in"]
+            "value": [
+              "Hello, sign in"
+            ]
           },
           {
             "type": "credential_ref_kind",
@@ -1109,16 +1331,25 @@
           {
             "type": "message_after_credential_contains",
             "credential_kind": "passkey",
-            "value": ["Hello, Andy"]
+            "value": [
+              "Hello, Andy"
+            ]
           },
           {
             "type": "forbidden_credential_ref_kinds",
-            "value": ["password", "email_otp", "sms_otp"]
+            "value": [
+              "password",
+              "email_otp",
+              "sms_otp"
+            ]
           }
         ]
       }
     ],
-    "source": ["commit:8923d6e87", "live-amazon:kernel-passkey"],
+    "source": [
+      "commit:8923d6e87",
+      "live-amazon:kernel-passkey"
+    ],
     "bench": "rose-bench",
     "group": "rose-bench"
   },
@@ -1128,8 +1359,15 @@
     "prompt": "Order me 1 rocky fish sandwich from Nopa Fish Ferry Building, from the restaurant's Toast site",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot", "ecommerce"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot",
+      "ecommerce"
+    ],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -1143,12 +1381,23 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["order.toasttab.com", "payment_approval"],
-      "secrets": ["live_browser_auth"],
-      "live_targets": ["https://order.toasttab.com/online/nopafish"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "order.toasttab.com",
+        "payment_approval"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://order.toasttab.com/online/nopafish"
+      ],
       "context_notes": "Live Toast menu and checkout flow. The live fixture explicitly refreshes compute credentials and the complete browser-auth graph before the payment-card approval probe.",
-      "live_cookie_domains": ["toasttab.com"]
+      "live_cookie_domains": [
+        "toasttab.com"
+      ]
     },
     "evaluators": [
       {
@@ -1168,20 +1417,29 @@
   {
     "name": "browser-opentable-reservation",
     "title": "OpenTable Restaurant Reservation",
-    "description": "Complete a flexible Sunday dinner reservation through OpenTable.",
-    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Sunday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
+    "description": "Complete a flexible Friday dinner reservation through OpenTable.",
+    "prompt": "Use OpenTable to reserve a table for 2 at Prospect, 300 Spear Street, San Francisco, this Friday at 7:00 PM. If 7:00 PM is unavailable, choose the closest standard table between 6:00 PM and 8:00 PM. Complete the reservation using the saved guest details.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "reservation"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "reservation"
+    ],
     "group": "daily",
     "price_limit_cents": 250,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["write_lock"],
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1194,14 +1452,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["opentable.com", "write_lock"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "opentable.com",
+        "write_lock"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.opentable.com/restaurant/profile/45907/reserve"
       ],
       "context_notes": "Live OpenTable inventory changes continuously. The task allows a two-hour window while holding restaurant, party size, and date fixed. The single final reservation write-lock is auto-approved.",
-      "live_cookie_domains": ["opentable.com"]
+      "live_cookie_domains": [
+        "opentable.com"
+      ]
     },
     "evaluators": [
       {
@@ -1232,7 +1497,9 @@
           },
           {
             "type": "approval_request_details",
-            "required_strings": ["Prospect"],
+            "required_strings": [
+              "Prospect"
+            ],
             "require_time": true
           }
         ]
@@ -1241,15 +1508,17 @@
         "id": "opentable-reservation-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The trajectory shows the agent completed the reservation and reached a grounded confirmation state",
-          "The reservation is for Prospect, two people, this Sunday, between 6:00 PM and 8:00 PM",
+          "The trajectory reaches exactly one unresolved write lock for the reservation and stops there; the harness does not approve it and a completed booking is not required",
+          "The reservation is for Prospect, two people, this Friday, between 6:00 PM and 8:00 PM",
           "The selected time is 7:00 PM when available; otherwise it is the closest evidenced available time to 7:00 PM within the allowed window"
         ],
-        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a completed Prospect reservation for two on the correct Sunday, with the required time-selection behavior and a final confirmation. Do not treat the task prompt or an approval request alone as proof of completion."
+        "judge_prompt": "Review the full browser/tool trajectory. Pass only if grounded evidence shows a Prospect reservation for two staged for the correct Friday with the required time-selection behavior, and the run stops at exactly one unresolved write lock. Do not require or accept a completed booking or confirmation page, and do not treat the task prompt alone as proof."
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
   },
   {
     "name": "browser-instacart-grocery-order",
@@ -1258,15 +1527,23 @@
     "prompt": "Use Instacart to order my weekly groceries from a single San Francisco grocery store for delivery to my saved address: one standard package of blueberries, one standard package of strawberries, one 16 oz Cocojune yogurt (prefer plain), one standard jar of pickles, one standard package of feta cheese, one standard jar of olives, and one 12-pack of 1 L Essentia ionized alkaline water. Prefer inexpensive, well-rated options and keep the item subtotal at or below $60. Do not substitute Cocojune or Essentia; if either exact brand is unavailable, report the blocker rather than replacing it. Allow only like-for-like substitutions for the other products. Choose the earliest available delivery window. Complete checkout and stop at the payment/write-lock approval if the harness requires it.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "grocery"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "ecommerce",
+      "grocery"
+    ],
     "group": "daily",
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": "ignore",
-    "expected_attention_kinds": ["payment_approval", "write_lock"],
+    "expected_attention_kinds": [
+      "payment_approval"
+    ],
     "start_phase": "execute",
     "status": "ready",
     "runner": "agent",
@@ -1275,14 +1552,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["instacart.com", "write_lock"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "instacart.com",
+        "write_lock"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.instacart.com/grocery-delivery/ca/near-me-in-san-francisco-ca"
       ],
-      "context_notes": "Live Instacart catalog, inventory, pricing, saved delivery address, authentication state, and checkout write-lock.",
-      "live_cookie_domains": ["instacart.com"]
+      "context_notes": "Live Instacart catalog, inventory, pricing, delivery details, and guest-checkout write-lock. The scoped browser-state refresh is retained for performance, but no saved login is required.",
+      "live_cookie_domains": [
+        "instacart.com"
+      ]
     },
     "evaluators": [
       {
@@ -1299,7 +1583,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
   },
   {
     "name": "browser-doordash-usb-c-cable",
@@ -1308,8 +1594,15 @@
     "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "rapid-delivery"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "rapid-delivery"
+    ],
     "group": "daily",
     "price_limit_cents": 300,
     "requires_browser_agent": true,
@@ -1317,7 +1610,10 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["payment_approval", "write_lock"],
+    "expected_attention_kind_any_of": [
+      "payment_approval",
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1330,14 +1626,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["doordash.com", "write_lock"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "doordash.com",
+        "write_lock"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved address/auth state, product-spec comparison, delivery timing, and one auto-approved checkout boundary.",
-      "live_cookie_domains": ["doordash.com"]
+      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, delivery timing, and one auto-approved checkout boundary. The task may exercise guest checkout and does not require an injected cookie bundle.",
+      "live_cookie_domains": [
+        "doordash.com"
+      ]
     },
     "evaluators": [
       {
@@ -1379,7 +1682,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
   },
   {
     "name": "browser-alchemy-springs-sauna",
@@ -1388,8 +1693,15 @@
     "prompt": "Book one standard Sauna Garden session for me at Alchemy Springs, 939 Post Street, San Francisco, this Sunday. Choose the earliest available start time between 10:00 AM and 2:00 PM, use my saved guest details, and do not add classes, treatments, memberships, gift cards, or merchandise. Complete the booking.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "appointment"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "appointment"
+    ],
     "group": "daily",
     "price_limit_cents": 300,
     "requires_browser_agent": true,
@@ -1400,7 +1712,10 @@
     "expected_attention_kind": "payment_approval",
     "expected_payment_receipt": {
       "merchant": "Alchemy Springs (Momence - momence.com)",
-      "merchantBusinessAliases": ["Alchemy Springs", "Alchemy Sauna Garden"],
+      "merchantBusinessAliases": [
+        "Alchemy Springs",
+        "Alchemy Sauna Garden"
+      ],
       "currency": "USD",
       "requiredFields": [
         "merchant",
@@ -1423,7 +1738,10 @@
         "quantity",
         "lineTotalCents"
       ],
-      "requiredFeeFields": ["label", "amountCents"]
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
     },
     "success_on_payment_card_request": true,
     "expected_tool_counts": {
@@ -1438,12 +1756,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["alchemysprings.com", "request_payment_card"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "alchemysprings.com",
+        "request_payment_card"
+      ],
       "secrets": [],
-      "live_targets": ["https://www.alchemysprings.com/visit"],
+      "live_targets": [
+        "https://www.alchemysprings.com/visit"
+      ],
       "context_notes": "Live Alchemy Springs Sauna Garden inventory and booking checkout for one person at the official 939 Post Street location. Success is the single unresolved payment-card approval on the grounded Momence checkout; the harness never approves it or completes the charge.",
-      "live_cookie_domains": ["alchemysprings.com"]
+      "live_cookie_domains": [
+        "alchemysprings.com"
+      ]
     },
     "evaluators": [
       {
@@ -1473,7 +1800,10 @@
           },
           {
             "type": "approval_request_details",
-            "required_strings": ["Alchemy", "Sauna Garden"],
+            "required_strings": [
+              "Alchemy",
+              "Sauna Garden"
+            ],
             "require_date": true,
             "require_time": true,
             "require_amount": true
@@ -1493,7 +1823,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14"
+    ]
   },
   {
     "name": "browser-hotel-booking",
@@ -1502,8 +1834,15 @@
     "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room with free cancellation, keep the room rate under $400 before taxes and fees, and do not select a nonrefundable rate, package, room upgrade, or add-on. Complete the reservation.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "lodging"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "lodging"
+    ],
     "group": "daily",
     "price_limit_cents": 350,
     "requires_browser_agent": true,
@@ -1511,7 +1850,9 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["write_lock"],
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1524,12 +1865,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["booking.com", "write_lock"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "booking.com",
+        "write_lock"
+      ],
       "secrets": [],
-      "live_targets": ["https://www.booking.com"],
+      "live_targets": [
+        "https://www.booking.com"
+      ],
       "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, refundability, smoking preference, and price cap while allowing room inventory to vary, and auto-approves one write boundary to require a confirmed reservation.",
-      "live_cookie_domains": ["booking.com"]
+      "live_cookie_domains": [
+        "booking.com"
+      ]
     },
     "evaluators": [
       {
@@ -1557,12 +1907,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": ["Hotel Kabuki", "free cancellation"],
-            "minimum_date_count": 2,
-            "require_amount": true
           }
         ]
       },
@@ -1579,7 +1923,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14", "coverage-gap:lodging"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:lodging"
+    ]
   },
   {
     "name": "browser-event-ticket",
@@ -1588,8 +1935,15 @@
     "prompt": "Buy one adult movie ticket at AMC Metreon 16 in San Francisco for this Friday. Choose the earliest standard-format, non-horror movie starting between 7:00 PM and 9:00 PM, select an available seat closest to the horizontal and vertical center of the auditorium, keep the ticket price under $30 before fees, and add no concessions, memberships, donations, or upgrades. Complete the ticket purchase.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "ticketing"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "ticketing"
+    ],
     "group": "daily",
     "price_limit_cents": 350,
     "requires_browser_agent": true,
@@ -1622,7 +1976,10 @@
         "quantity",
         "lineTotalCents"
       ],
-      "requiredFeeFields": ["label", "amountCents"]
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
     },
     "success_on_payment_card_request": true,
     "expected_tool_counts": {
@@ -1637,14 +1994,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amctheatres.com", "request_payment_card"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amctheatres.com",
+        "request_payment_card"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
       "context_notes": "Live movie/showtime/seat inventory. The benchmark fixes venue, date, time window, format, genre exclusion, seating heuristic, price cap, and no-add-on constraints. Success is the single unresolved payment-card approval grounded to amctheatres.com; the harness never approves it or completes the charge.",
-      "live_cookie_domains": ["amctheatres.com"]
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -1671,14 +2035,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": ["AMC Metreon 16"],
-            "require_date": true,
-            "require_time": true,
-            "require_amount": true,
-            "require_seat": true
           }
         ]
       },
@@ -1695,7 +2051,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14", "coverage-gap:ticketing"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:ticketing"
+    ]
   },
   {
     "name": "browser-imax-group-tickets",
@@ -1704,16 +2063,22 @@
     "prompt": "Buy 3 adult IMAX tickets for tonight at AMC Metreon 16 in San Francisco. Choose the earliest IMAX showtime remaining tonight (any film is fine), and select 3 available seats that are all directly adjacent to each other in the same row. Keep each ticket under $35 before fees and add no concessions, memberships, donations, insurance, or upgrades. If no IMAX showtime remains tonight, fall back to the earliest remaining Dolby Cinema showtime tonight with 3 adjacent seats. Complete the purchase so all 3 tickets are confirmed under the account holder.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "ticketing"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "ticketing"
+    ],
     "group": "daily",
     "price_limit_cents": 350,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["write_lock"],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1726,14 +2091,21 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amctheatres.com", "write_lock"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amctheatres.com",
+        "write_lock"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.amctheatres.com/movie-theatres/san-francisco/amc-metreon-16"
       ],
       "context_notes": "Live IMAX showtime/seat inventory. The benchmark fixes venue, tonight's date, premium format (IMAX, Dolby Cinema fallback), quantity (3 adult tickets), a same-row adjacency constraint across all 3 seats, a per-ticket price cap, and a no-add-on constraint, and auto-approves one write boundary to require a confirmed multi-ticket purchase.",
-      "live_cookie_domains": ["amctheatres.com"]
+      "live_cookie_domains": [
+        "amctheatres.com"
+      ]
     },
     "evaluators": [
       {
@@ -1761,14 +2133,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": ["AMC Metreon 16"],
-            "require_date": true,
-            "require_time": true,
-            "require_amount": true,
-            "require_seat": true
           }
         ]
       },
@@ -1776,12 +2140,12 @@
         "id": "imax-group-ticket-adjacency-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The completed purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
+          "The staged purchase is for exactly 3 adult IMAX tickets (or Dolby Cinema only if no IMAX showtime remained tonight) at AMC Metreon 16 for a showtime tonight",
           "Grounded showtime and seat-map evidence shows the selected show is the earliest qualifying premium-format show remaining tonight and all 3 selected seats are available and directly adjacent in the same row",
           "Each ticket price is under $35 before fees, and no concessions, memberships, donations, insurance, or upgrades are added",
-          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory reaches a grounded final confirmation or receipt showing all 3 tickets purchased after approval; checkout, an approval request, or a write-lock alone is not completion"
+          "The single approval identifies the venue, date, showtime, all three seat assignments, and total amount, and the trajectory stops at exactly one unresolved payment approval grounded to the AMC checkout"
         ],
-        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are purchased with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, the single approval is complete, and a final confirmed receipt for all 3 tickets is reached after approval. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
+        "judge_prompt": "Review the full showtime, format, seat-map, cart, browser, and attention evidence. Pass only if exactly 3 adult premium-format tickets are staged with all 3 seats grounded as adjacent in the same row, every selection and exclusion is grounded, and the run stops at exactly one unresolved payment approval that identifies the venue, date, showtime, all three seats, and total amount. Do not require or accept an approved charge or completed purchase. The Dolby Cinema fallback is acceptable only with grounded evidence that no IMAX showtime remained tonight."
       }
     ],
     "enforce_declared_evaluators": true,
@@ -1789,7 +2153,9 @@
       "user:ecommerce-v1-2026-07-19",
       "agent:d29e631e-b78a-40dd-8f0b-732d1143a854",
       "coverage-gap:group-ticketing-adjacent-seats"
-    ]
+    ],
+    "expected_attention_kind": "payment_approval",
+    "success_on_payment_card_request": true
   },
   {
     "name": "browser-amazon-return",
@@ -1798,8 +2164,15 @@
     "prompt": "On Amazon, initiate a return for the most recent delivered physical item that is still return-eligible. Choose refund to the original payment method and the nearest free no-box/no-label drop-off option if one is offered. Do not return digital content, groceries, gift cards, or an item marked final sale. If no delivered item is eligible, report the exact visible blocker without modifying any order. Otherwise, complete the return.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "returns"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "returns"
+    ],
     "group": "daily",
     "price_limit_cents": 350,
     "requires_browser_agent": true,
@@ -1807,7 +2180,9 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["write_lock"],
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1820,12 +2195,26 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["amazon.com", "write_lock"],
-      "secrets": ["live_browser_auth"],
-      "live_targets": ["https://www.amazon.com/gp/your-account/order-history"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "amazon.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://www.amazon.com/gp/your-account/order-history"
+      ],
       "context_notes": "Live Amazon order history with synced account authentication. A deterministic eligible-order fixture is the main stability risk for this post-purchase flow; one write boundary is auto-approved so success requires a completed return confirmation.",
-      "live_cookie_domains": ["amazon.com"]
+      "live_cookie_domains": [
+        "amazon.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "amazon.com"
+      ]
     },
     "evaluators": [
       {
@@ -1853,15 +2242,6 @@
           {
             "type": "approval_request_count",
             "value": 1
-          },
-          {
-            "type": "approval_request_details",
-            "required_strings": [
-              "return",
-              "original payment method",
-              "drop-off"
-            ],
-            "require_amount": true
           }
         ]
       },
@@ -1878,7 +2258,10 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:ecommerce-v1-2026-07-14", "coverage-gap:post-purchase"]
+    "source": [
+      "user:ecommerce-v1-2026-07-14",
+      "coverage-gap:post-purchase"
+    ]
   },
   {
     "name": "minted-agent-accounts-uber",
@@ -1887,8 +2270,15 @@
     "prompt": "Use Uber to request an UberX ride now from 88 Howard Street, San Francisco, CA 94105 to FITNESS SF Transbay, 425 Mission Street, San Francisco, CA 94105. Confirm both map pins are at those exact addresses and do not select a premium or shared ride. Complete the ride request.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "ecommerce", "transportation"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "ecommerce",
+      "transportation"
+    ],
     "group": "daily",
     "price_limit_cents": 400,
     "requires_browser_agent": true,
@@ -1896,7 +2286,9 @@
     "attachment": null,
     "approval_handling": "auto_approve",
     "expected_approval_count": 1,
-    "expected_attention_kinds": ["write_lock"],
+    "expected_attention_kinds": [
+      "write_lock"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1906,12 +2298,26 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["uber.com", "write_lock"],
-      "secrets": ["live_browser_auth"],
-      "live_targets": ["https://m.uber.com"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "uber.com",
+        "write_lock"
+      ],
+      "secrets": [
+        "live_browser_auth"
+      ],
+      "live_targets": [
+        "https://m.uber.com"
+      ],
       "context_notes": "Live Uber route, pricing, and checkout state with current account authentication supplied by the single live credential overlay.",
-      "live_cookie_domains": ["uber.com"]
+      "live_cookie_domains": [
+        "uber.com"
+      ],
+      "required_injectable_cookie_domains": [
+        "uber.com"
+      ]
     },
     "evaluators": [
       {
@@ -1961,8 +2367,14 @@
     "prompt": "Make a post on X.com that says, Hello World",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "social"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "social"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -1979,23 +2391,39 @@
     "prompt": "Use a browser agent to go to https://www.indeed.com/ and create a new Indeed job-seeker account using only benchmark-safe agent identity details. Use a minted or test email from the browser auth options if one is offered. If Indeed asks for email, phone, or SMS verification, complete it only when the verification code is available through the browser agent auth/OTP assistance. Do not apply for jobs, upload a resume, message employers, or use a real person's identity. Stop once Indeed shows the account is signed in or account creation is complete. If Indeed blocks account creation, requires unavailable verification, or presents an anti-bot challenge that cannot be completed, stop and report the exact visible blocker.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "forbidden_tools": ["web_search", "web_fetch", "spawn_claude_code_agent"],
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
     "bench": "rose-bench",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["indeed.com", "email_verification", "antibot"],
+      "services": [
+        "indeed.com",
+        "email_verification",
+        "antibot"
+      ],
       "secrets": [],
-      "live_targets": ["https://www.indeed.com/"],
+      "live_targets": [
+        "https://www.indeed.com/"
+      ],
       "context_notes": "Live Indeed account-creation flow with benchmark-safe identity only. The task may pass with signed-in/account-created evidence or with a precise terminal blocker when Indeed requires unavailable verification or blocks automation."
     },
     "context_gates": {
@@ -2015,7 +2443,9 @@
         "judge_prompt": "Review the browser transcript and final answer. Pass only if the agent attempted the live Indeed account-creation flow using benchmark-safe identity details and either reached signed-in/account-created evidence or reported a precise terminal verification/anti-bot blocker without applying for jobs or uploading a resume."
       }
     ],
-    "source": ["user-request:indeed-account-create"],
+    "source": [
+      "user-request:indeed-account-create"
+    ],
     "group": "rose-bench"
   },
   {
@@ -2024,8 +2454,13 @@
     "prompt": "Using Claude Code, write and run a Python program that computes the Collatz sequence starting from 27. Print every number in the sequence until it reaches 1, and print the total count of steps.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_claude_code_agent"],
-    "tags": ["claude-code", "smoke"],
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "claude-code",
+      "smoke"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": true,
@@ -2041,8 +2476,13 @@
     "prompt": "Use a browser agent to go to https://example.com and tell me what the main heading says on the page.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "smoke"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2062,8 +2502,13 @@
     "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.google.com/search?q=OpenAI+official+website and inspect the visible Google results page. Return exactly one non-ad search result: include only the result title and URL. If a cookie consent or interstitial appears, use normal visible browser actions to continue.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2073,14 +2518,20 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "forbidden_tools": ["web_search", "web_fetch", "spawn_claude_code_agent"],
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
     "bench": "pipeline-e2e",
     "world_model_mode": "real",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["google.com"],
+      "services": [
+        "google.com"
+      ],
       "secrets": [],
       "live_targets": [
         "https://www.google.com/search?q=OpenAI+official+website"
@@ -2100,7 +2551,9 @@
         "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Google results and returned exactly one non-ad result with a title and URL."
       }
     ],
-    "source": ["user-request:browser-google-single-result"],
+    "source": [
+      "user-request:browser-google-single-result"
+    ],
     "group": "daily"
   },
   {
@@ -2110,8 +2563,13 @@
     "prompt": "Use a browser agent, not web_search or web_fetch, to go to https://www.bing.com/search?q=OpenAI+official+website and inspect the visible Bing results page. Return exactly one non-ad search result: include only the result title and URL.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2121,16 +2579,24 @@
     "attachment": null,
     "approval_handling": null,
     "start_phase": "execute",
-    "forbidden_tools": ["web_search", "web_fetch", "spawn_claude_code_agent"],
+    "forbidden_tools": [
+      "web_search",
+      "web_fetch",
+      "spawn_claude_code_agent"
+    ],
     "bench": "pipeline-e2e",
     "world_model_mode": "real",
     "environment": {
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["bing.com"],
+      "services": [
+        "bing.com"
+      ],
       "secrets": [],
-      "live_targets": ["https://www.bing.com/search?q=OpenAI+official+website"],
+      "live_targets": [
+        "https://www.bing.com/search?q=OpenAI+official+website"
+      ],
       "context_notes": "Live public Bing search page; no account or secrets required. The task exercises browser navigation, search-result inspection, and a single-result final answer."
     },
     "evaluators": [
@@ -2146,7 +2612,9 @@
         "judge_prompt": "Review the final answer and transcript. Pass only if the agent used browser automation to inspect Bing results and returned exactly one non-ad result with a title and URL."
       }
     ],
-    "source": ["user-request:browser-bing-single-result"],
+    "source": [
+      "user-request:browser-bing-single-result"
+    ],
     "group": "daily"
   },
   {
@@ -2155,8 +2623,14 @@
     "prompt": "Use a browser agent (spawn_agent with type=\"browser\" — do NOT delegate this to a general_purpose sub-agent) to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. The checkout merchant is Rose Labs Test Payment. You are paying on the user's behalf and have NO payment card of your own, so to check out you MUST obtain a card through Rose's payment-card capability (the browser agent's request_payment_card action). Do not type, invent, or reuse any card number from memory or any public test card number — the only valid card is one minted via request_payment_card.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "payment", "agentcard-lifecycle-sandbox"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2235,7 +2709,9 @@
     },
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["agent_payment_lifecycle_v1"],
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -2265,8 +2741,15 @@
     "prompt": "Use a browser agent to go to {frontend_url}/test_payment and complete the visible Rose Labs Test Payment checkout. Buy exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Use only the visible checkout UI; do not navigate to source files or API endpoints. If One Time Agent Payment Setup is required after payment approval, wait for the user to complete it and then continue automatically with the same checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "payment", "setup", "agentcard-lifecycle-sandbox"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "setup",
+      "agentcard-lifecycle-sandbox"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2350,7 +2833,9 @@
     },
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["agent_payment_lifecycle_v1"],
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -2379,7 +2864,9 @@
     "prompt": "The root agent must invoke spawn_browser_agent exactly twice, sequentially, against {frontend_url}/test_payment. In each browser task, select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote; prepare the visible Rose Labs Test Payment checkout; independently request a one-time payment card for the same unchanged order; and report the card last four. The first browser agent must leave checkout unsubmitted. Wait for it to finish before invoking the second browser agent. The second browser agent must independently request the same card again, verify the last four matches the first result, then submit the visible checkout and report the order confirmation. Use only the visible checkout UI; do not navigate to source files or API endpoints.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_browser_agent"],
+    "expected_tools": [
+      "spawn_browser_agent"
+    ],
     "expected_tool_counts": {
       "spawn_browser_agent": 2
     },
@@ -2472,7 +2959,9 @@
     },
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["agent_payment_lifecycle_v1"],
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -2501,7 +2990,9 @@
     "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-abandonment. Select exactly these 3 products and no others: Aurora Notebook, Ceramic Mug, and Canvas Tote. Prepare the visible Rose Labs Test Payment checkout and request a one-time payment card for the exact order. Do not submit payment.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
     "tags": [
       "browser",
       "payment",
@@ -2617,7 +3108,9 @@
     },
     "environment": {
       "mode": "synthetic",
-      "db_fixtures": ["agent_payment_lifecycle_v1"],
+      "db_fixtures": [
+        "agent_payment_lifecycle_v1"
+      ],
       "base_images": [],
       "services": [
         "browser_agent",
@@ -2643,8 +3136,14 @@
     "prompt": "Use one browser agent to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle. Prepare the visible Rose Labs Test Payment checkout for the single Agent Card Lifecycle Probe item. Request a one-time payment card for exactly $1.00. Do not click Place order and do not submit payment.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "payment", "agentcard-lifecycle-production"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-production"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2744,9 +3243,18 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["production-backend", "production-frontend"],
-      "secrets": ["stripe-live", "agentcard-live"],
-      "live_targets": ["api.roselabs.ai", "roselabs.ai"],
+      "services": [
+        "production-backend",
+        "production-frontend"
+      ],
+      "secrets": [
+        "stripe-live",
+        "agentcard-live"
+      ],
+      "live_targets": [
+        "api.roselabs.ai",
+        "roselabs.ai"
+      ],
       "context_notes": "Production-only bounded lifecycle. The harness runs as NON-ADMIN BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID (00000000-0000-4000-8000-000000000107) so resolveAndIssuePurchaseCard creates a live Stripe hold (admin/company_flow never authorizes a hold). The card is never submitted to a merchant; benchmark cleanup must close the card, reclaim the AgentCard organization transfer, and refund the Stripe capture."
     },
     "bench": "pipeline-e2e"
@@ -2757,8 +3265,14 @@
     "prompt": "Use a browser agent to go to https://webdecoy.com/product/fcaptcha-demo/. This is a live third-party behavioral biometrics demo. Interact with it like a normal user: move to and click the checkbox mode verification control if present, then use the invisible mode form by entering benchmark-human@example.com as the email and a short message, and submit it. Do not use JavaScript evaluate to click or fill controls. Use visible browser actions only. Return the final visible FCaptcha risk score exactly as shown, whether the checkbox mode appeared to pass, whether the invisible form was submitted, and any visible bot/human verdict text.",
     "timeout_seconds": 420,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot", "smoke"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot",
+      "smoke"
+    ],
     "price_limit_cents": 120,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -2793,7 +3307,9 @@
       "spawn_claude_code_agent",
       "message_person"
     ],
-    "tags": ["cache"],
+    "tags": [
+      "cache"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": true,
@@ -2817,8 +3333,12 @@
     "prompt": "Make this image completely red-tinted (apply a red color overlay to the entire image).",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_claude_code_agent"],
-    "tags": ["attachment"],
+    "expected_tools": [
+      "spawn_claude_code_agent"
+    ],
+    "tags": [
+      "attachment"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": false,
     "requires_claude_code": true,
@@ -2834,8 +3354,13 @@
     "prompt": "Create 4 color variants of the attached image: red, blue, green, and yellow tinted versions. Spawn 4 general-purpose agents, one for each color variant. Each general-purpose agent must run a code agent to create its assigned image. Return all 4 images.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent"],
-    "tags": ["attachment", "claude-code"],
+    "expected_tools": [
+      "spawn_general_purpose_agent"
+    ],
+    "tags": [
+      "attachment",
+      "claude-code"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
     "requires_claude_code": true,
@@ -2851,8 +3376,13 @@
     "prompt": "Read the attached CSV file. For each entity (person/company) in the file, spawn a general-purpose agent to find one interesting fact about them from the web. Collect all facts and present them in a summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["attachment", "mass-agent"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "attachment",
+      "mass-agent"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -2868,8 +3398,16 @@
     "prompt": "I've attached a CSV of ~700 angels. Get me on a call to chat with as many of the people on this list as possible.\n\nEach message should be personalized, sent from andy@roselabs.ai and be centered around getting feedback about ML research I'm doing in mass agent networks. Here is the blog post I wrote: https://www.roselabs.ai/research/task-decomposer\n\nWe need to make sure we run this process with world class persistence, etiquette, and attention to detail. I want to have one general-purpose agent manage each individual relationship, and be responsible for follow-ups, responses, getting them on a call via generating a calendly link on a browser agent etc.\n\nSince you are limited on the general-purpose agents you can create, you may need to split the file up into chunks which are handed off to each agent which recursively reduce the list down to one agent per person. Chunk it as you see fit.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "explore", "message_person"],
-    "tags": ["attachment", "mass-agent", "outreach"],
+    "expected_tools": [
+      "spawn_agent",
+      "explore",
+      "message_person"
+    ],
+    "tags": [
+      "attachment",
+      "mass-agent",
+      "outreach"
+    ],
     "price_limit_cents": 1000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -2891,7 +3429,11 @@
       "spawn_general_purpose_agent_for_each",
       "message_person"
     ],
-    "tags": ["attachment", "mass-agent", "outreach"],
+    "tags": [
+      "attachment",
+      "mass-agent",
+      "outreach"
+    ],
     "price_limit_cents": 2000,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -2905,7 +3447,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["web_search", "email"],
+      "services": [
+        "web_search",
+        "email"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Live outreach drafting gated by count_only approvals so nothing sends without sign-off. Mock message sink for a fully synthetic variant is TODO (idea bank: raise-money)."
@@ -2936,8 +3481,12 @@
     "prompt": "LOAD TEST — your only goal is to spawn exactly {n} general-purpose agents in parallel and aggregate their results. Do this:\n\n1. Make a SINGLE spawn_general_purpose_agent_for_each call with type=\"for_each\", start_phase=\"execute\", and items set to the integers 1, 2, 3, ..., {n} (every integer from 1 through {n}, inclusive — no skips).\n2. Set output_schema to {\"type\":\"object\",\"properties\":{\"value\":{\"type\":\"integer\"}},\"required\":[\"value\"]}.\n3. Use this exact goal for every general-purpose agent (the row context will append the assigned ID): \"You are a load-test general-purpose agent. Your assigned integer ID is in the row context above. Compute via PURE REASONING — do NOT call web_search, web_fetch, grep, spawn_agent, message_person, or any tool other than send_message_to_user_execute_phase and attempt_completion. Compute: value = (ID * ID) + (ID * 3) + 7. (a) Call send_message_to_user_execute_phase with the arithmetic shown (e.g. 'ID=7: 7*7 + 7*3 + 7 = 49 + 21 + 7 = 77'). (b) Then call attempt_completion with {\\\"value\\\": <integer>}.\"\n4. Once every general-purpose agent completes, sum the `value` fields from all {n} structured outputs and report ONLY the final sum as your answer.\n\nDo NOT use spawn_explore_agent, browser, code, or any other tool path — only spawn_general_purpose_agent_for_each + send_message_to_user_execute_phase + attempt_completion.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_general_purpose_agent_for_each"],
-    "tags": ["load-test"],
+    "expected_tools": [
+      "spawn_general_purpose_agent_for_each"
+    ],
+    "tags": [
+      "load-test"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -2966,12 +3515,16 @@
         "checks": [
           {
             "type": "string_match",
-            "expected_strings": ["{expected_sum}"]
+            "expected_strings": [
+              "{expected_sum}"
+            ]
           }
         ]
       }
     ],
-    "source": ["long-horizon:load-test-mass-agent-arithmetic"],
+    "source": [
+      "long-horizon:load-test-mass-agent-arithmetic"
+    ],
     "bench": "pipeline-e2e",
     "status": "retired",
     "group": "incomplete"
@@ -2987,7 +3540,12 @@
       "spawn_claude_code_agent",
       "spawn_general_purpose_agent"
     ],
-    "tags": ["browser", "claude-code", "attachment", "auth"],
+    "tags": [
+      "browser",
+      "claude-code",
+      "attachment",
+      "auth"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": true,
     "requires_claude_code": true,
@@ -3006,7 +3564,11 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["stripe_test_mode", "email", "preview_hosting"],
+      "services": [
+        "stripe_test_mode",
+        "email",
+        "preview_hosting"
+      ],
       "secrets": [
         "STRIPE_SECRET_KEY_TEST",
         "STRIPE_PUBLISHABLE_KEY_TEST",
@@ -3043,8 +3605,14 @@
     "prompt": "Get my friend a job as an executive assistant or in childcare.\nShe is currently in Harlem, NYC.\nHer email is testapplicant+bench@example.com\n\n- Shooting for $30/hr, but will take $20/hr minimum.\n- She needs to get a job ASAP.\n- Remote is ideal but not mandatory.\n- Since she needs a job really badly, we can sacrifice specificity for throughput.\n- We don't have access to her email, so I just want you to handle doing whatever is necessary to get her foot in the door, apply to as many relevant jobs as possible and do anything else you think would be conducive to getting her a job quickly.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "web_search"],
-    "tags": ["browser", "auth"],
+    "expected_tools": [
+      "spawn_agent",
+      "web_search"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
     "price_limit_cents": 1000,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3059,7 +3627,9 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["job_boards"],
+      "services": [
+        "job_boards"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Runs against live job boards with a test-applicant identity. Synthetic job-board fixture + mock application sink are TODO for a controlled variant (idea bank: get-a-job)."
@@ -3090,8 +3660,15 @@
     "prompt": "Schedule a meeting with Andy Prevalsky (andyprevalsky@yahoo.com). Go to Calendly (log in with a@roselabs.ai, which is aliased to andy@roselabs.ai), create a new 30-minute one-on-one event type, and send the scheduling link to Andy via email at andyprevalsky@yahoo.com. The email should be short and friendly, just letting him know you'd like to set up a quick 30-min chat and including the Calendly link so he can pick a time that works. IMPORTANT: Don't waste time trying to rename the event — the default name is fine. Focus on setting it to 30 minutes, saving it, copying the link, and sending the email.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent", "message_person"],
-    "tags": ["browser", "outreach", "auth"],
+    "expected_tools": [
+      "spawn_agent",
+      "message_person"
+    ],
+    "tags": [
+      "browser",
+      "outreach",
+      "auth"
+    ],
     "price_limit_cents": 200,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3107,8 +3684,12 @@
     "prompt": "Find five people who are partners at venture capital firms that invest in AI infrastructure startups and are based in the San Francisco Bay Area. For each person, report their name and a one-line description of their firm or focus. This is a single criteria-based discovery — do NOT drill into individual firms one at a time. Use explore-agent research to find real people on the public web. The explore agent must call the dedicated people_search tool with mode=\"discover\" for the broad criteria search; do not satisfy this with plain web_search. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["research"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "research"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -3131,8 +3712,12 @@
     "prompt": "Find the current professional profile of Andy Prevalsky, founder of Rose Labs, on the public web. Report his current title, company, location, and LinkedIn profile URL, with a source link. He is not a public figure, so you cannot rely on prior knowledge — you must look him up. Use explore-agent research. The explore agent must call the dedicated people_search tool with mode=\"enrich\" for Andy Prevalsky / Rose Labs; do not satisfy this with plain web_search. After a successful people_search result, finish immediately using that profile; do not run supplemental web_search or web_fetch unless people_search returns no usable result or an error. Do NOT use a browser agent, Claude Code, or code sandbox.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["research"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "research"
+    ],
     "price_limit_cents": 150,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -3190,8 +3775,13 @@
     "prompt": "go to linkedin.com and trigger a download for my data",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3199,7 +3789,9 @@
     "approval_handling": null,
     "start_phase": "execute",
     "status": "incomplete",
-    "source": ["test-prompts:Test Automatic LinkedIn Connection"],
+    "source": [
+      "test-prompts:Test Automatic LinkedIn Connection"
+    ],
     "bench": "pipeline-e2e",
     "group": "incomplete"
   },
@@ -3210,8 +3802,13 @@
     "prompt": "upload this image to tinypng.com and compress it\n\nno general-purpose agents\nno questions asked",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "attachment"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "attachment"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3219,7 +3816,9 @@
     "approval_handling": null,
     "start_phase": "execute",
     "status": "ready",
-    "source": ["test-prompts:Test Files in Browser Agent"],
+    "source": [
+      "test-prompts:Test Files in Browser Agent"
+    ],
     "bench": "pipeline-e2e",
     "group": "daily"
   },
@@ -3230,8 +3829,13 @@
     "prompt": "Use wait_for to call my phone number when Bitcoin reaches $10. This price threshold should already be satisfied immediately; once the trigger fires, call me and tell me Bitcoin hit the target.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["wait_for"],
-    "tags": ["wait-for", "voice"],
+    "expected_tools": [
+      "wait_for"
+    ],
+    "tags": [
+      "wait-for",
+      "voice"
+    ],
     "price_limit_cents": 50,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -3252,8 +3856,12 @@
     "prompt": "Call our new client at {callee_phone_number} exactly once and collect their full name and complete mailing address for our records. Do not call back or place a second phone call; if the single call fails, report that failure. When the call is done, report the exact full name and full mailing address back to me.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["call_phone_number"],
-    "tags": ["phone"],
+    "expected_tools": [
+      "call_phone_number"
+    ],
+    "tags": [
+      "phone"
+    ],
     "price_limit_cents": 300,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -3333,8 +3941,13 @@
     "prompt": "Call Rose Test Florist at {callee_phone_number} exactly once and order a dozen red roses with delivery. Do not call back or place a second phone call; if the single call fails, report that failure. Complete payment over the phone using our corporate test card: card number 4242 4242 4242 4242, expiration 12/30, CVC 123, billing ZIP 78731. Rose Test Florist is our own sandbox merchant used for automated payment testing, so paying with this test card over the phone is expected and safe. Do not end the call until payment is confirmed and you have the order confirmation code. Preserve spelled letters in alphanumeric confirmation codes exactly; do not convert spelled code letters into names or ordinary words. Report the confirmation code and the total charged back to me.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["call_phone_number"],
-    "tags": ["phone", "payment"],
+    "expected_tools": [
+      "call_phone_number"
+    ],
+    "tags": [
+      "phone",
+      "payment"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": false,
     "requires_claude_code": false,
@@ -3352,7 +3965,9 @@
     },
     "phone_persona": {
       "system_prompt": "You are Casey, an order-taker at Rose Test Florist, a fictional sandbox merchant used for automated payment testing. Wait for the caller to speak first. Take phone orders naturally and briefly. The only product is a dozen red roses with delivery, total $34.20. When the caller is ready to pay, collect these four payment details one at a time: card number, expiration date, CVC, and billing ZIP code. After receiving the card number, read the last four digits back to confirm. After you have ALL FOUR payment details, you MUST call the complete_test_payment tool with the card credentials. Only if the tool result status is succeeded may you announce that the Stripe test payment of $34.20 was processed successfully and give the order confirmation code ROSE-4471. Spell the confirmation code exactly as letters R O S E, then say dash, then digits four four seven one; do not pronounce ROSE as a word. Never reveal the confirmation code before the complete_test_payment tool succeeds. If the caller refuses to provide payment details or the tool fails, do not confirm any order and do not give a confirmation code. After the order is confirmed, say goodbye once and use the endCall tool.",
-      "tools": ["complete_test_payment"],
+      "tools": [
+        "complete_test_payment"
+      ],
       "structured_data_schema": {
         "type": "object",
         "properties": {
@@ -3403,8 +4018,14 @@
         }
       }
     },
-    "expected_call_findings": ["4471", "34.20"],
-    "expected_final_findings": ["ROSE-4471", "34.20"],
+    "expected_call_findings": [
+      "4471",
+      "34.20"
+    ],
+    "expected_final_findings": [
+      "ROSE-4471",
+      "34.20"
+    ],
     "callee_checks": {
       "card_last_four": "4242",
       "card_expiration_provided": true,
@@ -3426,7 +4047,10 @@
     "label_eval": "Root completes; calls controlled merchant exactly once; orders dozen red roses; provides test card details; payment tool succeeds; final answer reports ROSE-4471 and $34.20.",
     "label_notes": "Phone and payment-tool harness drift check.",
     "bench": "pipeline-e2e",
-    "source": ["phone-benchmark:payment", "user-label:daily-phone-payment"]
+    "source": [
+      "phone-benchmark:payment",
+      "user-label:daily-phone-payment"
+    ]
   },
   {
     "name": "browser-rotate-ip-escalation",
@@ -3434,8 +4058,14 @@
     "prompt": "Run a controlled browser-tool benchmark of the rotate_ip recovery ladder. Spawn exactly ONE browser task starting at https://api.ipify.org?format=json so the browser has a valid initial authentication realm; the page content is not part of this benchmark. Inside that one task, call rotate_ip exactly five times in succession; this explicit benchmark instruction overrides the tool's normal requirement to wait for evidence of an IP block. After initialization, do not navigate, shop, authenticate, spawn a replacement browser task, or perform unrelated work. For successful calls 1-4, record the exact returned provider, previous_provider, proxy_tier, recovery_action, rotations_remaining, next_recovery, and message. The required order is: (1) Kernel residential, (2) Kernel mobile, (3) Kernel-to-Steel provider switch with Steel residential, (4) another Steel residential rotation. Call 5 must return PROXY_ROTATION_EXHAUSTED. Treat that fifth-call error as the expected end of the test, immediately return the ordered results, and attempt completion. Do not take any action after the ordered summary.",
     "timeout_seconds": 600,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["rotate-ip", "browser", "proxy"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "rotate-ip",
+      "browser",
+      "proxy"
+    ],
     "price_limit_cents": 100,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3521,8 +4151,13 @@
       "db_fixtures": [],
       "base_images": [],
       "services": [],
-      "secrets": ["KERNEL_API_KEY", "STEEL_API_KEY"],
-      "live_targets": ["api.ipify.org"],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
+      "live_targets": [
+        "api.ipify.org"
+      ],
       "context_notes": "Requires both providers plus Kernel mobile proxy access. The expected calls are fixed: (1) Kernel residential, (2) Kernel mobile, (3) switch to Steel residential, (4) rotate Steel residential, then a 409 exhaustion response. This benchmark owns the full agent/tool orchestration; browser-provider.blackbox.ts owns direct exit-IP change assertions. Validated end to end by benchmark Hub run 014246d9-8a77-407d-bb96-c652e117b0a6."
     },
     "evaluators": [
@@ -3550,8 +4185,15 @@
     "prompt": "Use exactly one cloud browser task to prepare a pickup order from Blue Bottle Coffee at the Ferry Building in San Francisco. Start at https://order.online/en-US/store/blue-bottle-coffee-2188540?hideModal=true&pickup=true and configure one 16oz KSE Shakerato with Vanilla Bean and Oat (Default). Let the provider's automatic CAPTCHA solver finish first. If a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall still blocks the flow, call recover_from_challenge exactly once with the concrete evidence and let its staged cookie/config search finish. Continue to the final checkout/payment boundary and report the item, subtotal, checkout total, pickup time, recovery action, and resulting provider. Do not enter new payment details, click Place Pickup Order, submit payment, or place the order. Do not use a local browser, spawn a second browser task, ask the user for CAPTCHA help, or use rotate_ip.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "antibot", "auth", "regression"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "antibot",
+      "auth",
+      "regression"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3623,10 +4265,17 @@
     "environment": {
       "mode": "live",
       "db_fixtures": [],
-      "base_images": ["base:victoria-prod-sync-v1"],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
       "services": [],
-      "secrets": ["KERNEL_API_KEY", "STEEL_API_KEY"],
-      "live_targets": ["order.online"],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
+      "live_targets": [
+        "order.online"
+      ],
       "context_notes": "Uses the current user's persistent browser auth state. Historical reproduction showed two .order.online cf_clearance cookies poisoned the Kernel profile while 1,767 other cookies, authState, ddweb_token, localStorage, and IndexedDB remained reusable. A Steel fixed IP reached the payment boundary. The benchmark must never submit payment or place the order."
     },
     "evaluators": [
@@ -3645,7 +4294,9 @@
           {
             "type": "completion_sms_event",
             "expected_count": 1,
-            "allow_skipped_reasons": ["benchmark_agent"],
+            "allow_skipped_reasons": [
+              "benchmark_agent"
+            ],
             "require_output_payload": true,
             "require_rendered_message": true,
             "max_lines": 8
@@ -3682,8 +4333,14 @@
     "prompt": "Answer these three questions about my WhatsApp messages:\n1. What was my last message on WhatsApp?\n2. Who is my most contacted person on WhatsApp?\n3. How many WhatsApp messages do I have in total, and what date range do they cover?\n\nSearch my actual WhatsApp data to answer. Give all three answers in your final response.",
     "timeout_seconds": 300,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["grep", "whatsapp", "messages"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "grep",
+      "whatsapp",
+      "messages"
+    ],
     "group": "daily",
     "price_limit_cents": 150,
     "requires_browser_agent": false,
@@ -3697,7 +4354,9 @@
     "environment": {
       "mode": "synthetic",
       "db_fixtures": [],
-      "base_images": ["base:victoria-prod-sync-v1"],
+      "base_images": [
+        "base:victoria-prod-sync-v1"
+      ],
       "live_fixtures": [],
       "services": [],
       "secrets": [],
@@ -3736,7 +4395,9 @@
       }
     ],
     "enforce_declared_evaluators": true,
-    "source": ["user:whatsapp-bench-2026-07-29"]
+    "source": [
+      "user:whatsapp-bench-2026-07-29"
+    ]
   },
   {
     "name": "agent-payment-production-purchase",
@@ -3744,8 +4405,14 @@
     "prompt": "Use one browser agent (spawn_agent with type=\"browser\" — do NOT delegate to a general_purpose sub-agent) to go to {frontend_url}/test_payment?benchmark=agentcard-live-lifecycle and COMPLETE the purchase of the single \"Agent Card Lifecycle Probe\" item, total $1.00. You are paying on the user's behalf and have NO payment card of your own, so you MUST obtain a one-time payment card through Rose's payment-card capability for exactly $1.00 — do not use any public test card. Click Place order, then complete the Stripe payment form with that card and submit it. Report the confirmation shown after the payment succeeds.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "payment", "agentcard-lifecycle-production"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "payment",
+      "agentcard-lifecycle-production"
+    ],
     "price_limit_cents": 500,
     "requires_browser_agent": true,
     "requires_claude_code": false,
@@ -3814,9 +4481,19 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["production-backend", "production-frontend"],
-      "secrets": ["stripe-live", "agentcard-live"],
-      "live_targets": ["roselabs.ai", "checkout.stripe.com", "api.roselabs.ai"],
+      "services": [
+        "production-backend",
+        "production-frontend"
+      ],
+      "secrets": [
+        "stripe-live",
+        "agentcard-live"
+      ],
+      "live_targets": [
+        "roselabs.ai",
+        "checkout.stripe.com",
+        "api.roselabs.ai"
+      ],
       "context_notes": "Production COMPLETED-purchase path on OUR OWN hosted /test_payment (distinct from the abandonment probe). Place order hands off to a real hosted Stripe Checkout on the Rose Labs account, which is the only way a live Rose-minted card can be authorized — AgentCard's test_charge is sandbox-only. The abandonment task covers the void/reclaim/refund path and must stay separate."
     },
     "bench": "pipeline-e2e"
@@ -3828,8 +4505,16 @@
     "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, proceed through checkout, and stop when Rose requests a payment card. Do not submit payment, place the order, or complete the purchase. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
-    "expected_tools": ["spawn_agent"],
-    "tags": ["browser", "auth", "antibot", "ecommerce", "ticketing"],
+    "expected_tools": [
+      "spawn_agent"
+    ],
+    "tags": [
+      "browser",
+      "auth",
+      "antibot",
+      "ecommerce",
+      "ticketing"
+    ],
     "group": "daily",
     "price_limit_cents": 200,
     "requires_browser_agent": true,
@@ -3869,7 +4554,10 @@
         "quantity",
         "lineTotalCents"
       ],
-      "requiredFeeFields": ["label", "amountCents"]
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
     },
     "success_on_payment_card_request": true,
     "min_tool_counts": {
@@ -3887,16 +4575,28 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "live_fixtures": ["live"],
-      "services": ["eventim.us", "request_payment_card", "antibot"],
-      "secrets": ["KERNEL_API_KEY", "STEEL_API_KEY"],
+      "live_fixtures": [
+        "live"
+      ],
+      "services": [
+        "eventim.us",
+        "request_payment_card",
+        "antibot"
+      ],
+      "secrets": [
+        "KERNEL_API_KEY",
+        "STEEL_API_KEY"
+      ],
       "live_targets": [
         "https://1015.com/",
         "https://wl.eventim.us/",
         "https://eventim.us/"
       ],
       "context_notes": "Reproduces prod agent ec03b6f2-744f-433a-87d0-e4cf7758818a (Yousuke Yukimatsu / 1015 Folsom), which reached Eventim then burned the $2 cap on Cloudflare/AXS antibot. The benchmark fixes venue + official Eventim US primary checkout, keeps artist/date flexible across upcoming 1015 Folsom shows with live inventory, and treats a single unresolved payment-card request as success. Never approve the charge or complete purchase. Secondary/resale marketplaces are forbidden. Local baseline 2026-08-05: FAIL — Cloudflare Access Denied hard-block on eventim.us/wl.eventim.us through challenge recovery; timed out at 1200s / ~15c without a payment-card request.",
-      "live_cookie_domains": ["eventim.us", "1015.com"]
+      "live_cookie_domains": [
+        "eventim.us",
+        "1015.com"
+      ]
     },
     "evaluators": [
       {
@@ -3926,7 +4626,9 @@
           },
           {
             "type": "approval_request_details",
-            "required_strings": ["1015"],
+            "required_strings": [
+              "1015"
+            ],
             "require_amount": true
           }
         ]
@@ -3963,7 +4665,10 @@
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
-    "tags": ["sms", "regression"],
+    "tags": [
+      "sms",
+      "regression"
+    ],
     "group": "daily",
     "price_limit_cents": 25,
     "requires_browser_agent": false,
@@ -3994,7 +4699,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["sms-supervisor", "surge-inbound-webhook"],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
@@ -4035,7 +4743,10 @@
     "timeout_seconds": 420,
     "is_chat_mode": false,
     "expected_tools": [],
-    "tags": ["sms", "regression"],
+    "tags": [
+      "sms",
+      "regression"
+    ],
     "group": "daily",
     "price_limit_cents": 25,
     "requires_browser_agent": false,
@@ -4066,7 +4777,10 @@
       "mode": "live",
       "db_fixtures": [],
       "base_images": [],
-      "services": ["sms-supervisor", "surge-inbound-webhook"],
+      "services": [
+        "sms-supervisor",
+        "surge-inbound-webhook"
+      ],
       "secrets": [],
       "live_targets": [],
       "context_notes": "Drives the real SMS supervisor over the local benchmark stack: real inbound Surge webhook, real context build, real LLM tool loop. Outbound Surge is intercepted by BLACKBOX_TEST_FAKE_SURGE so no human is texted. A seeded ACTIVE agent row supplies the running-agent state without spending a workflow."
@@ -4095,7 +4809,9 @@
       {
         "id": "sms-closed-states-closure",
         "method": "single_turn_llm_judge",
-        "criteria": ["The reply tells the user the store is closed"],
+        "criteria": [
+          "The reply tells the user the store is closed"
+        ],
         "judge_prompt": "Search told the assistant the restaurant is closed. Score 1.0 if the reply conveys to the user that it is closed or unavailable right now, in any wording. Score 0.0 only if a reader would NOT learn the place is closed. Judge the fact conveyed, not the phrasing, tone, length, or whether it promises anything."
       }
     ],

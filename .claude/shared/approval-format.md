@@ -3,12 +3,22 @@
 This file is the single source of truth for human approval requests emitted by
 `/RCA`, `/deploy`, and `/descend`. Read it completely immediately before
 composing any approval request. Do not replace it with a shorter free-form
-summary, and do not rename, reorder, or omit its four required sections.
+summary, and do not rename, reorder, or omit its five required sections
+(TL;DR, Detail, Before Behavior, After Behavior, Downstream Implications).
 
 Use one approval ID per snapshot-scoped decision. Group hunks only when one
 decision necessarily covers them together. Include clickable file-and-line links
 for every code, prompt, instruction, test, configuration, or migration hunk in
 scope.
+
+## TL;DR
+
+Open with a `## TL;DR` section: exactly one sentence stating, in plain language,
+what the human is approving and its single most important consequence. It must
+let the reader decide without reading further; the sections below justify it.
+Never omit it, never exceed one sentence, and never hide a cost, risk, or
+irreversibility here that the later sections reveal — if it is in Downstream
+Implications, its headline belongs in the TL;DR.
 
 ## Detail
 

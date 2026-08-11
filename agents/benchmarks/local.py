@@ -24,6 +24,7 @@ import tempfile
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Sequence, TextIO
 
@@ -34,6 +35,7 @@ if str(AGENTS_DIR) not in sys.path:
 
 from benchmarks.benchmark_tasks import RUNNABLE_TASK_RUNNERS, all_tasks, selected_tasks_require_gate_type
 from benchmarks.dashboard import DashboardServer, dashboard_enabled, maybe_launch_dashboard
+from benchmarks.results import bounded_path_component
 from benchmarks.seed_cache_path import canonical_base_dump_path, seed_dump_path
 
 SERVICES_MANIFEST = REPO_ROOT / ".context" / "services.json"
@@ -132,6 +134,23 @@ class ServiceStack:
 def slugify(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-")
     return slug or "bench"
+
+
+def isolated_workspace_name(base_name: str, run_id: str, max_len: int = 60) -> str:
+    """Build a CONDUCTOR_WORKSPACE_NAME that stays unique under the length cap.
+
+    Naive ``slugify(f"{base}-{run_id}")[:60]`` truncates the uniqueness suffix, so
+    two isolated stacks started in the same second (e.g. /deploy smoke + AgentCard)
+    can collapse onto one Temporal task queue and steal each other's workflows.
+    Keep the ``bench-<run_id>`` suffix intact and truncate only the human prefix.
+    """
+    suffix = slugify(f"bench-{run_id}")
+    if len(suffix) >= max_len:
+        digest = hashlib.sha1(run_id.encode("utf-8")).hexdigest()[:12]
+        suffix = f"b{digest}"
+    prefix_budget = max_len - len(suffix) - 1
+    prefix = slugify(base_name)[: max(1, prefix_budget)].strip("-") or "ws"
+    return f"{prefix}-{suffix}"
 
 
 def make_run_id(explicit: str | None = None) -> str:
@@ -246,7 +265,7 @@ def build_service_stack(args: argparse.Namespace) -> ServiceStack:
         )
     context_dir = BENCHMARK_CONTEXT_ROOT / run_id
     base_name = os.environ.get("CONDUCTOR_WORKSPACE_NAME") or REPO_ROOT.name
-    workspace_name = slugify(f"{base_name}-bench-{run_id}")[:60].strip("-")
+    workspace_name = isolated_workspace_name(base_name, run_id)
     preferred_base = args.base_port
     if preferred_base is None:
         env_base = os.environ.get("CONDUCTOR_PORT")
@@ -950,28 +969,151 @@ def local_seed_dump_path(
     return canonical_base_dump_path(resolved_schema, resolved_root)
 
 
+def _seed_dump_pair_is_usable(seed_dump: Path, schema_hash: str) -> bool:
+    sidecar = Path(f"{seed_dump}.schemahash")
+    try:
+        return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
+    except OSError:
+        return False
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def _benchmark_seed_publish_lock(
+    seed_dump: Path,
+    *,
+    attempts: int = 600,
+    retry_seconds: float = 0.1,
+):
+    """Interop with scripts/lib/seed-cache.sh's per-pair symlink lock."""
+    lock_path = Path(f"{seed_dump}.publish.lock")
+    owner = str(os.getpid())
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    acquired = False
+    for attempt in range(attempts):
+        try:
+            lock_path.symlink_to(owner)
+            acquired = True
+            break
+        except FileExistsError:
+            try:
+                current_owner = os.readlink(lock_path)
+            except OSError:
+                current_owner = ""
+            if current_owner.isdigit() and not _pid_is_alive(int(current_owner)):
+                try:
+                    if os.readlink(lock_path) == current_owner:
+                        lock_path.unlink()
+                        continue
+                except OSError:
+                    pass
+            if attempt + 1 < attempts:
+                time.sleep(retry_seconds)
+    if not acquired:
+        raise TimeoutError(f"timed out acquiring benchmark seed lock: {seed_dump}")
+    try:
+        yield
+    finally:
+        try:
+            if os.readlink(lock_path) == owner:
+                lock_path.unlink()
+        except OSError:
+            pass
+
+
+def _promote_previous_utc_day_seed_dump(
+    seed_dump: Path,
+    *,
+    schema_hash: str,
+    now: datetime,
+) -> bool:
+    """Promote yesterday's pair while the caller holds today's publish lock."""
+    current_time = now
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    current_time = current_time.astimezone(timezone.utc)
+    if current_time.hour >= 2:
+        return False
+
+    match = re.fullmatch(r"([0-9a-f]{40})-(\d{8})\.dump", seed_dump.name)
+    if (
+        match is None
+        or match.group(1) != schema_hash
+        or match.group(2) != current_time.strftime("%Y%m%d")
+    ):
+        return False
+    previous_day = (current_time - timedelta(days=1)).strftime("%Y%m%d")
+    previous_dump = seed_dump.with_name(f"{schema_hash}-{previous_day}.dump")
+    previous_sidecar = Path(f"{previous_dump}.schemahash")
+    seed_dump.parent.mkdir(parents=True, exist_ok=True)
+    temp_token = f"{os.getpid()}-{time.monotonic_ns()}"
+    temp_dump = seed_dump.with_name(f".{seed_dump.name}.rollover-{temp_token}")
+    temp_sidecar = Path(f"{temp_dump}.schemahash")
+    try:
+        with _benchmark_seed_publish_lock(previous_dump):
+            try:
+                previous_stat = previous_dump.stat()
+                if (
+                    previous_stat.st_size <= 0
+                    or previous_sidecar.read_text().strip() != schema_hash
+                ):
+                    return False
+            except OSError:
+                return False
+
+            age_seconds = current_time.timestamp() - previous_stat.st_mtime
+            if age_seconds < 0 or age_seconds > 26 * 60 * 60:
+                return False
+
+            try:
+                os.link(previous_dump, temp_dump)
+            except OSError:
+                shutil.copy2(previous_dump, temp_dump)
+            temp_sidecar.write_text(schema_hash)
+
+        if not _seed_dump_pair_is_usable(temp_dump, schema_hash):
+            return False
+        os.replace(temp_dump, seed_dump)
+        os.replace(temp_sidecar, Path(f"{seed_dump}.schemahash"))
+        return _seed_dump_pair_is_usable(seed_dump, schema_hash)
+    finally:
+        temp_dump.unlink(missing_ok=True)
+        temp_sidecar.unlink(missing_ok=True)
+
+
 def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
     """Snapshot a healthy shared stack when today's isolated seed cache is cold."""
     schema = REPO_ROOT / "back-end" / "prisma" / "schema.prisma"
     schema_hash = hashlib.sha1(schema.read_bytes()).hexdigest()
     sidecar = Path(f"{seed_dump}.schemahash")
-    lock_path = Path(f"{seed_dump}.lock")
     seed_dump.parent.mkdir(parents=True, exist_ok=True)
 
     def current_dump_exists() -> bool:
-        try:
-            return seed_dump.stat().st_size > 0 and sidecar.read_text().strip() == schema_hash
-        except OSError:
-            return False
+        return _seed_dump_pair_is_usable(seed_dump, schema_hash)
 
     if current_dump_exists():
         return True
 
-    with open(lock_path, "a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        if current_dump_exists():
-            return True
-        try:
+    try:
+        with _benchmark_seed_publish_lock(seed_dump):
+            if current_dump_exists():
+                return True
+            if _promote_previous_utc_day_seed_dump(
+                seed_dump,
+                schema_hash=schema_hash,
+                now=datetime.now(timezone.utc),
+            ):
+                print(f"Promoted recent previous-day benchmark seed dump: {seed_dump}")
+                return current_dump_exists()
             manifest = json.loads(SERVICES_MANIFEST.read_text())
             if manifest.get("status") != "running":
                 return False
@@ -1006,13 +1148,13 @@ def _prime_local_seed_dump_from_shared_stack(seed_dump: Path) -> bool:
             sidecar_tmp.write_text(schema_hash)
             os.replace(sidecar_tmp, sidecar)
             print(f"Primed isolated benchmark seed dump from shared stack: {seed_dump}")
-            return True
-        except Exception as exc:
-            print(
-                f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
-                file=sys.stderr,
-            )
-            return False
+            return current_dump_exists()
+    except Exception as exc:
+        print(
+            f"Warning: could not prime isolated benchmark seed dump from shared stack: {exc}",
+            file=sys.stderr,
+        )
+        return False
 
 
 def start_services(
@@ -1055,6 +1197,10 @@ def start_services(
         # task-local state, so routing schema setup through the shared production
         # pooler only adds an external startup dependency. A closed or saturated
         # pooler previously aborted the stack before either task could run.
+        # Clear any ambient FAST_MODE_CACHE_DATABASE_URL too, so a caller cannot
+        # accidentally retain the prod pooler despite the local opt-in; run.sh
+        # binds the concrete local URL after it starts Postgres.
+        env.pop("FAST_MODE_CACHE_DATABASE_URL", None)
         env["FAST_MODE_CACHE_USE_LOCAL"] = "1"
         # resolve_temporal_task_queue() preserves an inherited TEMPORAL_TASK_QUEUE.
         # /deploy's configure_deploy_local_env mints a Step-5 semantic queue in the
@@ -1489,7 +1635,11 @@ def run_diagnostics(
     if not runnable:
         return None
     out_root = result_path.with_suffix("")
-    diag_root = out_root.parent / f"{out_root.name}_diagnostics"
+    diag_root = out_root.parent / bounded_path_component(
+        out_root.name,
+        suffix="_diagnostics",
+        identity=result_path.name,
+    )
     diag_root.mkdir(parents=True, exist_ok=True)
     diag_env = diagnostic_log_env(stack)
     for failure in runnable:

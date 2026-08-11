@@ -48,6 +48,7 @@ vi.mock('../../main/base/config', () => ({
 
 import { BatchUploader } from '../../main/services/batchUploader';
 import { Uploader } from '../../main/services/uploader';
+import { Crypto as UploadCrypto } from '../../main/base/crypto';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -149,6 +150,134 @@ describe('batch-uploader blackbox', () => {
 
       expect(result.success).toBe(true);
       expect(fetchCaptures[0].headers['authorization']).toBe('Bearer tok-cookie-auth');
+    });
+  });
+
+  describe('transient transport recovery', () => {
+    it('retries an idempotent browser-cookie snapshot after a transient fetch failure', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('fetch failed'))
+        .mockResolvedValueOnce(jsonResponse({ ok: true }));
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      vi.useFakeTimers();
+
+      try {
+        const upload = BatchUploader.uploadInBatches(
+          'chrome',
+          [{ host_key: '.x', name: 'session', value: 'fresh' }],
+          'tok-cookie-retry',
+          null
+        );
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await expect(upload).resolves.toEqual({ success: true });
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('stops browser-cookie transport recovery after exactly three failed attempts', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn().mockRejectedValue(new Error('persistent fetch failure'));
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      vi.useFakeTimers();
+
+      try {
+        const upload = BatchUploader.uploadInBatches(
+          'chrome',
+          [{ host_key: '.x', name: 'session', value: 'fresh' }],
+          'tok-cookie-exhaustion',
+          null
+        );
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        await expect(upload).resolves.toEqual({
+          success: false,
+          message: 'persistent fetch failure',
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(3);
+      } finally {
+        vi.useRealTimers();
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('does not retry a browser-cookie HTTP rejection', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: 'rejected' }), {
+          status: 503,
+          statusText: 'Service Unavailable',
+        })
+      );
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      try {
+        const result = await BatchUploader.uploadInBatches(
+          'chrome',
+          [{ host_key: '.x', name: 'session', value: 'fresh' }],
+          'tok-cookie-http-rejection',
+          null
+        );
+
+        expect(result).toEqual({
+          success: false,
+          message: 'Upload failed: Service Unavailable',
+        });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('does not retry a non-cookie transport failure', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn().mockRejectedValue(new Error('message transport failed'));
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+
+      try {
+        const result = await BatchUploader.uploadInBatches('imessage', [], 'tok-message', null);
+
+        expect(result).toEqual({ success: false, message: 'message transport failed' });
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
+
+    it('does not retry a browser-cookie failure before the transport boundary', async () => {
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn();
+      const encryptSpy = vi.spyOn(UploadCrypto, 'encrypt').mockImplementation(() => {
+        throw new Error('cookie encryption failed');
+      });
+      globalThis.fetch = fetchMock as unknown as typeof globalThis.fetch;
+      vi.useFakeTimers();
+
+      try {
+        const upload = BatchUploader.uploadInBatches(
+          'chrome',
+          [{ host_key: '.x', name: 'session', value: 'fresh' }],
+          'tok-cookie-encryption',
+          null
+        );
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        await expect(upload).resolves.toEqual({
+          success: false,
+          message: 'cookie encryption failed',
+        });
+        expect(encryptSpy).toHaveBeenCalledTimes(1);
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+        encryptSpy.mockRestore();
+        globalThis.fetch = originalFetch;
+      }
     });
   });
 

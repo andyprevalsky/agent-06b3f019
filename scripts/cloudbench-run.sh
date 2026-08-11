@@ -434,6 +434,7 @@ chown "$APP_USER:$APP_USER" "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 chmod 600 "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env"
 cloudbench_verify_env_file "$REPO_DIR/agents/.env" "${AGENTS_ENV_SHA256:-}" agents || finish 1
 cloudbench_verify_env_file "$REPO_DIR/back-end/.env" "${BACKEND_ENV_SHA256:-}" backend || finish 1
+cloudbench_require_agentcard_org_oauth "$REPO_DIR/back-end/.env" || finish 1
 cloudbench_validate_browser_provider_contract \
     "$REPO_DIR/agents/.env" "$REPO_DIR/back-end/.env" \
     "${CLOUDBENCH_BROWSER_PROVIDER:-}" "${CLOUDBENCH_BROWSER_PROVIDER:-}" || finish 1

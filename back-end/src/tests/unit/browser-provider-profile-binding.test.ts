@@ -7,6 +7,7 @@ import {
 } from '../../providers/browser';
 import { buildPreferredBrowserConfig } from '../../providers/browser/challengeRecovery';
 import {
+  INVALIDATED_STEEL_PROFILE_SOURCE,
   providerProfileMismatch,
   recordedProviderProfileBinding,
 } from '../../providers/browser/profileBinding';
@@ -238,12 +239,31 @@ function steelReplacementNeverReusesForeignProviderProfile(): void {
   }
 }
 
+function invalidatedSteelProfileIsCompletionOnly(): void {
+  const invalidatedSession = {
+    provider: 'steel',
+    providerProfileId: '11111111-2222-3333-4444-555555555555',
+    providerProfileSource: INVALIDATED_STEEL_PROFILE_SOURCE,
+  };
+  assert.strictEqual(
+    reusableSteelRecordedProfileId(invalidatedSession),
+    null,
+    'an invalidated Steel profile must not be reloaded during resume'
+  );
+  assert.strictEqual(
+    recordedProviderProfileBinding(invalidatedSession),
+    undefined,
+    'an invalidated Steel profile must not become a provider replacement binding'
+  );
+}
+
 async function main(): Promise<void> {
   await requiredProfileOverridesProviderPreference();
   await concurrentSavedSteelSessionsRemainDistinct();
   requiredSteelAuthProfileFailsClosedOnMismatch();
   kernelManagedProfileDoesNotFailClosed();
   steelReplacementNeverReusesForeignProviderProfile();
+  invalidatedSteelProfileIsCompletionOnly();
   process.stdout.write('PASS browser provider profile binding\n');
 }
 

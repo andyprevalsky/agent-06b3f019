@@ -1,9 +1,11 @@
 #!/usr/bin/env tsx
 
 import { randomUUID } from 'node:crypto';
+import { createServer, type Socket } from 'node:net';
 import { config } from 'dotenv';
 import { prisma } from '../../providers/database';
 import {
+  injectUserData,
   resolveBrowserAuthCredentialSource,
   summarizeSteelCookiesForRealm,
 } from '../../providers/steel/injection';
@@ -28,6 +30,10 @@ async function createUser() {
 }
 
 async function cleanup(userId: string) {
+  await prisma.localStorageOrigin.deleteMany({ where: { userId } });
+  await prisma.indexedDBOrigin.deleteMany({ where: { userId } });
+  await prisma.browserPermission.deleteMany({ where: { userId } });
+  await prisma.cacheStorageOrigin.deleteMany({ where: { userId } });
   await prisma.agentRunCredentialPropagation.deleteMany({
     where: { agentId: { startsWith: userId } },
   });
@@ -266,6 +272,223 @@ test('Steel cookie summary is realm scoped and expiry aware without exposing val
   assert(summary.hasRealmCookies, 'expected live amazon cookies');
   assert(summary.cookieCount === 2, 'expected only live same-realm cookies');
   assert(!('value' in summary), 'expected no cookie values in summary');
+});
+
+test('browser-state injection is serial and bounded after CDP connects', async () => {
+  const userId = await createUser();
+  const context = await prisma.browserContext.create({ data: { userId } });
+  const sessionId = `steel-state-stall-${randomUUID()}`;
+  await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId,
+      wsUrl: 'ws://already-connected.invalid/devtools/browser/retained',
+      provider: 'kernel',
+      status: 'ACTIVE',
+      startUrl: 'https://www.google.com/search?q=movie+genre',
+    },
+  });
+  await Promise.all([
+    prisma.localStorageOrigin.create({
+      data: {
+        userId,
+        origin: 'https://www.google.com',
+        entries: [{ key: 'session', value: 'retained' }],
+        hash: 'local-storage',
+      },
+    }),
+    prisma.indexedDBOrigin.create({
+      data: {
+        userId,
+        origin: 'https://www.google.com',
+        databases: [],
+        hash: 'indexed-db',
+      },
+    }),
+    prisma.browserPermission.create({
+      data: {
+        userId,
+        origin: 'https://www.google.com',
+        permission: 'notifications',
+        setting: 1,
+      },
+    }),
+    prisma.cacheStorageOrigin.create({
+      data: {
+        userId,
+        origin: 'https://www.google.com',
+        caches: [{ name: 'retained-cache' }],
+        hash: 'cache-storage',
+      },
+    }),
+  ]);
+
+  let activeCalls = 0;
+  let maxActiveCalls = 0;
+  let callCount = 0;
+  let markFirstCallStarted: (() => void) | undefined;
+  const firstCallStarted = new Promise<void>((resolve) => {
+    markFirstCallStarted = resolve;
+  });
+  const stalledContext = {
+    addInitScript: async () => {
+      callCount += 1;
+      markFirstCallStarted?.();
+      activeCalls += 1;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      await new Promise<never>(() => {});
+      activeCalls -= 1;
+    },
+  };
+  const retainedBrowser = {
+    contexts: () => [stalledContext],
+    close: async () => {},
+  } as unknown as import('playwright').Browser;
+  const previousTimeout = process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
+  process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = '75';
+  try {
+    const injectionSettled = injectUserData(
+      sessionId,
+      userId,
+      'https://www.google.com/search?q=movie+genre',
+      { browser: retainedBrowser }
+    ).then(
+      () => ({ rejected: false, message: 'browser-state injection unexpectedly resolved' }),
+      (error: unknown) => ({
+        rejected: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
+    await Promise.race([
+      firstCallStarted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('browser-state fixture was not reached within 5s')),
+          5_000
+        )
+      ),
+    ]);
+    const outcome = await Promise.race([
+      injectionSettled,
+      new Promise<{ rejected: false; message: string }>((resolve) =>
+        setTimeout(
+          () => resolve({ rejected: false, message: 'browser-state injection exceeded 500ms' }),
+          500
+        )
+      ),
+    ]);
+
+    assert(outcome.rejected, outcome.message);
+    assert(
+      /browser state.*timed out/i.test(outcome.message),
+      `expected an explicit browser-state timeout, got: ${outcome.message}`
+    );
+    assert(callCount === 1, `expected one serial addInitScript call, got ${callCount}`);
+    assert(
+      maxActiveCalls === 1,
+      `expected no overlapping addInitScript calls, got ${maxActiveCalls}`
+    );
+  } finally {
+    if (previousTimeout === undefined) {
+      delete process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS;
+    } else {
+      process.env.BROWSER_STATE_INJECTION_TIMEOUT_MS = previousTimeout;
+    }
+    await prisma.browserSession.deleteMany({ where: { sessionId } });
+    await prisma.browserContext.deleteMany({ where: { id: context.id } });
+    await cleanup(userId);
+  }
+});
+
+test('JIT credential injection bounds a CDP endpoint that accepts transport but never upgrades', async () => {
+  const userId = await createUser();
+  const context = await prisma.browserContext.create({ data: { userId } });
+  const sessionId = `steel-cdp-stall-${randomUUID()}`;
+  const sockets = new Set<Socket>();
+  let markConnectionAccepted: (() => void) | undefined;
+  const connectionAccepted = new Promise<void>((resolve) => {
+    markConnectionAccepted = resolve;
+  });
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    markConnectionAccepted?.();
+    // Reproduce the provider symptom: TCP connects, but the CDP websocket
+    // upgrade never returns. The production call stayed here until its outer
+    // HTTP client abandoned the request after 180 seconds.
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => resolve());
+  });
+  const address = server.address();
+  assert(address !== null && typeof address === 'object', 'stalled CDP fixture did not bind');
+  await prisma.browserSession.create({
+    data: {
+      contextId: context.id,
+      agentId: randomUUID(),
+      sessionId,
+      wsUrl: `ws://127.0.0.1:${address.port}/devtools/browser/stalled`,
+      provider: 'kernel',
+      status: 'ACTIVE',
+      startUrl: 'https://www.google.com/search?q=movie+genre',
+    },
+  });
+
+  const previousTimeout = process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+  process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = '75';
+  let injectionSettled: Promise<{ rejected: boolean; message: string }> | undefined;
+  try {
+    injectionSettled = injectUserData(
+      sessionId,
+      userId,
+      'https://www.google.com/search?q=movie+genre'
+    ).then(
+      () => ({ rejected: false, message: 'credential injection unexpectedly resolved' }),
+      (error: unknown) => ({
+        rejected: true,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    );
+    await Promise.race([
+      connectionAccepted,
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () => reject(new Error('CDP fixture did not receive a connection within 30s')),
+          30_000
+        )
+      ),
+    ]);
+    const outcome = await Promise.race([
+      injectionSettled,
+      new Promise<{ rejected: false; message: string }>((resolve) =>
+        setTimeout(
+          () =>
+            resolve({ rejected: false, message: 'CDP acquisition exceeded the 500ms test budget' }),
+          500
+        )
+      ),
+    ]);
+
+    assert(outcome.rejected, outcome.message);
+    assert(
+      /timeout|timed out/i.test(outcome.message),
+      `expected an explicit CDP timeout, got: ${outcome.message}`
+    );
+  } finally {
+    if (previousTimeout === undefined) {
+      delete process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS;
+    } else {
+      process.env.BROWSER_CREDENTIAL_CDP_CONNECT_TIMEOUT_MS = previousTimeout;
+    }
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await injectionSettled?.catch(() => undefined);
+    await prisma.browserSession.deleteMany({ where: { sessionId } });
+    await prisma.browserContext.deleteMany({ where: { id: context.id } });
+    await cleanup(userId);
+  }
 });
 
 async function main() {

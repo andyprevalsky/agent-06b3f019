@@ -6,7 +6,7 @@ import json
 import math
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 HISTORY_DIR = os.path.join(os.path.dirname(__file__), "history")
 HISTORY_FILE = os.path.join(HISTORY_DIR, "span_durations.jsonl")
@@ -67,6 +67,7 @@ def load_records(
     benchmark: str = "",
     environment: str = "",
     span_key: str = "",
+    span_keys: Optional[Set[str]] = None,
     statuses: Optional[Tuple[str, ...]] = None,
     history_file: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
@@ -88,6 +89,8 @@ def load_records(
             if environment and record.get("environment") != environment:
                 continue
             if span_key and record.get("span_key") != span_key:
+                continue
+            if span_keys is not None and record.get("span_key") not in span_keys:
                 continue
             if statuses is not None and record.get("run_status") not in statuses:
                 continue
@@ -120,15 +123,43 @@ def summary(
     statuses: Optional[Tuple[str, ...]] = ("passed", "observed"),
     history_file: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    return summarize_records(
-        load_records(
-            benchmark=benchmark,
-            environment=environment,
-            span_key=span_key,
-            statuses=statuses,
-            history_file=history_file,
-        )
-    )
+    return summaries(
+        [span_key],
+        benchmark=benchmark,
+        environment=environment,
+        statuses=statuses,
+        history_file=history_file,
+    ).get(span_key)
+
+
+def summaries(
+    span_keys: Iterable[str],
+    *,
+    benchmark: str = "",
+    environment: str = "",
+    statuses: Optional[Tuple[str, ...]] = ("passed", "observed"),
+    history_file: Optional[str] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Summarize many span keys with one history-ledger scan."""
+    wanted = {str(span_key) for span_key in span_keys if span_key}
+    if not wanted:
+        return {}
+    grouped: Dict[str, List[Dict[str, Any]]] = {span_key: [] for span_key in wanted}
+    for record in load_records(
+        benchmark=benchmark,
+        environment=environment,
+        span_keys=wanted,
+        statuses=statuses,
+        history_file=history_file,
+    ):
+        span_key = str(record.get("span_key") or "")
+        if span_key in grouped:
+            grouped[span_key].append(record)
+    return {
+        span_key: stats
+        for span_key, records in grouped.items()
+        if (stats := summarize_records(records)) is not None
+    }
 
 
 def compare_observations(
@@ -148,22 +179,25 @@ def compare_observations(
     duration. A row is marked as a regression when current duration exceeds
     both p95 * multiplier and p95 + min_delta_ms.
     """
-    cache: Dict[str, Optional[Dict[str, Any]]] = {}
+    span_keys = {
+        str(observation.get("span_key") or "")
+        for observation in observations
+        if observation.get("span_key")
+    }
+    cache = summaries(
+        span_keys,
+        benchmark=benchmark,
+        environment=environment,
+        statuses=statuses,
+        history_file=history_file,
+    )
     rows: List[Dict[str, Any]] = []
     for observation in observations:
         span_key = str(observation.get("span_key") or "")
         duration_ms = observation.get("duration_ms")
         if not span_key or not isinstance(duration_ms, (int, float)):
             continue
-        if span_key not in cache:
-            cache[span_key] = summary(
-                span_key,
-                benchmark=benchmark,
-                environment=environment,
-                statuses=statuses,
-                history_file=history_file,
-            )
-        stats = cache[span_key]
+        stats = cache.get(span_key)
         if not stats or stats["count"] < min_samples:
             continue
         p95 = float(stats["p95_ms"])

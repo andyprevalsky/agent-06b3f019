@@ -158,17 +158,22 @@ seed_cache_decision() {
 materialize_benchmark_seed_dump() (
     local schema_path="$1"
     local cache_dir="$2"
-    local db_container="$3"
+    # Container name, or the literal token "system" for host Postgres (Cloud VMs
+    # where Docker overlay mounts fail and ROSE_USE_SYSTEM_PG=true).
+    local db_source="$3"
     local cache_day="${4:-$(date -u +%Y%m%d)}"
     local database_name="${5:-victoria}"
     local schema_hash
     local target_dump
     local temp_dump
     local temp_hash
+    local seed_helper
+    local dump_rc=0
 
     target_dump="$(benchmark_seed_dump_path "$schema_path" "$cache_dir" "$cache_day")" || return 1
     schema_hash="${target_dump##*/}"
     schema_hash="${schema_hash%%-*}"
+    seed_helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/save-seed-dump.sh"
 
     mkdir -p "$cache_dir"
     temp_dump="${target_dump}.tmp.$$"
@@ -177,12 +182,19 @@ materialize_benchmark_seed_dump() (
     trap 'rm -f "$temp_dump" "$temp_hash" 2>/dev/null || true; release_benchmark_seed_lock "$target_dump"' EXIT INT TERM
     rm -f "$temp_dump" "$temp_hash" 2>/dev/null || true
 
-    if ! docker exec "$db_container" pg_dump -U postgres -Fc "$database_name" > "$temp_dump"; then
-        echo "could not dump synchronized benchmark database from $db_container" >&2
+    # Route through save-seed-dump.sh so Docker and system Postgres use the
+    # matching pg_dump client (archive headers are not backward-compatible).
+    if [ "$db_source" = "system" ]; then
+        bash "$seed_helper" "$temp_dump" localhost 5432 postgres "$database_name" || dump_rc=$?
+    else
+        bash "$seed_helper" "$temp_dump" localhost 5432 postgres "$database_name" "$db_source" || dump_rc=$?
+    fi
+    if [ "$dump_rc" -ne 0 ]; then
+        echo "could not dump synchronized benchmark database from $db_source" >&2
         return 1
     fi
     if [ ! -s "$temp_dump" ]; then
-        echo "synchronized benchmark database dump was empty: $db_container" >&2
+        echo "synchronized benchmark database dump was empty: $db_source" >&2
         return 1
     fi
 

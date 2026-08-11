@@ -142,8 +142,13 @@ function appendEvent(event) {
 
 // Handle shutdown gracefully
 let processExited = false;
+let shuttingDown = false;
 
 async function shutdown(exitCode = 0) {
+  // Idempotent: the child close handler, the child error handler, and the
+  // stdin error handler can all race to trigger shutdown. Only the first wins.
+  if (shuttingDown) return;
+  shuttingDown = true;
   log("info", "Starting graceful shutdown", { exitCode });
 
   // Notify clients with exit code (sent directly, not wrapped in data)
@@ -436,8 +441,13 @@ async function runClaudeCli() {
   if (CODE_AGENT_SYSTEM_PROMPT) {
     args.push("--append-system-prompt", CODE_AGENT_SYSTEM_PROMPT);
   }
-  args.push(prompt);
 
+  // The prompt is delivered on stdin, NOT as a positional argument.
+  // Claude Code CLI (>=2.x) ignores a positional prompt when
+  // `--output-format stream-json` is set and reads the prompt from stdin
+  // instead; passing it positionally makes the CLI exit 1 immediately with
+  // "Input must be provided either through stdin or as a prompt argument when
+  // using --print". (Default `--input-format text` reads raw text from stdin.)
   const child = spawn("claude", args, {
     cwd: workDir,
     env: {
@@ -445,8 +455,22 @@ async function runClaudeCli() {
       HOME: home,
       NO_COLOR: "1",
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   });
+  // If claude exits before consuming the prompt, its stdin emits EPIPE. That
+  // error is on the stdin stream (not caught by child.on("error")), so without
+  // this listener it would throw an uncaughtException and crash ws-server —
+  // exactly the sandbox death this fix set out to prevent. The child's own
+  // error/close handlers drive the real shutdown; here we only swallow the pipe
+  // error so the write can never take the server down.
+  child.stdin.on("error", (err) => {
+    log("warn", "claude stdin write error (ignored)", {
+      error: err?.message,
+      code: err?.code,
+    });
+  });
+  child.stdin.write(prompt);
+  child.stdin.end();
 
   let stdoutRemainder = "";
   let sawResult = false;

@@ -89,7 +89,7 @@ describe('runGateConnectAction', () => {
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
-      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $20/mo' },
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
       action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
     };
 
@@ -110,7 +110,7 @@ describe('runGateConnectAction', () => {
     const gate: GateMetadata = {
       gateKey: 'subscription',
       type: 'subscription',
-      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $20/mo' },
+      presentation: { title: 'Subscribe', reason: 'x', cta: 'Subscribe · $30/mo' },
       action: { kind: 'link', url: 'https://checkout.stripe.com/c/session' },
     };
 

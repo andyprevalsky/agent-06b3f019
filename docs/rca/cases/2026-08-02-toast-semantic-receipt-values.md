@@ -69,6 +69,10 @@ reproduce the old false negative or reach semantic evaluation — the root route
 to DoorDash / Uber Eats instead (see case
 `2026-08-04-toast-task-never-named-the-ordering-surface`).
 
+## Human feedback
+
+None recorded.
+
 ## Reusable lesson
 
 Do not duplicate a production tool's schema validation in a task-specific

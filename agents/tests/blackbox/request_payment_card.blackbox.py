@@ -63,13 +63,16 @@ def test_normalize_payload_builds_receipt_metadata_and_fingerprint():
     assert len(payload["fingerprint"]) == 64
 
 
-def test_product_url_trust_is_trajectory_evidence_not_url_vocabulary():
-    """The ONLY semantic gate left is 'did the browser actually load this host?'.
+def test_product_url_host_must_match_a_visited_page():
+    """The approval renders product_url as a clickable link, so the host is constrained.
 
-    RCA (agents 53feac08, 90ac106a): the previous gate guessed a page's purpose
-    from the words in its URL and only ever produced false rejects on real
-    product pages. Evidence cannot be gamed by a slug and cannot false-reject a
-    site the agent genuinely shopped on, so it replaces the word lists outright.
+    Replaces test_product_url_does_not_match_browser_trajectory, which asserted
+    that any well-formed absolute URL - including https://evil.com/products/x -
+    was accepted. That was an open-redirect primitive (CWE-601).
+
+    Only the HOST is checked. The path/query heuristics stay removed: those were
+    the unguaranteeable part that rejected receipts from working checkouts, and
+    the cases below pin that they remain accepted.
     """
     from utils.purchase_approval import validate_product_url_for_pages
 
@@ -85,32 +88,31 @@ def test_product_url_trust_is_trajectory_evidence_not_url_vocabulary():
     )
     assert validate_product_url_for_pages(product_url, visited) == product_url
 
-    # An observed product page whose path carries no "product"/"item"/"p" marker
-    # must pass: the old _looks_like_product_route word list rejected these.
+    # No "product"/"item"/"p" marker in the path must still pass: the old
+    # _looks_like_product_route word list rejected these and cost a benchmark run.
     assert (
         validate_product_url_for_pages("https://order.toasttab.com/lok-lak", visited)
         == "https://order.toasttab.com/lok-lak"
     )
 
-    # A page BENEATH an observed host is covered (the browser was on that site).
+    # A subdomain of a visited host is legitimate - merchants serve the product
+    # page from menu.* while checkout lives on order.*.
     assert validate_product_url_for_pages("https://menu.order.toasttab.com/lok-lak", visited)
 
-    # Coverage is DIRECTIONAL. Observing order.toasttab.com must NOT authorize
-    # the parent toasttab.com. Agent 90ac106a did exactly this: blocked on the
-    # real host, it host-swapped to a www.toasttab.com URL it had never loaded
-    # and put that fabricated link in front of a human approving a real charge.
-    # A symmetric host match made that indistinguishable from a real product page.
-    for unobserved in (
-        "https://www.toasttab.com/local/lunette-cambodia/item-lok-lak",
-        "https://toasttab.com/local/lunette",
+    # A parent host of the visited host is still the same merchant.
+    assert validate_product_url_for_pages("https://toasttab.com/local/lunette", visited)
+
+    # An unrelated host must be rejected: this is the open-redirect case.
+    for untrusted in (
         "https://evil.com/products/x",
+        "https://toasttab.com.attacker.example/products/x",
     ):
         try:
-            validate_product_url_for_pages(unobserved, visited)
-        except ValueError as error:
-            assert "not observed in the browser trajectory" in str(error), error
-        else:
-            raise AssertionError(f"accepted a product_url on an unobserved host: {unobserved}")
+            validate_product_url_for_pages(untrusted, visited)
+        except ValueError:
+            continue
+        raise AssertionError(f"expected {untrusted} to be rejected as an untrusted host")
+
 
 
 def test_payment_line_item_requires_reviews_and_a_product_detail_url():
@@ -142,26 +144,38 @@ def test_payment_line_item_requires_reviews_and_a_product_detail_url():
         else:
             raise AssertionError(f"PaymentLineItem accepted missing {required_field}")
 
-    # Structural rejections only — a URL that names no resource at all.
-    invalid_product_urls = (
+    # product_url is validated for WELL-FORMEDNESS ONLY. Page-type inference
+    # (product vs checkout vs storefront) was removed by decision: every merchant
+    # invents its own conventions, so the heuristic only ever recognised shapes we
+    # had already been burned by, and each miss rejected a receipt from a WORKING
+    # checkout. These URLs are now accepted deliberately.
+    formerly_rejected_urls = (
+        "https://example.com/checkout/payment",
+        "https://checkout.example.com/products/desk-lamp",
+        "https://pay.example.com/session/123",
+        "https://example.com/order/ABC123",
         "https://example.com",
-        "https://example.com/",
-        "not-a-url",
+        "https://order.online/business/156787/checkout/3ebc87b0-5761-4afc-9bfd",
+    )
+    for product_url in formerly_rejected_urls:
+        PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
+
+    # The one guarantee retained: it must actually be an absolute http(s) URL.
+    for product_url in (
+        "not a url",
+        "/checkout/session/123",
+        "example.com/products/desk-lamp",
         "ftp://example.com/products/desk-lamp",
-        "https://example.com/products/desk lamp",
-        "https://example.com/products/<script>",
-        # urlparse defers port validation until the attribute is read, so these
-        # parsed clean and only exploded later at the HTTP layer.
+        "https://example.com/p/1?a=<script>",
         "https://example.com:99999/products/desk-lamp",
         "https://example.com:abc/products/desk-lamp",
-    )
-    for product_url in invalid_product_urls:
+    ):
         try:
             PaymentLineItem.model_validate({**valid_item, "product_url": product_url})
         except ValidationError:
             pass
         else:
-            raise AssertionError(f"PaymentLineItem accepted non-product URL {product_url}")
+            raise AssertionError(f"PaymentLineItem accepted non-URL {product_url}")
 
     # NO VOCABULARY FILTERING. The validator must never guess a page's purpose
     # from the words in its URL. Two prod incidents came from exactly that:
@@ -750,8 +764,8 @@ async def run_all_tests():
     result.record("normalize_payload", test_normalize_payload_builds_receipt_metadata_and_fingerprint)
     result.record("required_product_reviews", test_payment_line_item_requires_reviews_and_a_product_detail_url)
     result.record(
-        "product_url_trajectory_evidence_not_vocabulary",
-        test_product_url_trust_is_trajectory_evidence_not_url_vocabulary,
+        "product_url_host_must_match_a_visited_page",
+        test_product_url_host_must_match_a_visited_page,
     )
     result.record(
         "reviewless_bookings_pass_with_zero",

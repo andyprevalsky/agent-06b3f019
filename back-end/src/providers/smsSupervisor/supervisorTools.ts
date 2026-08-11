@@ -40,6 +40,9 @@ import { executeWebSearchTool, type WebSearchArgs } from './supervisorTools.webS
 
 const log = createLogger('SmsSupervisorTools');
 
+/** Ceiling for a single agent's price limit; keeps newLimitCents inside Prisma's Int column. */
+const MAX_PRICE_LIMIT_CENTS = 100_000_00;
+
 export { TOOL_SCHEMAS } from './supervisorTools.schemas';
 
 function formatTaskLabel(goal: string, maxLength = 80): string {
@@ -300,6 +303,19 @@ async function validateReplyToAgent(
       error: 'Current SMS does not identify this agent task or a matching pending request',
     };
   }
+  // A rejection is only expressible as a resolved attention request: without an
+  // `attention_request_id` the commit signals the bare `message`, which
+  // `receive_user_response` reads as ordinary feedback. Accepting this pair
+  // would silently downgrade a "no" into a "here's a comment" and let the
+  // blocked tool proceed as if it had never been refused.
+  if (args.reject === true && args.attention_request_id === undefined) {
+    return {
+      tool: 'reply_to_agent',
+      success: false,
+      result: '',
+      error: 'Rejecting requires the attention_request_id of the request being rejected',
+    };
+  }
   pendingWrites.push({ kind: 'reply_to_agent', args, agentId: agent.id });
   const verb = args.attention_request_id
     ? args.reject
@@ -469,6 +485,12 @@ async function commitReplyToAgent(
     };
   }
 
+  // ONE canonical response for both sinks. These used to diverge: the signal
+  // sent a bare empty `message` while the row persisted the 'Approved' default,
+  // so on an empty approval the database recorded a decision the workflow never
+  // received.
+  const canonicalUserResponse = reject ? '__REJECTED__' : message || 'Approved';
+
   // 2. Signal the workflow to unblock any waiting tool
   if (agent.temporalWorkflowId) {
     try {
@@ -477,7 +499,7 @@ async function commitReplyToAgent(
       const signalValue = attention_request_id
         ? JSON.stringify({
             request_id: attention_request_id,
-            response: reject ? '__REJECTED__' : message,
+            response: canonicalUserResponse,
           })
         : message;
       await handle.signal('receive_user_response', signalValue);
@@ -499,19 +521,34 @@ async function commitReplyToAgent(
   }
 
   // 3. If resolving an attention request, mark it in DB
+  let attentionResolved = false;
   if (attention_request_id) {
     try {
-      const userResponse = reject ? '__REJECTED__' : message || 'Approved';
-      await prisma.agentAttentionRequest.update({
-        where: { id: attention_request_id },
+      const userResponse = canonicalUserResponse;
+      // Scope by agent AND user, not request id alone. validateReplyToAgent
+      // accepts any attention_request_id when currentSmsMatches is true, so an
+      // id belonging to another agent or user would otherwise be written here.
+      // `userResponse: null` keeps this single-shot. Without it a repeated
+      // reply overwrites an existing decision and reports a fresh
+      // approval/rejection for a request that was already resolved.
+      const resolved = await prisma.agentAttentionRequest.updateMany({
+        where: { id: attention_request_id, agentId: agent.id, userId, userResponse: null },
         data: { userResponse },
       });
-
-      log.info('Resolved attention request', {
-        phase: 'reply',
-        requestId: attention_request_id,
-        reject: !!reject,
-      });
+      attentionResolved = resolved.count > 0;
+      if (!attentionResolved) {
+        log.warn('Attention request not resolved: not owned by this agent/user', {
+          phase: 'reply',
+          requestId: attention_request_id,
+          agentId: agent.id,
+        });
+      } else {
+        log.info('Resolved attention request', {
+          phase: 'reply',
+          requestId: attention_request_id,
+          reject: !!reject,
+        });
+      }
     } catch (error) {
       log.warn('Failed to resolve attention request', {
         phase: 'reply',
@@ -522,11 +559,17 @@ async function commitReplyToAgent(
     }
   }
 
-  const action = attention_request_id
-    ? reject
-      ? 'Rejected request and replied to'
-      : 'Approved request and replied to'
-    : 'Replied to';
+  // Only claim the approve/reject happened when a row actually changed. The
+  // message IS delivered either way, so this stays a success — but reporting
+  // "Approved request" for an unowned or already-resolved id would tell the
+  // operator a decision landed that never did.
+  const action = !attention_request_id
+    ? 'Replied to'
+    : attentionResolved
+      ? reject
+        ? 'Rejected request and replied to'
+        : 'Approved request and replied to'
+      : 'Replied to (request was already resolved or not found for)';
   return {
     tool: 'reply_to_agent',
     success: true,
@@ -586,8 +629,41 @@ async function commitIncreaseBudget(
     };
   }
 
+  // Reject non-finite input FIRST and by name. `Math.round(NaN)` is `NaN` and
+  // `NaN < 1` is false, so a non-numeric or Infinite amount slips past the
+  // sub-cent guard below and is only caught by the safe-integer check further
+  // down — which reports "exceeds the maximum" for an input that was never a
+  // number, sending the user chasing a limit that is not the problem.
+  if (!Number.isFinite(amount_dollars)) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase amount must be a number, got ${JSON.stringify(amount_dollars)}`,
+    };
+  }
+
+  // A sub-cent amount rounds to 0 and would report an increase that never
+  // happened; an enormous one overflows the Prisma `Int` column and throws
+  // AFTER the SMS commit gate.
   const addCents = Math.round(amount_dollars * 100);
+  if (addCents < 1) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Increase of $${amount_dollars} rounds to $0.00; use at least $0.01`,
+    };
+  }
   const newLimitCents = agent.priceLimitCents + addCents;
+  if (!Number.isSafeInteger(newLimitCents) || newLimitCents > MAX_PRICE_LIMIT_CENTS) {
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error: `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
 
   log.info('Increasing budget', {
     phase: 'budget',
@@ -598,11 +674,46 @@ async function commitIncreaseBudget(
     treeCostCents: agent.treeCostCents,
   });
 
-  // Update the agent's price limit
-  await prisma.agent.update({
-    where: { id: agent.id },
-    data: { priceLimitCents: newLimitCents },
-  });
+  // Atomic conditional increment. A read-then-write loses a concurrent increase:
+  // two commits read the same priceLimitCents and the last update overwrites the
+  // other. `commitPendingWrites` only serializes within one invocation, so the
+  // ceiling check and the increment must happen in the same database write.
+  // `deletedAt: null` must be re-asserted here, not just in the lookup above: a
+  // delete landing between the two would otherwise raise a deleted agent's
+  // budget and report success.
+  // `RETURNING` (rather than updateMany + a follow-up read) so the guard, the
+  // increment, and the value we report all come from ONE statement. Reporting
+  // the pre-read `newLimitCents` would understate the budget whenever a
+  // concurrent increase commits first — and the Temporal signal below would
+  // then resume the workflow on a lower limit than the row actually holds.
+  const bumpedRows = await prisma.$queryRaw<Array<{ priceLimitCents: number }>>`
+    UPDATE "Agent"
+    SET "priceLimitCents" = "priceLimitCents" + ${addCents}
+    WHERE "id" = ${agent.id}
+      AND "deletedAt" IS NULL
+      AND "priceLimitCents" <= ${MAX_PRICE_LIMIT_CENTS - addCents}
+    RETURNING "priceLimitCents"
+  `;
+  if (bumpedRows.length === 0) {
+    // Zero rows means the ceiling predicate OR the liveness predicate failed;
+    // re-read to report the accurate reason instead of always blaming the cap.
+    const current = await prisma.agent.findFirst({
+      where: { id: agent.id, deletedAt: null },
+      select: { id: true },
+    });
+    return {
+      tool: 'increase_budget',
+      success: false,
+      result: '',
+      error:
+        current === null
+          ? 'Agent no longer exists'
+          : `Resulting budget exceeds the $${(MAX_PRICE_LIMIT_CENTS / 100).toFixed(2)} maximum`,
+    };
+  }
+
+  // The authoritative committed limit, not the pre-read projection.
+  const committedLimitCents = bumpedRows[0].priceLimitCents;
 
   // If agent was cost-limited, signal workflow to resume
   if (agent.status === 'COST_LIMIT_REACHED' && agent.temporalWorkflowId) {
@@ -610,12 +721,12 @@ async function commitIncreaseBudget(
       const client = await getTemporalClient();
       const handle = client.workflow.getHandle(agent.temporalWorkflowId);
       await handle.signal('price_limit_increased', {
-        new_limit_cents: newLimitCents,
+        new_limit_cents: committedLimitCents,
       });
       log.info('Signaled price_limit_increased', {
         phase: 'budget',
         workflowId: agent.temporalWorkflowId,
-        newLimitCents,
+        newLimitCents: committedLimitCents,
       });
     } catch (error) {
       log.error('Failed to signal workflow', {
@@ -629,7 +740,7 @@ async function commitIncreaseBudget(
   return {
     tool: 'increase_budget',
     success: true,
-    result: `Budget increased to $${(newLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
+    result: `Budget increased to $${(committedLimitCents / 100).toFixed(2)} for [${agent.id.substring(0, 6)}] "${formatTaskLabel(agent.goal)}"${agent.status === 'COST_LIMIT_REACHED' ? ' — agent resuming' : ''}`,
   };
 }
 

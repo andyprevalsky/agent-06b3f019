@@ -131,13 +131,34 @@ export async function runCrossProviderRotationLadder(
     retrieveSteelBrowser,
   } = options;
 
+  // Steel create is flaky under parallel blackbox load; retry the Kernel→Steel
+  // switch on transient connection failures (server already retries create).
+  const postWithSteelConnectionRetry = async (
+    path: string,
+    body?: unknown
+  ): Promise<RotationResponse> =>
+    retryWithBackoff(() => post(path, body), {
+      maxRetries: 3,
+      fixedDelays: [1_000, 2_000],
+      isRetryable: (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        return (
+          message.includes('Failed to create Steel replacement') ||
+          message.includes('Connection error')
+        );
+      },
+      component: 'browser-provider:steel-switch',
+    });
+
   let switched: RotationResponse;
   try {
-    switched = await post('/rotate-proxy', {
+    switched = await postWithSteelConnectionRetry('/rotate-proxy', {
       task_id: taskId,
       current_url: 'https://example.com/provider-switch-check',
     });
   } catch (error) {
+    // Retries exhausted. If Steel's infra is genuinely down (not a transient
+    // blip), skip the Steel legs instead of failing while Kernel is healthy.
     if (isSteelProvisioningOutage(error)) {
       throw new SteelProviderUnavailableError(
         `Kernel→Steel switch (call 3) could not provision a Steel session: ${

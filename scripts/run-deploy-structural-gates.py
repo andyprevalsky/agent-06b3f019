@@ -77,6 +77,10 @@ GATES = (
         "run-public-tunnel-routing",
         ("bash", "scripts/tests/run-public-tunnel-routing.test.sh"),
     ),
+    Gate(
+        "setup-db-concurrency",
+        ("bash", "scripts/tests/setup-db-concurrency.test.sh"),
+    ),
 )
 
 

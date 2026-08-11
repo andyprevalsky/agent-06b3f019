@@ -14,6 +14,8 @@ RUN_SH="$RUN_SH" python3 - <<'PY'
 import os
 from pathlib import Path
 
+# Resolve from the caller, not a hardcoded /workspace: that path only exists in
+# the container image, so this gate failed on every developer machine.
 text = Path(os.environ["RUN_SH"]).read_text()
 idx = text.find('for pattern in "worker\\.py"')
 if idx < 0:

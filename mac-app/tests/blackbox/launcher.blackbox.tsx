@@ -438,6 +438,47 @@ describe('launcher blackbox', () => {
     );
   });
 
+  it('notifies main of file-drag even when dragover types are empty/unknown', async () => {
+    // Repro: macOS screenshot thumbnail can deliver dragover with no advertised
+    // types until drop. Main must still cancel blur-hide or the pill vanishes
+    // mid-drag while the cursor is already over the launcher.
+    const ipc = installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const target = screen.getByTestId('launcher-drop-target');
+    fireEvent.dragOver(target, {
+      dataTransfer: { types: [], files: [], dropEffect: 'none' },
+    });
+
+    expect(ipc.setQuickQueryFileDrag).toHaveBeenCalledWith({ active: true });
+    // Unknown types: claim the drop for main, but do not show the file overlay.
+    expect(screen.queryByTestId('launcher-drag-overlay')).not.toBeInTheDocument();
+  });
+
+  it('attaches screenshot drops that only expose File via items.getAsFile', async () => {
+    // Repro: files[] empty on drop; only DataTransferItem.getAsFile() returns
+    // the Screen Shot.png. Old handler ignored the drop entirely.
+    installLauncherIpc();
+    const tree = await loadLauncherTree();
+    render(<>{tree}</>);
+
+    const shot = makeDropFile('Screen Shot.png', 'png-bytes', 'image/png');
+    const target = screen.getByTestId('launcher-drop-target');
+    fireEvent.drop(target, {
+      dataTransfer: {
+        types: ['text/uri-list'],
+        files: [],
+        items: [{ kind: 'file', type: shot.type, getAsFile: () => shot }],
+        getData: () => '',
+      },
+    });
+
+    expect(await screen.findByTestId('launcher-attachment-chip')).toHaveTextContent(
+      'Screen Shot.png'
+    );
+  });
+
   it('keeps a hittable window surface so transparent pixels do not pass OS drags through', async () => {
     installLauncherIpc();
     const tree = await loadLauncherTree();

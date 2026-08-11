@@ -179,6 +179,7 @@ require_text "$DEPLOY_COMMAND" 'deploy stage-start runtime-blackbox' "/deploy mu
 require_text "$DEPLOY_COMMAND" 'deploy stage-finish runtime-blackbox' "/deploy must record the shared runtime-blackbox finish boundary"
 require_text "$DEPLOY_COMMAND" 'Claude Code task correctness remains hard-gated; only its repeatable prompt-cache telemetry floor is warn-only' "/deploy must document the narrow Claude Code cache-ratchet skip"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_CLAUDE_CODE_CACHE_RATCHET_WARN_ONLY=1' "local predeploy smoke must wire the narrow Claude Code cache-ratchet skip"
+require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_ALLOW_CLAUDE_CODE_CREDENTIAL_SKIP=1' "local predeploy smoke must allow Claude Code credential SKIP when the pool is rate-limited (infra-fix deploys)"
 require_text "$RUN_PREDEPLOY_LOCAL" 'BENCHMARK_COMPUTE_TOKEN_TYPE=claude' "local predeploy smoke must pin one provider for repeatable cache measurement"
 require_text "$RUN_PREDEPLOY_LOCAL" 'unset FAST_MODE_CACHE_DATABASE_URL' "local predeploy smoke must reject an inherited remote fast-cache database"
 require_text "$RUN_PREDEPLOY_LOCAL" 'FAST_MODE_CACHE_USE_LOCAL=1 \' "local predeploy smoke must isolate fast-cache schema startup from the production pooler"

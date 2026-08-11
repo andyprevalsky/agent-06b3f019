@@ -413,10 +413,106 @@ process_cwd_in_this_worktree() {
 
 kill_stale_tree() {
     local pid=$1
+    # Recheck EVERY pid, not just the entry point. A stale matching parent must
+    # not take an active isolated benchmark's descendant down with it.
+    if pid_belongs_to_active_isolated_benchmark "$pid"; then
+        echo "⏭️  Preserving ACTIVE isolated benchmark descendant (PID $pid)"
+        return 0
+    fi
     for child in $(pgrep -P "$pid" 2>/dev/null); do
         kill_stale_tree "$child"
     done
     kill "$pid" 2>/dev/null || true
+}
+
+# An isolated benchmark lane (run-bench --local / run-predeploy-local) records a
+# live manifest at .context/benchmarks/<run-id>/services.json. "Stale" GC must
+# never reap one of those while it is RUNNING: doing so SIGTERMs an in-flight
+# smoke/agentcard lane and the deploy reports `run.sh exited early with code -15`
+# with no hint that a sibling stack killed it. Returns 0 when the pid belongs to
+# a live isolated run.
+pid_belongs_to_active_isolated_benchmark() {
+    local pid=$1
+    # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
+    # recurses into descendants. A child of an ACTIVE isolated run must be just
+    # as protected as its root, or the recursive pass kills the live stack.
+    local probe="$pid" hops=0
+    while [ -n "$probe" ] && [ "$probe" != "0" ] && [ "$probe" != "1" ] && [ "$hops" -lt 12 ]; do
+        local manifest
+        for manifest in "$PWD"/.context/benchmarks/*/services.json; do
+            [ -f "$manifest" ] || continue
+            PID="$probe" MANIFEST="$manifest" python3 - <<'PYEOF' && return 0
+import json, os, sys
+
+# Only `starting` and `running` are live; run.sh emits nothing else that means
+# "in flight". A malformed manifest is a NON-match, never a reason to preserve
+# a stale pid — and it must not raise outside the parse guard.
+try:
+    with open(os.environ["MANIFEST"]) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+if not isinstance(data, dict):
+    sys.exit(1)
+if str(data.get("status", "")).strip().lower() not in {"starting", "running"}:
+    sys.exit(1)
+
+def valid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+pids = set()
+if valid(data.get("run_sh_pid")):
+    pids.add(data["run_sh_pid"])
+for service in data.get("services") or []:
+    if isinstance(service, dict) and valid(service.get("pid")):
+        pids.add(service["pid"])
+try:
+    probe = int(os.environ["PID"])
+except (TypeError, ValueError):
+    sys.exit(1)
+sys.exit(0 if probe in pids else 1)
+PYEOF
+        done
+        probe=$(ps -p "$probe" -o ppid= 2>/dev/null | tr -d ' ')
+        hops=$((hops + 1))
+    done
+
+    # Publication race: the isolated runner execs run.sh BEFORE it writes
+    # services.json, so a just-started stack has no manifest to match yet.
+    # Treat very young processes as owned rather than racing them to SIGTERM.
+    local age grace
+    age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
+    # Fall back to the default on any non-integer override. An arithmetic error
+    # here would return "not owned" and let cleanup kill a just-started run
+    # before it publishes services.json — fail toward preserving the stack.
+    grace="${BENCHMARK_STARTUP_GRACE_SECONDS:-90}"
+    # Bound before ANY numeric use. An all-digits string still breaks this
+    # function two ways: a leading-zero value ("0000000008") is invalid octal to
+    # the $(( )) below, and a value near the integer ceiling overflows
+    # `grace + 59`. Either one disables the young-process guard that stops
+    # cleanup from killing a benchmark which has not yet published
+    # services.json. Cap at 5 digits (~27h), far above any real bootstrap.
+    if [[ ! "$grace" =~ ^(0|[1-9][0-9]{0,4})$ ]]; then
+        grace=90
+    fi
+    [ -n "$age" ] && [ "$age" -lt "$grace" ] || return 1
+
+    # Young alone is not enough. An unqualified age check ALSO preserves a
+    # non-isolated benchmark that has no manifest and never will, so the next
+    # run inherits its workers and dies on occupied ports. Require evidence of
+    # a real in-flight isolated bootstrap: a run directory that exists but has
+    # not published services.json yet. `-mmin` is portable across BSD/GNU find;
+    # round the grace up to whole minutes.
+    local grace_min rundir
+    grace_min=$(( (grace + 59) / 60 ))
+    while IFS= read -r rundir; do
+        [ -n "$rundir" ] || continue
+        [ -f "$rundir/services.json" ] && continue
+        return 0
+    done <<EOF
+$(find "$PWD/.context/benchmarks" -maxdepth 1 -mindepth 1 -type d -mmin "-$grace_min" 2>/dev/null)
+EOF
+    return 1
 }
 
 kill_stale_same_worktree_benchmark_stack() {
@@ -431,6 +527,10 @@ kill_stale_same_worktree_benchmark_stack() {
         local cmd
         cmd=$(ps -p "$pid" -o command= 2>/dev/null) || true
         if echo "$cmd" | grep -q "$PWD" || process_cwd_in_this_worktree "$pid"; then
+            if pid_belongs_to_active_isolated_benchmark "$pid"; then
+                echo "⏭️  Leaving ACTIVE isolated benchmark process alone (PID $pid)"
+                continue
+            fi
             echo "🧹 Killing stale benchmark process from this worktree (PID $pid)"
             kill_stale_tree "$pid"
             killed_any=true
@@ -442,7 +542,8 @@ kill_stale_same_worktree_benchmark_stack() {
         for pid in $(pgrep -f "$pattern" 2>/dev/null); do
             [ "$pid" = "$$" ] && continue
             is_current_process_family "$pid" && continue
-            if process_cwd_in_this_worktree "$pid"; then
+            if process_cwd_in_this_worktree "$pid" &&
+                ! pid_belongs_to_active_isolated_benchmark "$pid"; then
                 kill -9 "$pid" 2>/dev/null || true
             fi
         done
@@ -834,7 +935,10 @@ _SCHEMA_HASH="$( (shasum back-end/prisma/schema.prisma 2>/dev/null || sha1sum ba
 # than clobber each other.
 _SEED_DUMP_CLIENT_MAJOR="$(
     if [ "${USE_SYSTEM_PG:-false}" = "true" ]; then
-        pg_dump --version 2>/dev/null | sed -E 's/.*[^0-9]([0-9]+)\.[0-9]+.*/\1/'
+        # Anchor at the first X.Y in the string. The Ubuntu package suffix
+        # (e.g. "16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)") contains a later
+        # "24.04" that a greedy "last X.Y" sed mistakenly treats as the major.
+        pg_dump --version 2>/dev/null | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/'
     else
         echo 16 # the pinned postgres:16-alpine container below writes the archive
     fi

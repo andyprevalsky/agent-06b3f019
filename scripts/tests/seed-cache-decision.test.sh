@@ -89,6 +89,23 @@ if grep -q 'BENCHMARK_PUBLISH_SEED_DUMP' "$ROOT_DIR/scripts/run.sh"; then
 else
     FAIL=$((FAIL+1)); echo "  ❌ canonical base publication is not explicitly gated"
 fi
+# Ubuntu's `pg_dump --version` ends with "...24.04.1)"; a greedy "last X.Y" sed
+# extracts 04 and looks up a nonexistent pg04 cache token. Anchor at the first
+# version number so system-PG hosts keep matching the pg16 (or real major) artifact.
+_PG_MAJOR_SED="$(printf '%s\n' 'pg_dump (PostgreSQL) 16.14 (Ubuntu 16.14-0ubuntu0.24.04.1)' \
+  | sed -E 's/^[^0-9]*([0-9]+)\..*/\1/')"
+if [ "$_PG_MAJOR_SED" = "16" ] \
+  && grep -q "s/^\\[^0-9\\]*(\\([0-9]\\+\\))\\\\..*/\\\\1/" "$ROOT_DIR/scripts/run.sh"; then
+    PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+else
+    # Prefer the literal sed source form used in run.sh.
+    if [ "$_PG_MAJOR_SED" = "16" ] \
+      && grep -F "s/^[^0-9]*([0-9]+)\\..*/\\1/" "$ROOT_DIR/scripts/run.sh"; then
+      PASS=$((PASS+1)); echo "  ✅ system pg_dump major parsing anchors at the first X.Y (not Ubuntu 24.04)"
+    else
+      FAIL=$((FAIL+1)); echo "  ❌ system pg_dump major parsing still vulnerable to Ubuntu package suffix (got '${_PG_MAJOR_SED}')"
+    fi
+fi
 
 echo
 echo "backend_ready_budget — warm-restored boxes must get the same startup budget"
@@ -286,6 +303,54 @@ if [ "$FAILED_PUBLISH_STATUS" -ne 0 ] \
     PASS=$((PASS+1)); echo "  ✅ failed publication preserves the prior pair and releases lock/temp state"
 else
     FAIL=$((FAIL+1)); echo "  ❌ failed publication corrupted state or leaked lock/temp files"
+fi
+
+# System-Postgres materialize path (Cloud: ROSE_USE_SYSTEM_PG / Docker overlay
+# mount failures). Must dump via host pg_dump, not docker exec.
+rm -f "$EXPECTED_PATH" "${EXPECTED_PATH}.schemahash"
+printf '%s\n' \
+    '#!/bin/sh' \
+    'printf "%s\n" "$*" >> "$SEED_DUMP_TEST_LOG"' \
+    'printf "seed-dump-from-system-pg\n"' \
+    > "$FAKE_BIN/pg_dump"
+chmod +x "$FAKE_BIN/pg_dump"
+: > "${SEED_DUMP_TEST_LOG:=$TMP/system-pg-dump.log}"
+export SEED_DUMP_TEST_LOG
+set +e
+SYSTEM_MATERIALIZED_PATH="$(
+    PATH="$FAKE_BIN:$PATH" bash "$SEED_CLI" materialize \
+        "$SCHEMA_FILE" "$LOCAL_CACHE" system 20260723
+)"
+SYSTEM_MATERIALIZE_STATUS=$?
+set -e
+if [ "$SYSTEM_MATERIALIZE_STATUS" -eq 0 ] \
+   && [ "$SYSTEM_MATERIALIZED_PATH" = "$EXPECTED_PATH" ] \
+   && [ "$(cat "$EXPECTED_PATH" 2>/dev/null)" = "seed-dump-from-system-pg" ] \
+   && grep -q -- '-h localhost -p 5432 -U postgres -Fc victoria' "$SEED_DUMP_TEST_LOG"; then
+    PASS=$((PASS+1)); echo "  ✅ system token materializes via host pg_dump (no Docker)"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ system materialize path failed: status=$SYSTEM_MATERIALIZE_STATUS path='$SYSTEM_MATERIALIZED_PATH'"
+fi
+
+# setup-db.sh must support ROSE_USE_SYSTEM_PG and pass "system" to materialize.
+SETUP_DB="$ROOT_DIR/scripts/setup-db.sh"
+if grep -q 'ROSE_USE_SYSTEM_PG' "$SETUP_DB" \
+   && grep -q 'SEED_DUMP_SOURCE="system"' "$SETUP_DB" \
+   && grep -q 'use_system_postgres' "$SETUP_DB"; then
+    PASS=$((PASS+1)); echo "  ✅ setup-db.sh owns the system-Postgres sync path"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ setup-db.sh missing ROSE_USE_SYSTEM_PG / system seed source wiring"
+fi
+
+# Fleet must fail closed before provisioning when the cloud-guest (pg15)
+# canonical seed dump is missing — otherwise every clone dies at the barrier.
+FLEET="$ROOT_DIR/scripts/run-bench-fleet"
+if grep -q 'CLOUDBENCH_GUEST_PG_MAJOR' "$FLEET" \
+   && grep -q 'Missing canonical base fixture for cloud guests' "$FLEET" \
+   && grep -q 'seed-dump-cache.ts get' "$FLEET"; then
+    PASS=$((PASS+1)); echo "  ✅ run-bench-fleet preflights the cloud-guest pg major seed dump"
+else
+    FAIL=$((FAIL+1)); echo "  ❌ run-bench-fleet missing cloud-guest canonical seed-dump preflight"
 fi
 
 echo "RESULTS: $PASS passed, $FAIL failed"

@@ -15,8 +15,13 @@ import {
   resizeQuickQueryWindow,
 } from './quickQueryGeometry';
 
-/** Delay blur→hide so Finder/screenshot file-drags can re-enter the window. */
-export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 500;
+/**
+ * Delay blur→hide so Finder/screenshot file-drags can re-enter the window.
+ * Screenshot thumbnails often spawn in a screen corner; dragging from there to
+ * the bottom-center launcher routinely takes multiple seconds. 500ms was too
+ * short and hid the pill before dragover could cancel the hide.
+ */
+export const QUICK_QUERY_BLUR_HIDE_DELAY_MS = 5_000;
 
 interface QuickQueryControllerOptions {
   getMainWindow: () => BrowserWindow | null;
@@ -204,6 +209,9 @@ export class QuickQueryController {
     if (!active) return;
 
     this.cancelBlurHide();
+    // Stop focus steals mid-drag — synthetic center-clicks can hit the
+    // paperclip and open Finder while the screenshot thumbnail is in flight.
+    this.clearFocusTimeouts();
     const quickWindow = this.quickQueryWindow;
     if (quickWindow === null || quickWindow.isDestroyed()) return;
 

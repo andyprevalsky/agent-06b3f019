@@ -510,4 +510,43 @@ export async function getWorkflowStatus(
     return null;
   }
 }
+
+/**
+ * Reconcile a workflow whose start outcome is AMBIGUOUS.
+ *
+ * `getWorkflowStatus` collapses "no such workflow" and "the describe call
+ * failed" into a single `null`, which is unsafe for a caller deciding whether
+ * to mark an agent FAILED: a transient Temporal error would bury a workflow
+ * that is actually running. This returns a discriminated result so
+ * `lookup_failed` can be treated as "unknown, stay retryable" rather than
+ * "absent".
+ */
+export type WorkflowReconciliation =
+  | { kind: 'live'; status: string; runId: string }
+  | { kind: 'terminal'; status: string }
+  | { kind: 'absent' }
+  | { kind: 'lookup_failed'; error: string };
+
+const LIVE_WORKFLOW_STATUSES = new Set(['RUNNING', 'CONTINUED_AS_NEW']);
+
+export async function reconcileWorkflowStart(workflowId: string): Promise<WorkflowReconciliation> {
+  try {
+    const client = await getTemporalClient();
+    // Bounded like every other control-plane RPC in this file. This runs on the
+    // SMS supervisor commit path, so an unbounded describe() against a wedged
+    // Temporal frontend would hang the user's reply rather than degrade. A
+    // deadline error falls through to `lookup_failed` below, which callers
+    // already treat as "unknown — do not mark the agent FAILED".
+    const description = await withTemporalControlDeadline(client, () =>
+      client.workflow.getHandle(workflowId).describe()
+    );
+    const status = description.status.name;
+    return LIVE_WORKFLOW_STATUSES.has(status)
+      ? { kind: 'live', status, runId: description.runId }
+      : { kind: 'terminal', status };
+  } catch (error) {
+    if (error instanceof WorkflowNotFoundError) return { kind: 'absent' };
+    return { kind: 'lookup_failed', error: error instanceof Error ? error.message : String(error) };
+  }
+}
 /* c8 ignore stop */

@@ -644,25 +644,48 @@ async function inspectGptCodeIntegrations(): Promise<GptCodeAvailability> {
   return { usable, rateLimited };
 }
 
-async function countUsableClaudeCodeIntegrations(): Promise<number> {
+interface ClaudeCodeAvailability {
+  // Connected, credentialed, bench-available, and NOT currently rate-limited.
+  usable: number;
+  // Connected, credentialed, bench-available, but throttled (rateLimitedUntil in
+  // the future) — present but temporarily blocked by an external quota.
+  rateLimited: number;
+}
+
+async function inspectClaudeCodeIntegrations(): Promise<ClaudeCodeAvailability> {
   const now = new Date();
   const integrations = await local.integration.findMany({
     where: {
       name: 'claude_code',
       status: 'CONNECTED',
-      OR: [{ rateLimitedUntil: null }, { rateLimitedUntil: { lt: now } }],
     },
     select: {
       userId: true,
       poolingEnabled: true,
       config: true,
+      rateLimitedUntil: true,
     },
   });
 
-  return integrations.filter((integration) => {
+  const eligible = integrations.filter((integration) => {
     const isAvailableToBench = integration.userId === DEV_USER_ID || integration.poolingEnabled;
     return isAvailableToBench && hasEncryptedCredentials(integration.config);
-  }).length;
+  });
+
+  let usable = 0;
+  let rateLimited = 0;
+  for (const integration of eligible) {
+    if (integration.rateLimitedUntil !== null && integration.rateLimitedUntil > now) {
+      rateLimited += 1;
+    } else {
+      usable += 1;
+    }
+  }
+  return { usable, rateLimited };
+}
+
+async function countUsableClaudeCodeIntegrations(): Promise<number> {
+  return (await inspectClaudeCodeIntegrations()).usable;
 }
 
 async function syncComputeTokensWithRetries(): Promise<void> {
@@ -672,13 +695,25 @@ async function syncComputeTokensWithRetries(): Promise<void> {
     try {
       const count = await syncIntegrations();
       await poolRequiredDevComputeTokensForSyntheticUsers();
-      const usableClaudeCodeCount = await countUsableClaudeCodeIntegrations();
+      const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
+        await inspectClaudeCodeIntegrations();
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
           console.warn(
             `  ⚠️  Compute Tokens (integrations): ${count} synced, ` +
               '0 usable claude_code — proceeding because this run requires GPT compute only ' +
               '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=gpt)'
+          );
+        } else if (rateLimitedClaudeCodeCount > 0) {
+          // Mirror gpt_code: a claude_code row that EXISTS but is merely
+          // rate-limited is an external-quota transient, not a missing
+          // credential. Infra-fix deploys and non-Claude Code smoke must not
+          // hard-fail the whole compute-token sync on Anthropic's cooldown;
+          // Claude Code tasks still fail closed at their own credential gate.
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable claude_code ` +
+              `(${rateLimitedClaudeCodeCount} present but rate-limited by an external quota) — ` +
+              `proceeding; callers that require Claude Code enforce that separately`
           );
         } else if (process.env.SEED_ALLOW_MISSING_CLAUDE_CODE_FOR_NON_CLAUDE_TASK === '1') {
           console.warn(

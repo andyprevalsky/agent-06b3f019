@@ -231,7 +231,18 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Product or service name"},
+                        "name": {
+                            "type": "string",
+                            "description": (
+                                "Item name shown on the checkout page. When the purchase is tied to a "
+                                "specific date, such as an event or movie ticket, a reservation, a flight, "
+                                "a hotel night, an appointment, or a delivery window, include that date "
+                                "(and the time when the booking is time-specific) in this name, for "
+                                "example 'Spider-Man: Brand New Day - Fri Jul 31, 2026, 7:15pm, Seat A7'. "
+                                "A person approving the charge must be able to see which day they are "
+                                "paying for without opening the merchant page."
+                            ),
+                        },
                         "image_url": {"type": "string", "description": "Product image URL, when visible"},
                         "product_url": {
                             "type": "string",
@@ -332,10 +343,27 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "title": {"type": "string", "description": "Visible item title"},
+                                "title": {
+                                    "type": "string",
+                                    "description": (
+                                        "Visible item title. When the purchase is tied to a specific date, such as an "
+                                        "event or movie ticket, a reservation, a flight, a hotel night, an "
+                                        "appointment, or a delivery window, include that date, and the time when "
+                                        "the booking is time-specific, in the title or the description, for "
+                                        "example 'Spider-Man: Brand New Day - Fri Jul 31, 2026, 7:15pm'. "
+                                        "Someone approving the charge must be able to see which day they are "
+                                        "paying for without opening the merchant page."
+                                    ),
+                                },
                                 "price": {"type": "string", "description": "Visible item price"},
                                 "quantity": {"type": "string", "description": "Visible quantity"},
-                                "description": {"type": "string", "description": "Visible variant details"},
+                                "description": {
+                                    "type": "string",
+                                    "description": (
+                                        "Visible variant details, including the booked date and time for any "
+                                        "date-specific purchase when they are not already in the title."
+                                    ),
+                                },
                                 "rating": {"type": "string", "description": "Required numeric rating"},
                                 "review_count": {
                                     "type": "string",

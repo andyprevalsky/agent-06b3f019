@@ -39,6 +39,7 @@ RUNTIME_STATIC_CHECK_TYPES = {
     "agent_status",
     "approval_request_count",
     "approval_request_details",
+    "approval_request_details_by_kind",
     "browser_agent_session_count",
     "completion_sms_event",
     "completion_summary_length",
@@ -143,6 +144,21 @@ def _validate_environment(env: dict[str, Any], item_id: str) -> dict[str, Any]:
     cookie_domains = env.get("live_cookie_domains")
     if cookie_domains is not None:
         _require_string_list(env, "live_cookie_domains", item_id, allow_empty=False)
+    # A separate declaration identifies domains where an injectable cookie
+    # bundle is a fixture prerequisite. Keeping this distinct from
+    # live_cookie_domains lets public/guest checkout tasks retain the fast scoped
+    # sync without turning a missing CookieBundle into an unrelated failure.
+    required_cookie_domains = env.get("required_injectable_cookie_domains")
+    if required_cookie_domains is not None:
+        _require_string_list(env, "required_injectable_cookie_domains", item_id, allow_empty=False)
+        synced_domains = set(cookie_domains or [])
+        required_domains = set(required_cookie_domains)
+        if not required_domains.issubset(synced_domains):
+            missing = sorted(required_domains - synced_domains)
+            raise ValueError(
+                f"{item_id}: required_injectable_cookie_domains must be a subset of "
+                f"live_cookie_domains; missing from sync scope: {missing}"
+            )
     return env
 
 

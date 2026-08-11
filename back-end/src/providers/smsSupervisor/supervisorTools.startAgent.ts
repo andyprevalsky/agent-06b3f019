@@ -4,7 +4,7 @@
  */
 
 import { prisma, runTransactionWithRetry } from '../database';
-import { startAgentWorkflow } from '../temporal';
+import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
 import type { SupervisorChannel } from './channelDelivery';
@@ -44,7 +44,7 @@ export async function commitStartNewAgent(
     priceLimitCents,
   });
 
-  let agent;
+  let agent: { id: string } | undefined;
   try {
     agent = await runTransactionWithRetry(async (tx) => {
       const newAgent = await tx.agent.create({
@@ -91,20 +91,58 @@ export async function commitStartNewAgent(
       'code' in error &&
       (error as { code: string }).code === 'P2002'
     ) {
-      log.info('start_new_agent commit already done (PK collision)', { provisionalId });
-      return {
-        tool: 'start_new_agent',
-        success: true,
-        result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
-      };
+      // P2002 names neither the model nor the constraint, and this transaction
+      // creates Agent, Verifier and Message. A collision on any of them rolls
+      // the whole transaction back, so reporting success here could hand the
+      // user a tracking link for an agent that does not exist.
+      const existing = await prisma.agent.findUnique({
+        where: { id: provisionalId },
+        select: { id: true, temporalWorkflowId: true, status: true },
+      });
+      if (!existing) {
+        log.error('start_new_agent P2002 without a committed agent row', { provisionalId });
+        throw error;
+      }
+      // The row existing is not the same as the agent RUNNING. If the previous
+      // attempt committed the transaction and died before startAgentWorkflow,
+      // the agent sits in STARTING_UP with no temporalWorkflowId forever. Fall
+      // through and (re)start the workflow rather than reporting success for an
+      // agent nothing is driving; startAgentWorkflow is itself idempotent on
+      // workflow id.
+      if (
+        existing.temporalWorkflowId === null ||
+        existing.temporalWorkflowId === undefined ||
+        existing.temporalWorkflowId === ''
+      ) {
+        log.warn('start_new_agent found a committed agent with no workflow; resuming startup', {
+          provisionalId,
+          status: existing.status,
+        });
+        // Adopt the committed row so the workflow start below drives the agent
+        // that actually exists.
+        agent = { id: existing.id };
+      } else {
+        log.info('start_new_agent commit already done (PK collision)', { provisionalId });
+        return {
+          tool: 'start_new_agent',
+          success: true,
+          result: `Agent [${provisionalId.substring(0, 6)}] already started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(provisionalId)}`,
+        };
+      }
+    } else {
+      throw error;
     }
-    throw error;
   }
+
+  if (!agent) {
+    throw new Error(`start_new_agent could not resolve an agent row for ${provisionalId}`);
+  }
+  const startedAgent = agent;
 
   // Start Temporal workflow
   try {
     const workflowId = await startAgentWorkflow({
-      agentId: agent.id,
+      agentId: startedAgent.id,
       userId,
       goal,
       model: 'rose-labs/rose-1-lite',
@@ -116,23 +154,69 @@ export async function commitStartNewAgent(
     });
 
     await prisma.agent.update({
-      where: { id: agent.id },
+      where: { id: startedAgent.id },
       data: { temporalWorkflowId: workflowId },
     });
 
     log.info('Agent created and workflow started', {
       phase: 'start',
-      agentId: agent.id,
-      prefix: agent.id.substring(0, 6),
+      agentId: startedAgent.id,
+      prefix: startedAgent.id.substring(0, 6),
       workflowId,
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
     log.error('Failed to start workflow', {
       phase: 'start',
-      agentId: agent.id,
+      agentId: startedAgent.id,
       error: errorMsg,
     });
+
+    // The start is AMBIGUOUS, not necessarily failed: Temporal may have accepted
+    // the workflow and the throw happened afterwards (response lost, or the
+    // follow-up row write failed). The workflow id IS the agent id, so ask
+    // Temporal before declaring failure — otherwise a live workflow keeps
+    // running against an agent row marked FAILED.
+    const reconciled = await reconcileWorkflowStart(startedAgent.id);
+    if (reconciled.kind === 'live') {
+      log.warn('Workflow start reported an error but the workflow is live; adopting it', {
+        phase: 'start',
+        agentId: startedAgent.id,
+        workflowStatus: reconciled.status,
+        error: errorMsg,
+      });
+      await prisma.agent.update({
+        where: { id: startedAgent.id },
+        data: { temporalWorkflowId: startedAgent.id },
+      });
+      return {
+        tool: 'start_new_agent',
+        success: true,
+        result: `Agent [${agent.id.substring(0, 6)}] started: "${goal.substring(0, 60)}"\nTrack: ${getAgentUrl(agent.id)}`,
+      };
+    }
+
+    // A failed LOOKUP is not evidence of absence. Writing FAILED here would
+    // bury a workflow that is actually running behind a transient Temporal
+    // error, which is the same orphan this reconciliation exists to prevent.
+    // Leave the agent's status untouched so startup stays retryable.
+    if (reconciled.kind === 'lookup_failed') {
+      log.error('Workflow start outcome is indeterminate; leaving agent status unchanged', {
+        phase: 'start',
+        agentId: startedAgent.id,
+        startError: errorMsg,
+        lookupError: reconciled.error,
+      });
+      return {
+        tool: 'start_new_agent',
+        success: false,
+        result: '',
+        error:
+          `Could not confirm whether agent [${agent.id.substring(0, 6)}] started ` +
+          `(Temporal lookup failed: ${reconciled.error}). Left pending rather than ` +
+          `marked failed; check its status before retrying.`,
+      };
+    }
 
     await prisma.agent.update({
       where: { id: agent.id },

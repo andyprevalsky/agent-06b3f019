@@ -68,6 +68,9 @@ async function main(): Promise<void> {
       expiry: '12/30',
       spendLimitCents: 2500,
       status: 'ACTIVE',
+      pan: '4242424242424242',
+      cvv: '123',
+      balanceCents: 2500,
     });
     assert.deepStrictEqual(
       calls.map((call) => [call.userId, call.name, call.args]),
@@ -326,6 +329,29 @@ async function main(): Promise<void> {
         ['user-wallet-text', 'fund_wallet', { amount_cents: 4396, payment_method: 'apple_pay' }],
       ]
     );
+  });
+
+  await test('prefers get_card_details status over stale create_card status', async () => {
+    const provider = new AgentCardUserMcpProvider('user-stale-status', async (_userId, name) => {
+      if (name === 'create_card') {
+        // Incomplete create payload forces getDetails; status here is stale.
+        return toolResult({ card_id: 'card-stale', status: 'ACTIVE' });
+      }
+      if (name === 'get_card_details') {
+        return toolResult({
+          pan: '4111111111111111',
+          cvv: '999',
+          expiry: '12/30',
+          balance_cents: 1000,
+          status: 'CLOSED',
+        });
+      }
+      throw new Error(`unexpected tool ${name}`);
+    });
+
+    const minted = await provider.mintCard({ amountCents: 1000, idempotencyKey: 'idem-stale' });
+    assert.strictEqual(minted.status, 'CLOSED');
+    assert.strictEqual(minted.pan, '4111111111111111');
   });
 
   if (failures.length > 0) {

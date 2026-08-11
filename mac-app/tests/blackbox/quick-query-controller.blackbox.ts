@@ -100,10 +100,21 @@ describe('QuickQueryController file-drag vs blur-hide', () => {
 
     const fileDrag = await ipcHandler('quick-query:file-drag');
     expect(fileDrag).toBeTypeOf('function');
+    // Mid-show focus steals are still pending; file-drag must clear them so a
+    // synthetic click cannot open the paperclip Finder picker during the drag.
+    const jsCallsBefore = win.webContents.executeJavaScript.mock.calls.length;
     fileDrag?.(null, { active: true });
+    await vi.advanceTimersByTimeAsync(1_200);
+    expect(win.webContents.executeJavaScript.mock.calls.length).toBe(jsCallsBefore);
 
-    await vi.advanceTimersByTimeAsync(QUICK_QUERY_BLUR_HIDE_DELAY_MS + 50);
+    await vi.advanceTimersByTimeAsync(QUICK_QUERY_BLUR_HIDE_DELAY_MS);
     expect(win.hide).not.toHaveBeenCalled();
+  });
+
+  it('keeps a multi-second blur grace so screenshot corner→launcher drags can land', () => {
+    // Screenshot thumbnails spawn at a screen edge; 500ms was shorter than a
+    // typical human drag to the bottom-center pill.
+    expect(QUICK_QUERY_BLUR_HIDE_DELAY_MS).toBeGreaterThanOrEqual(5_000);
   });
 
   it('hides on blur after the deferral when no file-drag arrives', async () => {
