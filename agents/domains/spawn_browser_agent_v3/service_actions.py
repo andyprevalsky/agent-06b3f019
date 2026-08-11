@@ -125,6 +125,25 @@ def get_domain_from_url(url: str) -> str:
     try:
         parsed = urlparse(url.lower())
         domain = parsed.netloc
+        if not domain and "://" not in url:
+            # Bare host / domain strings from notification payloads (e.g. "roselabs.ai").
+            # Require a dot so junk like "not-a-url" stays empty.
+            candidate = url.strip().lower()
+            if (
+                candidate
+                and "." in candidate
+                and " " not in candidate
+                and "/" not in candidate
+            ):
+                domain = candidate
+        if "@" in domain:
+            domain = domain.rsplit("@", 1)[-1]
+        if domain.startswith("["):
+            # Leave IPv6 literals alone; strip optional zone only.
+            end = domain.find("]")
+            domain = domain[: end + 1] if end != -1 else domain
+        elif ":" in domain:
+            domain = domain.split(":", 1)[0]
         if domain.startswith("www."):
             domain = domain[4:]
         return domain
@@ -274,11 +293,69 @@ def _get_base_domain(domain: str) -> str:
 # session only. Never copied into a newly spawned browser agent.
 SITE_WRITE_LOCK_APPROVAL_KEY = "site"
 
+# Browser live-view / provider hosts must not become the site-unlock domain —
+# Place order is checked against the real merchant page (e.g. roselabs.ai).
+_BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
+    "onkernel.com",
+    "steel.dev",
+    "browserbase.com",
+    "hyperbrowser.ai",
+)
+
+
+def _is_browser_provider_domain(domain: str) -> bool:
+    if not domain:
+        return True
+    lowered = domain.lower()
+    return any(lowered == suffix or lowered.endswith("." + suffix) for suffix in _BROWSER_PROVIDER_DOMAIN_SUFFIXES)
+
+
+def resolve_site_write_lock_grant_url(result: Optional[Dict]) -> str:
+    """Pick the merchant checkout URL for a payment-card site unlock.
+
+    Prefer payment-request product URLs / write-lock notification service URL over
+    ``current_url``, which on Kernel can be the live-view proxy host. Unlocking the
+    proxy domain would leave Place order on the real merchant site locked.
+    """
+    payload = result if isinstance(result, dict) else {}
+    candidates: list[str] = []
+
+    payment = payload.get("payment_request") or {}
+    if isinstance(payment, dict):
+        line_items = payment.get("line_items") or payment.get("lineItems") or []
+        if isinstance(line_items, list):
+            for item in line_items:
+                if not isinstance(item, dict):
+                    continue
+                product_url = item.get("product_url") or item.get("productUrl")
+                if product_url:
+                    candidates.append(str(product_url))
+
+    notification = payload.get("write_lock_notification") or {}
+    if isinstance(notification, dict):
+        service = notification.get("service") or {}
+        if isinstance(service, dict):
+            if service.get("url"):
+                candidates.append(str(service["url"]))
+            domain = service.get("domain")
+            if domain:
+                candidates.append(f"https://{domain}/")
+
+    current_url = payload.get("current_url")
+    if current_url:
+        candidates.append(str(current_url))
+
+    for url in candidates:
+        domain = get_domain_from_url(url)
+        if domain and not _is_browser_provider_domain(domain):
+            return url
+    return ""
+
 
 def _approval_entry_still_valid(approval: Optional[Dict], current_domain: str) -> bool:
     if not approval or not approval.get("domain") or not approval.get("approved_at"):
         return False
-    if current_domain != approval["domain"]:
+    if not current_domain or current_domain != approval["domain"]:
         return False
     return not time_module.time() - approval["approved_at"] > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 
@@ -312,8 +389,11 @@ def grant_site_write_lock_approvals(
     unlock used by purchase / other write-lock types on the same domain.
     """
     granted = dict(approvals or {})
+    domain = get_domain_from_url(current_url)
+    if not domain or _is_browser_provider_domain(domain):
+        return granted
     entry = {
-        "domain": get_domain_from_url(current_url),
+        "domain": domain,
         "approved_at": approved_at,
     }
     granted["payment"] = entry

@@ -7222,6 +7222,11 @@ def test_get_domain_from_url_variants():
     assert get_domain_from_url("https://www.amazon.com/cart") == "amazon.com"
     assert get_domain_from_url("https://auth.amazon.com/login") == "auth.amazon.com"
     assert get_domain_from_url("not-a-url") == ""
+    assert get_domain_from_url("roselabs.ai") == "roselabs.ai"
+    assert (
+        get_domain_from_url("https://proxy.jfk.onkernel.com:8443/browser/live/abc")
+        == "proxy.jfk.onkernel.com"
+    )
 
 def test_get_base_domain():
     from domains.spawn_browser_agent_v3.service_actions import _get_base_domain
@@ -7305,6 +7310,48 @@ def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
     assert prior is not fresh_session_approvals
     assert is_approval_valid(prior, "purchase", "https://roselabs.ai/test_payment") is True
     assert is_approval_valid(fresh_session_approvals, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url():
+    """H-06 outcome: Kernel live-view current_url must not become the unlock domain."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+        resolve_site_write_lock_grant_url,
+    )
+
+    result = {
+        "current_url": "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        "payment_request": {
+            "line_items": [
+                {
+                    "name": "Agent Card Lifecycle Probe",
+                    "product_url": "https://www.roselabs.ai/p/agentcard-lifecycle-probe",
+                }
+            ]
+        },
+    }
+    grant_url = resolve_site_write_lock_grant_url(result)
+    assert "roselabs.ai" in grant_url
+    assert "onkernel.com" not in grant_url
+    approvals = grant_site_write_lock_approvals({}, grant_url, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    # Proxy-only grant is refused (no merchant domain to unlock).
+    proxy_only = grant_site_write_lock_approvals(
+        {},
+        "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in proxy_only
 
 
 def test_get_element_description_none():
@@ -14772,6 +14819,10 @@ async def run_all_tests():
     r.record(
         "fresh_browser_session_no_site_unlock_inherit",
         test_fresh_browser_session_does_not_inherit_site_write_lock_unlock,
+    )
+    r.record(
+        "site_write_lock_grant_prefers_merchant_over_kernel_proxy",
+        test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url,
     )
     r.record("get_element_description_none", test_get_element_description_none)
     r.record("get_element_description_text", test_get_element_description_with_text)

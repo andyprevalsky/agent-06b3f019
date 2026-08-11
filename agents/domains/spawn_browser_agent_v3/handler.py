@@ -137,6 +137,7 @@ from .service_actions import (
     get_domain_from_url,
     get_element_description,
     grant_site_write_lock_approvals,
+    resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
 )
 from .service_crypto import (
@@ -8843,13 +8844,14 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "card_cvv": card_cvv,
                     }
 
-                    # Payment-card approval unlocks write locks on this checkout
-                    # domain for THIS browser activity only (resume state). A newly
-                    # spawned browser agent starts with empty write_lock_approvals
-                    # and must not inherit this unlock.
+                    # Payment-card approval unlocks write locks on the merchant
+                    # checkout domain for THIS browser activity only (resume state).
+                    # Resolve URL from payment_request / notification first —
+                    # Kernel live-view current_url can be a proxy host, which must
+                    # not become the unlock domain. New spawns start empty.
                     current_approvals = grant_site_write_lock_approvals(
                         result.get("write_lock_approvals", {}),
-                        result.get("current_url", ""),
+                        resolve_site_write_lock_grant_url(result),
                         workflow.now().timestamp(),
                     )
 
