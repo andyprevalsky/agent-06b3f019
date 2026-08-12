@@ -112,6 +112,9 @@ chmod +x "$TMP/bin"/* "$TMP/fake-repo/back-end/scripts/apply-local-workflow-ddl.
 
 run_setup_db() { # run_setup_db <tag> <workspace-name>
   local tag="$1" ws="$2"
+  # Hermetic suite stubs Docker; force ROSE_USE_SYSTEM_PG=false so an inherited
+  # Cloud ROSE_USE_SYSTEM_PG=true cannot divert into the host-Postgres path.
+  # (Do not put comments inside the env\ continuation — they break PATH=.)
   (
     cd "$TMP/fake-repo"
     PATH="$TMP/bin:$PATH" \
@@ -120,6 +123,7 @@ run_setup_db() { # run_setup_db <tag> <workspace-name>
     CONDUCTOR_WORKSPACE_NAME="$ws" \
     CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
     ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    ROSE_USE_SYSTEM_PG=false \
       bash "$TMP/fake-repo/scripts/setup-db.sh" > "$TMP/$tag.out" 2>&1
     printf '%s\n' "$?" > "$TMP/$tag.rc"
   )
@@ -216,5 +220,26 @@ $(cat "$TMP/D.out" 2>/dev/null)"
 # 1800s default cannot pass by eventually failing for some unrelated reason.
 [ "$timeout_elapsed" -lt 30 ] || fail \
   "case 4: waiter took ${timeout_elapsed}s to honor a 4s budget"
+
+# ── Case 5: system-PG lock keys contain '/' and must still acquire ───────────
+# Key shape from setup-db.sh: `system-pg:localhost:5432/victoria`. A naive
+# `$lock_dir/${key}.lock` nests under a missing subdirectory; shlock then fails
+# every claim and waiters hang for the full budget on Cloud VMs.
+mkdir -p "$TMP/locks"
+set +e
+ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+  ROSE_WORKSPACE_DB_LOCK_WAIT_SECONDS=4 \
+  ROSE_WORKSPACE_DB_LOCK_POLL_SECONDS=1 \
+  bash -c '. "$1/lib/workspace-db-lock.sh"; acquire_workspace_db_lock "system-pg:localhost:5432/victoria"' \
+  _ "$ROOT_DIR/scripts" >"$TMP/E.out" 2>&1
+slash_rc=$?
+set -e
+[ "$slash_rc" = "0" ] || fail "case 5: system-PG lock key with '/' failed to acquire (rc=$slash_rc)
+--- E output ---
+$(cat "$TMP/E.out" 2>/dev/null)"
+[ -f "$TMP/locks/system-pg:localhost:5432_victoria.lock" ] || fail \
+  "case 5: expected flattened lock file system-pg:localhost:5432_victoria.lock
+--- locks ---
+$(ls -la "$TMP/locks" 2>/dev/null)"
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"

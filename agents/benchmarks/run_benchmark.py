@@ -10115,11 +10115,14 @@ async def main_async(args):
         print(f"  📊 In-app Benchmark Hub: managed by parent run {parent_hub_run_id}")
     else:
         # Registration is a launch invariant: a benchmark agent must never be
-        # created unless the Mac app's persisted Hub can already resolve this
-        # run. Final save uses the same required contract below via results.py.
-        from benchmarks.hub_upload import DEFAULT_HUB_URL, require_run_visible
+        # created unless the Hub can already resolve this run. Local stacks
+        # register against the stack under test (not prod) so a production
+        # outage cannot deadlock /deploy of the outage fix. Final save uses
+        # the same required contract below via results.py.
+        from benchmarks.hub_upload import require_run_visible, resolve_hub_upload_url
 
-        os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB_URL)
+        if not (os.environ.get("BENCHMARK_HUB_UPLOAD_URL") or "").strip():
+            os.environ["BENCHMARK_HUB_UPLOAD_URL"] = resolve_hub_upload_url(base_url)
         os.environ.setdefault("BENCHMARK_HUB_API_KEY", API_KEY)
         os.environ["BENCHMARK_HUB_REQUIRED"] = "1"
         require_run_visible(

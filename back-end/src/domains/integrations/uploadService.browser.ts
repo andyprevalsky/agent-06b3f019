@@ -17,6 +17,7 @@ import { createLogger } from '../../providers/logger';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
+import { IndexedDBUploadPayloadTooLargeError } from './types';
 const log = createLogger('Integrations');
 const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 
@@ -454,46 +455,51 @@ export async function processLocalStorageUpload(
 }
 
 /**
- * Process IndexedDB upload.
+ * Process IndexedDB upload from an already-parsed payload.
+ *
+ * Prefer {@link ingestIndexedDBUploadJson} on the HTTP ingest path — parsing a
+ * multi-megabyte `databases` blob into a V8 object graph OOMs the production
+ * process (Render crash loop 2026-08-12).
  */
 export async function processIndexedDBUpload(userId: string, indexedDBData: IndexedDBPayload) {
-  const batchInfo = `batch ${indexedDBData.batchIndex + 1}/${indexedDBData.totalBatches}`;
+  return ingestIndexedDBUploadJson(userId, JSON.stringify(indexedDBData));
+}
+
+/** Hard ceiling on decompressed IndexedDB upload JSON (UTF-8 bytes). */
+export const MAX_INDEXEDDB_UPLOAD_JSON_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Ingest an IndexedDB upload from raw JSON text without decoding `databases`
+ * through V8's JSON codec. Postgres stages the document and upserts with
+ * `e->'databases'` server-side — the same bound that fixed seed OOMs on 41MB rows.
+ */
+export async function ingestIndexedDBUploadJson(
+  userId: string,
+  jsonString: string
+): Promise<{ batchIndex: number; totalBatches: number; originCount: number }> {
+  const utf8Bytes = Buffer.byteLength(jsonString, 'utf8');
+  if (utf8Bytes > MAX_INDEXEDDB_UPLOAD_JSON_BYTES) {
+    throw new IndexedDBUploadPayloadTooLargeError(
+      MAX_INDEXEDDB_UPLOAD_JSON_BYTES,
+      utf8Bytes
+    );
+  }
 
   log.info('Received IndexedDB origins', {
-    batchInfo,
-    count: indexedDBData.origins.length,
+    batchInfo: 'ingest',
+    userId,
+    bytes: utf8Bytes,
+  });
+
+  const result = await repo.ingestIndexedDBUploadJsonDocument(userId, jsonString);
+
+  log.info('Upserted IndexedDB origins', {
+    batchInfo: `batch ${result.batchIndex + 1}/${result.totalBatches}`,
+    count: result.originCount,
     userId,
   });
 
-  const origins = indexedDBData.origins.filter((o) => o.error === undefined || o.error === null);
-  if (origins.length > 0) {
-    const values = origins
-      .map(
-        (_origin, i) =>
-          `(gen_random_uuid(), $${i * 4 + 1}, $${i * 4 + 2}, $${i * 4 + 3}::jsonb, $${i * 4 + 4}, NOW())`
-      )
-      .join(', ');
-
-    const params: (string | object)[] = [];
-    for (const origin of origins) {
-      params.push(
-        userId,
-        origin.origin,
-        JSON.stringify(origin.databases),
-        indexedDBData.hashes[origin.origin] ?? ''
-      );
-    }
-
-    await repo.bulkUpsertIndexedDB(values, params);
-  }
-
-  log.info('Upserted IndexedDB origins', { batchInfo, count: origins.length, userId });
-
-  return {
-    batchIndex: indexedDBData.batchIndex,
-    totalBatches: indexedDBData.totalBatches,
-    originCount: origins.length,
-  };
+  return result;
 }
 
 /**
