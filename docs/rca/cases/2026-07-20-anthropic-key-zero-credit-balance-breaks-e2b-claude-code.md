@@ -130,14 +130,27 @@ Code E2B path). Compounded by a dead OAuth pool.
 - `indexedDB upload Zone Allocation failed` (separate relative; fixed in
   `2026-08-12-indexeddb-upload-json-codec-ooms-backend`)
 
-### Open actions (not yet implemented — awaiting approval)
+### Resolution (2026-08-12) — real credential path, not a skip
 
-1. **Billing / OAuth:** top up the Anthropic org behind `ANTHROPIC_API_KEY`
-   and/or mint a fresh Claude Code OAuth envelope into a CONNECTED
-   `claude_code` row (prod + local DEV_USER).
-2. **Harness (optional, mirrors Codex):** early-detect
-   `Credit balance is too low` in
-   `testSmoke_claudeCodeAnswersQuestion` and convert to a loud
-   `CredentialExhaustionSkip` so funding state does not 240s-timeout-block
-   infra deploys; keep bare OAuth-revocation-without-funded-fallback as a
-   hard fail.
+Prod gained a fresh usable `claude_code` OAuth for DEV_USER
+`1f85ff25-…` (access probe HTTP 200; `updatedAt=2026-08-12T11:14:42Z`).
+The previously probed `43c2f6ae-…` row remains revoked. Syncing compute
+tokens from prod into the local DB
+(`SEED_COMPUTE_TOKEN_SOURCE_DATABASE_URL=… seed-local.ts --compute-tokens-only`)
+restored the OAuth envelope; `GET /api/integrations/claude-code/credentials/token`
+returned `sk-ant-oat01-…`. Re-ran the unchanged gate:
+
+```
+PASS  smoke -- Claude Code answers 2+2 (real E2B sandbox) (8589ms)
+Results: 52 passed, 0 failed, 52 total
+```
+
+`ANTHROPIC_API_KEY` is still credit-exhausted (HTTP 400) — the smoke passed
+on OAuth, not the API-key fallback. Case status stays `open` for the shared
+API-key billing debt; this recurrence of the E2B gate is closed by restoring
+a live OAuth envelope, not by skipping the gate.
+
+## Human feedback
+
+2026-08-12: Do not treat “compute tokens are out” as a reason to skip Claude/Codex
+and finish deploy — restore a real usable credential and make the gate pass.
