@@ -13,7 +13,6 @@ import { asyncHandler } from '../../utils/asyncHandler';
 import { UPLOAD_LIMITS, VALID_BROWSERS } from './config';
 import type {
   LocalStoragePayload,
-  IndexedDBPayload,
   CacheStoragePayload,
   PermissionPayload,
   PasswordPayload,
@@ -155,14 +154,11 @@ router.post(
       return res.status(400).json({ error: 'Missing required fields: data, iv, key' });
     }
 
-    let indexedDBData: IndexedDBPayload;
+    // Keep the decompressed JSON as text — JSON.parse of multi-MB `databases`
+    // blobs OOMs the process (Render crash loop / login 502, 2026-08-12).
+    let indexedDBJson: string;
     try {
-      indexedDBData = await service.decryptCompressedPayload<IndexedDBPayload>(
-        data,
-        iv,
-        key,
-        compressed
-      );
+      indexedDBJson = await service.decryptCompressedToUtf8(data, iv, key, compressed);
     } catch (decryptError: unknown) {
       log.error('IndexedDB decryption/decompression failed', {
         error: decryptError instanceof Error ? decryptError.message : String(decryptError),
@@ -170,18 +166,21 @@ router.post(
       return res.status(400).json({ error: 'Failed to decrypt IndexedDB payload' });
     }
 
-    if (
-      indexedDBData.origins === undefined ||
-      indexedDBData.origins === null ||
-      !Array.isArray(indexedDBData.origins)
-    ) {
-      return res.status(400).json({
-        error: 'Invalid IndexedDB payload: expected origins array',
-      });
+    try {
+      const result = await service.ingestIndexedDBUploadJson(userId, indexedDBJson);
+      return res.json({ message: 'IndexedDB batch uploaded', ...result });
+    } catch (ingestError: unknown) {
+      const message = ingestError instanceof Error ? ingestError.message : String(ingestError);
+      if (message.includes('expected origins array')) {
+        return res.status(400).json({
+          error: 'Invalid IndexedDB payload: expected origins array',
+        });
+      }
+      if (message.includes('byte limit')) {
+        return res.status(413).json({ error: message });
+      }
+      throw ingestError;
     }
-
-    const result = await service.processIndexedDBUpload(userId, indexedDBData);
-    return res.json({ message: 'IndexedDB batch uploaded', ...result });
   })
 );
 

@@ -32,6 +32,7 @@ export {
   processCookiesUpload,
   processLocalStorageUpload,
   processIndexedDBUpload,
+  ingestIndexedDBUploadJson,
   processFingerprintUpload,
   processPermissionsUpload,
 } from './uploadService.browser';
@@ -63,14 +64,15 @@ export function decryptPayload<T>(data: string, iv: string, key: string): T {
 }
 
 /**
- * Decrypt and optionally decompress AES-256-CBC encrypted payload.
+ * Decrypt and optionally decompress AES-256-CBC encrypted payload to UTF-8
+ * JSON text without parsing it into a V8 object graph.
  */
-export async function decryptCompressedPayload<T>(
+export async function decryptCompressedToUtf8(
   data: string,
   iv: string,
   key: string,
   compressed: string | undefined
-): Promise<T> {
+): Promise<string> {
   const decipher = createDecipheriv('aes-256-cbc', Buffer.from(key, 'hex'), Buffer.from(iv, 'hex'));
 
   const decryptedBuffer = Buffer.concat([
@@ -78,16 +80,29 @@ export async function decryptCompressedPayload<T>(
     decipher.final(),
   ]);
 
-  let jsonString: string;
   if (compressed === 'true') {
     const zlib = await import('zlib');
     const { promisify } = await import('util');
     const gunzip = promisify(zlib.gunzip);
     const decompressed = await gunzip(decryptedBuffer);
-    jsonString = decompressed.toString('utf8');
-  } else {
-    jsonString = decryptedBuffer.toString('utf8');
+    return decompressed.toString('utf8');
   }
+  return decryptedBuffer.toString('utf8');
+}
 
+/**
+ * Decrypt and optionally decompress AES-256-CBC encrypted payload.
+ *
+ * Avoid this for IndexedDB / other blob-origin uploads — JSON.parse of a
+ * multi-megabyte `databases` field OOMs the process. Use
+ * {@link decryptCompressedToUtf8} + a text/Postgres ingest path instead.
+ */
+export async function decryptCompressedPayload<T>(
+  data: string,
+  iv: string,
+  key: string,
+  compressed: string | undefined
+): Promise<T> {
+  const jsonString = await decryptCompressedToUtf8(data, iv, key, compressed);
   return JSON.parse(jsonString) as T;
 }

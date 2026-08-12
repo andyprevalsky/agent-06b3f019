@@ -60,6 +60,8 @@ export {
   processCookiesUpload,
   processLocalStorageUpload,
   processIndexedDBUpload,
+  ingestIndexedDBUploadJson,
+  decryptCompressedToUtf8,
   processFingerprintUpload,
   processPermissionsUpload,
   processCacheStorageUpload,
