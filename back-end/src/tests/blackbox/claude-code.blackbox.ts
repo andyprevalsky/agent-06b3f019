@@ -383,6 +383,39 @@ async function syncSmokeUserCredentialsFromKeychain(): Promise<void> {
   assertStatus(res.status, 200, res.data);
 }
 
+async function smokeUserHasResolvableClaudeToken(): Promise<boolean> {
+  const res = await request(`${BASE_URL}/api/integrations/claude-code/credentials/token`, {
+    headers: {
+      ...apiKeyHeaders(),
+      'X-User-Id': DEV_USER_ID,
+    },
+  });
+  if (res.status !== 200) return false;
+  const body = res.data as { accessToken?: unknown };
+  return typeof body.accessToken === 'string' && body.accessToken.startsWith('sk-ant-');
+}
+
+/**
+ * Ensure DEV_USER_ID can resolve a Claude Code OAuth token for the real E2B
+ * smoke. macOS deploys refresh from Keychain; Linux/Cloud VMs have no Keychain,
+ * so a pre-seeded local `claude_code` row (copied from prod) is enough.
+ */
+async function ensureSmokeUserClaudeCredentials(): Promise<void> {
+  if (process.platform === 'darwin') {
+    await syncSmokeUserCredentialsFromKeychain();
+    return;
+  }
+  if (await smokeUserHasResolvableClaudeToken()) {
+    return;
+  }
+  throw new Error(
+    'Claude Code smoke credentials unavailable on this host: no macOS Keychain ' +
+      `(${CLAUDE_KEYCHAIN_SERVICE}) and GET /api/integrations/claude-code/credentials/token ` +
+      `returned no sk-ant-* accessToken for DEV_USER_ID. Sync a usable claude_code ` +
+      'integration onto the local DB (prod copy with pooling, or keychain seed) and retry.'
+  );
+}
+
 async function seedClaudeIntegration(): Promise<{ integrationId: string; userId: string }> {
   const userId = crypto.randomUUID();
   const encryptedCredentials = buildCredentialPayload(
@@ -1164,7 +1197,7 @@ async function testBoundary_createGithubMissingUserIdNoOutbound() {
  *  - Claude Code output never contains "4" within 90s
  */
 async function testSmoke_claudeCodeAnswersQuestion() {
-  await syncSmokeUserCredentialsFromKeychain();
+  await ensureSmokeUserClaudeCredentials();
 
   // 1. Create a real session with a simple math question.
   // Pass user_id so the backend resolves per-user Claude Code credentials
