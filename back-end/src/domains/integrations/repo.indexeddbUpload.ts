@@ -6,7 +6,7 @@
  * down with 502s. Keep `databases` inside Postgres for the whole upsert.
  */
 
-import { prisma } from '../../providers/database';
+import { runTransactionWithRetry } from '../../providers/database';
 
 /**
  * Ingest an IndexedDB upload JSON document without ever pulling `databases`
@@ -17,7 +17,7 @@ export async function ingestIndexedDBUploadJsonDocument(
   userId: string,
   jsonString: string
 ): Promise<{ batchIndex: number; totalBatches: number; originCount: number }> {
-  return prisma.$transaction(
+  return runTransactionWithRetry(
     async (tx) => {
       await tx.$executeRawUnsafe(`
         CREATE TEMP TABLE idb_upload_ingest_doc (
