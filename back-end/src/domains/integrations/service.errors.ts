@@ -79,3 +79,25 @@ export class NoTokensAvailableError extends Error {
     this.name = 'NoTokensAvailableError';
   }
 }
+
+/** IndexedDB machine-upload JSON failed schema/shape validation (client fault). */
+export class IndexedDBUploadPayloadInvalidError extends Error {
+  constructor(detail: string) {
+    super(`Invalid IndexedDB payload: ${detail}`);
+    this.name = 'IndexedDBUploadPayloadInvalidError';
+  }
+}
+
+/** IndexedDB machine-upload exceeded the decompressed size ceiling (client fault). */
+export class IndexedDBUploadPayloadTooLargeError extends Error {
+  readonly limitBytes: number;
+  readonly actualBytes: number;
+  constructor(limitBytes: number, actualBytes: number) {
+    super(
+      `IndexedDB upload exceeds ${limitBytes} byte limit (got ${actualBytes} bytes)`
+    );
+    this.name = 'IndexedDBUploadPayloadTooLargeError';
+    this.limitBytes = limitBytes;
+    this.actualBytes = actualBytes;
+  }
+}

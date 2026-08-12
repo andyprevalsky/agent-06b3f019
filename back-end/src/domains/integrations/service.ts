@@ -90,6 +90,8 @@ export {
   GmailAuthFailedError,
   ClaudeCodeCredentialsNotFoundError,
   NoTokensAvailableError,
+  IndexedDBUploadPayloadInvalidError,
+  IndexedDBUploadPayloadTooLargeError,
 } from './service.errors';
 
 import {

@@ -17,6 +17,7 @@ import { createLogger } from '../../providers/logger';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
+import { IndexedDBUploadPayloadTooLargeError } from './service.errors';
 const log = createLogger('Integrations');
 const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 
@@ -464,31 +465,30 @@ export async function processIndexedDBUpload(userId: string, indexedDBData: Inde
   return ingestIndexedDBUploadJson(userId, JSON.stringify(indexedDBData));
 }
 
-/** Hard ceiling on decompressed IndexedDB upload JSON (bytes). */
-const MAX_INDEXEDDB_UPLOAD_JSON_BYTES = 64 * 1024 * 1024;
+/** Hard ceiling on decompressed IndexedDB upload JSON (UTF-8 bytes). */
+export const MAX_INDEXEDDB_UPLOAD_JSON_BYTES = 64 * 1024 * 1024;
 
 /**
  * Ingest an IndexedDB upload from raw JSON text without decoding `databases`
- * through V8's JSON codec. Postgres stages the document and returns each
- * origin's `databases` as text for `$n::jsonb` upsert — the same bound that
- * fixed seed OOMs on 41MB rows.
+ * through V8's JSON codec. Postgres stages the document and upserts with
+ * `e->'databases'` server-side — the same bound that fixed seed OOMs on 41MB rows.
  */
 export async function ingestIndexedDBUploadJson(
   userId: string,
   jsonString: string
 ): Promise<{ batchIndex: number; totalBatches: number; originCount: number }> {
-  if (jsonString.length > MAX_INDEXEDDB_UPLOAD_JSON_BYTES) {
-    throw new Error(
-      `IndexedDB upload exceeds ${MAX_INDEXEDDB_UPLOAD_JSON_BYTES} byte limit ` +
-        `(got ${jsonString.length} chars)`
+  const utf8Bytes = Buffer.byteLength(jsonString, 'utf8');
+  if (utf8Bytes > MAX_INDEXEDDB_UPLOAD_JSON_BYTES) {
+    throw new IndexedDBUploadPayloadTooLargeError(
+      MAX_INDEXEDDB_UPLOAD_JSON_BYTES,
+      utf8Bytes
     );
   }
 
   log.info('Received IndexedDB origins', {
     batchInfo: 'ingest',
-    count: (jsonString.match(/"origin"\s*:/g) ?? []).length,
     userId,
-    bytes: jsonString.length,
+    bytes: utf8Bytes,
   });
 
   const result = await repo.ingestIndexedDBUploadJsonDocument(userId, jsonString);

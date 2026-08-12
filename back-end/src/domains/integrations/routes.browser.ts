@@ -160,6 +160,9 @@ router.post(
     try {
       indexedDBJson = await service.decryptCompressedToUtf8(data, iv, key, compressed);
     } catch (decryptError: unknown) {
+      if (decryptError instanceof service.IndexedDBUploadPayloadTooLargeError) {
+        return res.status(413).json({ error: decryptError.message });
+      }
       log.error('IndexedDB decryption/decompression failed', {
         error: decryptError instanceof Error ? decryptError.message : String(decryptError),
       });
@@ -170,14 +173,11 @@ router.post(
       const result = await service.ingestIndexedDBUploadJson(userId, indexedDBJson);
       return res.json({ message: 'IndexedDB batch uploaded', ...result });
     } catch (ingestError: unknown) {
-      const message = ingestError instanceof Error ? ingestError.message : String(ingestError);
-      if (message.includes('expected origins array')) {
-        return res.status(400).json({
-          error: 'Invalid IndexedDB payload: expected origins array',
-        });
+      if (ingestError instanceof service.IndexedDBUploadPayloadInvalidError) {
+        return res.status(400).json({ error: ingestError.message });
       }
-      if (message.includes('byte limit')) {
-        return res.status(413).json({ error: message });
+      if (ingestError instanceof service.IndexedDBUploadPayloadTooLargeError) {
+        return res.status(413).json({ error: ingestError.message });
       }
       throw ingestError;
     }

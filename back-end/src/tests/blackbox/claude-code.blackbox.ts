@@ -408,11 +408,18 @@ async function ensureSmokeUserClaudeCredentials(): Promise<void> {
   if (await smokeUserHasResolvableClaudeToken()) {
     return;
   }
+  // Linux/Cloud: when the OAuth pool is empty/revoked, Claude Code falls through
+  // to the funded ANTHROPIC_API_KEY (see resolveClaudeCodeAuthEnvs). That is a
+  // valid smoke path — do not hard-require Keychain on non-Darwin hosts.
+  const fundedApiKey = process.env.ANTHROPIC_API_KEY?.trim() ?? '';
+  if (fundedApiKey.startsWith('sk-ant-')) {
+    return;
+  }
   throw new Error(
     'Claude Code smoke credentials unavailable on this host: no macOS Keychain ' +
-      `(${CLAUDE_KEYCHAIN_SERVICE}) and GET /api/integrations/claude-code/credentials/token ` +
-      `returned no sk-ant-* accessToken for DEV_USER_ID. Sync a usable claude_code ` +
-      'integration onto the local DB (prod copy with pooling, or keychain seed) and retry.'
+      `(${CLAUDE_KEYCHAIN_SERVICE}), GET /api/integrations/claude-code/credentials/token ` +
+      'returned no sk-ant-* accessToken for DEV_USER_ID, and ANTHROPIC_API_KEY is unset. ' +
+      'Sync a usable claude_code integration or configure ANTHROPIC_API_KEY and retry.'
   );
 }
 
