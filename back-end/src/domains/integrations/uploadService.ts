@@ -5,7 +5,7 @@
  */
 
 import { createDecipheriv } from '../../providers/crypto';
-import { IndexedDBUploadPayloadTooLargeError } from './service.errors';
+import { IndexedDBUploadPayloadTooLargeError } from './types';
 
 // Re-export everything from sub-modules so service.ts imports stay unchanged
 export {

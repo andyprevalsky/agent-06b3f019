@@ -17,7 +17,7 @@ import { createLogger } from '../../providers/logger';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
-import { IndexedDBUploadPayloadTooLargeError } from './service.errors';
+import { IndexedDBUploadPayloadTooLargeError } from './types';
 const log = createLogger('Integrations');
 const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 

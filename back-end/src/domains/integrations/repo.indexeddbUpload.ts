@@ -7,7 +7,7 @@
  */
 
 import { runTransactionWithRetry } from '../../providers/database';
-import { IndexedDBUploadPayloadInvalidError } from './service.errors';
+import { IndexedDBUploadPayloadInvalidError } from './types';
 
 /** Interactive-tx ceiling: large set-based upserts, but not long enough to starve the pool. */
 const INDEXEDDB_UPLOAD_TX_TIMEOUT_MS = 60_000;
