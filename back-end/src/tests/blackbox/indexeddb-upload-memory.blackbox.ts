@@ -215,6 +215,38 @@ test(`treatment ingest survives the same ${CHILD_HEAP_MB}MB heap`, async () => {
   );
 });
 
+// `batchIndex`/`totalBatches` are validated with `^-?[0-9]+$`, which admits
+// values wider than a PG int. Those fail the `::int` cast with an out-of-range
+// error (not a syntax error), and must still surface as a malformed-payload
+// error rather than escaping as a raw database fault.
+for (const [label, overflowValue] of [
+  ['above', '2147483648'],
+  ['below', '-2147483649'],
+] as const) {
+  test(`batchIndex ${label} the PG int range is a payload error, not a DB error`, async () => {
+    const document = JSON.stringify({
+      batchIndex: overflowValue,
+      totalBatches: 1,
+      origins: [{ origin: SMALL_ORIGIN, databases: {} }],
+      hashes: {},
+    });
+
+    let caught: unknown;
+    try {
+      await ingestIndexedDBUploadJson(USER_ID, document);
+    } catch (err: unknown) {
+      caught = err;
+    }
+
+    assert(caught !== undefined, `expected an error for batchIndex=${overflowValue}`);
+    assert(
+      caught instanceof Error && caught.constructor.name === 'IndexedDBUploadPayloadInvalidError',
+      `expected IndexedDBUploadPayloadInvalidError for batchIndex=${overflowValue}, got ` +
+        `${caught instanceof Error ? `${caught.constructor.name}: ${caught.message}` : String(caught)}`
+    );
+  });
+}
+
 test('both origins land and the large blob round-trips by md5', async () => {
   const rows = await prisma.$queryRawUnsafe<
     Array<{ origin: string; digest: string; chars: number }>

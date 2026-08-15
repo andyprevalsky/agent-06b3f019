@@ -20,7 +20,10 @@ function mapPostgresJsonClientFault(err: unknown): never {
   if (/invalid input syntax for type json/i.test(message)) {
     throw new IndexedDBUploadPayloadInvalidError('document is not valid JSON');
   }
-  if (/invalid input syntax for type integer/i.test(message)) {
+  // `^-?[0-9]+$` admits values wider than a PG int (e.g. "2147483648"), so the
+  // ::int cast can fail with an out-of-range error rather than a syntax error.
+  // Both are malformed client payloads, not database faults.
+  if (/invalid input syntax for type integer|is out of range for type integer/i.test(message)) {
     throw new IndexedDBUploadPayloadInvalidError('batchIndex/totalBatches must be integers');
   }
   throw err;
