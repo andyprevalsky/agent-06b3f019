@@ -5,7 +5,12 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from benchmarks.hub_upload import hub_upload_enabled, upload_run_bundle
+from benchmarks.hub_upload import (
+    DEFAULT_HUB_URL,
+    hub_upload_enabled,
+    resolve_hub_upload_url,
+    upload_run_bundle,
+)
 
 
 def _serve(record: list):
@@ -39,6 +44,23 @@ def test_disabled_without_env(monkeypatch):
     monkeypatch.delenv("BENCHMARK_HUB_UPLOAD_URL", raising=False)
     assert hub_upload_enabled() is False
     assert upload_run_bundle({"run_id": "r"}) is False
+
+
+def test_resolve_hub_upload_url_prefers_explicit_env(monkeypatch):
+    monkeypatch.setenv("BENCHMARK_HUB_UPLOAD_URL", "https://hub.example/")
+    assert resolve_hub_upload_url("http://localhost:3201") == "https://hub.example"
+
+
+def test_resolve_hub_upload_url_uses_local_stack_when_unset(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_HUB_UPLOAD_URL", raising=False)
+    assert resolve_hub_upload_url("http://localhost:3201/") == "http://localhost:3201"
+    assert resolve_hub_upload_url("http://127.0.0.1:3201") == "http://127.0.0.1:3201"
+
+
+def test_resolve_hub_upload_url_defaults_to_prod_for_non_local(monkeypatch):
+    monkeypatch.delenv("BENCHMARK_HUB_UPLOAD_URL", raising=False)
+    assert resolve_hub_upload_url("https://navi-j9a9.onrender.com") == DEFAULT_HUB_URL
+    assert resolve_hub_upload_url(None) == DEFAULT_HUB_URL
 
 
 def test_uploads_bundle_with_auth_headers(monkeypatch):
