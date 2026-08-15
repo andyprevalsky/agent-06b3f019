@@ -4,11 +4,13 @@
  * [COLLAPSED] --toggle--> [EXPANDED] --toggle--> [COLLAPSED]
  *
  * Sub-items:
- *   LinkedIn: [IDLE] --click--> [SYNCING] (Desktop only, spawns agent)
+ *   LinkedIn: [IDLE] --click--> [SYNCING] --spawned--> [STARTED] (Desktop only,
+ *     spawns one export agent; once started the row icon lights with the rose
+ *     glow and re-export is blocked)
  *   X, Instagram: [COMING_SOON] (static)
  */
 
-import { Loader2 } from 'lucide-react';
+import { Loader2, Plus } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 import DropdownIconFrame, { DropdownIconPreset } from './DropdownIconFrame';
@@ -19,6 +21,7 @@ interface SocialsSectionProps {
   onToggle: () => void;
   isBrowserCookiesAvailable: boolean;
   linkedinSyncLoading: boolean;
+  linkedinSyncStarted: boolean;
   onLinkedInSync: () => void;
 }
 
@@ -104,10 +107,12 @@ const COMING_SOON_BADGE = (
 function LinkedInRow({
   isAvailable,
   loading,
+  started,
   onSync,
 }: {
   isAvailable: boolean;
   loading: boolean;
+  started: boolean;
   onSync: () => void;
 }) {
   if (!isAvailable) {
@@ -133,32 +138,28 @@ function LinkedInRow({
   return (
     <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
       <div className="flex items-center gap-3">
-        <DropdownIconFrame {...DropdownIconPreset.linkedin}>
+        <DropdownIconFrame {...DropdownIconPreset.linkedin} isSynced={started}>
           <LinkedInIcon />
         </DropdownIconFrame>
-        <span className="text-sm">LinkedIn</span>
+        <div className="flex min-w-0 flex-col">
+          <span className="text-sm">LinkedIn</span>
+          {started && (
+            <span className="bg-gradient-to-bl from-[#FE7503] via-[#FD5776] to-[#7A6BEC] bg-clip-text text-[11px] font-medium leading-none text-transparent">
+              Connecting your data…
+            </span>
+          )}
+        </div>
       </div>
       <button
         onClick={onSync}
-        disabled={loading}
-        className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"
+        disabled={loading || started}
+        aria-label="Connect LinkedIn"
+        className="h-8 w-8 rounded-md flex items-center justify-center transition-all duration-200 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground disabled:opacity-60 disabled:hover:bg-muted disabled:hover:text-muted-foreground"
       >
         {loading ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin" />
         ) : (
-          <svg
-            className="w-3.5 h-3.5"
-            fill="none"
-            viewBox="0 0 24 24"
-            stroke="currentColor"
-            strokeWidth={2}
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-            />
-          </svg>
+          <Plus className="w-3.5 h-3.5" />
         )}
       </button>
     </div>
@@ -170,6 +171,7 @@ export default function SocialsSection({
   onToggle,
   isBrowserCookiesAvailable,
   linkedinSyncLoading,
+  linkedinSyncStarted,
   onLinkedInSync,
 }: SocialsSectionProps) {
   return (
@@ -200,6 +202,7 @@ export default function SocialsSection({
           <LinkedInRow
             isAvailable={isBrowserCookiesAvailable}
             loading={linkedinSyncLoading}
+            started={linkedinSyncStarted}
             onSync={onLinkedInSync}
           />
           <div className="px-4 py-2 flex items-center justify-between">
