@@ -186,7 +186,7 @@ export default function SocialsSection({
             <span className="text-xs text-muted-foreground">Connect social media accounts</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={false} onClick={onToggle} />
+        <SectionToggleButton isConnected={false} onClick={onToggle} sectionLabel="Socials" />
       </div>
       {expanded && (
         <div className="border-t border-border">

@@ -169,7 +169,11 @@ export default function PasswordsSection(props: PasswordsSectionProps) {
             <span className="text-xs text-muted-foreground">Auto-fill login credentials</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={anyPasswordSynced} onClick={props.onToggle} />
+        <SectionToggleButton
+          isConnected={anyPasswordSynced}
+          onClick={props.onToggle}
+          sectionLabel="Passwords"
+        />
       </div>
       {props.expanded && <PasswordsExpandedContent {...props} />}
     </div>

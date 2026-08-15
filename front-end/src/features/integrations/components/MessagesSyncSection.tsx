@@ -221,7 +221,11 @@ export default function MessagesSyncSection({
             <span className="text-xs text-muted-foreground">Sync messaging clients</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={anyMessageConnected} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={anyMessageConnected}
+          onClick={onToggle}
+          sectionLabel="Messages"
+        />
       </div>
       {expanded && (
         <div className="border-t border-border">

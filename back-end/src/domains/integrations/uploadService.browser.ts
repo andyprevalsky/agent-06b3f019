@@ -12,12 +12,12 @@ import {
   type PermissionPayload,
   IntegrationType,
   IntegrationStatus,
+  IndexedDBUploadPayloadTooLargeError,
 } from './types';
 import { createLogger } from '../../providers/logger';
 import { authRealmFromCookieDomain } from '../../providers/authRealm';
 import { VALID_BROWSERS } from './config';
 import * as repo from './repo';
-import { IndexedDBUploadPayloadTooLargeError } from './types';
 const log = createLogger('Integrations');
 const COOKIE_SNAPSHOT_SEPARATOR = '\u001f';
 
@@ -479,10 +479,7 @@ export async function ingestIndexedDBUploadJson(
 ): Promise<{ batchIndex: number; totalBatches: number; originCount: number }> {
   const utf8Bytes = Buffer.byteLength(jsonString, 'utf8');
   if (utf8Bytes > MAX_INDEXEDDB_UPLOAD_JSON_BYTES) {
-    throw new IndexedDBUploadPayloadTooLargeError(
-      MAX_INDEXEDDB_UPLOAD_JSON_BYTES,
-      utf8Bytes
-    );
+    throw new IndexedDBUploadPayloadTooLargeError(MAX_INDEXEDDB_UPLOAD_JSON_BYTES, utf8Bytes);
   }
 
   log.info('Received IndexedDB origins', {

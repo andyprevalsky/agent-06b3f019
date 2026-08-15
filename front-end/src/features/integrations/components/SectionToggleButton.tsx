@@ -12,9 +12,15 @@ import { Plus } from 'lucide-react';
 interface SectionToggleButtonProps {
   isConnected: boolean;
   onClick: () => void;
+  /** Section name, used to give the icon-only button an accessible name. */
+  sectionLabel: string;
 }
 
-export default function SectionToggleButton({ isConnected, onClick }: SectionToggleButtonProps) {
+export default function SectionToggleButton({
+  isConnected,
+  onClick,
+  sectionLabel,
+}: SectionToggleButtonProps) {
   return (
     <div className="flex items-center gap-2">
       {isConnected && (
@@ -24,6 +30,7 @@ export default function SectionToggleButton({ isConnected, onClick }: SectionTog
       )}
       <button
         onClick={onClick}
+        aria-label={`Manage ${sectionLabel} connections`}
         className="h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-200 bg-primary text-primary-foreground hover:bg-primary/90"
       >
         <Plus className="w-4 h-4" />
