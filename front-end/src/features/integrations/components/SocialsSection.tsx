@@ -178,7 +178,7 @@ export default function SocialsSection({
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <DropdownIconFrame {...DropdownIconPreset.socialsMain}>
+          <DropdownIconFrame {...DropdownIconPreset.socialsMain} isSynced={linkedinSyncStarted}>
             <SocialsIcon />
           </DropdownIconFrame>
           <div className="flex flex-col">
@@ -186,7 +186,11 @@ export default function SocialsSection({
             <span className="text-xs text-muted-foreground">Connect social media accounts</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={false} onClick={onToggle} sectionLabel="Socials" />
+        <SectionToggleButton
+          isConnected={linkedinSyncStarted}
+          onClick={onToggle}
+          sectionLabel="Socials"
+        />
       </div>
       {expanded && (
         <div className="border-t border-border">

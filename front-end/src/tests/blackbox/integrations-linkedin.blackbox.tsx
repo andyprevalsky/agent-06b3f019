@@ -206,5 +206,33 @@ describe('Integrations page - LinkedIn export flow', () => {
       });
       expect(glowOf()).toBeDefined();
     });
+
+    it('shows the rose Connected label on the Socials header once LinkedIn connects', async () => {
+      const user = userEvent.setup();
+
+      server.use(
+        http.post(`${API_BASE}/agents`, () => {
+          return HttpResponse.json({ id: 'agent-linkedin' });
+        }),
+      );
+
+      renderWithProviders(
+        <IntegrationHandlersProvider handlers={macHandlers()}>
+          <Integrations />
+        </IntegrationHandlersProvider>,
+      );
+
+      const linkedInButton = await expandSocialsAndGetLinkedInButton(user);
+      const socialsSection = screen.getByText('Socials').closest('.rounded-lg')!;
+
+      // Before connecting the section header must not claim to be connected.
+      expect(within(socialsSection).queryByText('Connected')).not.toBeInTheDocument();
+
+      await user.click(linkedInButton);
+
+      await waitFor(() => {
+        expect(within(socialsSection).getByText('Connected')).toBeInTheDocument();
+      });
+    });
   });
 });
