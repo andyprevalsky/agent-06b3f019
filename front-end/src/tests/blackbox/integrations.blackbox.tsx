@@ -1,12 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { capturedRequests, clearCaptures } from './msw/capture';
 import { renderWithProviders } from './test-wrapper';
 import Integrations from '@/pages/Integrations';
+import { Toaster } from '@/components/ui/toaster';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
+import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
 
 const API_BASE = 'http://localhost:3001/api';

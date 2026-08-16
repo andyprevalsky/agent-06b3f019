@@ -104,7 +104,11 @@ export default function BrowserCookiesSection({
           </div>
         </div>
 
-        <SectionToggleButton isConnected={connectedBrowsers.size > 0} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={connectedBrowsers.size > 0}
+          onClick={onToggle}
+          sectionLabel="Browser Cookies"
+        />
       </div>
 
       {expanded && (

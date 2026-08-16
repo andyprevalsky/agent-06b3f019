@@ -189,7 +189,11 @@ export default function ComputeSection({
             <span className="text-xs text-muted-foreground">Connect AI subscriptions</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={claudeCodeSynced || gptCodeSynced} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={claudeCodeSynced || gptCodeSynced}
+          onClick={onToggle}
+          sectionLabel="Compute"
+        />
       </div>
       {claudeCodeSyncLoading && claudeCodeStatus && (
         <div className="px-4 py-2 flex items-center gap-2 border-t border-border/50">

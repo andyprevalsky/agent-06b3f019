@@ -159,6 +159,7 @@ export default function IntegrationSections({
         onToggle={() => accordion.toggleSection('socials')}
         isBrowserCookiesAvailable={isBrowserCookiesAvailable}
         linkedinSyncLoading={messages.linkedinSyncLoading}
+        linkedinSyncStarted={messages.linkedinSyncStarted}
         onLinkedInSync={() => void actions.onLinkedInSync()}
       />
     </>

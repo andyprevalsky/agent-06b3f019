@@ -24,7 +24,7 @@ describe('ConnectedAccountChip', () => {
       </div>,
     );
 
-    expect(screen.getByText('Synced').parentElement).toHaveClass('bg-emerald-500/10');
+    expect(screen.getByText('Synced').parentElement).toHaveClass('bg-rose-500/10');
     expect(screen.getByText('Syncing').parentElement).toHaveClass('bg-sky-500/10');
     expect(screen.getByText('Warning').parentElement).toHaveClass('bg-amber-500/10');
     expect(screen.getByText('Error').parentElement).toHaveClass('bg-destructive/10');
