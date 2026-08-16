@@ -8403,12 +8403,36 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                         approval_type = result.get("approval_type", "unknown")
-                        current_approvals = result.get("write_lock_approvals", {})
-
+                        current_approvals = dict(result.get("write_lock_approvals") or {})
+                        approved_at = workflow.now().timestamp()
+                        # Prefer merchant checkout URL over Kernel live-view current_url
+                        # so a write-lock approval after payment does not re-key the
+                        # domain to *.kernel.sh / *.onkernel.com.
+                        grant_url = (
+                            resolve_site_write_lock_grant_url(
+                                {
+                                    **(result if isinstance(result, dict) else {}),
+                                    "start_url": current_start_url or start_url,
+                                }
+                            )
+                            or result.get("current_url", "")
+                        )
                         current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(result.get("current_url", "")),
-                            "approved_at": workflow.now().timestamp(),
+                            "domain": get_domain_from_url(grant_url),
+                            "approved_at": approved_at,
                         }
+                        # Payment-card mint already unlocked the site for this
+                        # activity — keep that session-scoped site unlock alive
+                        # across later write-lock approvals on the same page.
+                        prior_resume = write_lock_resume_state or {}
+                        prior_payment_refs = prior_resume.get("payment_card_refs")
+                        prior_payment_last4 = prior_resume.get("payment_card_last4")
+                        if prior_payment_refs or current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY):
+                            current_approvals = grant_site_write_lock_approvals(
+                                current_approvals,
+                                grant_url,
+                                approved_at,
+                            )
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
@@ -8422,6 +8446,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "auth_realm": result.get("auth_realm"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
+                        # Preserve minted card refs across write-lock resumes so
+                        # purchase bypass + site unlock stay available.
+                        if prior_payment_refs:
+                            write_lock_resume_state["payment_card_refs"] = prior_payment_refs
+                        if prior_payment_last4:
+                            write_lock_resume_state["payment_card_last4"] = prior_payment_last4
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 

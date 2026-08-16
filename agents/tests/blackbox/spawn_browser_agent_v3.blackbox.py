@@ -7286,11 +7286,43 @@ def test_site_write_lock_unlock_covers_purchase_on_approved_domain():
     )
     assert approvals["payment"]["domain"] == "roselabs.ai"
     assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY].get("persistent") is True
     assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
     assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "social_post", "https://roselabs.ai/test_payment") is True
     # Other sites stay locked — and a newly spawned browser agent starts with {}.
     assert is_approval_valid(approvals, "purchase", "https://amazon.com/checkout") is False
     assert is_approval_valid({}, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_payment_site_unlock_survives_write_lock_timeout():
+    """Payment-card site unlock must outlive the 120s one-off write-lock timeout.
+
+    Checkout (fill card → Place order → Stripe) routinely exceeds 120s; expiring
+    the site unlock mid-flow re-prompts purchase write_lock after payment_approval.
+    """
+    from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time() - (WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS + 60)
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://www.roselabs.ai/test_payment",
+        approved_at,
+    )
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    # One-off typed purchase approval (no site unlock) still expires.
+    typed_only = {
+        "purchase": {
+            "domain": "roselabs.ai",
+            "approved_at": approved_at,
+        }
+    }
+    assert is_approval_valid(typed_only, "purchase", "https://roselabs.ai/test_payment") is False
 
 
 def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
@@ -14893,6 +14925,10 @@ async def run_all_tests():
     r.record(
         "site_write_lock_unlock_covers_purchase",
         test_site_write_lock_unlock_covers_purchase_on_approved_domain,
+    )
+    r.record(
+        "payment_site_unlock_survives_write_lock_timeout",
+        test_payment_site_unlock_survives_write_lock_timeout,
     )
     r.record(
         "fresh_browser_session_no_site_unlock_inherit",

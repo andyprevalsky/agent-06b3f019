@@ -366,11 +366,20 @@ def resolve_site_write_lock_grant_url(result: Optional[Dict]) -> str:
     return ""
 
 
-def _approval_entry_still_valid(approval: Optional[Dict], current_domain: str) -> bool:
+def _approval_entry_still_valid(
+    approval: Optional[Dict],
+    current_domain: str,
+    *,
+    enforce_timeout: bool = True,
+) -> bool:
     if not approval or not approval.get("domain") or not approval.get("approved_at"):
         return False
     if not current_domain or current_domain != approval["domain"]:
         return False
+    # Payment-card site unlock is session-scoped (no wall-clock expiry). One-off
+    # typed write-lock approvals still expire after WRITE_LOCK_APPROVAL_TIMEOUT.
+    if not enforce_timeout or approval.get("persistent"):
+        return True
     return not time_module.time() - approval["approved_at"] > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
 
 
@@ -378,15 +387,22 @@ def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url
     """Check if an existing approval is still valid for the current domain.
 
     A payment-card approval grants a site-wide unlock (``SITE_WRITE_LOCK_APPROVAL_KEY``)
-    so Place order / other write locks on that checkout domain do not re-prompt.
-    That unlock lives only in this browser activity's ``write_lock_approvals`` /
-    resume state — a newly spawned browser agent starts empty and does not inherit it.
+    so Place order / other write locks on that checkout domain do not re-prompt for
+    the rest of THIS browser activity. That unlock lives only in this browser
+    activity's ``write_lock_approvals`` / resume state — a newly spawned browser
+    agent starts empty and does not inherit it.
     """
     if not approvals:
         return False
 
     current_domain = get_domain_from_url(current_url)
-    if _approval_entry_still_valid(approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY), current_domain):
+    # Site unlock from payment-card approval: no 120s timeout (checkout often
+    # takes longer). Still domain-scoped to the approved merchant site.
+    if _approval_entry_still_valid(
+        approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY),
+        current_domain,
+        enforce_timeout=False,
+    ):
         return True
 
     return _approval_entry_still_valid(approvals.get(approval_type), current_domain)
@@ -400,7 +416,8 @@ def grant_site_write_lock_approvals(
     """Record payment-card approval as a site unlock for this browser session.
 
     Sets both the legacy ``payment`` entry (payment-field bypass) and the site-wide
-    unlock used by purchase / other write-lock types on the same domain.
+    unlock used by purchase / other write-lock types on the same domain. The site
+    entry is persistent for this browser activity (not the 120s one-off timeout).
     """
     granted = dict(approvals or {})
     domain = get_domain_from_url(current_url)
@@ -409,6 +426,7 @@ def grant_site_write_lock_approvals(
     entry = {
         "domain": domain,
         "approved_at": approved_at,
+        "persistent": True,
     }
     granted["payment"] = entry
     granted[SITE_WRITE_LOCK_APPROVAL_KEY] = entry
