@@ -32,6 +32,57 @@ function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
 }
 
+/**
+ * Raised when the live cross-provider ladder cannot exercise its Steel legs
+ * because Steel's live infrastructure is unreachable — NOT because the rotation
+ * code is wrong. The caller converts this into a loud SKIP (Kernel legs already
+ * proved live rotation; {@link assertFixedRotationLadder} proves the ladder
+ * config) instead of a hard failure, so a Steel outage cannot block a deploy
+ * while Kernel is healthy.
+ */
+export class SteelProviderUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SteelProviderUnavailableError';
+  }
+}
+
+const STEEL_OUTAGE_CONNECTIVITY_HINTS = [
+  'connection error',
+  'econnrefused',
+  'econnreset',
+  'etimedout',
+  'enotfound',
+  'eai_again',
+  'fetch failed',
+  'socket hang up',
+  'timed out',
+  'timeout',
+  'network',
+];
+
+/**
+ * True only when a `/rotate-proxy` failure is a genuine Steel live-infra OUTAGE:
+ * a 5xx whose body is production's post-retry "Failed to create Steel
+ * replacement after N attempts: <cause>" AND whose cause is a connectivity
+ * error. Production (providers/steel/sessionResume.ts) emits that message only
+ * after exhausting `MAX_SESSION_RETRIES`, so reaching it proves the rotation
+ * logic correctly escalated to Steel and Steel itself was down.
+ *
+ * Deliberately narrow so real defects still fail loudly: assertion failures,
+ * wrong provider/tier/counters, leaked sessions, and Steel AUTH/QUOTA rejections
+ * (401/402/403 — a credential problem to fix, no connectivity hint) do NOT match.
+ */
+export function isSteelProvisioningOutage(error: unknown): boolean {
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  const isRotateProxy5xx = message.includes('/rotate-proxy') && /\b5\d\d\b/.test(message);
+  const isSteelReplacementFailure = message.includes('failed to create steel replacement');
+  const looksLikeConnectivity = STEEL_OUTAGE_CONNECTIVITY_HINTS.some((hint) =>
+    message.includes(hint)
+  );
+  return isRotateProxy5xx && isSteelReplacementFailure && looksLikeConnectivity;
+}
+
 export function assertFixedRotationLadder(): void {
   assert(ROTATION_CAP === 4, 'rotation cap must remain four recovery actions');
   const steps = [
@@ -99,10 +150,24 @@ export async function runCrossProviderRotationLadder(
       component: 'browser-provider:steel-switch',
     });
 
-  const switched = await postWithSteelConnectionRetry('/rotate-proxy', {
-    task_id: taskId,
-    current_url: 'https://example.com/provider-switch-check',
-  });
+  let switched: RotationResponse;
+  try {
+    switched = await postWithSteelConnectionRetry('/rotate-proxy', {
+      task_id: taskId,
+      current_url: 'https://example.com/provider-switch-check',
+    });
+  } catch (error) {
+    // Retries exhausted. If Steel's infra is genuinely down (not a transient
+    // blip), skip the Steel legs instead of failing while Kernel is healthy.
+    if (isSteelProvisioningOutage(error)) {
+      throw new SteelProviderUnavailableError(
+        `Kernel→Steel switch (call 3) could not provision a Steel session: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    throw error;
+  }
   assert(switched.task_id === taskId, 'provider switch changed the stable task ID');
   assert(
     switched.provider === 'steel' && switched.proxy_tier === 'residential',
@@ -136,10 +201,22 @@ export async function runCrossProviderRotationLadder(
   assert(Boolean(evictedKernel.deleted_at), 'provider switch leaked the superseded Kernel session');
   const firstSteelIp = await readDifferentExitIp(String(switched.ws_url), mobileIp);
 
-  const steelRotated = await post('/rotate-proxy', {
-    task_id: taskId,
-    current_url: 'https://example.com/steel-rotation-check',
-  });
+  let steelRotated: RotationResponse;
+  try {
+    steelRotated = await post('/rotate-proxy', {
+      task_id: taskId,
+      current_url: 'https://example.com/steel-rotation-check',
+    });
+  } catch (error) {
+    if (isSteelProvisioningOutage(error)) {
+      throw new SteelProviderUnavailableError(
+        `Steel residential IP rotation (call 4) could not provision a Steel session: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+    throw error;
+  }
   assert(
     steelRotated.provider === 'steel' && steelRotated.proxy_tier === 'residential',
     'call 4 must remain on Steel residential'
@@ -198,4 +275,29 @@ export async function runCrossProviderRotationLadder(
     firstSteelIp,
     secondSteelIp,
   };
+}
+
+/**
+ * Run {@link runCrossProviderRotationLadder}, converting a genuine Steel
+ * live-infra outage into a loud SKIP (returns `null`) instead of a failure. The
+ * Kernel legs (run by the caller beforehand) already prove live IP rotation, and
+ * {@link assertFixedRotationLadder} proves the ladder config, so a Steel outage
+ * must not block a deploy while Kernel is healthy. Any non-outage error — real
+ * rotation defects, or a Steel auth/quota rejection — still propagates and fails.
+ */
+export async function runCrossProviderRotationLadderOrSkipOnSteelOutage(
+  options: CrossProviderLadderOptions
+): Promise<{ finalSessionId: string; firstSteelIp: string; secondSteelIp: string } | null> {
+  try {
+    return await runCrossProviderRotationLadder(options);
+  } catch (error) {
+    if (error instanceof SteelProviderUnavailableError) {
+      console.warn(
+        `⚠️  SKIP live Steel legs — Steel provider infra unavailable; Kernel rotation ` +
+          `validated end-to-end and ladder config asserted. Reason: ${error.message}`
+      );
+      return null;
+    }
+    throw error;
+  }
 }

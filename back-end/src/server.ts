@@ -31,6 +31,7 @@ import codexCodeRouter from './domains/codex-code/routes';
 import billingRouter from './domains/billing/routes';
 import apiKeysRouter from './domains/api-keys/routes';
 import smsWebhookRouter from './domains/sms-webhook/routes';
+import whatsappWebhookRouter from './domains/whatsapp-webhook/routes';
 import credentialPropagationRouter from './domains/credential-propagation/routes';
 import purchasesRouter, { agentCardWebhookHandler } from './domains/purchases/routes';
 import agentcardRouter from './domains/agentcard/routes';
@@ -107,6 +108,19 @@ app.use(
   '/api/agentphone',
   express.json({ type: 'application/json', limit: '1mb' }),
   agentPhoneRouter
+);
+
+// WhatsApp webhook from Meta Cloud API (JSON body; preserve raw body for the
+// X-Hub-Signature-256 HMAC verification). Routes inbound messages through the
+// same SMS supervisor.
+app.use(
+  '/api/whatsapp',
+  express.json({
+    verify: (req, _res, buf) => {
+      (req as unknown as { rawBody: string }).rawBody = buf.toString('utf-8');
+    },
+  }),
+  whatsappWebhookRouter
 );
 
 // AgentCard webhooks: JSON body, but HMAC is over the raw bytes, so preserve them on req.rawBody.

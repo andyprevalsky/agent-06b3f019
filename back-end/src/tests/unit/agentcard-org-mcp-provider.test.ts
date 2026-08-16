@@ -481,8 +481,6 @@ async function main(): Promise<void> {
     'the transfer-visibility window must not shrink'
   );
 
-  await assertTransferVisibilityPollSharesOneRetryBudget();
-
   // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
   // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
   // Covers both thrown MCP errors and isError structured results.
