@@ -247,6 +247,45 @@ for (const [label, overflowValue] of [
   });
 }
 
+// A payload may repeat the same origin. `DISTINCT ON (origin)` keeps an
+// arbitrary row unless ORDER BY breaks the tie, so the retained `databases`
+// would otherwise be non-deterministic. The policy is explicit last-wins.
+test('duplicate origins in one payload deterministically keep the last occurrence', async () => {
+  const duplicateOrigin = 'https://duplicate.example';
+  const document = JSON.stringify({
+    batchIndex: 0,
+    totalBatches: 1,
+    origins: [
+      { origin: duplicateOrigin, databases: { pick: 'first' } },
+      { origin: duplicateOrigin, databases: { pick: 'second' } },
+      { origin: duplicateOrigin, databases: { pick: 'last' } },
+    ],
+    hashes: {},
+  });
+
+  const result = await ingestIndexedDBUploadJson(USER_ID, document);
+  assert(
+    result.originCount === 1,
+    `duplicate origins must collapse to one row, got ${result.originCount}`
+  );
+
+  const rows = await prisma.$queryRawUnsafe<Array<{ pick: string }>>(
+    `SELECT databases->>'pick' AS pick
+     FROM "IndexedDBOrigin"
+     WHERE "userId" = $1 AND origin = $2`,
+    USER_ID,
+    duplicateOrigin
+  );
+  assert(rows.length === 1, `expected exactly one stored row, got ${rows.length}`);
+  assert(rows[0].pick === 'last', `expected the last occurrence to win, got "${rows[0].pick}"`);
+
+  await prisma.$executeRawUnsafe(
+    `DELETE FROM "IndexedDBOrigin" WHERE "userId" = $1 AND origin = $2`,
+    USER_ID,
+    duplicateOrigin
+  );
+});
+
 test('both origins land and the large blob round-trips by md5', async () => {
   const rows = await prisma.$queryRawUnsafe<
     Array<{ origin: string; digest: string; chars: number }>

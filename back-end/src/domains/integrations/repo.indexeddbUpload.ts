@@ -86,23 +86,27 @@ async function upsertOrigins(tx: Prisma.TransactionClient, userId: string): Prom
     `
     WITH origins AS (
       SELECT
-        e->>'origin' AS origin,
-        e->'databases' AS databases,
-        e->>'error' AS error,
-        NULLIF(doc->'hashes'->> (e->>'origin'), '') AS hash
+        e.value->>'origin' AS origin,
+        e.value->'databases' AS databases,
+        e.value->>'error' AS error,
+        NULLIF(doc->'hashes'->> (e.value->>'origin'), '') AS hash,
+        e.ord AS ord
       FROM idb_upload_ingest_doc
-      CROSS JOIN LATERAL jsonb_array_elements(doc->'origins') AS e
+      CROSS JOIN LATERAL jsonb_array_elements(doc->'origins') WITH ORDINALITY AS e(value, ord)
     ),
     filtered AS (
       -- One row per origin: duplicate origins in one payload must not abort
       -- the statement with "ON CONFLICT DO UPDATE cannot affect row a second time".
+      -- DISTINCT ON keeps an arbitrary row unless ORDER BY disambiguates the tie,
+      -- so order by payload position and make the policy explicit: last occurrence
+      -- wins, matching "a later entry in the payload supersedes an earlier one".
       SELECT DISTINCT ON (origin) origin, databases, hash
       FROM origins
       WHERE origin IS NOT NULL
         AND origin <> ''
         AND databases IS NOT NULL
         AND (error IS NULL OR error = '')
-      ORDER BY origin
+      ORDER BY origin, ord DESC
     ),
     upserted AS (
       INSERT INTO "IndexedDBOrigin" (id, "userId", origin, databases, hash, "updatedAt")
