@@ -4424,6 +4424,7 @@
     "expected_attention_kind": "payment_approval",
     "start_phase": "execute",
     "production_only": true,
+    "disable_purchase_reuse": true,
     "response_schema": {
       "fields": [
         {

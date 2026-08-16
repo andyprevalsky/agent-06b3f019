@@ -4024,6 +4024,120 @@ async def test_live_paid_booking_poll_stops_without_approving_payment():
         assert responses == []
 
 
+def test_production_purchase_prompt_omits_place_order_tail_after_you_are_paying():
+    """H-29 edit: truncate the purchase prompt at "You are paying…".
+
+    Card-mint / Place-order / Stripe / Report sequencing after that marker made
+    parents over-specify browser goals (agent 82c96df8: write_lock before
+    payment_approval). Keep the purchase objective; drop everything after
+    "You are paying".
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    prompt = get_task_by_name("agent-payment-production-purchase").prompt
+    assert "You are paying" in prompt
+    assert "MUST obtain a one-time payment card" not in prompt
+    assert "do not use any public test card" not in prompt
+    assert "Click Place order" not in prompt
+    assert "Stripe payment form" not in prompt
+    assert "Report the confirmation" not in prompt
+    assert prompt.rstrip().endswith("You are paying…")
+
+
+def test_production_purchase_disables_purchase_reuse_gate_only_for_that_task():
+    """Purchase probe closes leftover HELD reuse; sibling prod Stripe tasks keep reuse."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+
+    purchase = get_task_by_name("agent-payment-production-purchase")
+    assert purchase.disable_purchase_reuse is True
+    assert purchase.production_only is True
+
+    reuse_enabled = [
+        task.name
+        for task in all_tasks()
+        if task.name != purchase.name and getattr(task, "disable_purchase_reuse", False)
+    ]
+    assert reuse_enabled == [], f"unexpected disable_purchase_reuse tasks: {reuse_enabled}"
+
+    abandonment = get_task_by_name("agent-payment-production-abandonment")
+    assert abandonment.disable_purchase_reuse is False
+
+
+async def test_production_purchase_poll_auto_approves_follow_on_write_lock():
+    """After payment_approval, Place-order write_lock must not abort an auto_approve purchase."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    payment = {
+        "id": "payment-approval",
+        "agentId": "agent-prod-purchase",
+        "metadata": {
+            "requestUserApproval": {
+                "writePermission": True,
+                "requestPaymentCard": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "subtotalCents": 100,
+                    "totalCents": 100,
+                    "lineItems": [
+                        {
+                            "name": "Agent Card Lifecycle Probe",
+                            "imageUrl": "https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe",
+                            "unitPriceCents": 100,
+                            "quantity": 1,
+                            "lineTotalCents": 100,
+                        }
+                    ],
+                    "fees": [],
+                },
+            }
+        },
+    }
+    write_lock = {
+        "id": "place-order-write-lock",
+        "agentId": "agent-prod-purchase",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+    task = replace(
+        get_task_by_name("agent-payment-production-purchase"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        expected_payment_lifecycle=None,
+        timeout_seconds=5,
+    )
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "payment_approval"
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [payment, write_lock],
+    )
+    assert failure is None
+    assert triggered == 1
+    assert resolved == 2
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+    assert responses == [
+        ("payment-approval", "approved"),
+        ("place-order-write-lock", "approved"),
+    ]
+
+
+def test_wait_for_trigger_auto_approves_phone_call_write_lock():
+    """wait-for-trigger must auto-approve + simulate, or a real call hits Andy's phone."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("wait-for-trigger")
+    assert task.approval_handling == "auto_approve"
+    assert task.world_model_mode == "simulate", (
+        "auto_approve without world_model_mode=simulate would place a real "
+        "call_phone_number to the operator after the Bitcoin trigger fires"
+    )
+    assert "call my phone number" in task.prompt.lower()
+
+
 async def test_toast_poll_stops_without_responding_to_payment_approval():
     """Toast exposes the unresolved card request to semantic evaluation."""
     from dataclasses import replace
@@ -13828,6 +13942,22 @@ async def run_all_tests():
     await r.record_async(
         "live_paid_booking_poll_stops_unapproved",
         test_live_paid_booking_poll_stops_without_approving_payment,
+    )
+    r.record(
+        "production_purchase_prompt_omits_place_order_tail_after_you_are_paying",
+        test_production_purchase_prompt_omits_place_order_tail_after_you_are_paying,
+    )
+    r.record(
+        "production_purchase_disables_purchase_reuse_gate_only_for_that_task",
+        test_production_purchase_disables_purchase_reuse_gate_only_for_that_task,
+    )
+    await r.record_async(
+        "production_purchase_follow_on_write_lock",
+        test_production_purchase_poll_auto_approves_follow_on_write_lock,
+    )
+    r.record(
+        "wait_for_trigger_auto_approves_phone_call",
+        test_wait_for_trigger_auto_approves_phone_call_write_lock,
     )
     await r.record_async(
         "toast_poll_stops_unapproved",
