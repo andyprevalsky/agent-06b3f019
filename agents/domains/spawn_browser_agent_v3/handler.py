@@ -133,9 +133,12 @@ from .service import (
     select_auth_assistance_current_url,
 )
 from .service_actions import (
+    SITE_WRITE_LOCK_APPROVAL_KEY,
     execute_action,
     get_domain_from_url,
     get_element_description,
+    grant_site_write_lock_approvals,
+    resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
 )
 from .service_crypto import (
@@ -4857,7 +4860,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
-        write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
+        write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
@@ -4872,6 +4875,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
         ][-3:]
+        # H-06 heal: payment-card resume must unlock the merchant domain. Older
+        # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
+        # re-resolve from start_url / visited merchant URLs when needed.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            merchant_grant_url = resolve_site_write_lock_grant_url(
+                {
+                    "start_url": start_url,
+                    "visited_urls": visited_urls,
+                    "current_url": "",
+                }
+            )
+            merchant_domain = get_domain_from_url(merchant_grant_url)
+            site_entry = write_lock_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}
+            if merchant_domain and site_entry.get("domain") != merchant_domain:
+                write_lock_approvals = grant_site_write_lock_approvals(
+                    write_lock_approvals,
+                    merchant_grant_url,
+                    time.time(),
+                )
+                logger.info(
+                    "Browser payment site write-lock unlock healed on resume",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grant_url=merchant_grant_url,
+                    unlock_domain=merchant_domain,
+                    prior_domain=site_entry.get("domain"),
+                )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -8371,12 +8403,36 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                         approval_type = result.get("approval_type", "unknown")
-                        current_approvals = result.get("write_lock_approvals", {})
-
+                        current_approvals = dict(result.get("write_lock_approvals") or {})
+                        approved_at = workflow.now().timestamp()
+                        # Prefer merchant checkout URL over Kernel live-view current_url
+                        # so a write-lock approval after payment does not re-key the
+                        # domain to *.kernel.sh / *.onkernel.com.
+                        grant_url = (
+                            resolve_site_write_lock_grant_url(
+                                {
+                                    **(result if isinstance(result, dict) else {}),
+                                    "start_url": current_start_url or start_url,
+                                }
+                            )
+                            or result.get("current_url", "")
+                        )
                         current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(result.get("current_url", "")),
-                            "approved_at": workflow.now().timestamp(),
+                            "domain": get_domain_from_url(grant_url),
+                            "approved_at": approved_at,
                         }
+                        # Payment-card mint already unlocked the site for this
+                        # activity — keep that session-scoped site unlock alive
+                        # across later write-lock approvals on the same page.
+                        prior_resume = write_lock_resume_state or {}
+                        prior_payment_refs = prior_resume.get("payment_card_refs")
+                        prior_payment_last4 = prior_resume.get("payment_card_last4")
+                        if prior_payment_refs or current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY):
+                            current_approvals = grant_site_write_lock_approvals(
+                                current_approvals,
+                                grant_url,
+                                approved_at,
+                            )
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
@@ -8390,6 +8446,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "auth_realm": result.get("auth_realm"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
+                        # Preserve minted card refs across write-lock resumes so
+                        # purchase bypass + site unlock stay available.
+                        if prior_payment_refs:
+                            write_lock_resume_state["payment_card_refs"] = prior_payment_refs
+                        if prior_payment_last4:
+                            write_lock_resume_state["payment_card_last4"] = prior_payment_last4
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
@@ -8487,26 +8549,35 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         reusable=lookup_result.get("reusable"),
                     )
 
-                    approval_response = {"attention_request_id": None}
-                    if not lookup_result.get("reusable"):
-                        approval_response = await request_user_approval_direct(
-                            workflow_instance,
-                            question=build_payment_question(payment_payload),
-                            metadata={
-                                "toolApproval": True,
-                                "writePermission": True,
-                                "url": result.get("current_url", ""),
-                                "requestPaymentCard": payment_payload,
-                                "writeLockNotification": result.get("write_lock_notification"),
-                                "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
-                            },
-                        )
-                        logger.info(
-                            "Browser payment approval granted",
-                            agent_id=workflow_instance.agent_id,
-                            task_id=result.get("task_id"),
-                            attention_request_id=approval_response.get("attention_request_id"),
-                        )
+                    # Always surface payment_approval attention — even when a held
+                    # purchase is reusable. Skipping it left fleets with
+                    # attentionRequestId=null, so Place-order write_lock became the
+                    # first observed attention ("Expected payment_approval, observed
+                    # write_lock") and H-06 site unlock was never gated on a real
+                    # approval. Reuse still applies at mint; this only restores the
+                    # approval UX / benchmark contract.
+                    approval_response = await request_user_approval_direct(
+                        workflow_instance,
+                        question=build_payment_question(payment_payload),
+                        metadata={
+                            "toolApproval": True,
+                            "writePermission": True,
+                            "url": result.get("current_url", "")
+                            or current_start_url
+                            or start_url,
+                            "requestPaymentCard": payment_payload,
+                            "writeLockNotification": result.get("write_lock_notification"),
+                            "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
+                            "reusablePurchase": bool(lookup_result.get("reusable")),
+                        },
+                    )
+                    logger.info(
+                        "Browser payment approval granted",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        attention_request_id=approval_response.get("attention_request_id"),
+                        reusable=bool(lookup_result.get("reusable")),
+                    )
 
                     funding_retry_deadline = None
 
@@ -8842,11 +8913,33 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "card_cvv": card_cvv,
                     }
 
-                    current_approvals = result.get("write_lock_approvals", {})
-                    current_approvals["payment"] = {
-                        "domain": get_domain_from_url(result.get("current_url", "")),
-                        "approved_at": workflow.now().timestamp(),
+                    # Payment-card approval unlocks write locks on the merchant
+                    # checkout domain for THIS browser activity only (resume state).
+                    # Prefer normalized payment_payload product URLs + spawn
+                    # start_url — Kernel live-view current_url is often a proxy
+                    # host (*.kernel.sh / *.onkernel.com) and must not become the
+                    # unlock domain. New spawns start empty.
+                    grant_source = {
+                        **(result if isinstance(result, dict) else {}),
+                        "payment_request": payment_payload,
+                        "start_url": current_start_url or start_url,
                     }
+                    grant_url = resolve_site_write_lock_grant_url(grant_source)
+                    current_approvals = grant_site_write_lock_approvals(
+                        result.get("write_lock_approvals", {}),
+                        grant_url,
+                        workflow.now().timestamp(),
+                    )
+                    logger.info(
+                        "Browser payment site write-lock unlock",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        grant_url=grant_url,
+                        unlock_domain=(current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}).get(
+                            "domain"
+                        ),
+                        current_url=result.get("current_url"),
+                    )
 
                     write_lock_resume_state = {
                         "pending_action": None,
