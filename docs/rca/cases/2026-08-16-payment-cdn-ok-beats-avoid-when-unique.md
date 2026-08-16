@@ -8,12 +8,11 @@ classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
 first_bad_boundary: back-end/src/providers/browser/challengeRecovery.ts::candidateScore — isAvoided ranked before paymentCdnOk
 symptoms:
-  - 'Challenge recovery promoting stable winner configKey=kernel_isp ... paymentCdnOk=false ... stripe.js":false} requirePaymentCdn=false avoidConfigKey=steel_managed'
-  - 'paymentCdnHosts={"js.stripe.com":true,"api.stripe.com":false,"m.stripe.com":true,"stripe.js":true}'
+  - 'Challenge recovery promoting stable winner configKey=kernel_isp'
+  - 'requirePaymentCdn=false avoidConfigKey=steel_managed'
   - 'Critical resource block ignored: provider-exit cap reached'
-  - 'js.stripe.com/v3 blocked by proxy; window.Stripe undefined'
   - 'Expected payment_approval attention request (to ignore) but none was triggered'
-  - browser-1015-eventim-request-card COST_LIMIT_REACHED approvals_triggered=0
+  - 'js.stripe.com/v3 blocked by proxy; window.Stripe undefined'
 tags:
   - browser-agent
   - eventim
@@ -23,10 +22,8 @@ tags:
   - steel
 sources:
   - agent f1ba73c2-8387-4571-9912-b17f22816a64
-  - run agents/benchmarks/runs/20260816_230941_browser-1015-eventim-request-card.json
-  - prior PASS agent 0c2c66d9-1932-44b7-8f9a-4fd1ea81754d
-  - related docs/rca/cases/2026-08-10-eventim-avoid-config-beats-partial-stripe.md
-  - related docs/rca/cases/2026-08-11-eventim-recovery-requires-stripe-js.md
+  - agent 0c2c66d9-1932-44b7-8f9a-4fd1ea81754d
+  - commit 1b3a0448d
 repro: cd back-end && npx tsx src/tests/unit/browser-challenge-recovery-payment.test.ts
 status: open
 ---
