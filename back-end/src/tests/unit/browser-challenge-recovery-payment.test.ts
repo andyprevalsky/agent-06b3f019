@@ -144,6 +144,79 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   assert.strictEqual(winner.config.key, 'kernel_isp');
 }
 
+async function testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable(): Promise<void> {
+  // Eventim k=3 flake (agent f1ba73c2, 2026-08-16): after steel_managed was
+  // avoidConfigKey'd on a CF re-challenge, candidateScore promoted kernel_isp
+  // (paymentCdnOk=false, stripe.js=false) over steel_managed (paymentCdnOk=true,
+  // stripe.js=true). Live tab cleared CF but Stripe never initialized → no
+  // payment_approval. Exact probe matrix from backend.log @ 22:58:59Z.
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'TX',
+    city: 'DALLAS',
+  });
+  const promoted: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => {
+        if (config.key === 'steel_managed') {
+          return {
+            stablePasses: 2,
+            attempts: 2,
+            latencyMs: 12380,
+            paymentCdnOk: true,
+            paymentCdnHosts: {
+              'js.stripe.com': true,
+              'api.stripe.com': false,
+              'm.stripe.com': true,
+              'stripe.js': true,
+            },
+          };
+        }
+        if (config.key === 'kernel_isp') {
+          return {
+            stablePasses: 2,
+            attempts: 2,
+            latencyMs: 6518,
+            paymentCdnOk: false,
+            paymentCdnHosts: {
+              'js.stripe.com': true,
+              'api.stripe.com': true,
+              'm.stripe.com': true,
+              'stripe.js': false,
+            },
+          };
+        }
+        return {
+          stablePasses: 2,
+          attempts: 2,
+          latencyMs: 13122,
+          paymentCdnOk: false,
+          paymentCdnHosts: {
+            'js.stripe.com': true,
+            'api.stripe.com': true,
+            'm.stripe.com': true,
+            'stripe.js': false,
+          },
+        };
+      },
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
+    },
+    { avoidConfigKey: 'steel_managed', requirePaymentCdn: false }
+  );
+  assert.strictEqual(
+    winner.config.key,
+    'steel_managed',
+    'unique paymentCdnOk=true winner must beat avoidConfigKey (Eventim Stripe.js)'
+  );
+  assert.deepStrictEqual(promoted, ['steel_managed']);
+}
+
 async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> {
   const cookies = [
     {
@@ -471,6 +544,7 @@ async function main(): Promise<void> {
   await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
   await testPrefersPartialPaymentHostClearOverSteelBias();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
+  await testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable();
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPaymentCdnProbeUsesNoCorsForHostFetches();
   await testPaymentCdnOkRequiresStripeJsScriptLoad();
