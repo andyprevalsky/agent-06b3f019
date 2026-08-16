@@ -8306,6 +8306,27 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "browser_generation": 3,
         "document_url": "https://wl.eventim.us/checkout/order-1",
     }
+    from domains.spawn_browser_agent_v3.recording import blocked_resource_url_for_recovery
+
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "critical third-party resource blocked",
+                "url": "https://js.stripe.com/v3/",
+            }
+        )
+        == "https://js.stripe.com/v3/"
+    )
+    # Same-origin API-challenge exits must not hard-fail promote re-verify.
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "same-origin API returned Cloudflare challenge HTML",
+                "url": "https://wl.eventim.us/event/_/686363/order/checkaddtocart",
+            }
+        )
+        is None
+    )
     # One signal per browser generation — no recovery loop on repeated stripe fails.
     recorder._on_loading_failed(
         {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
