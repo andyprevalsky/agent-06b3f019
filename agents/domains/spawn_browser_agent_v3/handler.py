@@ -93,6 +93,7 @@ from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
+    blocked_resource_url_for_recovery,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -6438,17 +6439,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     (provider_exit_rejection or {}).get("reason")
                     or "The current provider IP was explicitly rejected."
                 )
-                blocked_resource_url = str(
-                    (provider_exit_rejection or {}).get("url") or ""
-                ).strip()
+                blocked_resource_url = blocked_resource_url_for_recovery(
+                    provider_exit_rejection
+                )
                 unified_action = {
                     "action": "recover_from_challenge",
                     "thinking": "",
                     "params": {
                         "reason": rejection_reason,
                         "provider_exit_rejected": True,
-                        # Failure-driven re-verify: only this URL must load after
-                        # promote. Plain CF recoveries leave it empty.
+                        # Failure-driven re-verify for critical third-party blocks
+                        # only (not same-origin API-challenge URLs).
                         **(
                             {"blocked_resource_url": blocked_resource_url}
                             if blocked_resource_url

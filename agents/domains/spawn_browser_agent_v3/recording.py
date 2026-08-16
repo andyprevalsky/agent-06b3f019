@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
@@ -3201,6 +3201,22 @@ class BrowserNetworkRecorder:
         if not rejections:
             return None
         return rejections.pop(0)
+
+
+def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
+    """URL to re-verify after promote, or None when CF-clear alone is enough.
+
+    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
+    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
+    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
+    after a good Steel promote.
+    """
+    if not isinstance(rejection, Mapping):
+        return None
+    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
+        return None
+    url = str(rejection.get("url") or "").strip()
+    return url or None
 
     def query_requests(  # noqa: C901
         self,
