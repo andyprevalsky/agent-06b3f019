@@ -3723,6 +3723,59 @@ async def test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it():
     assert responses == []
 
 
+async def test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval():
+    """Place-order write locks are prerequisites when auto_approve waits for payment_approval.
+
+    agent-payment-production-purchase (and similar) prompts click Place order before
+    minting the Rose card. The purchase write_lock must be auto-cleared so the
+    harness can still observe the expected payment_approval — not fail closed on
+    the first write_lock.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-production-purchase")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "payment_approval"
+
+    write_lock = {
+        "id": "purchase-write-lock",
+        "agentId": "agent-payment-prod",
+        "metadata": {
+            "requestUserApproval": {
+                "writePermission": True,
+                "writeLockNotification": {"trigger_type": "purchase"},
+            }
+        },
+    }
+    payment = {
+        "id": "payment-card-approval",
+        "agentId": "agent-payment-prod",
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "amount_cents": 100,
+                "line_items": [{"title": "Agent Card Lifecycle Probe", "price_cents": 100}],
+            }
+        },
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [write_lock, payment],
+        attention_batches=[[write_lock], [payment]],
+    )
+
+    assert failure is None
+    assert (triggered, resolved) == (1, 2)
+    assert responses == [
+        ("purchase-write-lock", "approved"),
+        ("payment-card-approval", "approved"),
+    ]
+    assert data["_benchmark"]["write_lock_prerequisite_auto_approved"] is True
+    assert data["_benchmark"]["attention_request_kind_seen"] == "payment_approval"
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+
+
 async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
     """DoorDash accepts either supported checkout gate without requiring a second request."""
     from benchmarks.benchmark_tasks import get_task_by_name
