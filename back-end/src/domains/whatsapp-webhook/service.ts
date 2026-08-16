@@ -169,6 +169,15 @@ function alreadyProcessedMessage(messageId: string): boolean {
   return false;
 }
 
+/**
+ * Release a dedup reservation so a failed message can be reprocessed on Meta's
+ * retry. Without this, a throw after the reservation would make the retry a
+ * no-op (skipped + 200) and silently drop the inbound message.
+ */
+function releaseProcessedMessage(messageId: string): void {
+  if (messageId !== '') RECENT_MESSAGE_IDS.delete(messageId);
+}
+
 export async function handleInboundWhatsApp(
   input: InboundWhatsAppInput
 ): Promise<InboundWhatsAppResult> {
@@ -224,40 +233,47 @@ export async function handleInboundWhatsApp(
       log.info('Duplicate WhatsApp delivery skipped', { messageId });
       continue;
     }
+    // Log shape only — the message body is user PII.
     log.info('Inbound WhatsApp received', {
       from: fromPhone.substring(0, 7) + '****',
       bodyLength: messageBody.length,
-      bodyPreview: messageBody.substring(0, 100),
       messageId,
     });
 
-    let userId = userIdByPhone.get(fromPhone);
-    if (userId === undefined) {
-      // An inbound WhatsApp message proves possession of the number (Meta
-      // verified the sender), so a first-time texter is provisioned silently.
-      const { user, created } = await provisionUserByPhone(fromPhone);
-      userId = user.userId;
-      userIdByPhone.set(fromPhone, userId);
-      if (created) {
-        log.info('Provisioned new WhatsApp user (first contact)', {
-          userId,
-          phone: fromPhone.substring(0, 7) + '****',
-        });
-        try {
-          await createSignupBonusCredit(userId);
-        } catch (error) {
-          log.error('Failed to create signup bonus credit for provisioned user', {
+    try {
+      let userId = userIdByPhone.get(fromPhone);
+      if (userId === undefined) {
+        // An inbound WhatsApp message proves possession of the number (Meta
+        // verified the sender), so a first-time texter is provisioned silently.
+        const { user, created } = await provisionUserByPhone(fromPhone);
+        userId = user.userId;
+        userIdByPhone.set(fromPhone, userId);
+        if (created) {
+          log.info('Provisioned new WhatsApp user (first contact)', {
             userId,
-            error: error instanceof Error ? error.message : String(error),
+            phone: fromPhone.substring(0, 7) + '****',
           });
+          try {
+            await createSignupBonusCredit(userId);
+          } catch (error) {
+            log.error('Failed to create signup bonus credit for provisioned user', {
+              userId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
         }
+        // The user just texted us on WhatsApp, so they are definitively reachable —
+        // (re-)enable WhatsApp mirroring of their lifecycle/onboarding notifications.
+        await markWhatsAppReachable(userId);
       }
-      // The user just texted us on WhatsApp, so they are definitively reachable —
-      // (re-)enable WhatsApp mirroring of their lifecycle/onboarding notifications.
-      await markWhatsAppReachable(userId);
-    }
 
-    await routeToSupervisor(userId, fromPhone, messageBody, requestStart);
+      await routeToSupervisor(userId, fromPhone, messageBody, requestStart);
+    } catch (error) {
+      // Processing failed (e.g. DB error) → release the dedup reservation so
+      // Meta's retry reprocesses this message instead of skipping it as a dup.
+      releaseProcessedMessage(messageId);
+      throw error;
+    }
   }
 
   return { ok: true };

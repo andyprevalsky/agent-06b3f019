@@ -94,7 +94,9 @@ export function parseWhatsAppInboundMessages(
       const textBody = typeof text?.body === 'string' ? text.body.trim() : '';
       const from = typeof message.from === 'string' ? message.from : '';
       const messageId = typeof message.id === 'string' ? message.id : '';
-      if (textBody === '' || from === '') continue;
+      // A valid Meta message always carries a `from` and an `id`; the id is
+      // required for retry deduplication, so drop anything missing either.
+      if (textBody === '' || from === '' || messageId === '') continue;
       parsed.push({ fromPhone: normalizeWaId(from), messageBody: textBody, messageId });
     }
   }
