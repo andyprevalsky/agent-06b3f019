@@ -144,12 +144,12 @@ async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   assert.strictEqual(winner.config.key, 'kernel_isp');
 }
 
-async function testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable(): Promise<void> {
-  // Eventim k=3 flake (agent f1ba73c2, 2026-08-16): after steel_managed was
-  // avoidConfigKey'd on a CF re-challenge, candidateScore promoted kernel_isp
-  // (paymentCdnOk=false, stripe.js=false) over steel_managed (paymentCdnOk=true,
-  // stripe.js=true). Live tab cleared CF but Stripe never initialized → no
-  // payment_approval. Exact probe matrix from backend.log @ 22:58:59Z.
+async function testHardPaymentCdnFilterKeepsOnlyWorkingConfig(): Promise<void> {
+  // Eventim flake (agent f1ba73c2, 2026-08-16): recovery must hard-filter to
+  // configs that clear Stripe.js when that is the failure mode — not soft-rank
+  // paymentCdnOk vs avoidConfigKey. Exact probe matrix from backend.log @ 22:58:59Z.
+  // With requirePaymentCdn=true, steel_managed is the only survivor; avoid is
+  // irrelevant because no alternative works.
   const configs = browserRecoveryCandidates({
     country: 'US',
     state: 'TX',
@@ -207,12 +207,12 @@ async function testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable(): Promise<void> 
       },
       release: async () => undefined,
     },
-    { avoidConfigKey: 'steel_managed', requirePaymentCdn: false }
+    { avoidConfigKey: 'steel_managed', requirePaymentCdn: true }
   );
   assert.strictEqual(
     winner.config.key,
     'steel_managed',
-    'unique paymentCdnOk=true winner must beat avoidConfigKey (Eventim Stripe.js)'
+    'hard paymentCdn filter: only working config survives (ignore avoid)'
   );
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
@@ -544,7 +544,7 @@ async function main(): Promise<void> {
   await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
   await testPrefersPartialPaymentHostClearOverSteelBias();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
-  await testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable();
+  await testHardPaymentCdnFilterKeepsOnlyWorkingConfig();
   await testCandidateProbeUsesThePromotedDefaultContext();
   testPaymentCdnProbeUsesNoCorsForHostFetches();
   await testPaymentCdnOkRequiresStripeJsScriptLoad();

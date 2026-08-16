@@ -85,22 +85,38 @@ Relatives (not closed by citing alone):
 
 ## Solution
 
-(Proposed — awaiting approval.) Reorder `candidateScore` to:
+(Proposed — awaiting approval; soft-rank reorder rejected.)
 
-`stablePasses → paymentCdnOk → isAvoided → paymentHostsOkCount → steel bias → latency`
+Configs are binary: they pass the hard requirements for **this** recovery or they
+do not. No soft payment-CDN preference in `candidateScore`.
 
-Preserves `testAvoidConfigKeyBeatsPartialPaymentHostClear` (both
-`paymentCdnOk=false` → avoid still wins). Fixes
-`testPaymentCdnOkBeatsAvoidWhenOnlyStripeCapable` (unique `paymentCdnOk=true`
-beats avoid). Do **not** bump provider-exit cap. Deploy gate: parallel k=4
-`scripts/run-bench --local browser-1015-eventim-request-card`.
+1. **Hard filter from the failure that triggered recovery**
+   - CF-only / no blocked URL → require CF-stable only.
+   - Blocked third-party / payment CDN URL (e.g. `js.stripe.com`) → require that
+     resource clears (`paymentCdnOk` / URL probe). Wire
+     `blocked_resource_url` into `recover-challenge` so
+     `requirePaymentCdn` (or equivalent) is set true when the exit was a
+     payment-CDN block — not from `/cart` URL heuristics.
+   - Sticky on the task: once a payment-CDN block was observed, later config
+     searches on that task keep the hard payment-CDN filter so a CF re-challenge
+     cannot promote a Kernel that already failed Stripe.js.
+2. **Among survivors:** drop `avoidConfigKey` if any other survivor remains;
+   otherwise keep the avoided key (it is the only one that works).
+3. **Among what remains:** pick by latency only (no `paymentCdnOk` soft tier).
+
+Unit: failure-driven hard filter with `avoidConfigKey=steel_managed` + unique
+`paymentCdnOk=true` must promote steel; CF-only with all `paymentCdnOk=false`
+must still prefer non-avoided. Deploy gate: parallel k=4
+`scripts/run-bench --local browser-1015-eventim-request-card`. Do **not** bump
+provider-exit cap.
 
 ## Human feedback
 
 Deploy-ready requires this task to pass at **k=4 in parallel** (not serial).
-`/rca` requested for the reliability failure before further deploy.
+Rejected soft priority reorder (“either the config works or it doesn’t”).
 
 ## Reusable lesson
 
-Never rank avoid ahead of a capability the avoided candidate uniquely probes true
-(here `paymentCdnOk` / Stripe.js); avoid only breaks ties among equally capable configs.
+Challenge recovery selects among configs that hard-pass the failure that triggered
+them; never soft-rank optional capabilities, and never avoid a config that is the
+only survivor of that hard filter.
