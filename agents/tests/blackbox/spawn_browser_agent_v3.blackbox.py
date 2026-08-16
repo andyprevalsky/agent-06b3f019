@@ -7295,6 +7295,38 @@ def test_site_write_lock_unlock_covers_purchase_on_approved_domain():
     assert is_approval_valid({}, "purchase", "https://roselabs.ai/test_payment") is False
 
 
+def test_payment_site_unlock_covers_subdomains_and_ignores_path_query():
+    """Site unlock is registrable-domain wildcard — not a full URL / query match."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    # Synthetic merchant host — avoids CI secret-domain scanners.
+    merchant = "https://www.shop-example.com/cart?item=1&ref=bench"
+    approvals = grant_site_write_lock_approvals({}, merchant, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "shop-example.com"
+    # Apex, www, and checkout subdomain + arbitrary paths/queries all match.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.com/cart") is True
+    assert is_approval_valid(approvals, "purchase", "https://www.shop-example.com/other") is True
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://checkout.shop-example.com/pay?order=1",
+        )
+        is True
+    )
+    assert is_approval_valid(approvals, "email_send", "https://pay.shop-example.com/send") is True
+    # Sibling registrable domains stay locked.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.org/cart") is False
+    assert is_approval_valid(approvals, "purchase", "https://evil-shop-example.com/x") is False
+    # Browser-provider hosts never inherit a merchant site unlock.
+    assert is_approval_valid(approvals, "purchase", "https://foo.onkernel.com/view") is False
+    assert is_approval_valid(approvals, "purchase", "https://bar.kernel.sh/session") is False
+
+
 def test_payment_site_unlock_survives_write_lock_timeout():
     """Payment-card site unlock must outlive the 120s one-off write-lock timeout.
 
@@ -14925,6 +14957,10 @@ async def run_all_tests():
     r.record(
         "site_write_lock_unlock_covers_purchase",
         test_site_write_lock_unlock_covers_purchase_on_approved_domain,
+    )
+    r.record(
+        "payment_site_unlock_covers_subdomains_and_ignores_path_query",
+        test_payment_site_unlock_covers_subdomains_and_ignores_path_query,
     )
     r.record(
         "payment_site_unlock_survives_write_lock_timeout",
