@@ -72,15 +72,20 @@ async function deliverAcrossChannels(
   send: (channel: SupervisorChannel) => Promise<ChannelSendResult>
 ): Promise<ChannelSendResult> {
   let anchor: ChannelSendResult | undefined;
+  let firstSuccess: ChannelSendResult | undefined;
   for (const channel of channels) {
     const result = await send(channel);
     if (channel === 'WHATSAPP') {
       if (result.recipientUnreachable === true) await markWhatsAppUnreachable(userId);
       else if (result.success) await markWhatsAppReachable(userId);
     }
+    if (result.success && firstSuccess === undefined) firstSuccess = result;
     if (channel === 'SMS' || anchor === undefined) anchor = result;
   }
-  return anchor ?? { success: false, error: 'no delivery channels' };
+  // A mirrored send succeeded if ANY channel delivered — so a successful result
+  // anchors the transcript append + completion outcome even when another channel
+  // (e.g. SMS) failed. Fall back to the SMS/first result when all channels fail.
+  return firstSuccess ?? anchor ?? { success: false, error: 'no delivery channels' };
 }
 
 async function sendLifecycleSms(

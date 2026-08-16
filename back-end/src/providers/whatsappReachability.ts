@@ -32,14 +32,16 @@ export async function markWhatsAppReachable(userId: string): Promise<void> {
 
 /**
  * Record that a user cannot receive proactive WhatsApp messages, so lifecycle
- * mirroring stops targeting WhatsApp for them (until they text us again). Only
- * flips a currently-non-false value to false — never overwrites a fresh `true`
- * set by a concurrent inbound.
+ * mirroring stops targeting WhatsApp for them (until they text us again). A Meta
+ * deliverability code is a definitive per-recipient signal, so this flips the
+ * flag to false unconditionally — including from a previously-`true` state. A
+ * rare race with a concurrent inbound (which sets `true`) is last-writer-wins
+ * and self-heals: the next inbound WhatsApp message re-enables the user.
  */
 export async function markWhatsAppUnreachable(userId: string): Promise<void> {
   try {
-    await prisma.user.updateMany({
-      where: { userId, NOT: { whatsappReachable: true } },
+    await prisma.user.update({
+      where: { userId },
       data: { whatsappReachable: false },
     });
     log.info('Marked WhatsApp unreachable; stop mirroring lifecycle to WhatsApp for this number', {

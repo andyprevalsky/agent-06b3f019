@@ -91,6 +91,43 @@ async function testSendApiError(): Promise<void> {
   );
 }
 
+async function testTransientNotDefinitive(): Promise<void> {
+  // 429 (throttle) and 5xx (Meta outage) are transient — NOT definitive — so the
+  // supervisor's delivery loop may retry rather than drop the message.
+  for (const status of [429, 500, 502, 503]) {
+    await withMockedFetch(
+      () =>
+        new Response(JSON.stringify({ error: { message: 'x', code: 131000 } }), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        }),
+      CONFIGURED,
+      async () => {
+        const result = await sendWhatsAppMessage('+15551234567', 'hi');
+        assert.strictEqual(result.success, false, `status ${status} is a failure`);
+        assert.notStrictEqual(
+          result.definitiveFailure,
+          true,
+          `status ${status} must be transient, not definitive`
+        );
+      }
+    );
+  }
+  // A non-429 4xx (e.g. 400 bad request) IS definitive.
+  await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ error: { message: 'x', code: 100 } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppMessage('+15551234567', 'hi');
+      assert.strictEqual(result.definitiveFailure, true, '400 is definitive');
+    }
+  );
+}
+
 async function testNotConfigured(): Promise<void> {
   const calls = await withMockedFetch(
     () => new Response('{}', { status: 200 }),
@@ -165,6 +202,7 @@ async function main(): Promise<void> {
   await testSendSuccess();
   await testSendApiError();
   await testRecipientUnreachableCodes();
+  await testTransientNotDefinitive();
   await testNotConfigured();
   await testNetworkThrow();
   process.stdout.write('PASS sendWhatsAppMessage request shape + result contract\n');

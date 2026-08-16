@@ -199,6 +199,9 @@ export async function sendWhatsAppMessage(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(requestBody),
+        // Undici has no total-request deadline; bound it so supervisor delivery
+        // and fallback handling can't hang indefinitely on a stuck connection.
+        signal: AbortSignal.timeout(15_000),
       }
     );
 
@@ -221,10 +224,14 @@ export async function sendWhatsAppMessage(
       const errorCode = extractWhatsAppErrorCode(errorText);
       const recipientUnreachable =
         errorCode !== null && WHATSAPP_UNREACHABLE_ERROR_CODES.has(errorCode);
+      // 429 (throttle) and 5xx (Meta outage) are transient — the supervisor's
+      // delivery loop may retry them. Only other 4xx are permanent. A
+      // recipient-unreachable code is definitive for THIS recipient.
+      const transient = response.status === 429 || response.status >= 500;
       return {
         success: false,
         error: `WhatsApp API error: ${response.status}`,
-        definitiveFailure: true,
+        definitiveFailure: recipientUnreachable || !transient,
         ...(recipientUnreachable ? { recipientUnreachable: true } : {}),
       };
     }

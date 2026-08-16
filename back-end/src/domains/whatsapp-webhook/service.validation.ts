@@ -80,7 +80,10 @@ function collectChanges(body: Record<string, unknown>): Record<string, unknown>[
  * a malformed body). Non-text messages are intentionally not parsed in v1 —
  * they require the media-download API and are handled as a follow-up.
  */
-export function parseWhatsAppInbound(body: Record<string, unknown>): ParsedWhatsAppMessage | null {
+export function parseWhatsAppInboundMessages(
+  body: Record<string, unknown>
+): ParsedWhatsAppMessage[] {
+  const parsed: ParsedWhatsAppMessage[] = [];
   for (const value of collectChanges(body)) {
     const messages = Array.isArray(value.messages) ? value.messages : [];
     for (const raw of messages) {
@@ -92,10 +95,15 @@ export function parseWhatsAppInbound(body: Record<string, unknown>): ParsedWhats
       const from = typeof message.from === 'string' ? message.from : '';
       const messageId = typeof message.id === 'string' ? message.id : '';
       if (textBody === '' || from === '') continue;
-      return { fromPhone: normalizeWaId(from), messageBody: textBody, messageId };
+      parsed.push({ fromPhone: normalizeWaId(from), messageBody: textBody, messageId });
     }
   }
-  return null;
+  return parsed;
+}
+
+/** First inbound text message in the payload (or null). */
+export function parseWhatsAppInbound(body: Record<string, unknown>): ParsedWhatsAppMessage | null {
+  return parseWhatsAppInboundMessages(body)[0] ?? null;
 }
 
 /**

@@ -188,7 +188,11 @@ async function testUnit_resolveWebhookVerification() {
   );
 }
 
-function inboundPayload(from: string, text: string): Record<string, unknown> {
+function inboundPayload(
+  from: string,
+  text: string,
+  messageId = 'wamid.TEST'
+): Record<string, unknown> {
   return {
     object: 'whatsapp_business_account',
     entry: [
@@ -204,7 +208,7 @@ function inboundPayload(from: string, text: string): Record<string, unknown> {
               messages: [
                 {
                   from,
-                  id: 'wamid.TEST',
+                  id: messageId,
                   timestamp: '1700000000',
                   type: 'text',
                   text: { body: text },
@@ -367,7 +371,7 @@ async function testInbound_newNumberProvisionsAndRoutes() {
   try {
     const res = await request(`${BASE_URL}/api/whatsapp/webhook`, {
       method: 'POST',
-      body: JSON.stringify(inboundPayload(wa, 'hey rose, what can you do?')),
+      body: JSON.stringify(inboundPayload(wa, 'hey rose, what can you do?', `wamid.${wa}`)),
     });
     assertStatus(res.status, 200, res.data);
     const body = res.data as { ok?: boolean };

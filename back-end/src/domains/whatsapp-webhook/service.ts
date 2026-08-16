@@ -16,7 +16,7 @@
 import { IS_PRODUCTION } from './config';
 import {
   resolveWebhookVerification,
-  parseWhatsAppInbound,
+  parseWhatsAppInboundMessages,
   isStatusOnlyEvent,
   type WebhookVerification,
 } from './service.validation';
@@ -152,16 +152,43 @@ export interface InboundWhatsAppResult {
   ok: true;
 }
 
+// Bounded, in-memory dedup of recently-handled Meta message ids. Meta re-delivers
+// a webhook when it does not get a timely 2xx, so a slow DB turn can re-run the
+// same inbound message; this suppresses the immediate retry. Per-instance only —
+// a shared dedup store (unique wamid) is the multi-instance follow-up.
+const RECENT_MESSAGE_IDS = new Set<string>();
+const RECENT_MESSAGE_ID_CAP = 5000;
+function alreadyProcessedMessage(messageId: string): boolean {
+  if (messageId === '') return false;
+  if (RECENT_MESSAGE_IDS.has(messageId)) return true;
+  RECENT_MESSAGE_IDS.add(messageId);
+  if (RECENT_MESSAGE_IDS.size > RECENT_MESSAGE_ID_CAP) {
+    const oldest = RECENT_MESSAGE_IDS.values().next().value;
+    if (oldest !== undefined) RECENT_MESSAGE_IDS.delete(oldest);
+  }
+  return false;
+}
+
 export async function handleInboundWhatsApp(
   input: InboundWhatsAppInput
 ): Promise<InboundWhatsAppResult> {
   const requestStart = Date.now();
   const { appSecret } = getWhatsAppConfig();
 
-  // Verify Meta's X-Hub-Signature-256 in production (mirrors Surge HMAC gating).
-  if (appSecret !== undefined && appSecret !== '' && IS_PRODUCTION) {
-    const rawBody = input.rawBody ?? JSON.stringify(input.body);
-    if (!verifyMetaSignature(input.signatureHeader, rawBody, appSecret)) {
+  // Verify Meta's X-Hub-Signature-256. In production this is MANDATORY and fails
+  // CLOSED: a missing app secret or an absent raw body must reject the request,
+  // never bypass verification — otherwise forged inbound messages could trigger
+  // provisioning, signup credits, reachability updates, and supervisor runs.
+  if (IS_PRODUCTION) {
+    if (appSecret === undefined || appSecret === '') {
+      log.error('WHATSAPP_APP_SECRET not configured; rejecting inbound WhatsApp in production');
+      throw new InvalidSignatureError();
+    }
+    if (input.rawBody === undefined || input.rawBody === '') {
+      log.error('Missing raw body for WhatsApp signature verification; rejecting');
+      throw new InvalidSignatureError();
+    }
+    if (!verifyMetaSignature(input.signatureHeader, input.rawBody, appSecret)) {
       log.error('Invalid WhatsApp signature');
       throw new InvalidSignatureError();
     }
@@ -178,47 +205,60 @@ export async function handleInboundWhatsApp(
     return { ok: true };
   }
 
-  const parsed = parseWhatsAppInbound(body);
-  if (!parsed) {
+  const messages = parseWhatsAppInboundMessages(body);
+  if (messages.length === 0) {
     // Non-text media, empty, or unrecognized shape. Acknowledge so Meta stops
-    // retrying; log for visibility. (Media handling is a follow-up.)
+    // retrying. Log SHAPE only — the raw payload holds the sender's phone number
+    // and message text (PII). (Media handling is a follow-up.)
     log.warn('No inbound WhatsApp text to route', {
       keys: Object.keys(body),
-      raw: JSON.stringify(body).substring(0, 500),
+      entryCount: Array.isArray(body.entry) ? body.entry.length : 0,
     });
     return { ok: true };
   }
 
-  const { fromPhone, messageBody, messageId } = parsed;
-  log.info('Inbound WhatsApp received', {
-    from: fromPhone.substring(0, 7) + '****',
-    bodyLength: messageBody.length,
-    bodyPreview: messageBody.substring(0, 100),
-    messageId,
-  });
-
-  // An inbound WhatsApp message proves possession of the number (Meta verified
-  // the sender), so a first-time texter is provisioned silently — same as SMS.
-  const { user, created } = await provisionUserByPhone(fromPhone);
-  if (created) {
-    log.info('Provisioned new WhatsApp user (first contact)', {
-      userId: user.userId,
-      phone: fromPhone.substring(0, 7) + '****',
-    });
-    try {
-      await createSignupBonusCredit(user.userId);
-    } catch (error) {
-      log.error('Failed to create signup bonus credit for provisioned user', {
-        userId: user.userId,
-        error: error instanceof Error ? error.message : String(error),
-      });
+  // Provision each unique sender once, then route every message in the batch.
+  const userIdByPhone = new Map<string, string>();
+  for (const { fromPhone, messageBody, messageId } of messages) {
+    if (alreadyProcessedMessage(messageId)) {
+      log.info('Duplicate WhatsApp delivery skipped', { messageId });
+      continue;
     }
+    log.info('Inbound WhatsApp received', {
+      from: fromPhone.substring(0, 7) + '****',
+      bodyLength: messageBody.length,
+      bodyPreview: messageBody.substring(0, 100),
+      messageId,
+    });
+
+    let userId = userIdByPhone.get(fromPhone);
+    if (userId === undefined) {
+      // An inbound WhatsApp message proves possession of the number (Meta
+      // verified the sender), so a first-time texter is provisioned silently.
+      const { user, created } = await provisionUserByPhone(fromPhone);
+      userId = user.userId;
+      userIdByPhone.set(fromPhone, userId);
+      if (created) {
+        log.info('Provisioned new WhatsApp user (first contact)', {
+          userId,
+          phone: fromPhone.substring(0, 7) + '****',
+        });
+        try {
+          await createSignupBonusCredit(userId);
+        } catch (error) {
+          log.error('Failed to create signup bonus credit for provisioned user', {
+            userId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      // The user just texted us on WhatsApp, so they are definitively reachable —
+      // (re-)enable WhatsApp mirroring of their lifecycle/onboarding notifications.
+      await markWhatsAppReachable(userId);
+    }
+
+    await routeToSupervisor(userId, fromPhone, messageBody, requestStart);
   }
 
-  // The user just texted us on WhatsApp, so they are definitively reachable —
-  // (re-)enable WhatsApp mirroring of their lifecycle/onboarding notifications.
-  await markWhatsAppReachable(user.userId);
-
-  await routeToSupervisor(user.userId, fromPhone, messageBody, requestStart);
   return { ok: true };
 }

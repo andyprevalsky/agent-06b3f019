@@ -199,7 +199,15 @@ export async function dispatchNotification(data: NotifyInput): Promise<NotifyRes
   // WhatsApp, so include it even if the reachability flag hasn't caught up yet.
   const reachable = await getWhatsAppReachable(data.user_id);
   const channels = notificationChannelsFor(reachable);
-  if (agent.source === 'WHATSAPP' && isWhatsAppConfigured() && !channels.includes('WHATSAPP')) {
+  // A WhatsApp-sourced agent's user just texted us, so include WhatsApp even if
+  // the reachability flag hasn't caught up (null) — but NEVER when the number is
+  // known-unreachable (false), or we'd hammer a number that can't receive.
+  if (
+    agent.source === 'WHATSAPP' &&
+    isWhatsAppConfigured() &&
+    reachable !== false &&
+    !channels.includes('WHATSAPP')
+  ) {
     channels.push('WHATSAPP');
   }
 
