@@ -8781,6 +8781,90 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     assert mobile._generic_script_provider_exits == 0
 
 
+def test_evicted_critical_request_meta_still_rejects_network_generation():
+    """Entry eviction must not drop provider-exit classification for in-flight critical scripts.
+
+    With a 1-entry capture buffer, a later request evicts js.stripe.com from
+    ``entries`` before loadingFailed arrives. The active meta map must retain
+    enough fields for the failure event to reject the network generation.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._max_entries = 1
+    recorder._max_active_request_meta = 256
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._active_request_meta = {}
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 262144
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {}
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "stripe",
+            "type": "Script",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://js.stripe.com/v3/", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    stripe_key = "3:stripe"
+    assert stripe_key in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+
+    # Later request fills the 1-entry buffer and evicts the Stripe capture row.
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "other",
+            "type": "XHR",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://checkout.eventim.us/api/ping", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" in recorder.entries
+    assert stripe_key not in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+    assert recorder._active_request_meta[stripe_key]["url"] == "https://js.stripe.com/v3/"
+
+    recorder._on_loading_failed(
+        {"requestId": "stripe", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+        "document_url": "https://checkout.eventim.us/pay",
+    }
+    assert 3 in recorder._rejected_network_generations
+    assert stripe_key not in recorder._active_request_meta
+    assert stripe_key not in recorder._active_request_ids
+
+    # Successful finish for the surviving request also clears its meta.
+    recorder._on_loading_finished(
+        {"requestId": "other", "encodedDataLength": 12},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" not in recorder._active_request_meta
+
+
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
     import tempfile
@@ -15589,6 +15673,10 @@ async def run_all_tests():
     r.record(
         "payment_cdn_tunnel_failure_provider_exit",
         test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "evicted_critical_request_meta_provider_exit",
+        test_evicted_critical_request_meta_still_rejects_network_generation,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",

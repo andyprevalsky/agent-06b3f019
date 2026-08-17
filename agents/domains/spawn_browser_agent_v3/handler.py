@@ -1723,6 +1723,7 @@ def _clear_browser_activity_memory_buffers(
             "_rejected_network_generations",
             "_ignored_request_ids",
             "_active_request_ids",
+            "_active_request_meta",
         ):
             value = getattr(browser_network_recorder, attr, None)
             if hasattr(value, "clear"):

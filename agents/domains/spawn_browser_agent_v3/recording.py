@@ -2433,6 +2433,11 @@ class BrowserNetworkRecorder:
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
         if not self.persists_network_log:
             self._max_body_bytes = min(self._max_body_bytes, 65_536)
+        # Lightweight classification fields for in-flight requests. Survives
+        # bounded ``entries`` eviction so loadingFailed can still reject a
+        # provider exit (Stripe/critical script) after the capture row is gone.
+        self._active_request_meta: Dict[str, Dict[str, Any]] = {}
+        self._max_active_request_meta = max(self._max_entries * 2, 256)
         # Response bodies the agent can read back via read_network_requests.
         # Kept separate from `entries` so the byte budget is enforced on the only
         # unbounded axis: one browser session must not hold tens of MB of page
@@ -2768,6 +2773,10 @@ class BrowserNetworkRecorder:
         The tool reads newest-first, so overflow must evict the OLDEST request —
         the previous behaviour refused to record NEW requests once full, which
         made every API call after a heavy page load invisible to the agent.
+
+        Eviction must NOT clear ``_active_request_meta``: an in-flight Stripe or
+        critical-script request may still emit loadingFailed after its capture
+        row is gone, and provider-exit classification needs those fields.
         """
         while len(self.entries) > self._max_entries:
             oldest_key = next(iter(self.entries))
@@ -2775,6 +2784,58 @@ class BrowserNetworkRecorder:
             if evicted:
                 self._append_diagnostic_entry(evicted)
             self._discard_body(oldest_key)
+
+    def _remember_active_request_meta(
+        self,
+        request_key: str,
+        *,
+        url: str,
+        document_url: str = "",
+        resource_type: str = "",
+        browser_generation: int | None = None,
+    ) -> None:
+        """Retain classification fields for an in-flight request outside ``entries``."""
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is None:
+            meta = {}
+            self._active_request_meta = meta
+        meta[request_key] = {
+            "url": url,
+            "document_url": document_url or "",
+            "resource_type": resource_type or "",
+            "browser_generation": browser_generation,
+        }
+        self._prune_active_request_meta()
+
+    def _clear_active_request_meta(self, request_key: str | None) -> None:
+        if not request_key:
+            return
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is not None:
+            meta.pop(request_key, None)
+
+    def _prune_active_request_meta(self) -> None:
+        """Bound the meta map so abandoned CDP ids cannot grow without limit."""
+        meta = getattr(self, "_active_request_meta", None)
+        if not meta:
+            return
+        max_meta = int(getattr(self, "_max_active_request_meta", 0) or 0)
+        if max_meta <= 0:
+            max_meta = max(int(getattr(self, "_max_entries", 600) or 600) * 2, 256)
+            self._max_active_request_meta = max_meta
+        if len(meta) <= max_meta:
+            return
+        active_ids = getattr(self, "_active_request_ids", set())
+        # Prefer dropping metadata for requests no longer considered in-flight.
+        for key in list(meta):
+            if key not in active_ids:
+                meta.pop(key, None)
+                if len(meta) <= max_meta:
+                    return
+        # Still over: drop oldest keys (dict insertion order) to protect heap.
+        while len(meta) > max_meta:
+            oldest_key = next(iter(meta))
+            meta.pop(oldest_key, None)
 
     def _redacted_network_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Return the bounded, secret-safe network row used for durable diagnostics."""
@@ -2936,6 +2997,13 @@ class BrowserNetworkRecorder:
                 "redirects": redirects,
                 "request_ts_ms": int((time.monotonic() - self._started_at) * 1000),
             }
+            self._remember_active_request_meta(
+                request_key,
+                url=url,
+                document_url=str(event.get("documentURL") or ""),
+                resource_type=resource_type,
+                browser_generation=generation,
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
@@ -2989,6 +3057,13 @@ class BrowserNetworkRecorder:
                     "response_ts_ms": int((time.monotonic() - self._started_at) * 1000),
                 }
             )
+            self._remember_active_request_meta(
+                request_key,
+                url=str(entry.get("url") or url),
+                document_url=str(entry.get("document_url") or ""),
+                resource_type=str(entry.get("resource_type") or resource_type or ""),
+                browser_generation=entry.get("browser_generation", generation),
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
@@ -3005,6 +3080,7 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
+            self._clear_active_request_meta(request_key)
         if not request_id or request_key not in self.entries:
             return
         entry = self.entries[request_key]
@@ -3042,96 +3118,106 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
-        if request_id and request_key in self.entries:
-            self.entries[request_key]["failed"] = True
-            self.entries[request_key]["failure"] = event.get("errorText")
-            self.entries[request_key]["terminal"] = True
-            # Eventim/checkout: js.stripe.com dies with ERR_TUNNEL_CONNECTION_FAILED
-            # inside Steel/Kernel proxies, so Payment Details never render. Treat that
-            # as a deterministic provider-exit rejection (same path as fingerprint
-            # poison) so recovery searches a fresh IP before the agent loops.
-            # Skip ticket/event browse documents that only preload Stripe widgets —
-            # those failures were rotating forever before cart/checkout.
-            entry = self.entries[request_key]
-            entry_generation = int(entry.get("browser_generation") or generation or 0)
-            current_generation = int(getattr(self, "_network_generation", entry_generation))
-            rejected_generations = getattr(self, "_rejected_network_generations", set())
-            document_url = str(entry.get("document_url") or "")
-            if (
-                entry_generation == current_generation
-                and entry_generation not in rejected_generations
-                and _is_critical_resource_block(
-                    str(entry.get("url") or ""),
-                    str(event.get("errorText") or ""),
-                    resource_type=str(entry.get("resource_type") or ""),
-                    document_url=document_url or None,
+        entry = self.entries.get(request_key) if request_id and request_key else None
+        meta = None
+        if request_id and request_key:
+            active_meta = getattr(self, "_active_request_meta", None)
+            if active_meta is not None:
+                meta = active_meta.pop(request_key, None)
+        if entry is not None:
+            entry["failed"] = True
+            entry["failure"] = event.get("errorText")
+            entry["terminal"] = True
+        # Prefer the capture row; fall back to meta retained across entry eviction
+        # so provider-exit classification still runs for in-flight critical scripts.
+        source = entry if entry is not None else meta
+        if not request_id or source is None:
+            return
+        # Eventim/checkout: js.stripe.com dies with ERR_TUNNEL_CONNECTION_FAILED
+        # inside Steel/Kernel proxies, so Payment Details never render. Treat that
+        # as a deterministic provider-exit rejection (same path as fingerprint
+        # poison) so recovery searches a fresh IP before the agent loops.
+        # Skip ticket/event browse documents that only preload Stripe widgets —
+        # those failures were rotating forever before cart/checkout.
+        entry_generation = int(source.get("browser_generation") or generation or 0)
+        current_generation = int(getattr(self, "_network_generation", entry_generation))
+        rejected_generations = getattr(self, "_rejected_network_generations", set())
+        document_url = str(source.get("document_url") or "")
+        if (
+            entry_generation == current_generation
+            and entry_generation not in rejected_generations
+            and _is_critical_resource_block(
+                str(source.get("url") or ""),
+                str(event.get("errorText") or ""),
+                resource_type=str(source.get("resource_type") or ""),
+                document_url=document_url or None,
+            )
+        ):
+            if not _document_warrants_payment_cdn_exit(document_url):
+                logger.info(
+                    "Ignoring critical resource block on non-checkout document",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    browser_generation=entry_generation,
+                    document_url=_redact_url_query(document_url),
+                    url=_redact_url_query(str(source.get("url") or "")),
                 )
-            ):
-                if not _document_warrants_payment_cdn_exit(document_url):
-                    logger.info(
-                        "Ignoring critical resource block on non-checkout document",
+            else:
+                blocked_url = str(source.get("url") or "")
+                blocked_url_is_payment_cdn = _host_matches_markers(
+                    blocked_url, _PAYMENT_CDN_EXIT_HOST_MARKERS
+                )
+                payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
+                generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
+                if blocked_url_is_payment_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                    logger.warning(
+                        "Critical resource block ignored: provider-exit cap reached",
                         agent_id=self.agent_id,
                         task_id=self.task_id,
                         browser_generation=entry_generation,
                         document_url=_redact_url_query(document_url),
-                        url=_redact_url_query(str(entry.get("url") or "")),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                    )
+                elif (
+                    not blocked_url_is_payment_cdn
+                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
+                ):
+                    logger.warning(
+                        "Critical resource block ignored: generic-script exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
                     )
                 else:
-                    blocked_url = str(entry.get("url") or "")
-                    blocked_url_is_payment_cdn = _host_matches_markers(
-                        blocked_url, _PAYMENT_CDN_EXIT_HOST_MARKERS
-                    )
-                    payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
-                    generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
-                    if blocked_url_is_payment_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
-                        logger.warning(
-                            "Critical resource block ignored: provider-exit cap reached",
-                            agent_id=self.agent_id,
-                            task_id=self.task_id,
-                            browser_generation=entry_generation,
-                            document_url=_redact_url_query(document_url),
-                            url=_redact_url_query(blocked_url),
-                            cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
-                        )
-                    elif (
-                        not blocked_url_is_payment_cdn
-                        and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
-                    ):
-                        logger.warning(
-                            "Critical resource block ignored: generic-script exit cap reached",
-                            agent_id=self.agent_id,
-                            task_id=self.task_id,
-                            browser_generation=entry_generation,
-                            document_url=_redact_url_query(document_url),
-                            url=_redact_url_query(blocked_url),
-                            cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
-                        )
+                    rejected_generations.add(entry_generation)
+                    self._rejected_network_generations = rejected_generations
+                    if blocked_url_is_payment_cdn:
+                        self._payment_cdn_provider_exits = payment_exits + 1
                     else:
-                        rejected_generations.add(entry_generation)
-                        self._rejected_network_generations = rejected_generations
-                        if blocked_url_is_payment_cdn:
-                            self._payment_cdn_provider_exits = payment_exits + 1
-                        else:
-                            self._generic_script_provider_exits = generic_exits + 1
-                        rejections = getattr(self, "_provider_exit_rejections", [])
-                        rejections.append(
-                            {
-                                "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
-                                "url": _redact_url_query(blocked_url),
-                                "browser_generation": entry_generation,
-                                "document_url": _redact_url_query(document_url),
-                            }
-                        )
-                        self._provider_exit_rejections = rejections
-                        logger.warning(
-                            "Browser provider exit rejected: critical third-party resource blocked",
-                            agent_id=self.agent_id,
-                            task_id=self.task_id,
-                            browser_generation=entry_generation,
-                            document_url=_redact_url_query(document_url),
-                            url=_redact_url_query(str(entry.get("url") or "")),
-                            error=event.get("errorText"),
-                        )
+                        self._generic_script_provider_exits = generic_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                            "url": _redact_url_query(blocked_url),
+                            "browser_generation": entry_generation,
+                            "document_url": _redact_url_query(document_url),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: critical third-party resource blocked",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(source.get("url") or "")),
+                        error=event.get("errorText"),
+                    )
 
     async def _fetch_response_body(
         self,
@@ -3523,6 +3609,11 @@ class BrowserNetworkRecorder:
                 )
         self._closed = True
         self._write_diagnostics_indexes()
+        # Terminal cleanup: drop in-flight meta so a closed recorder cannot retain
+        # unbounded request classification state after CDP detach.
+        active_meta = getattr(self, "_active_request_meta", None)
+        if active_meta is not None:
+            active_meta.clear()
         logger.info(
             "Browser console and network diagnostics saved",
             agent_id=self.agent_id,
