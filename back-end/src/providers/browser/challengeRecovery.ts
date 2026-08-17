@@ -17,6 +17,8 @@ export interface BrowserRecoveryConfig {
   proxyMode: string;
   kernelProxyType?: KernelProxyType;
   kernelSpecificity?: KernelRecoveryProxySpecificity;
+  /** Create the Kernel session without a managed/shared proxy exit. */
+  omitManagedProxy?: boolean;
   steelProxyMode?: 'managed' | 'fixed';
 }
 
@@ -185,7 +187,17 @@ export function browserRecoveryCandidates(
     }
   );
   if (!options?.preferSteel) return candidates;
+  // Kernel's managed proxy hard-blacklists Stripe Checkout. Prefer a direct
+  // (no managed proxy) Kernel session first, then Steel — never burn budget on
+  // residential/ISP/mobile Kernel exits that cannot reach the host.
+  const directKernel: BrowserRecoveryConfig = {
+    key: 'kernel_direct',
+    provider: 'kernel',
+    proxyMode: 'none',
+    omitManagedProxy: true,
+  };
   return [
+    directKernel,
     ...candidates.filter((candidate) => candidate.provider === 'steel'),
     ...candidates.filter((candidate) => candidate.provider !== 'steel'),
   ];
@@ -483,10 +495,14 @@ export async function searchAndPromoteBrowserConfig(
   const winner = await runParallelBrowserConfigSearch(configs, {
     create: async (config) => {
       if (config.provider === 'kernel') {
-        const session = await dependencies.createKernel(current.agentId, proxyLocation, {
-          type: config.kernelProxyType ?? 'residential',
-          specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
-        });
+        const session = config.omitManagedProxy
+          ? await dependencies.createKernel(current.agentId, proxyLocation, {
+              omitManagedProxy: true,
+            })
+          : await dependencies.createKernel(current.agentId, proxyLocation, {
+              type: config.kernelProxyType ?? 'residential',
+              specificity: config.kernelSpecificity ?? bestSpecificity(proxyLocation),
+            });
         return { provider: 'kernel', ...session };
       }
       const session = await dependencies.createSteel({

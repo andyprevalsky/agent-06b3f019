@@ -269,6 +269,7 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
   assert.deepStrictEqual(
     preferred.map((candidate) => candidate.key),
     [
+      'kernel_direct',
       'steel_managed',
       'steel_fixed',
       'kernel_residential_city',
@@ -277,6 +278,7 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
       'kernel_isp',
     ]
   );
+  assert.ok(preferred[0]?.omitManagedProxy === true);
 }
 
 async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> {
