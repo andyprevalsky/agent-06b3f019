@@ -176,8 +176,5 @@ export function browserRecoveryCandidates(
     proxyMode: 'none',
     omitManagedProxy: true,
   };
-  return [
-    directKernel,
-    ...candidates.filter((candidate) => candidate.provider === 'steel'),
-  ];
+  return [directKernel, ...candidates.filter((candidate) => candidate.provider === 'steel')];
 }

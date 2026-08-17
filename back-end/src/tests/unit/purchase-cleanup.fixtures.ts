@@ -2,10 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { PurchaseSpendStatus, PurchaseWalletFundingStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 import { reconcileFailedPurchaseFundingReclaims } from '../../providers/purchaseCleanup';
-import {
-  FakeWalletFundingProvider,
-  StubCardStateProvider,
-} from '../blackbox/purchases.testkit';
+import { FakeWalletFundingProvider, StubCardStateProvider } from '../blackbox/purchases.testkit';
 
 export const createdUserIds: string[] = [];
 export let passed = 0;
