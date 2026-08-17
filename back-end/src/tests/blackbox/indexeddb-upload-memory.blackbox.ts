@@ -105,46 +105,48 @@ function runChildJsonParseControl(): void {
 const prisma = new PrismaClient();
 
 async function buildPayloadFile(): Promise<number> {
-  await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS idb_upload_memory_fixture`);
-  await prisma.$executeRawUnsafe(`
-    CREATE TEMP TABLE idb_upload_memory_fixture AS
-    SELECT jsonb_build_object(
-      'batchIndex', 0,
-      'totalBatches', 1,
-      'hashes', jsonb_build_object(
-        ${sqlString(BIG_ORIGIN)}, 'big-hash',
-        ${sqlString(SMALL_ORIGIN)}, 'small-hash'
-      ),
-      'origins', jsonb_build_array(
-        jsonb_build_object(
-          'origin', ${sqlString(BIG_ORIGIN)},
-          'databases', jsonb_build_array(jsonb_build_object(
-            'name', 'DocsErrors',
-            'objectStores', jsonb_build_array(jsonb_build_object(
-              'name', 'Errors',
-              'records', (
-                SELECT jsonb_agg(jsonb_build_object(
-                  'key', 'record-key-' || i,
-                  'value', jsonb_build_object(
-                    'key', 'record-key-' || i,
-                    'value', md5(i::text) || md5((i * 7)::text)
-                  )
-                ))
-                FROM generate_series(1, ${BLOB_RECORDS}) i
-              )
-            ))
-          ))
+  // Prisma may lease a different pooled connection for every query. Build and
+  // read the fixture in one statement so its lifetime cannot depend on a
+  // connection-local TEMP table surviving between client calls.
+  const rows = await prisma.$queryRawUnsafe<Array<{ chars: number; doc: string }>>(`
+    WITH idb_upload_memory_fixture AS MATERIALIZED (
+      SELECT jsonb_build_object(
+        'batchIndex', 0,
+        'totalBatches', 1,
+        'hashes', jsonb_build_object(
+          ${sqlString(BIG_ORIGIN)}, 'big-hash',
+          ${sqlString(SMALL_ORIGIN)}, 'small-hash'
         ),
-        jsonb_build_object(
-          'origin', ${sqlString(SMALL_ORIGIN)},
-          'databases', '[{"name":"tiny","objectStores":[]}]'::jsonb
+        'origins', jsonb_build_array(
+          jsonb_build_object(
+            'origin', ${sqlString(BIG_ORIGIN)},
+            'databases', jsonb_build_array(jsonb_build_object(
+              'name', 'DocsErrors',
+              'objectStores', jsonb_build_array(jsonb_build_object(
+                'name', 'Errors',
+                'records', (
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'key', 'record-key-' || i,
+                    'value', jsonb_build_object(
+                      'key', 'record-key-' || i,
+                      'value', md5(i::text) || md5((i * 7)::text)
+                    )
+                  ))
+                  FROM generate_series(1, ${BLOB_RECORDS}) i
+                )
+              ))
+            ))
+          ),
+          jsonb_build_object(
+            'origin', ${sqlString(SMALL_ORIGIN)},
+            'databases', '[{"name":"tiny","objectStores":[]}]'::jsonb
+          )
         )
-      )
-    ) AS doc`);
-
-  const rows = await prisma.$queryRawUnsafe<Array<{ chars: number; doc: string }>>(
-    `SELECT length(doc::text)::int AS chars, doc::text AS doc FROM idb_upload_memory_fixture`
-  );
+      ) AS doc
+    )
+    SELECT length(doc::text)::int AS chars, doc::text AS doc
+    FROM idb_upload_memory_fixture
+  `);
   const chars = Number(rows[0]?.chars ?? 0);
   fs.writeFileSync(payloadPath, rows[0]?.doc ?? '');
   return chars;
@@ -350,7 +352,6 @@ async function main(): Promise<void> {
     }
   } finally {
     await cleanupUser();
-    await prisma.$executeRawUnsafe(`DROP TABLE IF EXISTS idb_upload_memory_fixture`);
     await prisma.$disconnect();
     try {
       fs.unlinkSync(payloadPath);

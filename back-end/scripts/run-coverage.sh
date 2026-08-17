@@ -378,6 +378,7 @@ END $$;
 SQL
   fi
   echo "Syncing Prisma schema to local test database..."
+  npx prisma generate >/dev/null
   npx prisma db push --skip-generate --accept-data-loss >/dev/null
   DATABASE_URL="$LOCAL_PSQL_URL" DIRECT_URL="$LOCAL_PSQL_URL" \
     bash "$SCRIPT_DIR/apply-local-runtime-sql-hooks.sh" >/dev/null

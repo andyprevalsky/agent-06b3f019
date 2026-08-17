@@ -104,7 +104,7 @@ export async function createSessionWithContext(
       },
     ],
     keepAlive: true, // Keep session alive - we'll close it explicitly when done
-    timeout: 7200, // 2 hours in seconds
+    api_timeout: 7200, // 2 hours in seconds
   });
 
   // Get the authenticated live view URLs (debugger, fullscreen, websocket)
@@ -241,7 +241,7 @@ export async function resumeSession(
       },
     ],
     keepAlive: true,
-    timeout: 7200, // 2 hours in seconds
+    api_timeout: 7200, // 2 hours in seconds
   });
 
   log.info('Created new Steel session', { sessionId: session.id });

@@ -379,6 +379,28 @@ export function installFetchCapture(): Router {
       });
     }
 
+    if (
+      process.env.BLACKBOX_TEST_FAKE_WHATSAPP === '1' &&
+      new URL(url).hostname === 'graph.facebook.com' &&
+      new URL(url).pathname.endsWith('/messages')
+    ) {
+      const unavailable = requestBody?.includes('__BLACKBOX_WHATSAPP_503__') === true;
+      const status = unavailable ? 503 : 200;
+      const body = unavailable
+        ? JSON.stringify({ error: { message: 'blackbox fake WhatsApp unavailable' } })
+        : JSON.stringify({ messages: [{ id: `blackbox-whatsapp-message-${String(id)}` }] });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = status;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status,
+        statusText: unavailable ? 'Service Unavailable' : 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     // AgentCard MCP is a stateful payment boundary. Replaying tools/call responses
     // (especially list_transfers) can hide a card issued seconds earlier and make
     // the benchmark exercise stale financial state. Preserve capture metadata but
