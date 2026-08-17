@@ -348,13 +348,29 @@ def _is_marketing_opt_in_action(normalized: str) -> bool:
     return any(pattern in normalized for pattern in MARKETING_OPT_IN_PATTERNS)
 
 
+def _matches_specific_email_send(normalized: str) -> bool:
+    """True for exact ``send`` or multi-word outbound-send phrases.
+
+    Bare substring ``send`` is handled separately so marketing opt-in labels
+    ("Send me info…") are not locked solely because they contain ``send``.
+    """
+    for pattern in EMAIL_SEND_BUTTON_PATTERNS:
+        if pattern == "send":
+            if normalized == "send":
+                return True
+            continue
+        if pattern == normalized or pattern in normalized:
+            return True
+    return False
+
+
 def is_email_send_button(element_text: str) -> bool:
     """Check whether any local action signal is an outbound send.
 
-    Three independent exemptions clear a signal: asking for a one-time code
-    (content, anywhere in the label), marketing/newsletter opt-in (content,
-    anywhere in the label), and resending (positional prefix). Each
-    newline-delimited signal is still classified on its own, so an exempt label
+    Exemptions: one-time code (content, anywhere), resend (positional prefix),
+    and marketing/newsletter opt-in (content) — but marketing never suppresses a
+    specific outbound-send phrase (e.g. ``send email`` in a composite label).
+    Each newline-delimited signal is classified on its own so an exempt label
     can never unlock a neighbouring send control or action-bearing attribute.
     """
     if not element_text:
@@ -364,13 +380,14 @@ def is_email_send_button(element_text: str) -> bool:
         normalized = re.sub(r"\s+", " ", candidate.lower()).strip()
         if not normalized:
             continue
-        if (
-            _is_one_time_code_action(normalized)
-            or _is_email_otp_retry(normalized)
-            or _is_marketing_opt_in_action(normalized)
-        ):
+        if _is_one_time_code_action(normalized) or _is_email_otp_retry(normalized):
             continue
-        if any(pattern == normalized or pattern in normalized for pattern in EMAIL_SEND_BUTTON_PATTERNS):
+        # Specific outbound phrases win over marketing opt-in (composite labels).
+        if _matches_specific_email_send(normalized):
+            return True
+        if _is_marketing_opt_in_action(normalized):
+            continue
+        if "send" in normalized:
             return True
     return False
 

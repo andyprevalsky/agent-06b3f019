@@ -10446,6 +10446,10 @@ def test_write_lock_email_send_excludes_marketing_opt_in_controls():
     # An opt-in label must not unlock a neighbouring real send control.
     assert is_email_send_button("Send me info about other shows\nSend message")
 
+    # Composite: marketing opt-in must not suppress a co-located send-email phrase.
+    assert is_email_send_button("Send me info and send email")
+    assert is_email_send_button("Send me updates and send message")
+
 
 def test_write_lock_email_send_excludes_resend_controls():
     """Code requests and resends never trigger the outbound-send write lock.

@@ -278,13 +278,20 @@ export async function probeCandidateBrowser(
   session: RecoveryCandidateSession,
   targetUrl: string,
   storageState: Record<string, unknown>,
-  logContext: { configKey?: string; provider?: string; proxyMode?: string } = {}
+  logContext: {
+    configKey?: string;
+    provider?: string;
+    proxyMode?: string;
+    /** When false/omitted, skip Stripe re-nav + payment CDN probe (CF-only recovery). */
+    requirePaymentCdn?: boolean;
+  } = {}
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
   let paymentCdnOk = false;
   let paymentCdnHosts: Record<string, boolean> = {};
   const attempts = 2;
+  const requirePaymentCdn = Boolean(logContext.requirePaymentCdn);
   try {
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
@@ -335,7 +342,9 @@ export async function probeCandidateBrowser(
       });
       stablePasses += 1;
     }
-    if (stablePasses > 0) {
+    // Payment-CDN re-nav + Stripe.js probe only when recovery requires it —
+    // CF-only recoveries must not pay the Stripe probe cost or latch on ORB.
+    if (requirePaymentCdn && stablePasses > 0) {
       // A clean first attempt + challenged second leaves stablePasses > 0 while
       // `page` is still the challenge document — Stripe.js then fails CSP/ORB
       // and paymentCdnOk falsely rejects. Re-nav to a clean doc before probing.
@@ -512,6 +521,7 @@ export async function searchAndPromoteBrowserConfig(
         configKey: config.key,
         provider: config.provider,
         proxyMode: config.proxyMode,
+        requirePaymentCdn,
       }),
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {

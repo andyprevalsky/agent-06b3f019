@@ -66,10 +66,10 @@ def is_payment_cdn_url(url: str) -> bool:
     return any(host in lowered for host in _PAYMENT_CDN_HOST_MARKERS)
 
 
-def should_cache(method: str, resource_type: str, url: str = "") -> bool:
+def should_cache(method: str, resource_type: str, url: str) -> bool:
     method_upper = method.upper()
     resource_lower = resource_type.lower()
-    if url and is_payment_cdn_url(url):
+    if is_payment_cdn_url(url):
         return False
     if resource_lower not in CACHEABLE_RESOURCE_TYPES:
         return False

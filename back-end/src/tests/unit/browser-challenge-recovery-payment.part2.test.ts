@@ -73,7 +73,8 @@ async function testPaymentCdnOkRequiresStripeJsScriptLoad(): Promise<void> {
   const result = await probeCandidateBrowser(
     session,
     'https://checkout.eventim.us/?afflky=1015Folsom',
-    {}
+    {},
+    { requirePaymentCdn: true }
   );
   assert.strictEqual(result.paymentCdnOk, false);
   assert.deepStrictEqual(result.paymentCdnHosts, {
@@ -128,7 +129,8 @@ async function testPaymentCdnOkWhenStripeJsLoadsWithoutApi(): Promise<void> {
   const result = await probeCandidateBrowser(
     session,
     'https://checkout.eventim.us/?afflky=1015Folsom',
-    {}
+    {},
+    { requirePaymentCdn: true }
   );
   assert.strictEqual(result.paymentCdnOk, true);
   assert.strictEqual(result.paymentCdnHosts?.['api.stripe.com'], false);
@@ -249,12 +251,66 @@ async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
   const result = await probeCandidateBrowser(
     session,
     'https://checkout.eventim.us/?afflky=1015Folsom',
-    {}
+    {},
+    { requirePaymentCdn: true }
   );
   assert.strictEqual(gotoCount, 2, 'must retry after first CF challenge');
   assert.strictEqual(result.stablePasses, 1, 'second clean load counts');
   assert.strictEqual(result.attempts, 2);
   assert.strictEqual(result.paymentCdnOk, true);
+}
+
+async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
+  // Non-payment recoveries must not re-nav or run Stripe.js probing.
+  let evaluateCalls = 0;
+  let gotoCount = 0;
+  const fakePage = {
+    goto: async () => {
+      gotoCount += 1;
+      return { status: () => 200 };
+    },
+    waitForTimeout: async () => undefined,
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      evaluateCalls += 1;
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('js.stripe.com')) {
+        throw new Error('payment CDN probe must not run for CF-only recovery');
+      }
+      return undefined;
+    },
+    title: async () => 'Event Listing',
+    locator: () => ({ innerText: async () => 'Tickets' }),
+    content: async () => '<main>Tickets</main>',
+  };
+  const browser = {
+    contexts: () => [
+      {
+        pages: () => [fakePage],
+        newPage: async () => fakePage,
+        addCookies: async () => undefined,
+        addInitScript: async () => undefined,
+        close: async () => undefined,
+      },
+    ],
+    newContext: async () => {
+      throw new Error('unexpected newContext');
+    },
+    close: async () => undefined,
+  } as unknown as Browser;
+  const session = {
+    ...fakeSession({ key: 'kernel_residential_city', provider: 'kernel', proxyMode: 'residential' }),
+    validationBrowser: browser,
+  };
+  const result = await probeCandidateBrowser(
+    session,
+    'https://wl.eventim.us/event/lyny/692405',
+    {}
+  );
+  assert.strictEqual(gotoCount, 2, 'CF probe still runs two attempts');
+  assert.strictEqual(result.stablePasses, 2);
+  assert.strictEqual(result.paymentCdnOk, false);
+  assert.deepStrictEqual(result.paymentCdnHosts, {});
+  assert.strictEqual(evaluateCalls, 0, 'Stripe evaluate must not run without requirePaymentCdn');
 }
 
 function testBlockedResourceRequiresPaymentCdn(): void {
@@ -273,6 +329,7 @@ async function main(): Promise<void> {
   await testRequirePaymentCdnRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesStripeJsWinner();
   await testProbeRetriesAfterFirstCfChallenge();
+  await testCfOnlyProbeSkipsPaymentCdn();
   testBlockedResourceRequiresPaymentCdn();
   process.stdout.write('PASS staged browser challenge recovery payment gates part2\n');
 }

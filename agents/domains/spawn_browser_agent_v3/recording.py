@@ -3530,10 +3530,15 @@ class BrowserNetworkRecorder:
 
 
 def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
-    """True when the blocked resource that triggered recovery is a payment CDN."""
+    """True when the blocked resource should latch sticky require_payment_cdn.
+
+    Uses ``_PAYMENT_CDN_EXIT_HOST_MARKERS`` (not ``_PAYMENT_TUNNEL_HOST_MARKERS``)
+    so api.stripe.com failures do not pin sticky payment-CDN recovery — live
+    steel_managed often fails api while Stripe.js still loads.
+    """
     if not url:
         return False
-    return _host_matches_markers(str(url).strip(), _PAYMENT_TUNNEL_HOST_MARKERS)
+    return _host_matches_markers(str(url).strip(), _PAYMENT_CDN_EXIT_HOST_MARKERS)
 
 
 def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:

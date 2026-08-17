@@ -354,16 +354,21 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     validationBrowser: browser,
   };
 
-  const result = await probeCandidateBrowser(session, 'https://order.online/store/blue-bottle', {
-    cookies,
-    origins: [
-      {
-        origin: 'https://order.online',
-        localStorage: [{ name: 'signedInCart', value: 'keep' }],
-        indexedDB: [],
-      },
-    ],
-  });
+  const result = await probeCandidateBrowser(
+    session,
+    'https://order.online/store/blue-bottle',
+    {
+      cookies,
+      origins: [
+        {
+          origin: 'https://order.online',
+          localStorage: [{ name: 'signedInCart', value: 'keep' }],
+          indexedDB: [],
+        },
+      ],
+    },
+    { requirePaymentCdn: true }
+  );
 
   assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
   assert.strictEqual(newContextCalls, 0, 'the disposable incognito context is not promoted');

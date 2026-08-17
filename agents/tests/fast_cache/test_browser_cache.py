@@ -76,12 +76,12 @@ def mem(monkeypatch):
 
 def test_should_cache_only_get_cacheable_types():
     # #17/#18 page-resource types only; POST is allowed for XHR/fetch with body keying.
-    assert browser_http.should_cache("GET", "document") is True
-    assert browser_http.should_cache("get", "xhr") is True
-    assert browser_http.should_cache("POST", "xhr") is True
-    assert browser_http.should_cache("POST", "document") is False
-    assert browser_http.should_cache("GET", "websocket") is False
-    assert browser_http.should_cache("GET", "media") is False
+    assert browser_http.should_cache("GET", "document", "https://example.com/") is True
+    assert browser_http.should_cache("get", "xhr", "https://example.com/api") is True
+    assert browser_http.should_cache("POST", "xhr", "https://example.com/api") is True
+    assert browser_http.should_cache("POST", "document", "https://example.com/") is False
+    assert browser_http.should_cache("GET", "websocket", "wss://example.com/ws") is False
+    assert browser_http.should_cache("GET", "media", "https://example.com/video.mp4") is False
     # Payment CDNs must never enter Fast Mode HTTP cache (Eventim Stripe Elements).
     assert browser_http.should_cache("GET", "script", "https://js.stripe.com/v3/") is False
     assert browser_http.should_cache("GET", "fetch", "https://api.stripe.com/healthcheck") is False
