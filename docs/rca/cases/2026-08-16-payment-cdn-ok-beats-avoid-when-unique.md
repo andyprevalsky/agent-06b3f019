@@ -85,35 +85,32 @@ Relatives (not closed by citing alone):
 
 ## Solution
 
-(Proposed — awaiting approval; soft-rank reorder rejected.)
+Hard failure-driven filter (no soft payment-CDN ranking):
 
-Configs are binary: they pass the hard requirements for **this** recovery or they
-do not. No soft payment-CDN preference in `candidateScore`.
+1. `blocked_resource_url` / sticky `require_payment_cdn` on recover-challenge →
+   `requirePaymentCdn` hard filter (only `paymentCdnOk` survivors).
+2. Agent sticky: once a payment-CDN block is seen on the task, later CF recoveries
+   keep `require_payment_cdn=true`.
+3. `candidateScore` is CF-stable → avoid → latency only.
 
-1. **Hard filter from the failure that triggered recovery**
-   - CF-only / no blocked URL → require CF-stable only.
-   - Blocked third-party / payment CDN URL (e.g. `js.stripe.com`) → require that
-     resource clears (`paymentCdnOk` / URL probe). Wire
-     `blocked_resource_url` into `recover-challenge` so
-     `requirePaymentCdn` (or equivalent) is set true when the exit was a
-     payment-CDN block — not from `/cart` URL heuristics.
-   - Sticky on the task: once a payment-CDN block was observed, later config
-     searches on that task keep the hard payment-CDN filter so a CF re-challenge
-     cannot promote a Kernel that already failed Stripe.js.
-2. **Among survivors:** drop `avoidConfigKey` if any other survivor remains;
-   otherwise keep the avoided key (it is the only one that works).
-3. **Among what remains:** pick by latency only (no `paymentCdnOk` soft tier).
+Cemented by unit + challenge-recovery blackbox. Deploy gate: parallel k=4
+`scripts/run-bench --local browser-1015-eventim-request-card`.
 
-Unit: failure-driven hard filter with `avoidConfigKey=steel_managed` + unique
-`paymentCdnOk=true` must promote steel; CF-only with all `paymentCdnOk=false`
-must still prefer non-avoided. Deploy gate: parallel k=4
-`scripts/run-bench --local browser-1015-eventim-request-card`. Do **not** bump
-provider-exit cap.
+## k=4 evidence (in progress)
+
+- Hard filter + CF probe retry: promotes `steel_managed` with `requirePaymentCdn=true`
+  even when `avoidConfigKey=steel_managed` (attempt6 run2 @ 03:43:56Z / 03:47:38Z).
+- Attempt6 parallel: **2/4 PASS** (runs 1+3); runs 2+4 timed out at 900s without
+  `payment_approval` after repeated Steel re-promotes under full 6-candidate probes.
+- Follow-up: `recoverySearchPlan` focuses Steel-only first when `requirePaymentCdn`
+  (cuts concurrent Kernel probes that never clear Stripe.js) and clears avoid under
+  the payment-CDN hard filter.
 
 ## Human feedback
 
 Deploy-ready requires this task to pass at **k=4 in parallel** (not serial).
 Rejected soft priority reorder (“either the config works or it doesn’t”).
+Approved hard-filter fix if it fixes the issue.
 
 ## Reusable lesson
 
