@@ -3211,6 +3211,7 @@ async def poll_agent(
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
     expected_gate_evidence: Optional[dict] = None
+    write_lock_prerequisite_request_id: Optional[str] = None
     agentcard_setup_attention_seen = False
     agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
@@ -3284,6 +3285,9 @@ async def poll_agent(
             data["_benchmark"]["expected_gate_seen"] = True
             data["_benchmark"]["expected_gate"] = expected_gate_evidence["gate"]
             data["_benchmark"]["expected_gate_request_id"] = expected_gate_evidence["request_id"]
+        if write_lock_prerequisite_request_id:
+            data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
+            data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -3653,6 +3657,27 @@ async def poll_agent(
                                     await respond_to_attention_request(base_url, req_id, "approved")
                                     approvals_resolved += 1
                                     print(f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}")
+                                    continue
+                                # Place-order / purchase write locks can fire before the
+                                # payment-card mint (task prompts often say "click Place
+                                # order, then pay"). When the harness is waiting for
+                                # payment_approval under auto_approve, clear the write
+                                # lock and keep polling for the card request — do not
+                                # treat the write lock as the expected attention kind.
+                                if (
+                                    task.approval_handling == "auto_approve"
+                                    and observed_kind == "write_lock"
+                                    and expected_kind == "payment_approval"
+                                ):
+                                    await respond_to_attention_request(base_url, req_id, "approved")
+                                    approvals_resolved += 1
+                                    write_lock_prerequisite_request_id = req_id
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "write_lock_prerequisite_auto_approved": True,
+                                        "write_lock_prerequisite_request_id": req_id,
+                                    }
+                                    print(f"    ✅ Auto-approved write-lock prerequisite {req_id[:8]}")
                                     continue
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
