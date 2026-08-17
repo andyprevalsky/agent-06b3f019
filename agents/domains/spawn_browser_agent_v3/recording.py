@@ -2109,6 +2109,18 @@ def _host_matches_markers(url: str, markers: tuple[str, ...]) -> bool:
     return any(host == marker or host.endswith(f".{marker}") for marker in markers)
 
 
+def _same_origin(a: str, b: str) -> bool:
+    """True when both URLs share scheme + netloc (case-insensitive)."""
+    left = urlparse(a or "")
+    right = urlparse(b or "")
+    if not left.scheme or not right.scheme or not left.netloc or not right.netloc:
+        return False
+    return (left.scheme.lower(), left.netloc.lower()) == (
+        right.scheme.lower(),
+        right.netloc.lower(),
+    )
+
+
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
     """Backward-compatible Stripe-host check (tests + older call sites)."""
     err = (error_text or "").lower()
@@ -2122,12 +2134,15 @@ def _is_critical_resource_block(
     error_text: str,
     *,
     resource_type: str = "",
+    document_url: str | None = None,
 ) -> bool:
     """True when a page-critical third-party request is blocked on this exit.
 
     Generalizes Stripe-only tunnel detection: any payment-CDN host OR any
     non-analytics script that dies with tunnel/ORB/client-block errors can
     trigger recovery. Soft third-parties (analytics/ads) never rotate.
+    When ``document_url`` is provided, generic (non-payment-CDN) script blocks
+    must be cross-origin — first-party script failures stay on the page.
     """
     err = (error_text or "").lower()
     if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
@@ -2137,7 +2152,11 @@ def _is_critical_resource_block(
         return False
     if _host_matches_markers(url or "", _PAYMENT_CDN_EXIT_HOST_MARKERS):
         return True
-    return (resource_type or "").lower() == "script"
+    if (resource_type or "").lower() != "script":
+        return False
+    if document_url:
+        return not _same_origin(url or "", document_url)
+    return True
 
 
 _API_CHALLENGE_CART_URL_MARKERS = (
@@ -2158,12 +2177,15 @@ def _is_api_challenge_html_response(
     resource_type: str,
     mime_type: str,
     body_bytes: bytes,
+    document_url: str | None = None,
 ) -> bool:
     """True when a same-tab XHR/fetch/document returns CF challenge HTML (Eventim cart).
 
     Document GET can look clean while ``checkaddtocart`` POSTs 403 with a ~667KB
     challenge page. Cookie-stage recovery only GET-probes the document URL and
     false-succeeds; treat the API challenge as a provider-exit signal instead.
+    When ``document_url`` is provided, require same-origin with ``url`` so a
+    third-party 403 HTML body cannot rotate the exit.
     """
     try:
         code = int(status)
@@ -2175,6 +2197,8 @@ def _is_api_challenge_html_response(
     if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
         return False
     if not (url or "").startswith("http"):
+        return False
+    if document_url and not _same_origin(url, document_url):
         return False
     sample = body_bytes[:12_000].decode("utf-8", errors="ignore").lower()
     mime = (mime_type or "").lower()
@@ -3034,6 +3058,7 @@ class BrowserNetworkRecorder:
                     str(entry.get("url") or ""),
                     str(event.get("errorText") or ""),
                     resource_type=str(entry.get("resource_type") or ""),
+                    document_url=document_url or None,
                 )
             ):
                 if not _document_warrants_payment_cdn_exit(document_url):
@@ -3164,6 +3189,7 @@ class BrowserNetworkRecorder:
                     resource_type=str(entry.get("resource_type") or ""),
                     mime_type=str(entry.get("mime_type") or ""),
                     body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
                 )
             ):
                 api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))

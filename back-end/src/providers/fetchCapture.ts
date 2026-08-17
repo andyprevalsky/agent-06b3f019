@@ -320,24 +320,17 @@ export function installFetchCapture(): Router {
       }
     }
 
-    // Collect full headers for the real call
+    // Collect full headers for the real call. Request headers come first so
+    // absent/partial init.headers still preserve Authorization/Content-Type on
+    // replay; init then overrides on conflict.
     const fullHeaders: Record<string, string> = {};
-    const rawHeaders = init?.headers;
-    if (rawHeaders) {
-      if (rawHeaders instanceof Headers) {
-        rawHeaders.forEach((v, k) => {
-          fullHeaders[k] = v;
-        });
-      } else if (Array.isArray(rawHeaders)) {
-        for (const [k, v] of rawHeaders) {
-          fullHeaders[k] = v;
-        }
-      } else {
-        for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
-          fullHeaders[k] = v;
-        }
-      }
+    if (
+      typeof globalThis.Request === 'function' &&
+      input instanceof globalThis.Request
+    ) {
+      assignHeadersInto(fullHeaders, input.headers);
     }
+    assignHeadersInto(fullHeaders, init?.headers);
 
     // Redacted headers for the capture log (visible to tests)
     const redactedHeaders: Record<string, string> = {};
@@ -541,6 +534,35 @@ export function installFetchCapture(): Router {
   });
 
   return router;
+}
+
+function assignHeadersInto(
+  target: Record<string, string>,
+  rawHeaders: HeadersInit | undefined
+): void {
+  if (!rawHeaders) return;
+  const apply = (key: string, value: string): void => {
+    const lower = key.toLowerCase();
+    for (const existing of Object.keys(target)) {
+      if (existing.toLowerCase() === lower) {
+        delete target[existing];
+      }
+    }
+    target[key] = value;
+  };
+  if (rawHeaders instanceof Headers) {
+    rawHeaders.forEach((v, k) => {
+      apply(k, v);
+    });
+  } else if (Array.isArray(rawHeaders)) {
+    for (const [k, v] of rawHeaders) {
+      apply(k, v);
+    }
+  } else {
+    for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
+      apply(k, v);
+    }
+  }
 }
 
 function redactHeader(key: string, value: string): string {

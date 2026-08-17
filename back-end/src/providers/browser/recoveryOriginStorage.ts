@@ -15,9 +15,11 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
     const state = originStates.find((entry) => entry.origin === location.origin);
     if (!state) return;
     try { if (sessionStorage.getItem(completionKey) === '1') return; } catch {}
+    let localStorageRestored = false;
     try {
       localStorage.clear();
       for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
+      localStorageRestored = true;
     } catch {}
     const overallDeadline = Date.now() + OVERALL_RESTORE_DEADLINE_MS;
     let restoredAllDatabases = true;
@@ -30,21 +32,22 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
       const entryDeadlineMs = Math.min(RESTORE_DEADLINE_MS, remainingMs);
       await new Promise((resolve) => {
         let settled = false;
-        const finish = () => {
+        const finish = (ok) => {
           if (settled) return;
           settled = true;
+          if (!ok) restoredAllDatabases = false;
           resolve();
         };
-        const timer = setTimeout(finish, entryDeadlineMs);
+        const timer = setTimeout(() => finish(false), entryDeadlineMs);
         let request;
         try {
           request = indexedDB.open(database.name, database.version);
         } catch {
           clearTimeout(timer);
-          finish();
+          finish(false);
           return;
         }
-        request.onblocked = () => { clearTimeout(timer); finish(); };
+        request.onblocked = () => { clearTimeout(timer); finish(false); };
         request.onupgradeneeded = () => {
           try {
             const db = request.result;
@@ -58,7 +61,7 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
             }
           } catch {}
         };
-        request.onerror = () => { clearTimeout(timer); finish(); };
+        request.onerror = () => { clearTimeout(timer); finish(false); };
         request.onsuccess = () => {
           try {
             const db = request.result;
@@ -68,7 +71,7 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
             if (storeNames.length === 0) {
               db.close();
               clearTimeout(timer);
-              finish();
+              finish(true);
               return;
             }
             const transaction = db.transaction(storeNames, 'readwrite');
@@ -86,19 +89,19 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
                 } catch {}
               }
             }
-            transaction.oncomplete = () => { db.close(); clearTimeout(timer); finish(); };
-            transaction.onerror = () => { try { db.close(); } catch {} clearTimeout(timer); finish(); };
-            transaction.onabort = () => { try { db.close(); } catch {} clearTimeout(timer); finish(); };
+            transaction.oncomplete = () => { db.close(); clearTimeout(timer); finish(true); };
+            transaction.onerror = () => { try { db.close(); } catch {} clearTimeout(timer); finish(false); };
+            transaction.onabort = () => { try { db.close(); } catch {} clearTimeout(timer); finish(false); };
           } catch {
             clearTimeout(timer);
-            finish();
+            finish(false);
           }
         };
       });
     }
-    // Only mark complete after a full restore. A truncated IndexedDB pass must
-    // retry on the next candidate probe rather than pretend storage is ready.
-    if (restoredAllDatabases) {
+    // Only mark complete after a full restore. Truncated IndexedDB or a failed
+    // localStorage write must retry on the next candidate probe.
+    if (localStorageRestored && restoredAllDatabases) {
       try { sessionStorage.setItem(completionKey, '1'); } catch {}
     }
   };

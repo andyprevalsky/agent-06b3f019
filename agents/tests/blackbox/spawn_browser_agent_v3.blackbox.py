@@ -8388,6 +8388,22 @@ def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
         mime_type="text/html; charset=utf-8",
         body_bytes=large_html,
     )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://wl.eventim.us/checkout",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://cdn.attacker.example/frame",
+    )
     assert not _is_api_challenge_html_response(
         status=403,
         url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
@@ -8503,6 +8519,24 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "https://cdn.example/checkout-widget.js",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
         resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert not _is_critical_resource_block(
+        "https://checkout.eventim.us/static/app.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
     )
     assert not _is_critical_resource_block(
         "https://www.google-analytics.com/analytics.js",

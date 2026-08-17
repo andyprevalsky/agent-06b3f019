@@ -184,6 +184,37 @@ async function run(): Promise<void> {
     );
     assert.strictEqual(whatsappUnavailableFromRequest.status, 503);
 
+    // Request-only headers must survive when init.headers is absent; init then overrides.
+    const requestAuthOnly = await fetch(
+      new Request('https://api.example.com/request-headers', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer request-only-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ source: 'request' }),
+      })
+    );
+    assert.strictEqual(requestAuthOnly.status, 201);
+
+    const requestPartialOverride = await fetch(
+      new Request('https://api.example.com/request-headers-override', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer request-base-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ source: 'override' }),
+      }),
+      {
+        headers: {
+          Authorization: 'Bearer init-override-secret',
+          'X-Trace': 'from-init',
+        },
+      }
+    );
+    assert.strictEqual(requestPartialOverride.status, 201);
+
     const agentCardBody = JSON.stringify({
       method: 'tools/call',
       params: { name: 'list_transfers' },
@@ -200,7 +231,7 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(agentCardResponses, [1, 2]);
 
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 10);
+    assert.strictEqual(all.captures.length, 12);
     assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
     assert.strictEqual(all.captures[0].responseStatus, 201);
     assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
@@ -220,19 +251,49 @@ async function run(): Promise<void> {
     assert.strictEqual(all.captures[5].responseStatus, 200);
     assert.strictEqual(all.captures[6].responseStatus, 503);
     assert.strictEqual(all.captures[7].responseStatus, 503);
-    assert.strictEqual(all.captures[8].cached, false);
-    assert.strictEqual(all.captures[9].cached, false);
+    const requestHeaderCapture = all.captures[8];
+    assert.strictEqual(requestHeaderCapture.url, 'https://api.example.com/request-headers');
+    assert.match(
+      requestHeaderCapture.requestHeaders.authorization ??
+        requestHeaderCapture.requestHeaders.Authorization ??
+        '',
+      /Bearer request-o\.\.\.\[redacted\]|Bearer request-only-secret/
+    );
     assert.strictEqual(
-      all.captures[8].requestHeaders.Authorization,
+      requestHeaderCapture.requestHeaders['content-type'] ??
+        requestHeaderCapture.requestHeaders['Content-Type'],
+      'application/json'
+    );
+    const overrideCapture = all.captures[9];
+    assert.strictEqual(overrideCapture.url, 'https://api.example.com/request-headers-override');
+    assert.match(
+      overrideCapture.requestHeaders.authorization ??
+        overrideCapture.requestHeaders.Authorization ??
+        '',
+      /Bearer init-over\.\.\.\[redacted\]|Bearer init-override-secret/
+    );
+    assert.strictEqual(
+      overrideCapture.requestHeaders['content-type'] ??
+        overrideCapture.requestHeaders['Content-Type'],
+      'application/json'
+    );
+    assert.strictEqual(
+      overrideCapture.requestHeaders['x-trace'] ?? overrideCapture.requestHeaders['X-Trace'],
+      'from-init'
+    );
+    assert.strictEqual(all.captures[10].cached, false);
+    assert.strictEqual(all.captures[11].cached, false);
+    assert.strictEqual(
+      all.captures[10].requestHeaders.Authorization,
       'Bearer agentcard...[redacted]'
     );
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
-      ['FormData', 'none', 'none', 'none', 'String', 'String']
+      ['FormData', 'none', 'none', 'none', 'String', 'String', 'String', 'String']
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 9);
+    assert.strictEqual(afterFirst.captures.length, 11);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);
