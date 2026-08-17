@@ -1,14 +1,11 @@
 /**
  * RCA owning-boundary repro for agent 500c444d-a5ff-4a35-9b08-3b888489f3df.
  *
- * Prod evidence: Org MCP create_card returns `card_creation_failed`; mint path
- * rewrites it to `agentcard_company_funding_in_progress` ("funding outcome is
- * not confirmed"), so the browser workflow silently retries for ~10 minutes
- * until the harness tree-stalls / returns "Payment funding is delayed".
- * Compensation later surfaces the raw `create_card failed: card_creation_failed`.
- *
- * Expected (fail-closed, same class as cardholder_not_found): keep a typed
- * terminal provider code — do NOT rewrite into funding-in-progress.
+ * Prod evidence: Org MCP create_card returns status=error
+ * `create_card failed: card_creation_failed` for the purchase idempotency key
+ * (replay of purchase:b3e6de0e-… still returns that terminal failure; a fresh
+ * key on the same cardholder succeeds). Mint previously rewrote the untyped
+ * error into funding-in-progress and silently retried for ~10 minutes.
  *
  * Exit 1 = bug present (rewrite happened). Exit 0 = fail-closed.
  */
@@ -17,7 +14,7 @@ import { PurchaseSpendStatus } from '@prisma/client';
 import { mintPurchaseCard } from '../src/domains/purchases/service';
 import { PurchaseError } from '../src/domains/purchases/errors';
 import { prisma } from '../src/providers/database';
-import { AgentCardProviderError, type CardProvider } from '../src/providers/card-provider';
+import { AgentCardOrgMcpProvider } from '../src/providers/card-provider/agentcard-org-mcp';
 import {
   FakeWalletFundingProvider,
   withFakeStripe,
@@ -50,18 +47,19 @@ async function main(): Promise<void> {
     },
   });
 
-  // Match providerErrorFromUnknown(Error('card_creation_failed')): untyped message only.
-  const provider: CardProvider = {
-    async mintCard(): Promise<never> {
-      throw new AgentCardProviderError('create_card failed: card_creation_failed');
-    },
-    async getDetails(): Promise<never> {
-      throw new Error('details must not run when create_card failed');
-    },
-    async closeCard(): Promise<void> {
-      throw new Error('an unknown card must not be closed without its id');
-    },
-  };
+  // Match the live AgentCard structured error for a poisoned idempotency key.
+  const provider = new AgentCardOrgMcpProvider('cardholder-ok', async (name) => {
+    if (name === 'create_card') {
+      return {
+        isError: true,
+        structuredContent: {
+          status: 'error',
+          message: 'create_card failed: card_creation_failed',
+        },
+      };
+    }
+    throw new Error(`unexpected tool ${name}`);
+  });
 
   const error = await withFakeStripe(async () =>
     expectPurchaseError(() =>
@@ -100,17 +98,22 @@ async function main(): Promise<void> {
   };
   console.log(JSON.stringify(payload, null, 2));
 
-  await prisma.purchaseWalletFunding.deleteMany({ where: { purchaseId: purchase?.id } }).catch(() => undefined);
+  await prisma.purchaseWalletFunding
+    .deleteMany({ where: { purchaseId: purchase?.id } })
+    .catch(() => undefined);
   await prisma.purchaseSpend.deleteMany({ where: { userId } }).catch(() => undefined);
   await prisma.subscription.deleteMany({ where: { userId } }).catch(() => undefined);
   await prisma.user.delete({ where: { userId } }).catch(() => undefined);
   await prisma.$disconnect();
 
-  // Hard gate: buggy code rewrites → exit 1. Fixed code fail-closes → exit 0.
   if (rewritten) {
     console.error(
-      'FAIL: untyped create_card failed: card_creation_failed was rewritten as funding-in-progress'
+      'FAIL: create_card failed: card_creation_failed was rewritten as funding-in-progress'
     );
+    process.exit(1);
+  }
+  if (error.code !== 'agentcard_card_creation_failed') {
+    console.error(`FAIL: expected agentcard_card_creation_failed, got ${error.code}`);
     process.exit(1);
   }
   if (purchase?.status !== PurchaseSpendStatus.FAILED) {

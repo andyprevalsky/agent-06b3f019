@@ -24,7 +24,7 @@ sources:
   - agent 500c444d-a5ff-4a35-9b08-3b888489f3df
   - commit f50686598114972a925a47c84a7029aad337353d
 repro: back-end/scripts/rca-card-creation-failed-repro.ts
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -44,41 +44,46 @@ Critical path:
 classifyFundingResumeFailure(providerCallStarted=true) → ambiguous rewrite →
 mint_payment_card() silent 10m loop → stall / delayed message`.
 
-Archive search (`card_creation_failed`, `tree stalled … funding delayed`,
-`cardholder_not_found fail-closed funding rewrite`): no exact prior case for
-`card_creation_failed`. Relative of the cardholder-not-found fail-closed pattern
-already cemented in `purchases.part6.blackbox.ts` / `throwIfCardholderNotFound`
-— deterministic provider rejections must keep a typed safe code so
-`hasSafeProviderFailureCode` does not treat them as ambiguous funding.
+**Why mint could not succeed for this purchase:** AgentCard stores create_card
+outcomes under the idempotency key `purchase:{purchaseId}`. Live replay of
+`purchase:b3e6de0e-efe4-4a91-a772-b268f2f44aea` still returns
+`status=error` / `create_card failed: card_creation_failed`. A fresh
+idempotency key on the same verified cardholder (`cmrs…y7jg`) and live org
+wallet (~$159 available) creates a card successfully. So this purchase row is
+permanently poisoned at the provider — retries of the same key can never mint.
+The original first-attempt AgentCard failure reason is opaque (provider-side);
+our bug was classifying that terminal idempotency outcome as ambiguous funding.
 
-Local repro on buggy main tip (force local Postgres via `DATABASE_URL` and
-`DIRECT_URL` — both must be localhost; injected cloud `DIRECT_URL` otherwise
-points Prisma at prod):
+Archive search (`card_creation_failed`, `tree stalled … funding delayed`,
+`cardholder_not_found fail-closed funding rewrite`): relative of the
+cardholder-not-found fail-closed pattern, not a recurrence of a prior case file.
+Operational note: Render `BENCHMARK_AGENTCARD_CARDHOLDER_ID` (`cmru…3foy`) is
+KYC `pending` and cannot mint; the Integration fixture correctly still points at
+the verified `cmrs…y7jg` cardholder — do not re-seed live from the pending env id.
+
+Local repro (pre-fix exit 1 / post-fix exit 0):
 
 ```bash
 cd back-end && DATABASE_URL="$LOCAL_DB_URL" DIRECT_URL="$LOCAL_DB_URL" \
   npx tsx scripts/rca-card-creation-failed-repro.ts
-# LOCAL_DB_URL=postgresql://postgres:***@localhost:5432/victoria
 ```
-
-Observed: `IS_FUNDING_REWRITE=true`, `errorCode=agentcard_company_funding_in_progress`,
-`purchaseStatus=FUNDING_PENDING`, exit 1.
 
 ## Solution
 
-Pending approval. Proposed generalizable fix (same class as cardholder_not_found):
-
-1. Type `card_creation_failed` in Org MCP `providerErrorFromUnknown` as
-   `agentcard_card_creation_failed` (deterministic pre-commit rejection).
+1. Type `card_creation_failed` in Org MCP (`throwIfCardCreationFailed`) as
+   `agentcard_card_creation_failed`.
 2. Add that code to `hasSafeProviderFailureCode` so post-provider-call failures
    fail closed instead of rewriting to funding-in-progress.
-3. Cement in `purchases.part6.blackbox.ts` + org-MCP unit test; keep the
-   owning-boundary repro green without raising `AGENT_STALL_SECONDS`.
+3. Abandoned-funding compensation treats poisoned mint codes as terminal:
+   discard wallet marker, reverse Stripe hold, mark purchase FAILED.
+4. Cemented in `purchases.part6.blackbox.ts`, org-MCP unit test, purchase-cleanup
+   unit test, and the owning-boundary repro script.
 
 ## Human feedback
 
-None recorded.
+Approved fail-closed typing; also required diagnosing why mint failed in the
+first place (poisoned AgentCard idempotency key), not only the rewrite symptom.
 
 ## Reusable lesson
 
-Never rewrite an untyped deterministic provider rejection into funding-in-progress after the provider call has started — type it and fail closed.
+Never rewrite an AgentCard terminal create_card idempotency failure into funding-in-progress — type it, fail closed, and stop replaying the poisoned purchase key.
