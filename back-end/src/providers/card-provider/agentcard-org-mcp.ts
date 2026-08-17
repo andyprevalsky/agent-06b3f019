@@ -228,6 +228,10 @@ function isCardholderNotFoundMessage(message: string): boolean {
   return /\bcardholder not found\b/i.test(message);
 }
 
+function isCardCreationFailedMessage(message: string): boolean {
+  return /\bcard_creation_failed\b/i.test(message);
+}
+
 function throwIfCardholderNotFound(message: string): void {
   if (!isCardholderNotFoundMessage(message)) return;
   // Deterministic pre-commit rejection: keep the typed safe code so
@@ -238,10 +242,22 @@ function throwIfCardholderNotFound(message: string): void {
   });
 }
 
+function throwIfCardCreationFailed(message: string): void {
+  if (!isCardCreationFailedMessage(message)) return;
+  // AgentCard stores this under the create_card idempotency key: every replay of
+  // the same purchase:{id} key returns the same terminal failure. Keep a typed
+  // safe code so classifyFundingResumeFailure fail-closes instead of rewriting
+  // into a silent funding-in-progress retry loop.
+  throw new AgentCardProviderError(message, 409, undefined, 'agentcard_card_creation_failed', {
+    agentcardStatus: 'card_creation_failed',
+  });
+}
+
 function providerErrorFromUnknown(error: unknown): AgentCardProviderError {
   if (error instanceof AgentCardProviderError) return error;
   const message = errorMessage(error);
   throwIfCardholderNotFound(message);
+  throwIfCardCreationFailed(message);
   return new AgentCardProviderError(message);
 }
 
@@ -371,6 +387,7 @@ function throwForGate(record: Record<string, unknown>, result: unknown): void {
     const failureMessage =
       optionalString(record, ['message', 'error']) ?? (text || 'AgentCard Organization MCP failed');
     throwIfCardholderNotFound(failureMessage);
+    throwIfCardCreationFailed(failureMessage);
     throw new AgentCardProviderError(failureMessage);
   }
 }

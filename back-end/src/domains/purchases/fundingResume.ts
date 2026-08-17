@@ -45,6 +45,7 @@ function hasSafeProviderFailureCode(error: Error): boolean {
     'agentcard_wallet_funding_required',
     'agentcard_payment_method_required',
     'agentcard_cardholder_not_found',
+    'agentcard_card_creation_failed',
     'kyc_required',
   ]).has(error.code);
 }
