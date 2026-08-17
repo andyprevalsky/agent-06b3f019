@@ -589,9 +589,7 @@ async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
       innerText: async () => (gotoCount === 1 ? 'Checking your browser' : 'Billing Address'),
     }),
     content: async () =>
-      gotoCount === 1
-        ? '<h1>Just a moment...</h1>'
-        : '<main>Billing Address</main>',
+      gotoCount === 1 ? '<h1>Just a moment...</h1>' : '<main>Billing Address</main>',
   };
   const browser = {
     contexts: () => [
@@ -624,14 +622,8 @@ async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
 }
 
 function testBlockedResourceRequiresPaymentCdn(): void {
-  assert.strictEqual(
-    blockedResourceRequiresPaymentCdn('https://js.stripe.com/v3'),
-    true
-  );
-  assert.strictEqual(
-    blockedResourceRequiresPaymentCdn('https://m.stripe.com/6'),
-    true
-  );
+  assert.strictEqual(blockedResourceRequiresPaymentCdn('https://js.stripe.com/v3'), true);
+  assert.strictEqual(blockedResourceRequiresPaymentCdn('https://m.stripe.com/6'), true);
   assert.strictEqual(
     blockedResourceRequiresPaymentCdn('https://wl.eventim.us/cdn-cgi/challenge'),
     false
