@@ -556,10 +556,7 @@ export function installFetchCapture(): Router {
   return router;
 }
 
-function assignHeadersInto(
-  target: Record<string, string>,
-  rawHeaders: HeadersInit | undefined
-): void {
+function assignHeadersInto(target: Record<string, string>, rawHeaders: unknown): void {
   if (!rawHeaders) return;
   const apply = (key: string, value: string): void => {
     const lower = key.toLowerCase();
@@ -570,15 +567,16 @@ function assignHeadersInto(
     }
     target[key] = value;
   };
-  if (rawHeaders instanceof Headers) {
+  if (typeof Headers !== 'undefined' && rawHeaders instanceof Headers) {
     rawHeaders.forEach((v, k) => {
       apply(k, v);
     });
   } else if (Array.isArray(rawHeaders)) {
-    for (const [k, v] of rawHeaders) {
-      apply(k, v);
+    for (const entry of rawHeaders) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      apply(String(entry[0]), String(entry[1]));
     }
-  } else {
+  } else if (typeof rawHeaders === 'object') {
     for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
       apply(k, v);
     }
