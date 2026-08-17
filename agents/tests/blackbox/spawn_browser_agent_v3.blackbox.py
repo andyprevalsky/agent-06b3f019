@@ -14167,12 +14167,14 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resume_state["write_lock_approvals"]["payment"] == {
         "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
+        "persistent": True,
     }
     # Site-wide unlock so Place order does not re-prompt on this domain
     # (ephemeral to this browser activity's resume state only).
     assert resume_state["write_lock_approvals"]["site"] == {
         "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
+        "persistent": True,
     }
     assert resume_state["payment_card_refs"] == {
         "card_number": "4242424242424242",
