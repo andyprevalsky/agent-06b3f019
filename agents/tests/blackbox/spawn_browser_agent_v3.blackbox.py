@@ -8715,6 +8715,37 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     assert widget._payment_cdn_provider_exits == 1
     assert widget._generic_script_provider_exits == 1
 
+    # Non-js Stripe script hosts must charge the payment budget (not generic).
+    mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    mobile._network_generation = 9
+    mobile._provider_exit_rejections = []
+    mobile._rejected_network_generations = set()
+    mobile._payment_cdn_provider_exits = 0
+    mobile._generic_script_provider_exits = 0
+    mobile._ignored_request_ids = set()
+    mobile._active_request_ids = set()
+    mobile.agent_id = "agent"
+    mobile.task_id = "task"
+    for host in ("m.stripe.network", "checkout.stripe.com"):
+        mobile._network_generation += 1
+        generation = mobile._network_generation
+        mobile.entries = {
+            f"{generation}:r-{host}": {
+                "browser_generation": generation,
+                "url": f"https://{host}/inner-script.js",
+                "document_url": "https://checkout.eventim.us/",
+                "resource_type": "script",
+            }
+        }
+        mobile._on_loading_failed(
+            {"requestId": f"r-{host}", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+            session_id=f"cdp-{generation}",
+            generation=generation,
+        )
+        assert mobile.pop_provider_exit_rejection() is not None
+    assert mobile._payment_cdn_provider_exits == 2
+    assert mobile._generic_script_provider_exits == 0
+
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""

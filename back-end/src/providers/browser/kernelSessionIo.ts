@@ -19,6 +19,8 @@ export async function getKernelCaptchaTelemetry(
     if (entry.event.type === 'captcha_solve_result') {
       events.push(entry);
     }
+    // Deadline is checked after each page yields; the Kernel SDK stream has no
+    // AbortSignal, so a single in-flight page fetch can still overrun slightly.
     if (events.length >= 50 || scanned >= 500 || Date.now() >= scanDeadline) break;
   }
   return summarizeKernelCaptchaEvents(events);

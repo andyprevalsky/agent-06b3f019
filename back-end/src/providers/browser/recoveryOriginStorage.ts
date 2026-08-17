@@ -9,6 +9,7 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
     .replaceAll('\u2029', '\\u2029')};
   const completionKey = '__naviRecoveryStorageRestoredV1';
   const RESTORE_DEADLINE_MS = 8_000;
+  const OVERALL_RESTORE_DEADLINE_MS = 12_000;
   let restorePromise;
   const restoreCurrentOrigin = async () => {
     const state = originStates.find((entry) => entry.origin === location.origin);
@@ -18,7 +19,15 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
       localStorage.clear();
       for (const item of state.localStorage || []) localStorage.setItem(item.name, item.value);
     } catch {}
+    const overallDeadline = Date.now() + OVERALL_RESTORE_DEADLINE_MS;
+    let restoredAllDatabases = true;
     for (const database of state.indexedDB || []) {
+      if (Date.now() >= overallDeadline) {
+        restoredAllDatabases = false;
+        break;
+      }
+      const remainingMs = Math.max(0, overallDeadline - Date.now());
+      const entryDeadlineMs = Math.min(RESTORE_DEADLINE_MS, remainingMs);
       await new Promise((resolve) => {
         let settled = false;
         const finish = () => {
@@ -26,7 +35,7 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
           settled = true;
           resolve();
         };
-        const timer = setTimeout(finish, RESTORE_DEADLINE_MS);
+        const timer = setTimeout(finish, entryDeadlineMs);
         let request;
         try {
           request = indexedDB.open(database.name, database.version);
@@ -87,7 +96,11 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
         };
       });
     }
-    try { sessionStorage.setItem(completionKey, '1'); } catch {}
+    // Only mark complete after a full restore. A truncated IndexedDB pass must
+    // retry on the next candidate probe rather than pretend storage is ready.
+    if (restoredAllDatabases) {
+      try { sessionStorage.setItem(completionKey, '1'); } catch {}
+    }
   };
   globalThis.__naviRestoreRecoveryStorage = () => {
     // Absorb rejections into the memoized promise itself so a later await

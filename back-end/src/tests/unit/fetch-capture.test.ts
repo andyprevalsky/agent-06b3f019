@@ -176,6 +176,14 @@ async function run(): Promise<void> {
     );
     assert.strictEqual(whatsappUnavailable.status, 503);
 
+    const whatsappUnavailableFromRequest = await fetch(
+      new Request('https://graph.facebook.com/v21.0/blackbox-phone/messages', {
+        method: 'POST',
+        body: JSON.stringify({ text: { body: '__BLACKBOX_WHATSAPP_503__' } }),
+      })
+    );
+    assert.strictEqual(whatsappUnavailableFromRequest.status, 503);
+
     const agentCardBody = JSON.stringify({
       method: 'tools/call',
       params: { name: 'list_transfers' },
@@ -192,7 +200,7 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(agentCardResponses, [1, 2]);
 
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 9);
+    assert.strictEqual(all.captures.length, 10);
     assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
     assert.strictEqual(all.captures[0].responseStatus, 201);
     assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
@@ -208,12 +216,14 @@ async function run(): Promise<void> {
     assert.strictEqual(all.captures[4].cached, false);
     assert.strictEqual(all.captures[5].cached, false);
     assert.strictEqual(all.captures[6].cached, false);
+    assert.strictEqual(all.captures[7].cached, false);
     assert.strictEqual(all.captures[5].responseStatus, 200);
     assert.strictEqual(all.captures[6].responseStatus, 503);
-    assert.strictEqual(all.captures[7].cached, false);
+    assert.strictEqual(all.captures[7].responseStatus, 503);
     assert.strictEqual(all.captures[8].cached, false);
+    assert.strictEqual(all.captures[9].cached, false);
     assert.strictEqual(
-      all.captures[7].requestHeaders.Authorization,
+      all.captures[8].requestHeaders.Authorization,
       'Bearer agentcard...[redacted]'
     );
     assert.deepStrictEqual(
@@ -222,7 +232,7 @@ async function run(): Promise<void> {
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 8);
+    assert.strictEqual(afterFirst.captures.length, 9);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);

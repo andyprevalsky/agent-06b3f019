@@ -2024,13 +2024,17 @@ _PAYMENT_TUNNEL_HOST_MARKERS = (
     "m.stripe.com",
     "m.stripe.network",
 )
-# Hosts whose tunnel failure should rotate the provider exit. Aligns with
-# paymentCdnOk (Stripe.js / window.Stripe). api.stripe.com is intentionally
-# omitted: live steel_managed often fails /healthcheck while js.stripe.com
-# loads — treating api-only failures as exits burns the recovery slot and
-# strands checkout (eventim k=4 attempt7 run2).
+# Hosts whose tunnel failure should rotate the provider exit and charge the
+# payment-CDN budget (not the generic-script budget). Includes Stripe.js plus
+# checkout/mobile Stripe script hosts that also pin sticky require_payment_cdn.
+# api.stripe.com is intentionally omitted: live steel_managed often fails
+# /healthcheck while js.stripe.com loads — treating api-only failures as exits
+# burns the recovery slot and strands checkout (eventim k=4 attempt7 run2).
 _PAYMENT_CDN_EXIT_HOST_MARKERS = (
     "js.stripe.com",
+    "checkout.stripe.com",
+    "m.stripe.com",
+    "m.stripe.network",
 )
 # Network failures that mean "this exit cannot fetch the resource" — includes
 # ORB (Eventim Stripe.js) and classic proxy tunnel deaths.

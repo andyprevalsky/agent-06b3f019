@@ -261,7 +261,7 @@ export function installFetchCapture(): Router {
         ? input.method
         : 'GET');
 
-    // Serialize request body
+    // Serialize request body (init.body, else Request body for fake markers).
     let requestBody: string | null = null;
     let bodySerializable = true;
     if (init?.body !== undefined && init?.body !== null) {
@@ -272,6 +272,17 @@ export function installFetchCapture(): Router {
       } else {
         requestBody = '[non-string body]';
         bodySerializable = false;
+      }
+    } else if (
+      typeof globalThis.Request === 'function' &&
+      input instanceof globalThis.Request &&
+      method.toUpperCase() !== 'GET' &&
+      method.toUpperCase() !== 'HEAD'
+    ) {
+      try {
+        requestBody = await input.clone().text();
+      } catch {
+        requestBody = null;
       }
     }
 
