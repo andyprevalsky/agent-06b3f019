@@ -36,6 +36,22 @@ interface CheckResult {
   duration: number;
   error?: string;
   overridden?: boolean;
+  /** A non-blocking failure (provider infra outage), surfaced as WARN not FAIL. */
+  softFail?: boolean;
+}
+
+/**
+ * Thrown when a provider probe fails because the provider's infrastructure is
+ * unreachable (connection refused, DNS, timeout, or a 5xx) rather than because
+ * the credential is bad. This gate validates CREDENTIALS, not provider uptime,
+ * so an outage is a WARN — especially for Steel, where Kernel is the default
+ * browser provider and covers rotation when Steel is down.
+ */
+class ProviderOutageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderOutageError';
+  }
 }
 
 async function fetchWithTimeout(
@@ -89,6 +105,7 @@ async function runCheck(name: string, fn: () => Promise<void>): Promise<CheckRes
       passed: false,
       duration: Date.now() - start,
       error: error instanceof Error ? error.message : String(error),
+      softFail: error instanceof ProviderOutageError,
     };
   }
 }
@@ -117,18 +134,35 @@ async function checkE2B(): Promise<void> {
 
 async function checkSteel(): Promise<void> {
   const key = requireEnv('STEEL_API_KEY');
-  const res = await fetchWithTimeout(
-    'https://api.steel.dev/v1/sessions?limit=1',
-    {
-      method: 'GET',
-      headers: { 'Steel-Api-Key': key },
-    },
-    STEEL_CHECK_TIMEOUT_MS
-  );
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      'https://api.steel.dev/v1/sessions?limit=1',
+      {
+        method: 'GET',
+        headers: { 'Steel-Api-Key': key },
+      },
+      STEEL_CHECK_TIMEOUT_MS
+    );
+  } catch (error) {
+    // Connection refused / DNS / timeout: Steel's API is unreachable. That is an
+    // OUTAGE, not a bad credential — WARN and keep shipping (Kernel is the
+    // default browser provider and covers IP rotation when Steel is down).
+    throw new ProviderOutageError(
+      `Steel API unreachable (${error instanceof Error ? error.message : String(error)}). ` +
+        `Treated as a provider outage, not a credential failure; Kernel remains the default browser provider.`
+    );
+  }
   if (authFailed(res.status)) {
     const body = await res.text().catch(() => '');
     throw new Error(
       `Steel auth rejected (HTTP ${res.status}). Refresh STEEL_API_KEY from https://app.steel.dev/. Body: ${body.slice(0, 200)}`
+    );
+  }
+  if (providerUnavailable(res.status)) {
+    const body = await res.text().catch(() => '');
+    throw new ProviderOutageError(
+      `Steel API returned HTTP ${res.status} (outage, not a credential failure). Body: ${body.slice(0, 200)}`
     );
   }
 }
@@ -323,7 +357,7 @@ async function runAll(): Promise<void> {
 
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
-    const isWarn = !r.passed && checks[i].warnOnly === true;
+    const isWarn = !r.passed && (checks[i].warnOnly === true || r.softFail === true);
     const icon =
       r.overridden === true ? '  SKIP' : r.passed ? '  PASS' : isWarn ? '  WARN' : '  FAIL';
     const detail =
@@ -335,8 +369,12 @@ async function runAll(): Promise<void> {
     console.log(`${icon}  ${r.name}${detail} (${r.duration}ms)`);
   }
 
-  const hardFailures = results.filter((r, i) => !r.passed && checks[i].warnOnly !== true);
-  const warnings = results.filter((r, i) => !r.passed && checks[i].warnOnly === true);
+  const hardFailures = results.filter(
+    (r, i) => !r.passed && checks[i].warnOnly !== true && r.softFail !== true
+  );
+  const warnings = results.filter(
+    (r, i) => !r.passed && (checks[i].warnOnly === true || r.softFail === true)
+  );
   const overrides = results.filter((r) => r.overridden === true);
   const passed = results.filter((r) => r.passed && r.overridden !== true).length;
 

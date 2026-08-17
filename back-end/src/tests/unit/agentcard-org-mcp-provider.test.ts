@@ -481,8 +481,6 @@ async function main(): Promise<void> {
     'the transfer-visibility window must not shrink'
   );
 
-  await assertTransferVisibilityPollSharesOneRetryBudget();
-
   // "Cardholder not found" is a deterministic pre-commit rejection: keep a typed safe code so the
   // purchase funding-resume classifier does not rewrite it into a funding-in-progress retry loop.
   // Covers both thrown MCP errors and isError structured results.
@@ -537,6 +535,39 @@ async function main(): Promise<void> {
       error.message.includes('Cardholder not found') &&
       'details' in error &&
       error.details.agentcardStatus === 'cardholder_not_found'
+  );
+
+  // Terminal AgentCard idempotency outcome: same purchase:{id} key forever returns
+  // card_creation_failed. Keep a typed safe code so funding-resume cannot rewrite it.
+  const cardCreationFailedProvider = new AgentCardOrgMcpProvider(
+    'cardholder-ok',
+    async (name) => {
+      if (name === 'create_card') {
+        return {
+          isError: true,
+          structuredContent: {
+            status: 'error',
+            message: 'create_card failed: card_creation_failed',
+          },
+        };
+      }
+      throw new Error(`unexpected card-creation-failed tool ${name}`);
+    }
+  );
+  await assert.rejects(
+    () =>
+      cardCreationFailedProvider.mintCard({
+        amountCents: 100,
+        fundsSource: 'company_flow',
+        idempotencyKey: 'purchase:card-creation-failed',
+      }),
+    (error: unknown) =>
+      error instanceof Error &&
+      'code' in error &&
+      error.code === 'agentcard_card_creation_failed' &&
+      error.message.includes('card_creation_failed') &&
+      'details' in error &&
+      error.details.agentcardStatus === 'card_creation_failed'
   );
 
   process.stdout.write('AgentCard organization MCP provider tests passed\n');

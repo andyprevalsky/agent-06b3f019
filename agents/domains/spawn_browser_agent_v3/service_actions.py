@@ -125,6 +125,25 @@ def get_domain_from_url(url: str) -> str:
     try:
         parsed = urlparse(url.lower())
         domain = parsed.netloc
+        if not domain and "://" not in url:
+            # Bare host / domain strings from notification payloads (e.g. "roselabs.ai").
+            # Require a dot so junk like "not-a-url" stays empty.
+            candidate = url.strip().lower()
+            if (
+                candidate
+                and "." in candidate
+                and " " not in candidate
+                and "/" not in candidate
+            ):
+                domain = candidate
+        if "@" in domain:
+            domain = domain.rsplit("@", 1)[-1]
+        if domain.startswith("["):
+            # Leave IPv6 literals alone; strip optional zone only.
+            end = domain.find("]")
+            domain = domain[: end + 1] if end != -1 else domain
+        elif ":" in domain:
+            domain = domain.split(":", 1)[0]
         if domain.startswith("www."):
             domain = domain[4:]
         return domain
@@ -270,23 +289,164 @@ def _get_base_domain(domain: str) -> str:
     return domain
 
 
+# Ephemeral site-wide unlock after payment-card approval for this browser-agent
+# session only. Never copied into a newly spawned browser agent.
+SITE_WRITE_LOCK_APPROVAL_KEY = "site"
+
+# Browser live-view / provider hosts must not become the site-unlock domain —
+# Place order is checked against the real merchant page (e.g. roselabs.ai).
+# Kernel exposes both *.onkernel.com and *.kernel.sh live-view hosts.
+_BROWSER_PROVIDER_DOMAIN_SUFFIXES = (
+    "onkernel.com",
+    "kernel.sh",
+    "steel.dev",
+    "browserbase.com",
+    "hyperbrowser.ai",
+)
+
+
+def _is_browser_provider_domain(domain: str) -> bool:
+    if not domain:
+        return True
+    lowered = domain.lower()
+    return any(lowered == suffix or lowered.endswith("." + suffix) for suffix in _BROWSER_PROVIDER_DOMAIN_SUFFIXES)
+
+
+def resolve_site_write_lock_grant_url(result: Optional[Dict]) -> str:
+    """Pick the merchant checkout URL for a payment-card site unlock.
+
+    Prefer payment-request product URLs / write-lock notification service URL /
+    spawn ``start_url`` / visited merchant URLs over ``current_url``, which on
+    Kernel can be the live-view proxy host (``*.onkernel.com`` / ``*.kernel.sh``).
+    Unlocking the proxy domain would leave Place order on the real merchant site
+    locked.
+    """
+    payload = result if isinstance(result, dict) else {}
+    candidates: list[str] = []
+
+    payment = payload.get("payment_request") or {}
+    if isinstance(payment, dict):
+        line_items = payment.get("line_items") or payment.get("lineItems") or []
+        if isinstance(line_items, list):
+            for item in line_items:
+                if not isinstance(item, dict):
+                    continue
+                product_url = item.get("product_url") or item.get("productUrl")
+                if product_url:
+                    candidates.append(str(product_url))
+
+    notification = payload.get("write_lock_notification") or {}
+    if isinstance(notification, dict):
+        service = notification.get("service") or {}
+        if isinstance(service, dict):
+            if service.get("url"):
+                candidates.append(str(service["url"]))
+            domain = service.get("domain")
+            if domain:
+                candidates.append(f"https://{domain}/")
+
+    start_url = payload.get("start_url")
+    if start_url:
+        candidates.append(str(start_url))
+
+    visited = payload.get("visited_urls") or []
+    if isinstance(visited, list):
+        for url in visited:
+            if url:
+                candidates.append(str(url))
+
+    current_url = payload.get("current_url")
+    if current_url:
+        candidates.append(str(current_url))
+
+    for url in candidates:
+        domain = get_domain_from_url(url)
+        if domain and not _is_browser_provider_domain(domain):
+            return url
+    return ""
+
+
+def _approval_entry_still_valid(
+    approval: Optional[Dict],
+    current_domain: str,
+    *,
+    enforce_timeout: bool = True,
+    match_base_domain: bool = False,
+) -> bool:
+    if not approval or not approval.get("domain") or not approval.get("approved_at"):
+        return False
+    if not current_domain:
+        return False
+    approved_domain = approval["domain"]
+    if match_base_domain:
+        # Payment-card site unlock: same registrable domain + any subdomain /
+        # path / query (e.g. unlock on www.roselabs.ai covers checkout.roselabs.ai).
+        # Never widen browser-provider proxy hosts into a site unlock.
+        if _is_browser_provider_domain(current_domain) or _is_browser_provider_domain(approved_domain):
+            return False
+        if _get_base_domain(approved_domain) != _get_base_domain(current_domain):
+            return False
+    elif current_domain != approved_domain:
+        return False
+    # Payment-card site unlock is session-scoped (no wall-clock expiry). One-off
+    # typed write-lock approvals still expire after WRITE_LOCK_APPROVAL_TIMEOUT.
+    if not enforce_timeout or approval.get("persistent"):
+        return True
+    return not time_module.time() - approval["approved_at"] > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+
 def is_approval_valid(approvals: Optional[Dict], approval_type: str, current_url: str) -> bool:
-    """Check if an existing approval is still valid for the current domain."""
+    """Check if an existing approval is still valid for the current domain.
+
+    A payment-card approval grants a site-wide unlock (``SITE_WRITE_LOCK_APPROVAL_KEY``)
+    for the merchant's registrable domain and all of its subdomains / paths / queries
+    for the rest of THIS browser activity. That unlock lives only in this browser
+    activity's ``write_lock_approvals`` / resume state — a newly spawned browser
+    agent starts empty and does not inherit it.
+    """
     if not approvals:
         return False
 
-    approval = approvals.get(approval_type, {})
-    if not approval.get("domain") or not approval.get("approved_at"):
-        return False
-
     current_domain = get_domain_from_url(current_url)
-    approved_domain = approval["domain"]
-    approved_at = approval["approved_at"]
+    # Site unlock from payment-card approval: base-domain wildcard, no 120s timeout.
+    if _approval_entry_still_valid(
+        approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY),
+        current_domain,
+        enforce_timeout=False,
+        match_base_domain=True,
+    ):
+        return True
 
-    if current_domain != approved_domain:
-        return False
+    return _approval_entry_still_valid(approvals.get(approval_type), current_domain)
 
-    return not time_module.time() - approved_at > WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+
+def grant_site_write_lock_approvals(
+    approvals: Optional[Dict],
+    current_url: str,
+    approved_at: float,
+) -> Dict[str, Dict]:
+    """Record payment-card approval as a site unlock for this browser session.
+
+    Stores the registrable base domain (not a full URL path/query) so any host
+    under that domain — apex, www, checkout.*, etc. — shares the unlock. Also
+    sets the legacy ``payment`` entry for payment-field bypass. Persistent for
+    this browser activity (not the 120s one-off timeout).
+    """
+    granted = dict(approvals or {})
+    domain = get_domain_from_url(current_url)
+    if not domain or _is_browser_provider_domain(domain):
+        return granted
+    base_domain = _get_base_domain(domain)
+    if not base_domain:
+        return granted
+    entry = {
+        "domain": base_domain,
+        "approved_at": approved_at,
+        "persistent": True,
+    }
+    granted["payment"] = entry
+    granted[SITE_WRITE_LOCK_APPROVAL_KEY] = entry
+    return granted
 
 
 # ========================================
@@ -457,6 +617,7 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
             write_lock_approvals=context.write_lock_approvals,
             current_url=context.current_url,
             system_name=context.system_name,
+            secret_refs=context.secret_refs,
         )
     if context.action_name == "input_text":
         return await _execute_input_text(
@@ -1358,6 +1519,7 @@ async def _click_write_lock_result(
     write_lock_approvals: Optional[Dict],
     current_url: str,
     system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
 ) -> Optional[Dict[str, Any]]:
     from browser_tools.write_lock import (
         get_write_lock_approval_question,
@@ -1405,6 +1567,7 @@ async def _click_write_lock_result(
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""
+    minted_card_unlocks_purchase = has_payment_card_secret_refs(secret_refs)
     for approval_type, detected, description in checks:
         if not detected:
             continue
@@ -1412,6 +1575,16 @@ async def _click_write_lock_result(
             logger.info(
                 f"Write lock bypassed: existing approval valid{suffix}",
                 approval_type=approval_type,
+                url=current_url,
+            )
+            continue
+        # H-06: a minted one-time card in THIS browser activity unlocks Place
+        # order / purchase write locks (same ephemeral scope as site unlock).
+        # Payment-field typing already bypasses via secret refs; purchase must
+        # too or Place order re-prompts after Payment card ready.
+        if approval_type == "purchase" and minted_card_unlocks_purchase:
+            logger.info(
+                f"Write lock bypassed: minted payment card unlocks purchase{suffix}",
                 url=current_url,
             )
             continue
@@ -1450,6 +1623,7 @@ async def _execute_click(
     write_lock_approvals: Optional[Dict],
     current_url: str,
     system_name: str,
+    secret_refs: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """Execute a click action with write lock checks."""
     from browser_use.browser.events import ClickCoordinateEvent, ClickElementEvent
@@ -1471,6 +1645,7 @@ async def _execute_click(
             write_lock_approvals=write_lock_approvals,
             current_url=current_url,
             system_name=system_name,
+            secret_refs=secret_refs,
         )
         if write_lock_result:
             return write_lock_result

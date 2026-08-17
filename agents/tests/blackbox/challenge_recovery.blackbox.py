@@ -456,6 +456,35 @@ async def test_live_blocked_resource_verify_is_failure_driven():
     assert ok.last_args["scriptFlags"] == [True]
 
 
+def test_challenge_page_classifier_detects_kernel_provider_blacklist():
+    """Kernel 502 provider_blacklisted must not read as a clean recovered page.
+
+    RCA cement for agent-payment-production-purchase (882509fd): checkout.stripe.com
+    returns HTTP 502 with x-kernel-proxy-error: provider_blacklisted. Challenge
+    recovery previously promoted another Kernel residential/ISP exit as "stable"
+    because the classifier ignored 502 + blacklist markers, then the agent burned
+    the $5 budget looping recoveries that could never clear a domain denylist.
+    """
+    assert page_looks_challenged(
+        status=502,
+        title="Bad Gateway",
+        body_text="Proxy error",
+        html="<html><body>Bad Gateway</body></html>",
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Error",
+        body_text="Upstream refused: provider_blacklisted for this destination",
+        html="",
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Proxy Error",
+        body_text="Blocked",
+        html="<html><body>x-kernel-proxy-error: provider_blacklisted</body></html>",
+    )
+
+
 def test_challenge_page_classifier_detects_non_cloudflare_vendors():
     """HTTP-200 interstitials from non-Cloudflare vendors are still challenges.
 
@@ -675,6 +704,10 @@ async def run_all_tests():
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    result.record(
+        "challenge_page_classifier_kernel_blacklist",
+        test_challenge_page_classifier_detects_kernel_provider_blacklist,
+    )
     result.record(
         "challenge_page_classifier_vendors",
         test_challenge_page_classifier_detects_non_cloudflare_vendors,

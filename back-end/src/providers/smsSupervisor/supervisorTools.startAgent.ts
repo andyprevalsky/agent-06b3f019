@@ -7,6 +7,7 @@ import { prisma, runTransactionWithRetry } from '../database';
 import { reconcileWorkflowStart, startAgentWorkflow } from '../temporal';
 import { getAgentUrl } from '../smsTemplates';
 import { createLogger } from '../logger';
+import type { SupervisorChannel } from './channelDelivery';
 
 const log = createLogger('SmsSupervisorTools');
 
@@ -28,7 +29,8 @@ export interface WebSearchArgs {
 
 export async function commitStartNewAgent(
   op: { kind: 'start_new_agent'; args: StartNewAgentArgs; provisionalId: string },
-  userId: string
+  userId: string,
+  channel: SupervisorChannel = 'SMS'
 ): Promise<ToolResult> {
   const { args, provisionalId } = op;
   const { goal, budget_dollars } = args;
@@ -52,7 +54,7 @@ export async function commitStartNewAgent(
           id: provisionalId,
           userId,
           goal,
-          source: 'SMS',
+          source: channel,
           model: 'rose-labs/rose-1-lite',
           reasoningMaxTokens: 2048,
           status: 'STARTING_UP',

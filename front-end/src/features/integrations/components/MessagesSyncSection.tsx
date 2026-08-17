@@ -6,7 +6,8 @@
  * Sub-items:
  *   iMessage: [IDLE] --click--> [SYNCING] --done--> [SYNCED]  (Desktop only)
  *   Gmail:    [IDLE] --plus click--> [CONNECTING] --OAuth--> [CONNECTED + email chips]
- *   WhatsApp, Telegram, Messenger: [COMING_SOON] (static)
+ *   WhatsApp: [DESKTOP_ONLY + download] --paired in Mac app--> [CONNECTED]
+ *   Telegram, Messenger: [COMING_SOON] (static)
  */
 
 import { Loader2, Plus } from 'lucide-react';
@@ -31,6 +32,7 @@ interface MessagesSyncSectionProps {
   onToggle: () => void;
   isIMessageAvailable: boolean;
   iMessageSynced: boolean;
+  whatsAppConnected: boolean;
   messageSyncLoading: MessageSyncType | null;
   onIMessageSync: () => void;
   connectedIntegrations: ConnectedIntegration[];
@@ -104,6 +106,40 @@ function IMessageRow({
         </DropdownIconFrame>
         <div className="flex items-center gap-2">
           <span className="text-sm">iMessage</span>
+          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+            Desktop Only
+          </span>
+        </div>
+      </div>
+      <Button size="sm" variant="outline" asChild>
+        <a href="/download">Download for Mac</a>
+      </Button>
+    </div>
+  );
+}
+
+function WhatsAppRow({ connected }: { connected: boolean }) {
+  if (connected) {
+    return (
+      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
+        <div className="flex items-center gap-3">
+          <DropdownIconFrame {...DropdownIconPreset.whatsapp} isSynced>
+            <WhatsAppIcon />
+          </DropdownIconFrame>
+          <span className="truncate text-sm">WhatsApp</span>
+        </div>
+        <ConnectedAccountChip label="Synced" tone="synced" />
+      </div>
+    );
+  }
+  return (
+    <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
+      <div className="flex items-center gap-3">
+        <DropdownIconFrame {...DropdownIconPreset.whatsapp}>
+          <WhatsAppIcon />
+        </DropdownIconFrame>
+        <div className="flex items-center gap-2">
+          <span className="text-sm">WhatsApp</span>
           <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
             Desktop Only
           </span>
@@ -199,6 +235,7 @@ export default function MessagesSyncSection({
   onToggle,
   isIMessageAvailable,
   iMessageSynced,
+  whatsAppConnected,
   messageSyncLoading,
   onIMessageSync,
   connectedIntegrations,
@@ -208,7 +245,7 @@ export default function MessagesSyncSection({
   onGmailDisconnect,
 }: MessagesSyncSectionProps) {
   const anyMessageConnected =
-    iMessageSynced || connectedIntegrations.some((i) => i.name === 'gmail');
+    iMessageSynced || whatsAppConnected || connectedIntegrations.some((i) => i.name === 'gmail');
   return (
     <div className="rounded-lg border border-border bg-card/60 overflow-hidden">
       <div className="p-4 flex items-center justify-between">
@@ -221,7 +258,11 @@ export default function MessagesSyncSection({
             <span className="text-xs text-muted-foreground">Sync messaging clients</span>
           </div>
         </div>
-        <SectionToggleButton isConnected={anyMessageConnected} onClick={onToggle} />
+        <SectionToggleButton
+          isConnected={anyMessageConnected}
+          onClick={onToggle}
+          sectionLabel="Messages"
+        />
       </div>
       {expanded && (
         <div className="border-t border-border">
@@ -238,11 +279,7 @@ export default function MessagesSyncSection({
             onGmailConnect={onGmailConnect}
             onGmailDisconnect={onGmailDisconnect}
           />
-          <ComingSoonRow
-            icon={<WhatsAppIcon />}
-            iconFrameProps={DropdownIconPreset.whatsapp}
-            label="WhatsApp"
-          />
+          <WhatsAppRow connected={whatsAppConnected} />
           <ComingSoonRow
             icon={<TelegramIcon />}
             iconFrameProps={DropdownIconPreset.telegram}

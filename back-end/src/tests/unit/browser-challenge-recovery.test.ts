@@ -9,6 +9,7 @@ import {
   pageLooksChallenged,
   recoveryConfigKeyForSession,
   runParallelBrowserConfigSearch,
+  shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
@@ -282,6 +283,62 @@ function testChallengeDetection(): void {
       html: '<script src="/cdn-cgi/challenge-platform/x.js"></script>',
     })
   );
+  // RCA: agent-payment-production-purchase (882509fd) — Kernel returns HTTP 502
+  // with x-kernel-proxy-error: provider_blacklisted for checkout.stripe.com.
+  // Without classifying that page as challenged, Kernel residential/ISP
+  // candidates "win" the config search and recovery falsely reports success.
+  assert.ok(
+    pageLooksChallenged({
+      status: 502,
+      title: 'Bad Gateway',
+      bodyText: 'Proxy error',
+      html: '<html><body>Bad Gateway</body></html>',
+    }),
+    'HTTP 502 must count as challenged so Kernel blacklist exits cannot win'
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Error',
+      bodyText: 'Upstream refused: provider_blacklisted for this destination',
+      html: '',
+    }),
+    'provider_blacklisted body text must count as challenged'
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Proxy Error',
+      bodyText: 'Blocked',
+      html: '<html><body>x-kernel-proxy-error: provider_blacklisted</body></html>',
+    }),
+    'x-kernel-proxy-error HTML must count as challenged'
+  );
+}
+
+function testSteelPreferredForKernelBlacklistedHosts(): void {
+  assert.ok(shouldPreferSteelForChallengeTarget('https://checkout.stripe.com/c/pay/cs_live_x'));
+  assert.ok(shouldPreferSteelForChallengeTarget('https://pay.stripe.com/b/session'));
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.roselabs.ai/test_payment'));
+  assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
+
+  const preferred = browserRecoveryCandidates(
+    { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
+    { preferSteel: true }
+  );
+  assert.deepStrictEqual(
+    preferred.map((candidate) => candidate.key),
+    [
+      'kernel_direct',
+      'steel_managed',
+      'steel_fixed',
+      'kernel_residential_city',
+      'kernel_residential_state',
+      'kernel_mobile',
+      'kernel_isp',
+    ]
+  );
+  assert.ok(preferred[0]?.omitManagedProxy === true);
 }
 
 function testPreferredConfigCompatibility(): void {
@@ -539,6 +596,7 @@ async function main(): Promise<void> {
   // browser-challenge-recovery-payment.test.ts (max-lines split).
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
+  testSteelPreferredForKernelBlacklistedHosts();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();

@@ -60,6 +60,8 @@ export {
   processCookiesUpload,
   processLocalStorageUpload,
   processIndexedDBUpload,
+  ingestIndexedDBUploadJson,
+  decryptCompressedToUtf8,
   processFingerprintUpload,
   processPermissionsUpload,
   processCacheStorageUpload,
@@ -88,6 +90,8 @@ export {
   GmailAuthFailedError,
   ClaudeCodeCredentialsNotFoundError,
   NoTokensAvailableError,
+  IndexedDBUploadPayloadInvalidError,
+  IndexedDBUploadPayloadTooLargeError,
 } from './service.errors';
 
 import {

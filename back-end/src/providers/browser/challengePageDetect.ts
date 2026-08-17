@@ -13,6 +13,12 @@ const CHALLENGE_TEXT = [
   'too many requests',
   'unusual traffic from your computer network',
   'verify you are human',
+  // Kernel proxy hard-blocks (e.g. checkout.stripe.com → provider_blacklisted).
+  // These 502 error pages are not Cloudflare walls, so without these markers a
+  // Kernel candidate "passes" the probe and recovery falsely reports success.
+  'provider_blacklisted',
+  'x-kernel-proxy-error',
+  'kernel-proxy-error',
 ];
 // Present on hard CF walls *and* on cleared pages that embed Bot Management /
 // Turnstile (Eventim ticket HTML). Only count when visible body is still sparse.
@@ -29,12 +35,19 @@ export function challengeDetectionReason(input: {
   bodyText: string;
   html: string;
 }): string | null {
-  if (input.status === 403 || input.status === 429) return `status_${input.status}`;
+  // 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
+  // as challenged keeps a blacklisted Kernel exit from winning the config search.
+  if (input.status === 403 || input.status === 429 || input.status === 502) {
+    return `status_${input.status}`;
+  }
   const content = `${input.title}\n${input.bodyText}`.toLowerCase();
   for (const marker of CHALLENGE_TEXT) {
     if (content.includes(marker)) return `text:${marker}`;
   }
   const html = input.html.toLowerCase();
+  for (const marker of CHALLENGE_TEXT) {
+    if (html.includes(marker)) return `html_text:${marker}`;
+  }
   const visibleMarkup = html.replace(/<[^>]+>/g, '').trim();
   if (!input.title.trim() && !input.bodyText.trim() && !visibleMarkup) return 'empty_page';
   // Cleared Eventim pages embed challenge-platform/Turnstile beside real

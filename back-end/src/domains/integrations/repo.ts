@@ -285,3 +285,5 @@ export {
   findIntegrationPoolingState,
   findIntegrationById,
 } from './repo.bulk';
+
+export { ingestIndexedDBUploadJsonDocument } from './repo.indexeddbUpload';

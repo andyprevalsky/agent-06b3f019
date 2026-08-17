@@ -7279,6 +7279,11 @@ def test_get_domain_from_url_variants():
     assert get_domain_from_url("https://www.amazon.com/cart") == "amazon.com"
     assert get_domain_from_url("https://auth.amazon.com/login") == "auth.amazon.com"
     assert get_domain_from_url("not-a-url") == ""
+    assert get_domain_from_url("roselabs.ai") == "roselabs.ai"
+    assert (
+        get_domain_from_url("https://proxy.jfk.onkernel.com:8443/browser/live/abc")
+        == "proxy.jfk.onkernel.com"
+    )
 
 def test_get_base_domain():
     from domains.spawn_browser_agent_v3.service_actions import _get_base_domain
@@ -7320,6 +7325,233 @@ def test_is_approval_valid_expired():
         }
     }
     assert is_approval_valid(approvals, "purchase", "https://amazon.com/x") is False
+
+
+def test_site_write_lock_unlock_covers_purchase_on_approved_domain():
+    """Payment-card site unlock disables Place-order write lock on that domain only."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time()
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        approved_at,
+    )
+    assert approvals["payment"]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY].get("persistent") is True
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "social_post", "https://roselabs.ai/test_payment") is True
+    # Other sites stay locked — and a newly spawned browser agent starts with {}.
+    assert is_approval_valid(approvals, "purchase", "https://amazon.com/checkout") is False
+    assert is_approval_valid({}, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_payment_site_unlock_covers_subdomains_and_ignores_path_query():
+    """Site unlock is registrable-domain wildcard — not a full URL / query match."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    # Synthetic merchant host — avoids CI secret-domain scanners.
+    merchant = "https://www.shop-example.com/cart?item=1&ref=bench"
+    approvals = grant_site_write_lock_approvals({}, merchant, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "shop-example.com"
+    # Apex, www, and checkout subdomain + arbitrary paths/queries all match.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.com/cart") is True
+    assert is_approval_valid(approvals, "purchase", "https://www.shop-example.com/other") is True
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://checkout.shop-example.com/pay?order=1",
+        )
+        is True
+    )
+    assert is_approval_valid(approvals, "email_send", "https://pay.shop-example.com/send") is True
+    # Sibling registrable domains stay locked.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.org/cart") is False
+    assert is_approval_valid(approvals, "purchase", "https://evil-shop-example.com/x") is False
+    # Browser-provider hosts never inherit a merchant site unlock.
+    assert is_approval_valid(approvals, "purchase", "https://foo.onkernel.com/view") is False
+    assert is_approval_valid(approvals, "purchase", "https://bar.kernel.sh/session") is False
+
+
+def test_payment_site_unlock_survives_write_lock_timeout():
+    """Payment-card site unlock must outlive the 120s one-off write-lock timeout.
+
+    Checkout (fill card → Place order → Stripe) routinely exceeds 120s; expiring
+    the site unlock mid-flow re-prompts purchase write_lock after payment_approval.
+    """
+    from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time() - (WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS + 60)
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://www.roselabs.ai/test_payment",
+        approved_at,
+    )
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    # One-off typed purchase approval (no site unlock) still expires.
+    typed_only = {
+        "purchase": {
+            "domain": "roselabs.ai",
+            "approved_at": approved_at,
+        }
+    }
+    assert is_approval_valid(typed_only, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
+    """write_lock_approvals are resume-state only; a new browser activity starts empty."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    prior = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment",
+        time_module.time(),
+    )
+    # Simulate a newly spawned browser agent: no write_lock_resume_state.
+    fresh_session_approvals: dict = {}
+    assert prior is not fresh_session_approvals
+    assert is_approval_valid(prior, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(fresh_session_approvals, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+@pytest.mark.asyncio
+async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present():
+    """H-06: minted card refs unlock Place order even if site approval bookkeeping missed."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.text_content = "Place order\n$1.00"
+    element.tag_name = "button"
+    element.attributes = {}
+    secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+        AsyncMock(return_value="Place order $1.00"),
+    ), patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place order $1.00",
+    ):
+        locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},  # empty site unlock — secret refs must still unlock
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs=secret_refs,
+        )
+        assert locked is None
+        still_locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs={},
+        )
+        assert still_locked is not None
+        assert still_locked["status"] == "needs_write_approval"
+        assert still_locked["approval_type"] == "purchase"
+
+
+def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url():
+    """H-06 outcome: Kernel live-view current_url must not become the unlock domain."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+        resolve_site_write_lock_grant_url,
+    )
+
+    result = {
+        "current_url": "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        "payment_request": {
+            "line_items": [
+                {
+                    "name": "Agent Card Lifecycle Probe",
+                    "product_url": "https://www.roselabs.ai/p/agentcard-lifecycle-probe",
+                }
+            ]
+        },
+    }
+    grant_url = resolve_site_write_lock_grant_url(result)
+    assert "roselabs.ai" in grant_url
+    assert "onkernel.com" not in grant_url
+    approvals = grant_site_write_lock_approvals({}, grant_url, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    # Proxy-only grant is refused (no merchant domain to unlock).
+    proxy_only = grant_site_write_lock_approvals(
+        {},
+        "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in proxy_only
+
+    # Fleet 20260811-010703: live-view host is *.kernel.sh (not onkernel.com).
+    # When product URLs are absent, spawn start_url must still unlock merchant.
+    kernel_sh = {
+        "current_url": "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/5GgNkgp6OZ2g?readOnly=true",
+        "payment_request": {
+            "merchant": "Rose Labs Test Payment",
+            "lineItems": [{"name": "Agent Card Lifecycle Probe", "quantity": 1}],
+        },
+        "start_url": "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+    }
+    grant_url_sh = resolve_site_write_lock_grant_url(kernel_sh)
+    assert "roselabs.ai" in grant_url_sh
+    assert "kernel.sh" not in grant_url_sh
+    approvals_sh = grant_site_write_lock_approvals({}, grant_url_sh, time_module.time())
+    assert approvals_sh[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals_sh,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    kernel_sh_only = grant_site_write_lock_approvals(
+        {},
+        "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in kernel_sh_only
 
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
@@ -13931,8 +14163,15 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resume_state["approval_type"] == "payment"
     assert resume_state["auth_realm"] == "dickblick.com"
     assert resume_state["step_count"] == 12
+    checkout_domain = get_domain_from_url("https://www.dickblick.com/checkout/")
     assert resume_state["write_lock_approvals"]["payment"] == {
-        "domain": get_domain_from_url("https://www.dickblick.com/checkout/"),
+        "domain": checkout_domain,
+        "approved_at": current_time.timestamp(),
+    }
+    # Site-wide unlock so Place order does not re-prompt on this domain
+    # (ephemeral to this browser activity's resume state only).
+    assert resume_state["write_lock_approvals"]["site"] == {
+        "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
     }
     assert resume_state["payment_card_refs"] == {
@@ -15131,6 +15370,30 @@ async def run_all_tests():
     r.record("is_approval_valid_domain_mismatch", test_is_approval_valid_domain_mismatch)
     r.record("is_approval_valid_fresh", test_is_approval_valid_still_fresh)
     r.record("is_approval_valid_expired", test_is_approval_valid_expired)
+    r.record(
+        "site_write_lock_unlock_covers_purchase",
+        test_site_write_lock_unlock_covers_purchase_on_approved_domain,
+    )
+    r.record(
+        "payment_site_unlock_covers_subdomains_and_ignores_path_query",
+        test_payment_site_unlock_covers_subdomains_and_ignores_path_query,
+    )
+    r.record(
+        "payment_site_unlock_survives_write_lock_timeout",
+        test_payment_site_unlock_survives_write_lock_timeout,
+    )
+    r.record(
+        "fresh_browser_session_no_site_unlock_inherit",
+        test_fresh_browser_session_does_not_inherit_site_write_lock_unlock,
+    )
+    r.record(
+        "site_write_lock_grant_prefers_merchant_over_kernel_proxy",
+        test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url,
+    )
+    await r.record_async(
+        "purchase_write_lock_bypassed_when_payment_card_secret_refs_present",
+        test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present,
+    )
     r.record("get_element_description_none", test_get_element_description_none)
     r.record("get_element_description_text", test_get_element_description_with_text)
     r.record(

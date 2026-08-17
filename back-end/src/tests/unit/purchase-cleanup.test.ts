@@ -23,6 +23,7 @@ import {
   reconcileTerminalAgentPurchaseCards,
 } from '../../providers/purchaseCleanup';
 import { WalletFundingProviderError } from '../../providers/wallet-funding';
+import { AgentCardProviderError } from '../../providers/card-provider/errors';
 import {
   capturedPaymentIntent,
   FailingDetailsCardProvider,
@@ -594,6 +595,51 @@ async function main(): Promise<void> {
       );
     });
     assert.equal(await statusOf(row.id), PurchaseSpendStatus.FUNDING_ABANDONED);
+  });
+
+  await test('abandoned compensation fail-closes poisoned card_creation_failed mint keys', async () => {
+    const userId = await seedUser();
+    const row = await prisma.purchaseSpend.create({
+      data: {
+        userId,
+        fingerprint: `fp-${randomUUID()}`,
+        merchant: 'Poisoned Idempotency Merchant',
+        lineItemsJson: { totalCents: 100 },
+        totalCents: 100,
+        status: PurchaseSpendStatus.FUNDING_ABANDONED,
+        cardId: null,
+        stripePaymentIntentId: `pi_${randomUUID()}`,
+      },
+    });
+    await seedFunding(row.id, userId, PurchaseWalletFundingStatus.PENDING);
+    const poisonedMintProvider = {
+      async mintCard(): Promise<never> {
+        throw new AgentCardProviderError(
+          'create_card failed: card_creation_failed',
+          409,
+          undefined,
+          'agentcard_card_creation_failed',
+          { agentcardStatus: 'card_creation_failed' }
+        );
+      },
+      async getDetails(): Promise<never> {
+        throw new Error('details must not run when create_card failed');
+      },
+      async closeCard(): Promise<void> {
+        throw new Error('close must not run when no card was issued');
+      },
+    };
+    await withFakeStripe(async (calls) => {
+      await reconcileAbandonedPurchaseFunding(poisonedMintProvider, new FakeWalletFundingProvider(), {
+        userId,
+      });
+      assert.equal(calls.cancels.length, 1, 'poisoned mint must release the Stripe hold');
+    });
+    assert.equal(await statusOf(row.id), PurchaseSpendStatus.FAILED);
+    const funding = await prisma.purchaseWalletFunding.findUnique({
+      where: { purchaseId: row.id },
+    });
+    assert.equal(funding, null, 'pending wallet marker must be discarded');
   });
 
   await test('reconcileStaleChargingPurchases preserves a pre-card funding attempt', async () => {

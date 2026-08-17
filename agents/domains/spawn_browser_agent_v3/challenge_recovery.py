@@ -66,6 +66,11 @@ _CHALLENGE_TEXT_MARKERS = (
     "too many requests",
     "unusual traffic from your computer network",
     "verify you are human",
+    # Kernel proxy hard-blocks (checkout.stripe.com → provider_blacklisted).
+    # Without these, a 502 error page reads as clean and recovery falsely succeeds.
+    "provider_blacklisted",
+    "x-kernel-proxy-error",
+    "kernel-proxy-error",
 )
 # Vendor fingerprints for interstitials that return HTTP 200 with benign text, so
 # neither the status nor the text markers above can catch them. This list is kept
@@ -169,12 +174,16 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
 
 
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
-    if status in {403, 429}:
+    # 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
+    # as challenged keeps a blacklisted Kernel exit from looking "recovered".
+    if status in {403, 429, 502}:
         return True
     content = f"{title}\n{body_text}".lower()
     if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
         return True
     normalized_html = html.lower()
+    if any(marker in normalized_html for marker in _CHALLENGE_TEXT_MARKERS):
+        return True
     # Drop script/style/noscript CONTENT before stripping tags. Tag-only
     # stripping leaves their text nodes in `visible_markup`, and a challenge
     # interstitial is precisely the page that ships a large inline script with

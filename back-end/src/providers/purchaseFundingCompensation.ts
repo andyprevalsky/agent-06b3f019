@@ -1,5 +1,6 @@
 import { PurchaseSpendStatus } from '@prisma/client';
 import { createCardProviderForAgent, type CardProvider } from './card-provider';
+import { AgentCardProviderError } from './card-provider/errors';
 import { ROSE_AGENT_CARD_ID } from './card-provider/static-card';
 import { prisma } from './database';
 import { createLogger } from './logger';
@@ -22,6 +23,16 @@ const FUNDING_PENDING_ABANDON_MS =
   fundingPendingAbandonRaw === undefined ? 12 * 60 * 1000 : Number(fundingPendingAbandonRaw);
 if (!Number.isInteger(FUNDING_PENDING_ABANDON_MS) || FUNDING_PENDING_ABANDON_MS <= 0) {
   throw new Error('PURCHASE_FUNDING_PENDING_ABANDON_MS must be a positive integer');
+}
+
+const TERMINAL_AGENTCARD_MINT_CODES = new Set([
+  'agentcard_card_creation_failed',
+  'agentcard_cardholder_not_found',
+]);
+
+function isTerminalAgentCardMintFailure(error: unknown): boolean {
+  if (!(error instanceof AgentCardProviderError) || error.code === undefined) return false;
+  return TERMINAL_AGENTCARD_MINT_CODES.has(error.code);
 }
 
 export type FundingCompensationScope = { userId?: string; agentId?: string };
@@ -138,7 +149,26 @@ async function compensateAbandonedPurchase(
   if (purchase === null) return;
   const activeCardProvider =
     cardProvider ?? (await createCardProviderForAgent(purchase.userId, purchase.agentId));
-  const issued = await ensureIssuedCardIsRecorded(purchase, activeCardProvider);
+  let issued: { cardId: string; staticCard: boolean } | null;
+  try {
+    issued = await ensureIssuedCardIsRecorded(purchase, activeCardProvider);
+  } catch (error) {
+    // AgentCard stores terminal create_card failures under purchase:{id}. Replaying the same
+    // idempotency key can never succeed — reverse the Stripe hold and stop compensation.
+    if (!isTerminalAgentCardMintFailure(error)) throw error;
+    log.warn('Abandoned purchase mint is terminal; releasing Stripe authorization', {
+      purchase_id: purchase.id,
+      error: error instanceof Error ? error.message : String(error),
+      code: error instanceof AgentCardProviderError ? error.code : undefined,
+    });
+    await discardPendingPurchaseWalletCollection(purchase.id);
+    await reversePurchaseAuthorization(purchase.id, paymentIntentId);
+    await prisma.purchaseSpend.updateMany({
+      where: { id: purchase.id, status: PurchaseSpendStatus.FUNDING_ABANDONED },
+      data: { status: PurchaseSpendStatus.FAILED },
+    });
+    return;
+  }
   if (issued === null) return;
   if (issued.staticCard) {
     await reversePurchaseAuthorization(purchase.id, paymentIntentId);

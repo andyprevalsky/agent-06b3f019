@@ -25,7 +25,7 @@ interface ConnectedAccountChipProps {
 function toneClasses(tone: NonNullable<ConnectedAccountChipProps['tone']>): string {
   switch (tone) {
     case 'synced':
-      return 'border-emerald-500/25 bg-emerald-500/10 text-emerald-900 dark:text-emerald-100';
+      return 'border-rose-500/25 bg-rose-500/10 text-rose-900 dark:text-rose-100';
     case 'syncing':
       return 'border-sky-500/25 bg-sky-500/10 text-sky-900 dark:text-sky-100';
     case 'warning':

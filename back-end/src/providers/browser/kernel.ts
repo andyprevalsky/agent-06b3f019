@@ -86,6 +86,8 @@ interface KernelRemoteSessionOptions {
     type: KernelProxyType;
     specificity: KernelRecoveryProxySpecificity;
   };
+  /** Skip managed/shared proxies (used when the target host is provider-blacklisted). */
+  omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
 }
@@ -334,6 +336,12 @@ async function createRemoteSession(
   };
 
   try {
+    if (options.omitManagedProxy) {
+      return await createValidatedSession({
+        proxySource: stealth ? 'kernel_stealth' : 'none',
+        proxyLocation,
+      });
+    }
     if (options.exactManagedProxy !== undefined) {
       const exact = kernelProxyCandidates(proxyLocation, options.exactManagedProxy.type).find(
         (candidate) => candidate.source.endsWith(`_${options.exactManagedProxy?.specificity}`)
@@ -439,8 +447,16 @@ export async function createKernelSessionWithContext(
 export async function createKernelRecoverySession(
   agentId: string,
   proxyLocation: ProxyGeoLocation,
-  proxy: { type: KernelProxyType; specificity: KernelRecoveryProxySpecificity }
+  proxy:
+    | { type: KernelProxyType; specificity: KernelRecoveryProxySpecificity }
+    | { omitManagedProxy: true }
 ) {
+  if ('omitManagedProxy' in proxy) {
+    return createRemoteSession('', agentId, proxyLocation, {
+      omitManagedProxy: true,
+      omitProfile: true,
+    });
+  }
   return createRemoteSession('', agentId, proxyLocation, {
     exactManagedProxy: proxy,
     omitProfile: true,
