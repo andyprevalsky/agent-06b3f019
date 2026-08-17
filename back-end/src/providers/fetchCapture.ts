@@ -344,10 +344,7 @@ export function installFetchCapture(): Router {
     // absent/partial init.headers still preserve Authorization/Content-Type on
     // replay; init then overrides on conflict.
     const fullHeaders: Record<string, string> = {};
-    if (
-      typeof globalThis.Request === 'function' &&
-      input instanceof globalThis.Request
-    ) {
+    if (typeof globalThis.Request === 'function' && input instanceof globalThis.Request) {
       assignHeadersInto(fullHeaders, input.headers);
     }
     assignHeadersInto(fullHeaders, init?.headers);
