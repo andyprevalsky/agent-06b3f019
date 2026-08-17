@@ -378,7 +378,11 @@ export async function probeCandidateBrowser(
           reason: attempt.reason,
           title: attempt.title.slice(0, 200),
         });
-        break;
+        // Do NOT abort the remaining attempts — CF often clears on the second
+        // load (Eventim steel_managed under parallel k=4). Breaking here left
+        // stablePasses=0 after a single "Just a moment..." and discarded the
+        // only Stripe-capable config while Kernels CF-cleared without Stripe.js.
+        continue;
       }
       log.info('Challenge recovery candidate probe attempt clean', {
         ...logContext,

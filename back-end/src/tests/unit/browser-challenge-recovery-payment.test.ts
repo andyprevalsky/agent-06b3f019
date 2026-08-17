@@ -517,6 +517,68 @@ async function testRequirePaymentCdnPromotesStripeJsWinner(): Promise<void> {
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
+async function testProbeRetriesAfterFirstCfChallenge(): Promise<void> {
+  // Eventim k=4: steel_managed attempt-1 "Just a moment..." used to break the
+  // probe loop, leaving stablePasses=0 and discarding the only Stripe-capable
+  // config. Second load often clears — continue, don't abort.
+  let gotoCount = 0;
+  const fakePage = {
+    goto: async () => {
+      gotoCount += 1;
+      return { status: () => 200 };
+    },
+    waitForTimeout: async () => undefined,
+    evaluate: async (pageFunction: () => Promise<unknown>) => {
+      const source = Function.prototype.toString.call(pageFunction);
+      if (source.includes('js.stripe.com') && source.includes('createElement')) {
+        return {
+          'js.stripe.com': true,
+          'api.stripe.com': false,
+          'm.stripe.com': true,
+          'stripe.js': true,
+        };
+      }
+      return undefined;
+    },
+    title: async () => (gotoCount === 1 ? 'Just a moment...' : 'Eventim Checkout'),
+    locator: () => ({
+      innerText: async () => (gotoCount === 1 ? 'Checking your browser' : 'Billing Address'),
+    }),
+    content: async () =>
+      gotoCount === 1
+        ? '<h1>Just a moment...</h1>'
+        : '<main>Billing Address</main>',
+  };
+  const browser = {
+    contexts: () => [
+      {
+        pages: () => [fakePage],
+        newPage: async () => fakePage,
+        addCookies: async () => undefined,
+        addInitScript: async () => undefined,
+        close: async () => undefined,
+      },
+    ],
+    newContext: async () => {
+      throw new Error('unexpected newContext');
+    },
+    close: async () => undefined,
+  } as unknown as Browser;
+  const session = {
+    ...fakeSession({ key: 'steel_managed', provider: 'steel', proxyMode: 'managed' }),
+    validationBrowser: browser,
+  };
+  const result = await probeCandidateBrowser(
+    session,
+    'https://checkout.eventim.us/?afflky=1015Folsom',
+    {}
+  );
+  assert.strictEqual(gotoCount, 2, 'must retry after first CF challenge');
+  assert.strictEqual(result.stablePasses, 1, 'second clean load counts');
+  assert.strictEqual(result.attempts, 2);
+  assert.strictEqual(result.paymentCdnOk, true);
+}
+
 function testBlockedResourceRequiresPaymentCdn(): void {
   assert.strictEqual(
     blockedResourceRequiresPaymentCdn('https://js.stripe.com/v3'),
@@ -544,6 +606,7 @@ async function main(): Promise<void> {
   await testPaymentCdnOkWhenStripeJsLoadsWithoutApi();
   await testRequirePaymentCdnRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesStripeJsWinner();
+  await testProbeRetriesAfterFirstCfChallenge();
   testBlockedResourceRequiresPaymentCdn();
   process.stdout.write('PASS staged browser challenge recovery payment gates\n');
 }
