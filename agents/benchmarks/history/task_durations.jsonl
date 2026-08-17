@@ -2451,3 +2451,4 @@
 {"task": "parallel-tool-calls", "duration_seconds": 80.0, "cost_cents": 56.0, "timestamp": "2026-08-17T06:02:56.054089+00:00", "agent_id": "3ff4d31e-f252-4287-995c-84dbf8878a4a"}
 {"task": "agent-payment-setup-resume", "duration_seconds": 161.5, "cost_cents": 20.0, "timestamp": "2026-08-17T06:08:59.100658+00:00", "agent_id": "bc320e1c-b47c-41f4-a427-b7c2262f8f34"}
 {"task": "agent-payment-idempotent-abandonment", "duration_seconds": 242.4, "cost_cents": 58.0, "timestamp": "2026-08-17T06:08:59.100658+00:00", "agent_id": "5e1c3a1a-f44e-4348-9c97-c9b16977e5cf"}
+{"task": "agent-payment-test-shop", "duration_seconds": 146.5, "cost_cents": 26.0, "timestamp": "2026-08-17T06:27:49.153129+00:00", "agent_id": "cd6547ec-1b01-44b7-bc13-6b2f39924ae2"}
