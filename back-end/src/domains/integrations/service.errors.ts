@@ -82,7 +82,4 @@ export class NoTokensAvailableError extends Error {
 
 // IndexedDBUploadPayload*Error live in types.ts so repo can throw them without
 // a repo → service layer-deps violation. Re-exported here for service callers.
-export {
-  IndexedDBUploadPayloadInvalidError,
-  IndexedDBUploadPayloadTooLargeError,
-} from './types';
+export { IndexedDBUploadPayloadInvalidError, IndexedDBUploadPayloadTooLargeError } from './types';

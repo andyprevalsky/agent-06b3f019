@@ -29,27 +29,22 @@ function transferId(transfer: Record<string, unknown> | undefined): string {
 }
 
 /**
- * AgentCard sandbox (observed 2026-08-09+) leaves `transferred_cents` at 0 for
- * consumed/reclaimed mint rows while `amount_cents` still carries the funded
- * amount. Prefer the explicit transferred counter when present; otherwise fall
- * back to amount for those statuses so sandbox lifecycle gates stay aligned
- * with the funded amount (catalog expects transferredCents == amountCents).
+ * `amount_cents` is the immutable funded amount, while AgentCard mutates
+ * `transferred_cents` as a card is charged (observed as 4396 → 3196 after a
+ * $12 sandbox authorization). Terminal lifecycle rows must therefore derive
+ * the original transfer amount from `amount_cents`, not the mutable counter.
  *
- * Live AgentCard reclaim is different: outstanding transferred balance is 0
- * even when the provider still echoes the original `transferred_cents`
- * (observed on production abandon 2026-08-09). Gate that zeroing on livemode
- * so sandbox expectations are not collapsed.
+ * Live AgentCard reclaim is different: the outstanding transferred balance is
+ * 0 even when the provider still echoes the original counter (observed on
+ * production abandon 2026-08-09).
  */
 function mapTransferredCents(transfer: Record<string, unknown>): number {
   const status = transfer.status;
   if (status === 'reclaimed' && transfer.livemode === true) return 0;
-  const transferred = integerField(transfer, 'transferred_cents');
-  if (transferred > 0) return transferred;
-  const amount = integerField(transfer, 'amount_cents');
-  if ((status === 'consumed' || status === 'reclaimed') && amount > 0) {
-    return amount;
+  if (status === 'consumed' || status === 'reclaimed') {
+    return integerField(transfer, 'amount_cents');
   }
-  return transferred;
+  return integerField(transfer, 'transferred_cents');
 }
 
 export function mapOrgTransfer(

@@ -46,10 +46,31 @@ CACHEABLE_METHODS = {"GET", "HEAD", "POST"}
 
 _SECRET_HEADERS = {"authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"}
 
+# Payment CDNs must never be recorded/replayed. Even write-through of Stripe
+# responses is useless for determinism, and Fast Mode replay of Elements/iframes
+# poisons checkout card fields (Eventim empty Payment Details).
+_PAYMENT_CDN_HOST_MARKERS = (
+    "js.stripe.com",
+    "api.stripe.com",
+    "merchant-ui-api.stripe.com",
+    "m.stripe.com",
+    "m.stripe.network",
+    "r.stripe.com",
+    "checkout.stripe.com",
+)
 
-def should_cache(method: str, resource_type: str) -> bool:
+
+def is_payment_cdn_url(url: str) -> bool:
+    """True for Stripe payment-CDN hosts that must bypass Fast Mode HTTP cache."""
+    lowered = (url or "").lower()
+    return any(host in lowered for host in _PAYMENT_CDN_HOST_MARKERS)
+
+
+def should_cache(method: str, resource_type: str, url: str) -> bool:
     method_upper = method.upper()
     resource_lower = resource_type.lower()
+    if is_payment_cdn_url(url):
+        return False
     if resource_lower not in CACHEABLE_RESOURCE_TYPES:
         return False
     if method_upper in {"GET", "HEAD"}:
@@ -82,7 +103,7 @@ class BrowserHttpCache:
         """Return a Playwright fulfill() payload for a cache hit, else None."""
         if not self.read_enabled:
             return None
-        if not should_cache(method, resource_type):
+        if not should_cache(method, resource_type, url):
             return None
         key = normalize.browser_http_key(self.goal, method, url, request_headers, request_body)
         stored = await cache_client.cache_get(key)
@@ -112,7 +133,7 @@ class BrowserHttpCache:
         """Store a response body. Only successful, cacheable responses are kept (#8)."""
         if not self.write_enabled:
             return False
-        if not should_cache(method, resource_type):
+        if not should_cache(method, resource_type, url):
             return False
         if not (200 <= status < 300):
             return False

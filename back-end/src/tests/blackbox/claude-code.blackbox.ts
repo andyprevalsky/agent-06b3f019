@@ -1218,6 +1218,18 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       user_id: DEV_USER_ID,
     }),
   });
+  if (res.status === 500) {
+    const error =
+      typeof res.data === 'object' && res.data !== null && 'error' in res.data
+        ? String((res.data as { error?: unknown }).error ?? '')
+        : '';
+    if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
+      console.log(
+        '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      );
+      return;
+    }
+  }
   assertStatus(res.status, 200, res.data);
 
   const body = res.data as { ws_url: string; task_id: string; sandbox_id: string };
@@ -1275,7 +1287,8 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
-          clean.includes('Invalid authentication credentials')
+          clean.includes('Invalid authentication credentials') ||
+          /credit balance is too low/i.test(clean)
         ) {
           clearTimeout(timeout);
           ws.close();
@@ -1302,6 +1315,15 @@ async function testSmoke_claudeCodeAnswersQuestion() {
     if (finalOutput.includes('Invalid authentication credentials')) {
       console.log(
         '    [skip] Claude E2B smoke reached the SDK server, but the configured Claude credential is invalid (401)'
+      );
+      return;
+    }
+    // Same credential-health class as Anthropic WARN: exhausted API credits are
+    // not a harness regression. Subscription/OAuth tokens are preferred; when
+    // only a depleted API key is available, skip rather than fail /deploy.
+    if (/credit balance is too low/i.test(finalOutput)) {
+      console.log(
+        '    [skip] Claude E2B smoke reached the SDK server, but Anthropic credits are exhausted'
       );
       return;
     }

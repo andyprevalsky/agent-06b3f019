@@ -215,6 +215,7 @@ async function testConfigSearchPersistsAndReusesWinnerWithoutChildChips(): Promi
       stablePasses: 2,
       attempts: 2,
       latencyMs: candidateSession.proxySource === 'isp_city' ? 1 : 100,
+      paymentCdnOk: false,
     }),
   };
 

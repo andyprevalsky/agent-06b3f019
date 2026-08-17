@@ -5372,6 +5372,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "https://example.com/current",
         storage_state,
         user_agent="test-agent",
+        blocked_resource_url="https://js.stripe.com/v3",
+        require_payment_cdn=True,
     )
     assert out["recovery_action"] == "config_selected"
     call = assert_captured_call(
@@ -5383,6 +5385,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "current_url": "https://example.com/current",
         "storage_state": storage_state,
         "user_agent": "test-agent",
+        "blocked_resource_url": "https://js.stripe.com/v3",
+        "require_payment_cdn": True,
     }
 
 async def test_rotation_storage_state_survives_provider_switch():
@@ -5538,7 +5542,8 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
     assert browser_turn_messages[-1]["role"] == "tool"
     assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
 
-async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state():
+async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
+    """Helper still supports restore_cookies=False for non-recovery callers."""
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
 
     captured = {
@@ -5559,7 +5564,12 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
         ],
     }
     context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
-    page = SimpleNamespace(context=context, evaluate=AsyncMock(), goto=AsyncMock())
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="https://order.online/store/blue-bottle",
+    )
 
     await _restore_rotation_storage_state(
         page,
@@ -5570,11 +5580,58 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
 
     context.add_cookies.assert_not_awaited()
     context.add_init_script.assert_awaited_once()
-    page.goto.assert_awaited_once()
+    page.goto.assert_not_awaited()
     page.evaluate.assert_awaited_once()
 
+
+async def test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs():
+    from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
+
+    context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="about:blank",
+    )
+    await _restore_rotation_storage_state(
+        page,
+        {"cookies": [], "origins": []},
+        current_url="https://order.online/store/blue-bottle",
+        restore_cookies=False,
+    )
+    page.goto.assert_awaited_once_with(
+        "https://order.online/store/blue-bottle",
+        wait_until="domcontentloaded",
+        timeout=45_000,
+    )
+
+
+def test_recovery_requires_live_tab_verify_before_success():
+    """Promoted configs must re-verify the live tab before claiming recovery success."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    preloaded_guard = recovery_block.index('storage_state_preloaded')
+    restore_offset = recovery_block.index("await _restore_rotation_storage_state(")
+    verify_offset = recovery_block.index("await verify_live_page_cleared_challenge(")
+    success_offset = recovery_block.index('title="Browser challenge recovered"')
+    assert preloaded_guard < restore_offset < verify_offset < success_offset
+    assert "passed candidate probes but the live tab" in recovery_block
+    assert "is still challenged" in recovery_block
+    assert "configKey" in recovery_block
+    # Preloaded winners must not rewrite challenged origin state onto the clean session.
+    assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
+
+
 def test_recovery_restore_failure_is_not_suppressed():
-    """A replacement session without restored origin state must not run actions."""
+    """A non-preloaded replacement session must restore state without suppress()."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -5599,8 +5656,8 @@ def test_recovery_restore_failure_is_not_suppressed():
     restore_await = restore_awaits[0]
     restore_call = restore_await.value
     restore_keywords = {keyword.arg: keyword.value for keyword in restore_call.keywords}
-    assert "restore_cookies" in restore_keywords
-    assert "storage_state_preloaded" in ast.unparse(restore_keywords["restore_cookies"])
+    assert restore_keywords.get("restore_cookies") is not None
+    assert ast.unparse(restore_keywords["restore_cookies"]) in {"True", "true"}
 
     ancestor = parents.get(restore_await)
     while ancestor is not None:
@@ -7764,6 +7821,13 @@ def test_network_recorder_query_requests_filters_and_shapes():
         _redact_url_query,
     )
 
+    # Guard against mid-class module-level inserts orphaning query_requests (and
+    # sibling methods) as dead nested defs — that AttributeError fails live Eventim
+    # runs under the runtime-contract evaluator even after payment_approval.
+    assert hasattr(BrowserNetworkRecorder, "query_requests")
+    assert hasattr(BrowserNetworkRecorder, "close")
+    assert hasattr(BrowserNetworkRecorder, "export_diagnostics_bundle_bytes")
+
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
     recorder._max_body_bytes = 262144
@@ -8306,6 +8370,507 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
         "url": "https://shop.test/provider-exit",
         "browser_generation": 1,
     }
+
+
+def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
+    """Eventim custom 403 interstitial is large HTML without classic CF markers."""
+    from domains.spawn_browser_agent_v3.recording import _is_api_challenge_html_response
+
+    large_html = (
+        b"<!doctype html><html lang='en'><head><title>page title</title></head>"
+        + (b"x" * 25_000)
+        + b"<body>blocked</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://wl.eventim.us/checkout",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://cdn.attacker.example/frame",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=b"<html><body>forbidden</body></html>",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://cdn.example.com/assets/font.woff2",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=large_html,
+    )
+
+
+async def test_api_challenge_html_triggers_provider_exit_rejection():
+    """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+        _is_api_challenge_html_response,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=200,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="image",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+        }
+    }
+
+    class _FakeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": _API_CHALLENGE_HTML_REASON,
+        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        "browser_generation": 1,
+        "status": 403,
+    }
+
+
+def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
+    """js.stripe.com ERR_TUNNEL / ORB must rotate the provider exit (Eventim card fields)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _document_warrants_payment_cdn_exit,
+        _is_critical_resource_block,
+        _is_payment_cdn_tunnel_failure,
+    )
+
+    assert _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert not _is_critical_resource_block(
+        "https://checkout.eventim.us/static/app.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert not _is_critical_resource_block(
+        "https://www.google-analytics.com/analytics.js",
+        "net::ERR_BLOCKED_BY_CLIENT",
+        resource_type="script",
+    )
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://wl.eventim.us/asset.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_NAME_NOT_RESOLVED",
+    )
+    assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
+    assert not _document_warrants_payment_cdn_exit(
+        "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "3:r1": {
+            "browser_generation": 3,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://wl.eventim.us/checkout/order-1",
+        }
+    }
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+        "document_url": "https://wl.eventim.us/checkout/order-1",
+    }
+    from domains.spawn_browser_agent_v3.recording import blocked_resource_url_for_recovery
+
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "critical third-party resource blocked",
+                "url": "https://js.stripe.com/v3/",
+            }
+        )
+        == "https://js.stripe.com/v3/"
+    )
+    # Same-origin API-challenge exits must not hard-fail promote re-verify.
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "same-origin API returned Cloudflare challenge HTML",
+                "url": "https://wl.eventim.us/event/_/686363/order/checkaddtocart",
+            }
+        )
+        is None
+    )
+    # One signal per browser generation — no recovery loop on repeated stripe fails.
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() is None
+
+    # api.stripe.com/healthcheck must NOT rotate exits: steel often fails it
+    # while Stripe.js loads (paymentCdnOk). Burning the slot stranded Eventim.
+    api_only = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    api_only._network_generation = 4
+    api_only._provider_exit_rejections = []
+    api_only._rejected_network_generations = set()
+    api_only._payment_cdn_provider_exits = 0
+    api_only._generic_script_provider_exits = 0
+    api_only._ignored_request_ids = set()
+    api_only._active_request_ids = set()
+    api_only.agent_id = "agent"
+    api_only.task_id = "task"
+    api_only.entries = {
+        "4:r-api": {
+            "browser_generation": 4,
+            "url": "https://api.stripe.com/healthcheck",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "xhr",
+        }
+    }
+    api_only._on_loading_failed(
+        {"requestId": "r-api", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-4",
+        generation=4,
+    )
+    assert api_only.pop_provider_exit_rejection() is None
+    assert api_only._payment_cdn_provider_exits == 0
+
+    # Cap=2: a second browser generation may still rotate on js.stripe.com after
+    # the first Kernel→Steel promote consumed exit #1.
+    second_gen = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    second_gen._network_generation = 5
+    second_gen._provider_exit_rejections = []
+    second_gen._rejected_network_generations = {3}
+    second_gen._payment_cdn_provider_exits = 1
+    second_gen._generic_script_provider_exits = 0
+    second_gen._ignored_request_ids = set()
+    second_gen._active_request_ids = set()
+    second_gen.agent_id = "agent"
+    second_gen.task_id = "task"
+    second_gen.entries = {
+        "5:r3": {
+            "browser_generation": 5,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+        }
+    }
+    second_gen._on_loading_failed(
+        {"requestId": "r3", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-5",
+        generation=5,
+    )
+    assert second_gen.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 5,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert second_gen._payment_cdn_provider_exits == 2
+
+    # Ticket/event browse pages preload Stripe; do not rotate there.
+    browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    browse._network_generation = 1
+    browse._provider_exit_rejections = []
+    browse._rejected_network_generations = set()
+    browse._payment_cdn_provider_exits = 0
+    browse._generic_script_provider_exits = 0
+    browse._ignored_request_ids = set()
+    browse._active_request_ids = set()
+    browse.agent_id = "agent"
+    browse.task_id = "task"
+    browse.entries = {
+        "1:r2": {
+            "browser_generation": 1,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom",
+        }
+    }
+    browse._on_loading_failed(
+        {"requestId": "r2", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-1",
+        generation=1,
+    )
+    assert browse.pop_provider_exit_rejection() is None
+
+    # Consent/chat widget script blocks must not consume the payment-CDN budget.
+    widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    widget._network_generation = 7
+    widget._provider_exit_rejections = []
+    widget._rejected_network_generations = set()
+    widget._payment_cdn_provider_exits = 0
+    widget._generic_script_provider_exits = 0
+    widget._ignored_request_ids = set()
+    widget._active_request_ids = set()
+    widget.agent_id = "agent"
+    widget.task_id = "task"
+    widget.entries = {
+        "7:r-widget": {
+            "browser_generation": 7,
+            "url": "https://cdn.consentmanager.net/delivery/cmp.js",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_CLIENT"},
+        session_id="cdp-7",
+        generation=7,
+    )
+    assert widget.pop_provider_exit_rejection() is not None
+    assert widget._generic_script_provider_exits == 1
+    assert widget._payment_cdn_provider_exits == 0
+    # A later Stripe block on a new generation still has its reserved budget.
+    widget._network_generation = 8
+    widget.entries = {
+        "8:r-stripe": {
+            "browser_generation": 8,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-stripe", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-8",
+        generation=8,
+    )
+    assert widget.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 8,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert widget._payment_cdn_provider_exits == 1
+    assert widget._generic_script_provider_exits == 1
+
+    # Non-js Stripe script hosts must charge the payment budget (not generic).
+    mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    mobile._network_generation = 9
+    mobile._provider_exit_rejections = []
+    mobile._rejected_network_generations = set()
+    mobile._payment_cdn_provider_exits = 0
+    mobile._generic_script_provider_exits = 0
+    mobile._ignored_request_ids = set()
+    mobile._active_request_ids = set()
+    mobile.agent_id = "agent"
+    mobile.task_id = "task"
+    for host in ("m.stripe.network", "checkout.stripe.com"):
+        mobile._network_generation += 1
+        generation = mobile._network_generation
+        mobile.entries = {
+            f"{generation}:r-{host}": {
+                "browser_generation": generation,
+                "url": f"https://{host}/inner-script.js",
+                "document_url": "https://checkout.eventim.us/",
+                "resource_type": "script",
+            }
+        }
+        mobile._on_loading_failed(
+            {"requestId": f"r-{host}", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+            session_id=f"cdp-{generation}",
+            generation=generation,
+        )
+        assert mobile.pop_provider_exit_rejection() is not None
+    assert mobile._payment_cdn_provider_exits == 2
+    assert mobile._generic_script_provider_exits == 0
+
+
+def test_evicted_critical_request_meta_still_rejects_network_generation():
+    """Entry eviction must not drop provider-exit classification for in-flight critical scripts.
+
+    With a 1-entry capture buffer, a later request evicts js.stripe.com from
+    ``entries`` before loadingFailed arrives. The active meta map must retain
+    enough fields for the failure event to reject the network generation.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._max_entries = 1
+    recorder._max_active_request_meta = 256
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._active_request_meta = {}
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 262144
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {}
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "stripe",
+            "type": "Script",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://js.stripe.com/v3/", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    stripe_key = "3:stripe"
+    assert stripe_key in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+
+    # Later request fills the 1-entry buffer and evicts the Stripe capture row.
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "other",
+            "type": "XHR",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://checkout.eventim.us/api/ping", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" in recorder.entries
+    assert stripe_key not in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+    assert recorder._active_request_meta[stripe_key]["url"] == "https://js.stripe.com/v3/"
+
+    recorder._on_loading_failed(
+        {"requestId": "stripe", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+        "document_url": "https://checkout.eventim.us/pay",
+    }
+    assert 3 in recorder._rejected_network_generations
+    assert stripe_key not in recorder._active_request_meta
+    assert stripe_key not in recorder._active_request_ids
+
+    # Successful finish for the surviving request also clears its meta.
+    # Point at a binary URL so the finish path skips body fetch (no CDP client).
+    recorder._cdp_client = None
+    recorder._tasks = set()
+    recorder._closed = False
+    recorder.entries["3:other"]["url"] = "https://checkout.eventim.us/static/pixel.png"
+    recorder._on_loading_finished(
+        {"requestId": "other", "encodedDataLength": 12},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" not in recorder._active_request_meta
+    assert "3:other" not in recorder._active_request_ids
+    assert recorder.entries["3:other"].get("terminal") is True
+
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
@@ -9916,6 +10481,66 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+
+
+def test_write_lock_purchase_button_excludes_terms_consent_prose():
+    """Terms copy that quotes Buy Now must not trip the purchase write lock.
+
+    Eventim checkout (2026-08-10 agent e20e5a4e): clicking the legal line
+    'By clicking "Buy Now," you agree to our Terms of Purchase…' was classified
+    as a purchase button, forced generate_write_lock_notification, and blocked
+    request_payment_card. Real Buy Now / Place Order controls stay locked.
+    """
+    from browser_tools.write_lock import is_purchase_button
+
+    terms = (
+        'By clicking "Buy Now," you agree to our\n'
+        "Terms of Purchase\n"
+        "and acknowledge our privacy practices as described in our\n"
+        "Privacy Policy."
+    )
+    assert not is_purchase_button(terms)
+    assert not is_purchase_button(
+        "By clicking Place Order you agree to the Terms of Service"
+    )
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("Place Order")
+    assert is_purchase_button("Pay Now")
+    # Independent signals joined with newlines: consent in one must not veto
+    # a real purchase phrase in another.
+    assert is_purchase_button("Terms of Service\nBuy Now")
+    assert is_purchase_button("Buy Now\nPrivacy Policy")
+
+
+def test_write_lock_email_send_excludes_marketing_opt_in_controls():
+    """Marketing opt-in checkboxes never trigger the outbound-send write lock.
+
+    Eventim checkout (2026-08-10 agent 317bd635): clicking the label
+    "Send me info about other shows by this organizer" was classified as
+    email_send, parked the agent on write_lock approval, and blocked
+    request_payment_card. Opting into merchant emails is not composing an
+    outbound message.
+    """
+    from browser_tools.write_lock import is_email_send_button
+
+    assert not is_email_send_button("Send me info about other shows by this organizer")
+    assert not is_email_send_button("Send me updates about upcoming events")
+    assert not is_email_send_button("Email me about other shows")
+    assert not is_email_send_button("Subscribe to the organizer newsletter")
+    assert not is_email_send_button("Sign me up for promotional emails")
+
+    # Ordinary outbound sends stay locked.
+    assert is_email_send_button("Send")
+    assert is_email_send_button("Send email")
+    assert is_email_send_button("Send message")
+
+    # An opt-in label must not unlock a neighbouring real send control.
+    assert is_email_send_button("Send me info about other shows\nSend message")
+
+    # Composite: marketing opt-in must not suppress a co-located send-email phrase.
+    assert is_email_send_button("Send me info and send email")
+    assert is_email_send_button("Send me updates and send message")
+
 
 def test_write_lock_email_send_excludes_resend_controls():
     """Code requests and resends never trigger the outbound-send write lock.
@@ -13761,12 +14386,14 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resume_state["write_lock_approvals"]["payment"] == {
         "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
+        "persistent": True,
     }
     # Site-wide unlock so Place order does not re-prompt on this domain
     # (ephemeral to this browser activity's resume state only).
     assert resume_state["write_lock_approvals"]["site"] == {
         "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
+        "persistent": True,
     }
     assert resume_state["payment_card_refs"] == {
         "card_number": "4242424242424242",
@@ -14145,11 +14772,13 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert "tool_call_id=recovery_call_id" in recovery_branch
     assert "recovery_call_id = str(uuid_module.uuid4())" not in recovery_branch
     assert "status=MessageStatus.IN_PROGRESS" in recovery_branch
-    assert 'restore_cookies=not bool(config_result.get("storage_state_preloaded"))' in recovery_branch
+    assert 'if not bool(config_result.get("storage_state_preloaded")):' in recovery_branch
+    assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "pop_provider_exit_rejection()" in activity_source
     assert '"provider_exit_rejected": True' in activity_source
-    assert "provider_exit_rejected=bool(" in recovery_branch
+    # Assignment form (main): provider_exit_rejected = bool(unified_action...)
+    assert "provider_exit_rejected = bool(" in recovery_branch
     assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -14769,7 +15398,15 @@ async def run_all_tests():
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
-        test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
+        test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite,
+    )
+    await r.record_async(
+        "recovery_preloaded_navigates_when_host_differs",
+        test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs,
+    )
+    r.record(
+        "recovery_requires_live_tab_verify_before_success",
+        test_recovery_requires_live_tab_verify_before_success,
     )
     r.record(
         "recovery_restore_failure_is_not_suppressed",
@@ -15032,6 +15669,22 @@ async def run_all_tests():
         "network_recorder_accepted_fingerprint_warning",
         test_network_recorder_does_not_reject_successful_fingerprint_warning,
     )
+    r.record(
+        "api_challenge_html_large_cart_interstitial",
+        test_api_challenge_html_large_cart_interstitial_without_classic_markers,
+    )
+    await r.record_async(
+        "api_challenge_html_provider_exit",
+        test_api_challenge_html_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "payment_cdn_tunnel_failure_provider_exit",
+        test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "evicted_critical_request_meta_provider_exit",
+        test_evicted_critical_request_meta_still_rejects_network_generation,
+    )
     await r.record_async(
         "provider_exit_monitor_without_recording",
         test_provider_exit_monitor_runs_without_production_body_log_persistence,
@@ -15180,6 +15833,14 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_order_controls",
         test_write_lock_purchase_button_detects_order_controls,
+    )
+    r.record(
+        "write_lock_purchase_button_excludes_terms_consent_prose",
+        test_write_lock_purchase_button_excludes_terms_consent_prose,
+    )
+    r.record(
+        "write_lock_email_send_excludes_marketing_opt_in_controls",
+        test_write_lock_email_send_excludes_marketing_opt_in_controls,
     )
     r.record(
         "write_lock_email_send_excludes_resend_controls",

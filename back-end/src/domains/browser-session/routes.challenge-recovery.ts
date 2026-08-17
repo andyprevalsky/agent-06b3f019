@@ -43,6 +43,8 @@ export function registerBrowserChallengeRecoveryRoutes(router: Router): void {
           currentUrl: input.current_url,
           storageState: input.storage_state,
           userAgent: input.user_agent,
+          blockedResourceUrl: input.blocked_resource_url,
+          requirePaymentCdn: input.require_payment_cdn,
         });
         res.json({ success: true, ...result });
       } catch (error) {

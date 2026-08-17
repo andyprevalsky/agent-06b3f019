@@ -6,7 +6,6 @@ import {
   AgentCardRoutingProvider,
   type CardProvider,
 } from '../../providers/card-provider';
-import { assertTransferVisibilityPollSharesOneRetryBudget } from './agentcard-org-mcp-provider.retry-budget.support';
 
 type ToolCall = { name: string; args: Record<string, unknown> };
 
@@ -539,21 +538,18 @@ async function main(): Promise<void> {
 
   // Terminal AgentCard idempotency outcome: same purchase:{id} key forever returns
   // card_creation_failed. Keep a typed safe code so funding-resume cannot rewrite it.
-  const cardCreationFailedProvider = new AgentCardOrgMcpProvider(
-    'cardholder-ok',
-    async (name) => {
-      if (name === 'create_card') {
-        return {
-          isError: true,
-          structuredContent: {
-            status: 'error',
-            message: 'create_card failed: card_creation_failed',
-          },
-        };
-      }
-      throw new Error(`unexpected card-creation-failed tool ${name}`);
+  const cardCreationFailedProvider = new AgentCardOrgMcpProvider('cardholder-ok', async (name) => {
+    if (name === 'create_card') {
+      return {
+        isError: true,
+        structuredContent: {
+          status: 'error',
+          message: 'create_card failed: card_creation_failed',
+        },
+      };
     }
-  );
+    throw new Error(`unexpected card-creation-failed tool ${name}`);
+  });
   await assert.rejects(
     () =>
       cardCreationFailedProvider.mintCard({

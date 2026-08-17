@@ -915,11 +915,6 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
 
 
-def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
-    expected = expected_host.casefold().rstrip(".")
-    actual = actual_host.casefold().rstrip(".")
-    return actual == expected or actual.endswith(f".{expected}")
-
 
 def _browser_action_scope(metadata: dict) -> Optional[tuple[str, str]]:
     candidates = [metadata]
@@ -1013,16 +1008,32 @@ def _grounded_payment_navigation_hosts(messages: Optional[List[dict]]) -> set[st
 
 
 def _payment_approval_hosts(req: dict) -> set[str]:
-    """Return checkout hosts carried by the pending payment approval itself."""
+    """Return checkout hosts carried by the pending payment approval itself.
+
+    Attention API payloads flatten write-lock fields onto ``metadata``
+    (``url``, ``writeLockNotification``, ``requestPaymentCard``) while chat
+    messages nest the same contract under ``requestUserApproval``. Read both
+    shapes — bench14 agent ``abd4ae8a-…`` had ``metadata.url=
+    https://checkout.eventim.us/…`` but no nested ``requestUserApproval``, so
+    host grounding reported ``observed none`` despite a valid payment card.
+    """
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     approval = metadata.get("requestUserApproval")
-    if not isinstance(approval, dict):
-        return set()
+    approval = approval if isinstance(approval, dict) else {}
 
-    values: list[object] = [approval.get("url"), approval.get("approvalUrl")]
-    notification = approval.get("writeLockNotification")
-    if isinstance(notification, dict):
+    values: list[object] = [
+        approval.get("url"),
+        approval.get("approvalUrl"),
+        metadata.get("url"),
+        metadata.get("approvalUrl"),
+    ]
+    for notification in (
+        approval.get("writeLockNotification"),
+        metadata.get("writeLockNotification"),
+    ):
+        if not isinstance(notification, dict):
+            continue
         service = notification.get("service")
         if isinstance(service, dict):
             values.extend([service.get("url"), service.get("domain")])
@@ -1044,10 +1055,20 @@ def _validate_payment_merchant_identity(
     messages: Optional[List[dict]],
     business_aliases: object = None,
 ) -> Optional[str]:
+    """Validate business/platform/site for structured merchants without format pedantry.
+
+    Pass/fail is: checkout host grounded + business alias and platform tokens appear
+    somewhere in the merchant label. Do **not** require ``Business (Platform - host)``
+    formatting — e.g. ``Eventim US (1015 Folsom)`` is fine when aliases/platform match
+    and the approval is on eventim.us.
+    """
     if not isinstance(expected_merchant, str) or not isinstance(actual_merchant, str):
         if actual_merchant != expected_merchant:
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
+
+    if not actual_merchant.strip():
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
     expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
     if expected_match is None:
@@ -7762,6 +7783,8 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
+            if _is_intermediate_challenge_recovery_failure(candidate):
+                continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -7924,6 +7947,22 @@ def _validate_agent_class_min_steps(
     return None
 
 
+def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
+    """Staged antibot recoveries often ERROR then continue; those are not tool failures.
+
+    `recover_from_challenge` emits `action_type=browser_challenge_recovery` rows (often
+    under synthetic `provider-exit-recovery-*` toolCallIds). A later successful payment
+    boundary can follow after one or more of these ERRORs. Counting them in
+    `no_tool_failures` / `no_browser_agent_failures` makes antibot benches fail closed
+    on expected recovery noise.
+    """
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    if action_type == "browser_challenge_recovery":
+        return True
+    call_id = str(candidate.get("toolCallId") or candidate.get("tool_call_id") or "")
+    return call_id.startswith("provider-exit-recovery-")
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -7937,6 +7976,8 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         for candidate in candidates:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
+                continue
+            if _is_intermediate_challenge_recovery_failure(candidate):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}

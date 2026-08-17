@@ -1,7 +1,6 @@
-import path from 'node:path';
 import https from 'node:https';
 import { randomUUID } from 'node:crypto';
-import Kernel, { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
+import { PermissionDeniedError, RateLimitError } from '@onkernel/sdk';
 import type { Browser } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
@@ -9,11 +8,7 @@ import { createLogger } from '../logger';
 import { retryWithBackoff } from '../retry';
 import { connectValidatedBrowser, validateSessionConnection } from '../steel/sessionConnection';
 import { browserProviderEnabled } from './config';
-import {
-  kernelCaptchaTelemetryConfig,
-  summarizeKernelCaptchaEvents,
-  type BrowserCaptchaTelemetry,
-} from './captchaTelemetry';
+import { kernelCaptchaTelemetryConfig } from './captchaTelemetry';
 import { getProviderProfile, rememberProviderProfile } from './context';
 import {
   getOrCreateKernelProxy,
@@ -25,11 +20,9 @@ import {
 } from './kernelProxy';
 import {
   BrowserProviderRateLimitError,
-  type BrowserFileInfo,
   type BrowserProviderResumeSession,
   type BrowserProviderSession,
   type BrowserSessionHealth,
-  type BrowserViewport,
 } from './types';
 import {
   benchmarkIsolatedBrowserProfilesEnabled,
@@ -43,6 +36,15 @@ import {
   type ProviderProfileBinding,
 } from './profileBinding';
 import { kernelTimeoutSeconds, readOnlyLiveView } from './kernelSessionConfig';
+import { kernelClient } from './kernelClient';
+export {
+  captureKernelScreenshot,
+  getKernelCaptchaTelemetry,
+  listKernelSessionFiles,
+  readKernelSessionFile,
+  resizeKernelViewport,
+  uploadKernelSessionFile,
+} from './kernelSessionIo';
 
 const log = createLogger('Kernel');
 
@@ -90,12 +92,6 @@ interface KernelRemoteSessionOptions {
   omitManagedProxy?: boolean;
   omitProfile?: boolean;
   boundProfile?: ProviderProfileBinding;
-}
-
-function kernelClient(): Kernel {
-  const apiKey = process.env.KERNEL_API_KEY?.trim();
-  if (!apiKey) throw new Error('KERNEL_API_KEY is required when BROWSER_PROVIDER=kernel');
-  return new Kernel({ apiKey });
 }
 
 export async function releaseKernelRemoteSession(sessionId: string): Promise<void> {
@@ -617,79 +613,4 @@ export async function getKernelSessionHealth(sessionId: string): Promise<Browser
     profileId: session.profile?.id ?? null,
     uptimeMs: session.usage?.uptime_ms ?? null,
   };
-}
-
-export async function getKernelCaptchaTelemetry(
-  sessionId: string
-): Promise<BrowserCaptchaTelemetry> {
-  const events: unknown[] = [];
-  for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
-    category: ['captcha'],
-    order: 'desc',
-  })) {
-    if (entry.event.type === 'captcha_solve_result') {
-      events.push(entry);
-    }
-    if (events.length >= 50) break;
-  }
-  return summarizeKernelCaptchaEvents(events);
-}
-
-export async function resizeKernelViewport(
-  sessionId: string,
-  viewport: BrowserViewport
-): Promise<BrowserViewport> {
-  await kernelClient().browsers.update(sessionId, {
-    viewport: { ...viewport, force: true },
-  });
-  return viewport;
-}
-
-const FILE_DIRECTORIES = ['/tmp/downloads', '/tmp/rose-uploads', '/home/oai/share'];
-
-export async function listKernelSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
-  const client = kernelClient();
-  const results = await Promise.all(
-    FILE_DIRECTORIES.map(async (directory) => {
-      try {
-        return await client.browsers.fs.listFiles(sessionId, { path: directory });
-      } catch {
-        return [];
-      }
-    })
-  );
-  const byPath = new Map<string, BrowserFileInfo>();
-  for (const file of results.flat()) {
-    if (!file.is_dir) {
-      byPath.set(file.path, {
-        path: file.path,
-        size: file.size_bytes,
-        lastModified: file.mod_time,
-      });
-    }
-  }
-  return [...byPath.values()];
-}
-
-export async function uploadKernelSessionFile(
-  sessionId: string,
-  fileBuffer: Buffer,
-  filename: string
-): Promise<{ path: string; size: number }> {
-  const client = kernelClient();
-  const directory = '/tmp/rose-uploads';
-  await client.browsers.fs.createDirectory(sessionId, { path: directory }).catch(() => {});
-  const remotePath = `${directory}/${path.basename(filename)}`;
-  await client.browsers.fs.writeFile(sessionId, fileBuffer, { path: remotePath });
-  return { path: remotePath, size: fileBuffer.length };
-}
-
-export async function readKernelSessionFile(sessionId: string, filePath: string): Promise<Buffer> {
-  const response = await kernelClient().browsers.fs.readFile(sessionId, { path: filePath });
-  return Buffer.from(await response.arrayBuffer());
-}
-
-export async function captureKernelScreenshot(sessionId: string): Promise<Buffer> {
-  const response = await kernelClient().browsers.computer.captureScreenshot(sessionId);
-  return Buffer.from(await response.arrayBuffer());
 }

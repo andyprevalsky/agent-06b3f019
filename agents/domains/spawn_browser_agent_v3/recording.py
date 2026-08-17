@@ -23,7 +23,7 @@ import threading
 import time
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from urllib.parse import unquote, unquote_to_bytes, urljoin, urlparse
 
 import httpx
@@ -2013,6 +2013,224 @@ def provider_exit_monitoring_enabled() -> bool:
 
 
 _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
+# Kept for log/search continuity; new exits use CRITICAL_RESOURCE_BLOCK_REASON.
+_PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
+_CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
+_API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
+_PAYMENT_TUNNEL_HOST_MARKERS = (
+    "js.stripe.com",
+    "api.stripe.com",
+    "checkout.stripe.com",
+    "m.stripe.com",
+    "m.stripe.network",
+)
+# Hosts whose tunnel failure should rotate the provider exit and charge the
+# payment-CDN budget (not the generic-script budget). Includes Stripe.js plus
+# checkout/mobile Stripe script hosts that also pin sticky require_payment_cdn.
+# api.stripe.com is intentionally omitted: live steel_managed often fails
+# /healthcheck while js.stripe.com loads — treating api-only failures as exits
+# burns the recovery slot and strands checkout (eventim k=4 attempt7 run2).
+_PAYMENT_CDN_EXIT_HOST_MARKERS = (
+    "js.stripe.com",
+    "checkout.stripe.com",
+    "m.stripe.com",
+    "m.stripe.network",
+)
+# Network failures that mean "this exit cannot fetch the resource" — includes
+# ORB (Eventim Stripe.js) and classic proxy tunnel deaths.
+_RESOURCE_BLOCK_MARKERS = (
+    "err_tunnel_connection_failed",
+    "err_proxy_connection_failed",
+    "err_proxy_connection_refused",
+    "err_blocked_by_orb",
+    "err_blocked_by_response",
+    "err_blocked_by_client",
+)
+# Alias used by older call sites / tests.
+_TUNNEL_FAILURE_MARKERS = _RESOURCE_BLOCK_MARKERS
+# Optional noise: blocked analytics must not rotate the browser exit.
+_OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS = (
+    "google-analytics.com",
+    "googletagmanager.com",
+    "googleadservices.com",
+    "doubleclick.net",
+    "facebook.net",
+    "facebook.com",
+    "hotjar.com",
+    "segment.com",
+    "segment.io",
+    "mixpanel.com",
+    "amplitude.com",
+    "sentry.io",
+    "newrelic.com",
+    "nr-data.net",
+    "clarity.ms",
+)
+_API_CHALLENGE_HTML_MARKERS = (
+    "access denied",
+    "attention required",
+    "just a moment",
+    "cf-chl-",
+    "/cdn-cgi/challenge-platform",
+    "challenges.cloudflare.com/turnstile",
+)
+_API_CHALLENGE_RESOURCE_TYPES = {"xhr", "fetch", "document"}
+# Cap automatic API-challenge exits so cookie-stage loops cannot be replaced by
+# an unbounded config-search thrash on a permanently blocked endpoint.
+_MAX_API_CHALLENGE_PROVIDER_EXITS = 2
+# Ticket/event inventory pages (Eventim `/event/...`) preload Stripe apple-pay
+# extensions. Tunnel failures there must not force IP rotation or recovery
+# loops before the agent reaches a real checkout/payment document.
+_PAYMENT_DOCUMENT_URL_MARKERS = (
+    "checkout",
+    "payment",
+    "billing",
+    "/pay",
+    "purchase",
+    "/cart",
+)
+_EVENT_BROWSE_DOCUMENT_MARKERS = ("/event/", "/events/")
+# Cap automatic payment-CDN exit rotations per recorder so a bad proxy cannot
+# thrash recover_from_challenge forever when every candidate still fails Stripe.
+# 2 (not 1): after hard-filter promotes steel, a second js.stripe.com flake on
+# the new generation must still be allowed to recover — task-lifetime 1 stranded
+# checkout once the first Kernel→Steel promote consumed the sole slot.
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = 2
+# Generic blocked scripts (consent/A-B/chat widgets) get their own small budget
+# so they cannot exhaust the reserved Stripe.js recovery slots.
+_MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+
+
+def _host_matches_markers(url: str, markers: tuple[str, ...]) -> bool:
+    """True when the URL hostname equals or is a subdomain of any marker."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    return any(host == marker or host.endswith(f".{marker}") for marker in markers)
+
+
+def _same_origin(a: str, b: str) -> bool:
+    """True when both URLs share scheme, host, and effective port."""
+    left = urlparse(a or "")
+    right = urlparse(b or "")
+    if not left.scheme or not right.scheme or not left.hostname or not right.hostname:
+        return False
+    try:
+        left_port = left.port or {"http": 80, "https": 443}.get(left.scheme.lower())
+        right_port = right.port or {"http": 80, "https": 443}.get(right.scheme.lower())
+    except ValueError:
+        return False
+    return (left.scheme.lower(), left.hostname.lower(), left_port) == (
+        right.scheme.lower(),
+        right.hostname.lower(),
+        right_port,
+    )
+
+
+def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
+    """Backward-compatible Stripe-host check (tests + older call sites)."""
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    return _host_matches_markers(url or "", _PAYMENT_TUNNEL_HOST_MARKERS)
+
+
+def _is_critical_resource_block(
+    url: str,
+    error_text: str,
+    *,
+    resource_type: str = "",
+    document_url: str | None = None,
+) -> bool:
+    """True when a page-critical third-party request is blocked on this exit.
+
+    Generalizes Stripe-only tunnel detection: any payment-CDN host OR any
+    non-analytics script that dies with tunnel/ORB/client-block errors can
+    trigger recovery. Soft third-parties (analytics/ads) never rotate.
+    When ``document_url`` is provided, generic (non-payment-CDN) script blocks
+    must be cross-origin — first-party script failures stay on the page.
+    """
+    err = (error_text or "").lower()
+    if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
+        return False
+    if _host_matches_markers(url or "", _PAYMENT_CDN_EXIT_HOST_MARKERS):
+        return True
+    if (resource_type or "").lower() != "script":
+        return False
+    if document_url:
+        return not _same_origin(url or "", document_url)
+    return True
+
+
+_API_CHALLENGE_CART_URL_MARKERS = (
+    "checkaddtocart",
+    "/order/",
+    "/cart",
+    "/checkout",
+)
+# Eventim returns a ~667KB custom interstitial (embedded fonts, no classic CF
+# markers) on cart POSTs. Size + cart URL + HTML 403 is enough to rotate exit.
+_API_CHALLENGE_LARGE_HTML_BYTES = 20_000
+
+
+def _is_api_challenge_html_response(
+    *,
+    status: Any,
+    url: str,
+    resource_type: str,
+    mime_type: str,
+    body_bytes: bytes,
+    document_url: str | None = None,
+) -> bool:
+    """True when a same-tab XHR/fetch/document returns CF challenge HTML (Eventim cart).
+
+    Document GET can look clean while ``checkaddtocart`` POSTs 403 with a ~667KB
+    challenge page. Cookie-stage recovery only GET-probes the document URL and
+    false-succeeds; treat the API challenge as a provider-exit signal instead.
+    When ``document_url`` is provided, require same-origin with ``url`` so a
+    third-party 403 HTML body cannot rotate the exit.
+    """
+    try:
+        code = int(status)
+    except (TypeError, ValueError):
+        return False
+    if code != 403:
+        return False
+    resource = (resource_type or "").lower()
+    if resource and resource not in _API_CHALLENGE_RESOURCE_TYPES:
+        return False
+    if not (url or "").startswith("http"):
+        return False
+    if document_url and not _same_origin(url, document_url):
+        return False
+    sample = body_bytes[:12_000].decode("utf-8", errors="ignore").lower()
+    mime = (mime_type or "").lower()
+    looks_html = "html" in mime or "<html" in sample[:800] or "<!doctype html" in sample[:800]
+    if not looks_html:
+        return False
+    if any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS):
+        return True
+    lowered_url = (url or "").lower()
+    if (
+        len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
+        and any(marker in lowered_url for marker in _API_CHALLENGE_CART_URL_MARKERS)
+    ):
+        return True
+    return False
+
+
+def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
+    """Only rotate for Stripe tunnel failures on checkout/payment documents."""
+    lowered = (document_url or "").lower()
+    if any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS):
+        return True
+    if any(marker in lowered for marker in _EVENT_BROWSE_DOCUMENT_MARKERS):
+        return False
+    # Unknown SPA paths: keep the signal so opaque checkout URLs still rotate.
+    return bool(lowered)
 
 
 def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
@@ -2200,6 +2418,9 @@ class BrowserNetworkRecorder:
         self._tasks: set[asyncio.Task] = set()
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
+        self._payment_cdn_provider_exits = 0
+        self._generic_script_provider_exits = 0
+        self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
         # can repeat after challenge recovery promotes another provider/session.
@@ -2212,6 +2433,11 @@ class BrowserNetworkRecorder:
         self._max_body_bytes = max(1024, int(os.getenv("BROWSER_AGENT_NETWORK_MAX_BODY_BYTES", "262144")))
         if not self.persists_network_log:
             self._max_body_bytes = min(self._max_body_bytes, 65_536)
+        # Lightweight classification fields for in-flight requests. Survives
+        # bounded ``entries`` eviction so loadingFailed can still reject a
+        # provider exit (Stripe/critical script) after the capture row is gone.
+        self._active_request_meta: Dict[str, Dict[str, Any]] = {}
+        self._max_active_request_meta = max(self._max_entries * 2, 256)
         # Response bodies the agent can read back via read_network_requests.
         # Kept separate from `entries` so the byte budget is enforced on the only
         # unbounded axis: one browser session must not hold tens of MB of page
@@ -2547,6 +2773,10 @@ class BrowserNetworkRecorder:
         The tool reads newest-first, so overflow must evict the OLDEST request —
         the previous behaviour refused to record NEW requests once full, which
         made every API call after a heavy page load invisible to the agent.
+
+        Eviction must NOT clear ``_active_request_meta``: an in-flight Stripe or
+        critical-script request may still emit loadingFailed after its capture
+        row is gone, and provider-exit classification needs those fields.
         """
         while len(self.entries) > self._max_entries:
             oldest_key = next(iter(self.entries))
@@ -2554,6 +2784,58 @@ class BrowserNetworkRecorder:
             if evicted:
                 self._append_diagnostic_entry(evicted)
             self._discard_body(oldest_key)
+
+    def _remember_active_request_meta(
+        self,
+        request_key: str,
+        *,
+        url: str,
+        document_url: str = "",
+        resource_type: str = "",
+        browser_generation: int | None = None,
+    ) -> None:
+        """Retain classification fields for an in-flight request outside ``entries``."""
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is None:
+            meta = {}
+            self._active_request_meta = meta
+        meta[request_key] = {
+            "url": url,
+            "document_url": document_url or "",
+            "resource_type": resource_type or "",
+            "browser_generation": browser_generation,
+        }
+        self._prune_active_request_meta()
+
+    def _clear_active_request_meta(self, request_key: str | None) -> None:
+        if not request_key:
+            return
+        meta = getattr(self, "_active_request_meta", None)
+        if meta is not None:
+            meta.pop(request_key, None)
+
+    def _prune_active_request_meta(self) -> None:
+        """Bound the meta map so abandoned CDP ids cannot grow without limit."""
+        meta = getattr(self, "_active_request_meta", None)
+        if not meta:
+            return
+        max_meta = int(getattr(self, "_max_active_request_meta", 0) or 0)
+        if max_meta <= 0:
+            max_meta = max(int(getattr(self, "_max_entries", 600) or 600) * 2, 256)
+            self._max_active_request_meta = max_meta
+        if len(meta) <= max_meta:
+            return
+        active_ids = getattr(self, "_active_request_ids", set())
+        # Prefer dropping metadata for requests no longer considered in-flight.
+        for key in list(meta):
+            if key not in active_ids:
+                meta.pop(key, None)
+                if len(meta) <= max_meta:
+                    return
+        # Still over: drop oldest keys (dict insertion order) to protect heap.
+        while len(meta) > max_meta:
+            oldest_key = next(iter(meta))
+            meta.pop(oldest_key, None)
 
     def _redacted_network_entry(self, entry: Dict[str, Any]) -> Dict[str, Any]:
         """Return the bounded, secret-safe network row used for durable diagnostics."""
@@ -2698,6 +2980,7 @@ class BrowserNetworkRecorder:
                 "session_id": session_id,
                 "method": request.get("method"),
                 "url": url,
+                "document_url": str(event.get("documentURL") or ""),
                 "resource_type": resource_type,
                 "request_headers": _coerce_header_map(request.get("headers")),
                 # Default-deny: only allowlisted anti-bot endpoints retain a body,
@@ -2714,6 +2997,13 @@ class BrowserNetworkRecorder:
                 "redirects": redirects,
                 "request_ts_ms": int((time.monotonic() - self._started_at) * 1000),
             }
+            self._remember_active_request_meta(
+                request_key,
+                url=url,
+                document_url=str(event.get("documentURL") or ""),
+                resource_type=resource_type,
+                browser_generation=generation,
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network request capture failed", error=str(exc))
@@ -2767,6 +3057,13 @@ class BrowserNetworkRecorder:
                     "response_ts_ms": int((time.monotonic() - self._started_at) * 1000),
                 }
             )
+            self._remember_active_request_meta(
+                request_key,
+                url=str(entry.get("url") or url),
+                document_url=str(entry.get("document_url") or ""),
+                resource_type=str(entry.get("resource_type") or resource_type or ""),
+                browser_generation=entry.get("browser_generation", generation),
+            )
             self._evict_overflow_entries()
         except Exception as exc:
             logger.warning("Browser network response capture failed", error=str(exc))
@@ -2783,6 +3080,7 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
+            self._clear_active_request_meta(request_key)
         if not request_id or request_key not in self.entries:
             return
         entry = self.entries[request_key]
@@ -2820,10 +3118,106 @@ class BrowserNetworkRecorder:
         if request_id:
             self._ignored_request_ids.discard(request_key)
             self._active_request_ids.discard(request_key)
-        if request_id and request_key in self.entries:
-            self.entries[request_key]["failed"] = True
-            self.entries[request_key]["failure"] = event.get("errorText")
-            self.entries[request_key]["terminal"] = True
+        entry = self.entries.get(request_key) if request_id and request_key else None
+        meta = None
+        if request_id and request_key:
+            active_meta = getattr(self, "_active_request_meta", None)
+            if active_meta is not None:
+                meta = active_meta.pop(request_key, None)
+        if entry is not None:
+            entry["failed"] = True
+            entry["failure"] = event.get("errorText")
+            entry["terminal"] = True
+        # Prefer the capture row; fall back to meta retained across entry eviction
+        # so provider-exit classification still runs for in-flight critical scripts.
+        source = entry if entry is not None else meta
+        if not request_id or source is None:
+            return
+        # Eventim/checkout: js.stripe.com dies with ERR_TUNNEL_CONNECTION_FAILED
+        # inside Steel/Kernel proxies, so Payment Details never render. Treat that
+        # as a deterministic provider-exit rejection (same path as fingerprint
+        # poison) so recovery searches a fresh IP before the agent loops.
+        # Skip ticket/event browse documents that only preload Stripe widgets —
+        # those failures were rotating forever before cart/checkout.
+        entry_generation = int(source.get("browser_generation") or generation or 0)
+        current_generation = int(getattr(self, "_network_generation", entry_generation))
+        rejected_generations = getattr(self, "_rejected_network_generations", set())
+        document_url = str(source.get("document_url") or "")
+        if (
+            entry_generation == current_generation
+            and entry_generation not in rejected_generations
+            and _is_critical_resource_block(
+                str(source.get("url") or ""),
+                str(event.get("errorText") or ""),
+                resource_type=str(source.get("resource_type") or ""),
+                document_url=document_url or None,
+            )
+        ):
+            if not _document_warrants_payment_cdn_exit(document_url):
+                logger.info(
+                    "Ignoring critical resource block on non-checkout document",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    browser_generation=entry_generation,
+                    document_url=_redact_url_query(document_url),
+                    url=_redact_url_query(str(source.get("url") or "")),
+                )
+            else:
+                blocked_url = str(source.get("url") or "")
+                blocked_url_is_payment_cdn = _host_matches_markers(
+                    blocked_url, _PAYMENT_CDN_EXIT_HOST_MARKERS
+                )
+                payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
+                generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
+                if blocked_url_is_payment_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                    logger.warning(
+                        "Critical resource block ignored: provider-exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                    )
+                elif (
+                    not blocked_url_is_payment_cdn
+                    and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
+                ):
+                    logger.warning(
+                        "Critical resource block ignored: generic-script exit cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(blocked_url),
+                        cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(entry_generation)
+                    self._rejected_network_generations = rejected_generations
+                    if blocked_url_is_payment_cdn:
+                        self._payment_cdn_provider_exits = payment_exits + 1
+                    else:
+                        self._generic_script_provider_exits = generic_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                            "url": _redact_url_query(blocked_url),
+                            "browser_generation": entry_generation,
+                            "document_url": _redact_url_query(document_url),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: critical third-party resource blocked",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=entry_generation,
+                        document_url=_redact_url_query(document_url),
+                        url=_redact_url_query(str(source.get("url") or "")),
+                        error=event.get("errorText"),
+                    )
 
     async def _fetch_response_body(
         self,
@@ -2850,12 +3244,12 @@ class BrowserNetworkRecorder:
             if truncated:
                 body_bytes = body_bytes[: self._max_body_bytes]
 
+            generation = int(entry.get("browser_generation") or 0)
+            current_generation = int(getattr(self, "_network_generation", generation))
+            rejected_generations = getattr(self, "_rejected_network_generations", set())
             if "json" in str(entry.get("mime_type", "")).lower():
                 with contextlib.suppress(json.JSONDecodeError, UnicodeDecodeError):
                     payload = json.loads(body_bytes.decode("utf-8"))
-                    generation = int(entry.get("browser_generation") or 0)
-                    current_generation = int(getattr(self, "_network_generation", generation))
-                    rejected_generations = getattr(self, "_rejected_network_generations", set())
                     if (
                         generation == current_generation
                         and generation not in rejected_generations
@@ -2878,6 +3272,50 @@ class BrowserNetworkRecorder:
                             task_id=self.task_id,
                             browser_generation=generation,
                         )
+            if (
+                generation == current_generation
+                and generation not in rejected_generations
+                and _is_api_challenge_html_response(
+                    status=entry.get("status"),
+                    url=str(entry.get("url") or ""),
+                    resource_type=str(entry.get("resource_type") or ""),
+                    mime_type=str(entry.get("mime_type") or ""),
+                    body_bytes=body_bytes,
+                    document_url=entry.get("document_url"),
+                )
+            ):
+                api_exits = int(getattr(self, "_api_challenge_provider_exits", 0))
+                if api_exits >= _MAX_API_CHALLENGE_PROVIDER_EXITS:
+                    logger.warning(
+                        "API challenge HTML provider-exit ignored: cap reached",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        cap=_MAX_API_CHALLENGE_PROVIDER_EXITS,
+                    )
+                else:
+                    rejected_generations.add(generation)
+                    self._rejected_network_generations = rejected_generations
+                    self._api_challenge_provider_exits = api_exits + 1
+                    rejections = getattr(self, "_provider_exit_rejections", [])
+                    rejections.append(
+                        {
+                            "reason": _API_CHALLENGE_HTML_REASON,
+                            "url": _redact_url_query(str(entry.get("url") or "")),
+                            "browser_generation": generation,
+                            "status": entry.get("status"),
+                        }
+                    )
+                    self._provider_exit_rejections = rejections
+                    logger.warning(
+                        "Browser provider exit rejected: API returned challenge HTML",
+                        agent_id=self.agent_id,
+                        task_id=self.task_id,
+                        browser_generation=generation,
+                        url=_redact_url_query(str(entry.get("url") or "")),
+                        status=entry.get("status"),
+                    )
 
             entry.update(
                 {
@@ -3171,6 +3609,11 @@ class BrowserNetworkRecorder:
                 )
         self._closed = True
         self._write_diagnostics_indexes()
+        # Terminal cleanup: drop in-flight meta so a closed recorder cannot retain
+        # unbounded request classification state after CDP detach.
+        active_meta = getattr(self, "_active_request_meta", None)
+        if active_meta is not None:
+            active_meta.clear()
         logger.info(
             "Browser console and network diagnostics saved",
             agent_id=self.agent_id,
@@ -3181,3 +3624,32 @@ class BrowserNetworkRecorder:
             console_entry_count=len(self.console_entries),
         )
         return self.network_index_path
+
+
+def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
+    """True when the blocked resource should latch sticky require_payment_cdn.
+
+    Uses ``_PAYMENT_CDN_EXIT_HOST_MARKERS`` (not ``_PAYMENT_TUNNEL_HOST_MARKERS``)
+    so api.stripe.com failures do not pin sticky payment-CDN recovery — live
+    steel_managed often fails api while Stripe.js still loads.
+    """
+    if not url:
+        return False
+    return _host_matches_markers(str(url).strip(), _PAYMENT_CDN_EXIT_HOST_MARKERS)
+
+
+def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
+    """URL to re-verify after promote, or None when CF-clear alone is enough.
+
+    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
+    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
+    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
+    after a good Steel promote.
+    """
+    if not isinstance(rejection, Mapping):
+        return None
+    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
+        return None
+    url = str(rejection.get("url") or "").strip()
+    return url or None
+

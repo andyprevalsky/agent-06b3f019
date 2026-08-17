@@ -55,6 +55,10 @@ for (const variable of [
   'SLACK_ERROR_CHANNEL_ID',
   'GITHUB_DISPATCH_TOKEN',
   'STRIPE_SECRET_KEY',
+  'WHATSAPP_PHONE_NUMBER_ID',
+  'WHATSAPP_ACCESS_TOKEN',
+  'WHATSAPP_WEBHOOK_VERIFY_TOKEN',
+  'BLACKBOX_TEST_FAKE_WHATSAPP',
 ]) {
   assert.match(
     autoRcaEnv,
@@ -67,6 +71,15 @@ assert.match(
   /BLACKBOX_TEST_CAPTURE_OUTBOUND[\s\S]*BLACKBOX_TEST_REPLAY_OUTBOUND/,
   'shared auto-RCA fixtures must fail closed outside capture/replay mode'
 );
+for (const [name, harness] of [
+  ['coverage', coverageScript],
+  ['blackbox', blackboxScript],
+] as const) {
+  assert.ok(
+    harness.indexOf('npx prisma generate') < harness.indexOf('npx prisma db push'),
+    `${name} launcher must regenerate Prisma before syncing or starting test children`
+  );
+}
 
 assert.match(
   coverageScript,

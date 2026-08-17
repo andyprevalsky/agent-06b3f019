@@ -113,7 +113,7 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
-    'lifecycle parses an AgentCard transfer from a text-content MCP envelope',
+    'lifecycle maps a consumed sandbox transfer from its immutable funded amount',
     async () => {
       const result = await getTestPaymentLifecycle('agent-text-envelope', {
         findPurchase: async () =>
@@ -147,7 +147,9 @@ const tests: Array<[string, () => Promise<void>]> = [
                     id: 'transfer-text',
                     status: 'consumed',
                     amount_cents: 4396,
-                    transferred_cents: 4396,
+                    // Captured AgentCard sandbox response after a successful $43.96 checkout:
+                    // this mutable counter had fallen by the $12.00 first line item.
+                    transferred_cents: 3196,
                     released_cents: 0,
                     card_id: 'card-text',
                     livemode: false,

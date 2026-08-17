@@ -135,3 +135,4 @@ def validate_product_review_count(value: Any) -> str:
     if not match:
         raise ValueError("review_count must include a numeric count followed by reviews or ratings")
     return " ".join(match.group(0).split())
+
