@@ -1561,12 +1561,17 @@ async def _wait_for_provider_captcha_solver(
         page_still_challenged = False
         if page is not None:
             try:
-                snapshot = await asyncio.gather(
-                    page.title(),
-                    page.locator("body").inner_text(timeout=2_000),
-                    page.content(),
-                    return_exceptions=True,
+                snapshot = await asyncio.wait_for(
+                    asyncio.gather(
+                        page.title(),
+                        page.locator("body").inner_text(timeout=2_000),
+                        page.content(),
+                        return_exceptions=True,
+                    ),
+                    timeout=15,
                 )
+                if asyncio.get_running_loop().time() >= deadline:
+                    return
                 title = snapshot[0] if isinstance(snapshot[0], str) else ""
                 body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
                 html = snapshot[2] if isinstance(snapshot[2], str) else ""
@@ -1578,6 +1583,8 @@ async def _wait_for_provider_captcha_solver(
                 )
             except Exception:
                 page_still_challenged = False
+                if asyncio.get_running_loop().time() >= deadline:
+                    return
         try:
             telemetry = await fetch_browser_captcha_telemetry(config, task_id)
         except Exception as exc:
@@ -6944,7 +6951,12 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     nonlocal require_payment_cdn
                     user_agent = ""
                     with contextlib.suppress(Exception):
-                        user_agent = str(await input_page.evaluate("() => navigator.userAgent"))
+                        user_agent = str(
+                            await asyncio.wait_for(
+                                input_page.evaluate("() => navigator.userAgent"),
+                                timeout=15,
+                            )
+                        )
                     blocked_resource_url = str(
                         unified_action.get("params", {}).get("blocked_resource_url") or ""
                     ).strip()
@@ -7242,7 +7254,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
 
                 return {
                     "status": "needs_user_help",
-                    "success": False,
                     "message": message,
                     "reason": reason,
                     "task_id": task_id,

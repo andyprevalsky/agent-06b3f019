@@ -71,7 +71,15 @@ function testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst(): void {
   );
   assert.strictEqual(payment[1]?.label, 'payment_cdn_full');
   assert.strictEqual(payment[1]?.avoidConfigKey, undefined);
-  assert.strictEqual(payment[1]?.configs.length, configs.length);
+  // Phase 2 must not re-probe Steel keys already tried in phase 1.
+  assert.ok(
+    (payment[1]?.configs ?? []).every((config) => config.provider !== 'steel'),
+    'payment_cdn_full must exclude already-tried Steel candidates'
+  );
+  assert.strictEqual(
+    payment[1]?.configs.length,
+    configs.filter((config) => config.provider !== 'steel').length
+  );
 }
 
 async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void> {

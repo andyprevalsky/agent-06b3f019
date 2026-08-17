@@ -75,23 +75,31 @@ export function recoverySearchPlan(options: {
     ];
   }
   const focused = paymentCdnFocusedCandidates(options.configs);
+  // No Steel candidates ⇒ Kernel-only cannot clear Stripe.js. Fail fast rather
+  // than burning the full parallel probe budget on a guaranteed empty set.
+  if (focused.length === 0) {
+    return [];
+  }
+  const triedKeys = new Set(focused.map((config) => config.key));
+  const remaining = options.configs.filter((config) => !triedKeys.has(config.key));
   const phases: Array<{
     configs: BrowserRecoveryConfig[];
     avoidConfigKey?: string;
     label: string;
-  }> = [];
-  if (focused.length > 0) {
-    phases.push({
+  }> = [
+    {
       configs: focused,
       avoidConfigKey: undefined,
       label: 'payment_cdn_steel',
+    },
+  ];
+  if (remaining.length > 0) {
+    phases.push({
+      configs: remaining,
+      avoidConfigKey: undefined,
+      label: 'payment_cdn_full',
     });
   }
-  phases.push({
-    configs: options.configs,
-    avoidConfigKey: undefined,
-    label: 'payment_cdn_full',
-  });
   return phases;
 }
 
@@ -160,7 +168,8 @@ export function browserRecoveryCandidates(
   if (!options?.preferSteel) return candidates;
   // Kernel's managed proxy hard-blacklists Stripe Checkout. Prefer a direct
   // (no managed proxy) Kernel session first, then Steel — never burn budget on
-  // residential/ISP/mobile Kernel exits that cannot reach the host.
+  // residential/ISP/mobile Kernel exits that cannot reach the host. Probes run
+  // concurrently, so reordering alone does not skip managed Kernel; filter them.
   const directKernel: BrowserRecoveryConfig = {
     key: 'kernel_direct',
     provider: 'kernel',
@@ -170,6 +179,5 @@ export function browserRecoveryCandidates(
   return [
     directKernel,
     ...candidates.filter((candidate) => candidate.provider === 'steel'),
-    ...candidates.filter((candidate) => candidate.provider !== 'steel'),
   ];
 }

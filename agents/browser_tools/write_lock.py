@@ -387,17 +387,26 @@ def is_purchase_button(element_text: str) -> bool:
     if not element_text:
         return False
 
-    text_lower = normalize_write_lock_text(element_text)
+    # Callers join independent write-lock signals with newlines. Apply consent
+    # exclusion only within the same signal that carries a purchase phrase so
+    # "Terms of Service" in one signal cannot veto "Buy Now" in another.
+    for signal in element_text.split("\n"):
+        text_lower = normalize_write_lock_text(signal)
+        if not text_lower:
+            continue
+        if any(
+            normalize_write_lock_text(pattern) in text_lower
+            for pattern in PURCHASE_CONSENT_PROSE_PATTERNS
+        ):
+            logger.debug(
+                f"Element signal '{signal[:80]}' matched purchase consent-prose exclusion"
+            )
+            continue
 
-    # Consent/legal prose that merely mentions the purchase verb is not a button.
-    if any(normalize_write_lock_text(pattern) in text_lower for pattern in PURCHASE_CONSENT_PROSE_PATTERNS):
-        logger.debug(f"Element text '{element_text}' matched purchase consent-prose exclusion")
-        return False
-
-    for phrase in PURCHASE_BUTTON_PHRASES:
-        if normalize_write_lock_text(phrase) in text_lower:
-            logger.debug(f"Element text '{element_text}' matched purchase pattern: {phrase}")
-            return True
+        for phrase in PURCHASE_BUTTON_PHRASES:
+            if normalize_write_lock_text(phrase) in text_lower:
+                logger.debug(f"Element text '{signal[:80]}' matched purchase pattern: {phrase}")
+                return True
 
     return False
 

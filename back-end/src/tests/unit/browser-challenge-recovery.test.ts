@@ -221,6 +221,11 @@ function testRecoveryConfigKeyForSession(): void {
     recoveryConfigKeyForSession('kernel', 'residential_city'),
     'kernel_residential_city'
   );
+  assert.strictEqual(
+    recoveryConfigKeyForSession('kernel', 'residential_country'),
+    'kernel_residential_country'
+  );
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'none'), 'kernel_direct');
   assert.strictEqual(recoveryConfigKeyForSession('steel', 'managed'), 'steel_managed');
   assert.strictEqual(recoveryConfigKeyForSession('steel', 'fixed'), 'steel_fixed');
   assert.strictEqual(recoveryConfigKeyForSession('kernel', 'mobile_city'), 'kernel_mobile');
@@ -314,6 +319,20 @@ function testChallengeDetection(): void {
     }),
     'x-kernel-proxy-error HTML must count as challenged'
   );
+  // Substantive merchant body + "just a moment" buried in a script/i18n bundle
+  // must NOT false-positive — that discarded Stripe-capable exits.
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Buy tickets to LYNY',
+      bodyText:
+        'General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout now.',
+      html:
+        '<script>window.__i18n={"errors":{"rate":"too many requests","cf":"just a moment","deny":"access denied"}}</script>' +
+        '<main>General Admission</main>',
+    }),
+    'generic challenge prose in script bundles must not flag a cleared page'
+  );
 }
 
 function testSteelPreferredForKernelBlacklistedHosts(): void {
@@ -328,15 +347,7 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
   );
   assert.deepStrictEqual(
     preferred.map((candidate) => candidate.key),
-    [
-      'kernel_direct',
-      'steel_managed',
-      'steel_fixed',
-      'kernel_residential_city',
-      'kernel_residential_state',
-      'kernel_mobile',
-      'kernel_isp',
-    ]
+    ['kernel_direct', 'steel_managed', 'steel_fixed']
   );
   assert.ok(preferred[0]?.omitManagedProxy === true);
 }

@@ -123,6 +123,7 @@ export function recoveryConfigKeyForSession(
     return undefined;
   }
   if ((provider || '').toLowerCase() === 'kernel') {
+    if (tier === 'none') return 'kernel_direct';
     if (tier.startsWith('isp')) return 'kernel_isp';
     if (tier.startsWith('mobile')) return 'kernel_mobile';
     if (tier.includes('residential_state') || tier === 'residential_state') {
@@ -130,6 +131,9 @@ export function recoveryConfigKeyForSession(
     }
     if (tier.includes('residential_city') || tier === 'residential_city') {
       return 'kernel_residential_city';
+    }
+    if (tier.includes('residential_country') || tier === 'residential_country') {
+      return 'kernel_residential_country';
     }
     if (tier.startsWith('residential')) return 'kernel_residential_city';
   }
@@ -293,6 +297,7 @@ export async function probeCandidateBrowser(
       await context.addInitScript(recoveryOriginStorageScript(storageState));
     }
     const page = context.pages()[0] ?? (await context.newPage());
+    let lastAttemptClean = false;
     for (let index = 0; index < attempts; index += 1) {
       const response = await page
         .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
@@ -307,6 +312,7 @@ export async function probeCandidateBrowser(
       }
       const attempt = await waitForProviderSolver(page, response);
       if (!attempt.clean) {
+        lastAttemptClean = false;
         log.info('Challenge recovery candidate probe attempt still challenged', {
           ...logContext,
           attempt: index + 1,
@@ -320,6 +326,7 @@ export async function probeCandidateBrowser(
         // only Stripe-capable config while Kernels CF-cleared without Stripe.js.
         continue;
       }
+      lastAttemptClean = true;
       log.info('Challenge recovery candidate probe attempt clean', {
         ...logContext,
         attempt: index + 1,
@@ -329,14 +336,33 @@ export async function probeCandidateBrowser(
       stablePasses += 1;
     }
     if (stablePasses > 0) {
-      const paymentProbe = await probePaymentCdnReachable(page);
-      paymentCdnOk = paymentProbe.paymentCdnOk;
-      paymentCdnHosts = paymentProbe.paymentCdnHosts;
-      log.info('Challenge recovery candidate payment CDN probe', {
-        ...logContext,
-        paymentCdnOk,
-        paymentCdnHosts,
-      });
+      // A clean first attempt + challenged second leaves stablePasses > 0 while
+      // `page` is still the challenge document — Stripe.js then fails CSP/ORB
+      // and paymentCdnOk falsely rejects. Re-nav to a clean doc before probing.
+      let paymentPageClean = lastAttemptClean;
+      if (!paymentPageClean) {
+        const response = await page
+          .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+          .catch(() => null);
+        const retry = await waitForProviderSolver(page, response);
+        paymentPageClean = retry.clean;
+        log.info('Challenge recovery payment CDN pre-probe navigation', {
+          ...logContext,
+          clean: retry.clean,
+          reason: retry.reason,
+          title: retry.title.slice(0, 200),
+        });
+      }
+      if (paymentPageClean) {
+        const paymentProbe = await probePaymentCdnReachable(page);
+        paymentCdnOk = paymentProbe.paymentCdnOk;
+        paymentCdnHosts = paymentProbe.paymentCdnHosts;
+        log.info('Challenge recovery candidate payment CDN probe', {
+          ...logContext,
+          paymentCdnOk,
+          paymentCdnHosts,
+        });
+      }
     }
   } finally {
     // Closing this CDP client leaves the remote default context (including any

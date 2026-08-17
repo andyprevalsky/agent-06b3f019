@@ -7,14 +7,19 @@ export async function getKernelCaptchaTelemetry(
   sessionId: string
 ): Promise<BrowserCaptchaTelemetry> {
   const events: unknown[] = [];
+  // Bound entries SCANNED, not only entries kept: a captcha-category stream can
+  // contain many non-solve_result events, and events.length never grows for them.
+  let scanned = 0;
+  const scanDeadline = Date.now() + 5_000;
   for await (const entry of kernelClient().browsers.telemetry.events(sessionId, {
     category: ['captcha'],
     order: 'desc',
   })) {
+    scanned += 1;
     if (entry.event.type === 'captcha_solve_result') {
       events.push(entry);
     }
-    if (events.length >= 50) break;
+    if (events.length >= 50 || scanned >= 500 || Date.now() >= scanDeadline) break;
   }
   return summarizeKernelCaptchaEvents(events);
 }

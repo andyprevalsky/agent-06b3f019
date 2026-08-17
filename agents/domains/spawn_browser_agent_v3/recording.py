@@ -2092,6 +2092,17 @@ _EVENT_BROWSE_DOCUMENT_MARKERS = ("/event/", "/events/")
 # the new generation must still be allowed to recover — task-lifetime 1 stranded
 # checkout once the first Kernel→Steel promote consumed the sole slot.
 _MAX_PAYMENT_CDN_PROVIDER_EXITS = 2
+# Generic blocked scripts (consent/A-B/chat widgets) get their own small budget
+# so they cannot exhaust the reserved Stripe.js recovery slots.
+_MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
+
+
+def _host_matches_markers(url: str, markers: tuple[str, ...]) -> bool:
+    """True when the URL hostname equals or is a subdomain of any marker."""
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return False
+    return any(host == marker or host.endswith(f".{marker}") for marker in markers)
 
 
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
@@ -2099,8 +2110,7 @@ def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
     err = (error_text or "").lower()
     if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
         return False
-    lowered = (url or "").lower()
-    return any(host in lowered for host in _PAYMENT_TUNNEL_HOST_MARKERS)
+    return _host_matches_markers(url or "", _PAYMENT_TUNNEL_HOST_MARKERS)
 
 
 def _is_critical_resource_block(
@@ -2118,11 +2128,10 @@ def _is_critical_resource_block(
     err = (error_text or "").lower()
     if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
         return False
-    lowered = (url or "").lower()
     host = (urlparse(url).hostname or "").lower()
     if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
         return False
-    if any(marker in lowered for marker in _PAYMENT_CDN_EXIT_HOST_MARKERS):
+    if _host_matches_markers(url or "", _PAYMENT_CDN_EXIT_HOST_MARKERS):
         return True
     return (resource_type or "").lower() == "script"
 
@@ -2376,6 +2385,7 @@ class BrowserNetworkRecorder:
         self._provider_exit_rejections: List[Dict[str, Any]] = []
         self._rejected_network_generations: set[int] = set()
         self._payment_cdn_provider_exits = 0
+        self._generic_script_provider_exits = 0
         self._api_challenge_provider_exits = 0
         self._cdp_client: Any = None
         # CDP requestId values are scoped to one remote browser connection and
@@ -3031,40 +3041,62 @@ class BrowserNetworkRecorder:
                         document_url=_redact_url_query(document_url),
                         url=_redact_url_query(str(entry.get("url") or "")),
                     )
-                elif int(getattr(self, "_payment_cdn_provider_exits", 0)) >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
-                    logger.warning(
-                        "Critical resource block ignored: provider-exit cap reached",
-                        agent_id=self.agent_id,
-                        task_id=self.task_id,
-                        browser_generation=entry_generation,
-                        document_url=_redact_url_query(document_url),
-                        url=_redact_url_query(str(entry.get("url") or "")),
-                        cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
-                    )
                 else:
-                    rejected_generations.add(entry_generation)
-                    self._rejected_network_generations = rejected_generations
-                    self._payment_cdn_provider_exits = int(getattr(self, "_payment_cdn_provider_exits", 0)) + 1
                     blocked_url = str(entry.get("url") or "")
-                    rejections = getattr(self, "_provider_exit_rejections", [])
-                    rejections.append(
-                        {
-                            "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
-                            "url": _redact_url_query(blocked_url),
-                            "browser_generation": entry_generation,
-                            "document_url": _redact_url_query(document_url),
-                        }
+                    blocked_url_is_payment_cdn = _host_matches_markers(
+                        blocked_url, _PAYMENT_CDN_EXIT_HOST_MARKERS
                     )
-                    self._provider_exit_rejections = rejections
-                    logger.warning(
-                        "Browser provider exit rejected: critical third-party resource blocked",
-                        agent_id=self.agent_id,
-                        task_id=self.task_id,
-                        browser_generation=entry_generation,
-                        document_url=_redact_url_query(document_url),
-                        url=_redact_url_query(str(entry.get("url") or "")),
-                        error=event.get("errorText"),
-                    )
+                    payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
+                    generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
+                    if blocked_url_is_payment_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                        logger.warning(
+                            "Critical resource block ignored: provider-exit cap reached",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=entry_generation,
+                            document_url=_redact_url_query(document_url),
+                            url=_redact_url_query(blocked_url),
+                            cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
+                        )
+                    elif (
+                        not blocked_url_is_payment_cdn
+                        and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
+                    ):
+                        logger.warning(
+                            "Critical resource block ignored: generic-script exit cap reached",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=entry_generation,
+                            document_url=_redact_url_query(document_url),
+                            url=_redact_url_query(blocked_url),
+                            cap=_MAX_GENERIC_SCRIPT_PROVIDER_EXITS,
+                        )
+                    else:
+                        rejected_generations.add(entry_generation)
+                        self._rejected_network_generations = rejected_generations
+                        if blocked_url_is_payment_cdn:
+                            self._payment_cdn_provider_exits = payment_exits + 1
+                        else:
+                            self._generic_script_provider_exits = generic_exits + 1
+                        rejections = getattr(self, "_provider_exit_rejections", [])
+                        rejections.append(
+                            {
+                                "reason": _CRITICAL_RESOURCE_BLOCK_REASON,
+                                "url": _redact_url_query(blocked_url),
+                                "browser_generation": entry_generation,
+                                "document_url": _redact_url_query(document_url),
+                            }
+                        )
+                        self._provider_exit_rejections = rejections
+                        logger.warning(
+                            "Browser provider exit rejected: critical third-party resource blocked",
+                            agent_id=self.agent_id,
+                            task_id=self.task_id,
+                            browser_generation=entry_generation,
+                            document_url=_redact_url_query(document_url),
+                            url=_redact_url_query(str(entry.get("url") or "")),
+                            error=event.get("errorText"),
+                        )
 
     async def _fetch_response_body(
         self,
@@ -3471,10 +3503,7 @@ def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     """True when the blocked resource that triggered recovery is a payment CDN."""
     if not url:
         return False
-    lowered = str(url).strip().lower()
-    if not lowered:
-        return False
-    return any(marker in lowered for marker in _PAYMENT_TUNNEL_HOST_MARKERS)
+    return _host_matches_markers(str(url).strip(), _PAYMENT_TUNNEL_HOST_MARKERS)
 
 
 def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:

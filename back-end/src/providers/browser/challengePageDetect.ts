@@ -13,13 +13,10 @@ const CHALLENGE_TEXT = [
   'too many requests',
   'unusual traffic from your computer network',
   'verify you are human',
-  // Kernel proxy hard-blocks (e.g. checkout.stripe.com → provider_blacklisted).
-  // These 502 error pages are not Cloudflare walls, so without these markers a
-  // Kernel candidate "passes" the probe and recovery falsely reports success.
-  'provider_blacklisted',
-  'x-kernel-proxy-error',
-  'kernel-proxy-error',
 ];
+// Kernel proxy hard-blocks (e.g. checkout.stripe.com → provider_blacklisted).
+// Safe to match in raw HTML: they never appear in legitimate merchant bundles.
+const PROXY_ERROR_TEXT = ['provider_blacklisted', 'x-kernel-proxy-error', 'kernel-proxy-error'];
 // Present on hard CF walls *and* on cleared pages that embed Bot Management /
 // Turnstile (Eventim ticket HTML). Only count when visible body is still sparse.
 const HTML_CHALLENGE_MARKERS = [
@@ -44,16 +41,24 @@ export function challengeDetectionReason(input: {
   for (const marker of CHALLENGE_TEXT) {
     if (content.includes(marker)) return `text:${marker}`;
   }
+  for (const marker of PROXY_ERROR_TEXT) {
+    if (content.includes(marker)) return `text:${marker}`;
+  }
   const html = input.html.toLowerCase();
-  for (const marker of CHALLENGE_TEXT) {
+  // Proxy-error markers are safe anywhere; generic CHALLENGE_TEXT is not —
+  // script/i18n bundles on clean commerce pages embed "access denied" etc.
+  for (const marker of PROXY_ERROR_TEXT) {
     if (html.includes(marker)) return `html_text:${marker}`;
   }
   const visibleMarkup = html.replace(/<[^>]+>/g, '').trim();
   if (!input.title.trim() && !input.bodyText.trim() && !visibleMarkup) return 'empty_page';
   // Cleared Eventim pages embed challenge-platform/Turnstile beside real
   // inventory copy — do not treat those script URLs as a wall once body text
-  // is substantive.
+  // is substantive. Same gate for generic html_text markers.
   if (input.bodyText.trim().length < SUBSTANTIVE_BODY_CHARS) {
+    for (const marker of CHALLENGE_TEXT) {
+      if (html.includes(marker)) return `html_text:${marker}`;
+    }
     for (const marker of HTML_CHALLENGE_MARKERS) {
       if (html.includes(marker)) return `html:${marker}`;
     }

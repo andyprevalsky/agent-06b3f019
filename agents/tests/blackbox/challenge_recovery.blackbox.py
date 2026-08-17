@@ -330,6 +330,19 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
         body_text="Coffee",
         html='<script src="/cdn-cgi/challenge-platform/x.js"></script>',
     )
+    # "just a moment" / "access denied" in script/i18n bundles must not flag a
+    # cleared page with substantive rendered body (probe false-positive).
+    assert not page_looks_challenged(
+        status=200,
+        title="Buy tickets to LYNY in San Francisco on August 14, 2026",
+        body_text=(
+            "General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout."
+        ),
+        html=(
+            '<script>window.__i18n={"cf":"just a moment","deny":"access denied",'
+            '"rate":"too many requests"}</script><main>General Admission</main>'
+        ),
+    )
 
 
 async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
@@ -411,6 +424,10 @@ def test_blocked_resource_requires_payment_cdn():
     assert blocked_resource_requires_payment_cdn("https://js.stripe.com/v3")
     assert blocked_resource_requires_payment_cdn("https://api.stripe.com/v1/tokens")
     assert not blocked_resource_requires_payment_cdn("https://wl.eventim.us/cdn-cgi/challenge")
+    # Query-string mentions of Stripe hosts must not sticky require_payment_cdn.
+    assert not blocked_resource_requires_payment_cdn(
+        "https://cdn.example.com/tag.js?ref=js.stripe.com"
+    )
     assert not blocked_resource_requires_payment_cdn(None)
     assert not blocked_resource_requires_payment_cdn("")
 

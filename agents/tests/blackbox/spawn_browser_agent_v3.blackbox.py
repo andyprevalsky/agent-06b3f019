@@ -8527,6 +8527,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     recorder._provider_exit_rejections = []
     recorder._rejected_network_generations = set()
     recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
     recorder._ignored_request_ids = set()
     recorder._active_request_ids = set()
     recorder.agent_id = "agent"
@@ -8585,6 +8586,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     api_only._provider_exit_rejections = []
     api_only._rejected_network_generations = set()
     api_only._payment_cdn_provider_exits = 0
+    api_only._generic_script_provider_exits = 0
     api_only._ignored_request_ids = set()
     api_only._active_request_ids = set()
     api_only.agent_id = "agent"
@@ -8612,6 +8614,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     second_gen._provider_exit_rejections = []
     second_gen._rejected_network_generations = {3}
     second_gen._payment_cdn_provider_exits = 1
+    second_gen._generic_script_provider_exits = 0
     second_gen._ignored_request_ids = set()
     second_gen._active_request_ids = set()
     second_gen.agent_id = "agent"
@@ -8642,6 +8645,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     browse._provider_exit_rejections = []
     browse._rejected_network_generations = set()
     browse._payment_cdn_provider_exits = 0
+    browse._generic_script_provider_exits = 0
     browse._ignored_request_ids = set()
     browse._active_request_ids = set()
     browse.agent_id = "agent"
@@ -8659,6 +8663,57 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         generation=1,
     )
     assert browse.pop_provider_exit_rejection() is None
+
+    # Consent/chat widget script blocks must not consume the payment-CDN budget.
+    widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    widget._network_generation = 7
+    widget._provider_exit_rejections = []
+    widget._rejected_network_generations = set()
+    widget._payment_cdn_provider_exits = 0
+    widget._generic_script_provider_exits = 0
+    widget._ignored_request_ids = set()
+    widget._active_request_ids = set()
+    widget.agent_id = "agent"
+    widget.task_id = "task"
+    widget.entries = {
+        "7:r-widget": {
+            "browser_generation": 7,
+            "url": "https://cdn.consentmanager.net/delivery/cmp.js",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_CLIENT"},
+        session_id="cdp-7",
+        generation=7,
+    )
+    assert widget.pop_provider_exit_rejection() is not None
+    assert widget._generic_script_provider_exits == 1
+    assert widget._payment_cdn_provider_exits == 0
+    # A later Stripe block on a new generation still has its reserved budget.
+    widget._network_generation = 8
+    widget.entries = {
+        "8:r-stripe": {
+            "browser_generation": 8,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-stripe", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-8",
+        generation=8,
+    )
+    assert widget.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 8,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert widget._payment_cdn_provider_exits == 1
+    assert widget._generic_script_provider_exits == 1
 
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
@@ -10295,6 +10350,10 @@ def test_write_lock_purchase_button_excludes_terms_consent_prose():
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place Order")
     assert is_purchase_button("Pay Now")
+    # Independent signals joined with newlines: consent in one must not veto
+    # a real purchase phrase in another.
+    assert is_purchase_button("Terms of Service\nBuy Now")
+    assert is_purchase_button("Buy Now\nPrivacy Policy")
 
 
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():

@@ -255,7 +255,11 @@ export function installFetchCapture(): Router {
 
     const id = nextId++;
     const start = Date.now();
-    const method = init?.method ?? 'GET';
+    const method =
+      init?.method ??
+      (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
+        ? input.method
+        : 'GET');
 
     // Serialize request body
     let requestBody: string | null = null;
@@ -382,7 +386,8 @@ export function installFetchCapture(): Router {
     if (
       process.env.BLACKBOX_TEST_FAKE_WHATSAPP === '1' &&
       new URL(url).hostname === 'graph.facebook.com' &&
-      new URL(url).pathname.endsWith('/messages')
+      new URL(url).pathname.endsWith('/messages') &&
+      method.toUpperCase() === 'POST'
     ) {
       const unavailable = requestBody?.includes('__BLACKBOX_WHATSAPP_503__') === true;
       const status = unavailable ? 503 : 200;

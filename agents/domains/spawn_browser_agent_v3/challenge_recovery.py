@@ -53,7 +53,10 @@ _CHALLENGE_COOKIE_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
-_CHALLENGE_TEXT_MARKERS = (
+# Match only against rendered title/body — never raw HTML. Generic phrases like
+# "just a moment" / "access denied" appear in script/i18n bundles on clean
+# commerce pages and false-positive the probe (stablePasses=0).
+_CHALLENGE_RENDERED_TEXT_MARKERS = (
     "access denied",
     "attention required! | cloudflare",
     "checking your browser",
@@ -66,12 +69,16 @@ _CHALLENGE_TEXT_MARKERS = (
     "too many requests",
     "unusual traffic from your computer network",
     "verify you are human",
-    # Kernel proxy hard-blocks (checkout.stripe.com → provider_blacklisted).
-    # Without these, a 502 error page reads as clean and recovery falsely succeeds.
+)
+# Kernel proxy hard-blocks are safe in raw HTML: they never appear in merchant
+# page bundles (checkout.stripe.com → provider_blacklisted).
+_PROXY_ERROR_TEXT_MARKERS = (
     "provider_blacklisted",
     "x-kernel-proxy-error",
     "kernel-proxy-error",
 )
+# Backward-compatible alias for call sites / tests that still import the old name.
+_CHALLENGE_TEXT_MARKERS = _CHALLENGE_RENDERED_TEXT_MARKERS + _PROXY_ERROR_TEXT_MARKERS
 # Vendor fingerprints for interstitials that return HTTP 200 with benign text, so
 # neither the status nor the text markers above can catch them. This list is kept
 # at parity with `_CHALLENGE_COOKIE_RE`: that regex already recognises DataDome,
@@ -179,10 +186,13 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     if status in {403, 429, 502}:
         return True
     content = f"{title}\n{body_text}".lower()
-    if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
+    if any(marker in content for marker in _CHALLENGE_RENDERED_TEXT_MARKERS):
+        return True
+    if any(marker in content for marker in _PROXY_ERROR_TEXT_MARKERS):
         return True
     normalized_html = html.lower()
-    if any(marker in normalized_html for marker in _CHALLENGE_TEXT_MARKERS):
+    # Proxy-error tokens only — generic challenge prose must not scan raw HTML.
+    if any(marker in normalized_html for marker in _PROXY_ERROR_TEXT_MARKERS):
         return True
     # Drop script/style/noscript CONTENT before stripping tags. Tag-only
     # stripping leaves their text nodes in `visible_markup`, and a challenge
