@@ -1275,7 +1275,8 @@ async function testSmoke_claudeCodeAnswersQuestion() {
         const clean = wsOutput.replace(ANSI_CURSOR_FWD, ' ').replace(ANSI_OTHER, '');
         if (
           clean.includes('CLAUDE_E2B_DONE') ||
-          clean.includes('Invalid authentication credentials')
+          clean.includes('Invalid authentication credentials') ||
+          /credit balance is too low/i.test(clean)
         ) {
           clearTimeout(timeout);
           ws.close();
