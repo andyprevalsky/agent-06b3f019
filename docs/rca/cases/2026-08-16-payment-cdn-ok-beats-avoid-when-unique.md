@@ -96,15 +96,14 @@ Hard failure-driven filter (no soft payment-CDN ranking):
 Cemented by unit + challenge-recovery blackbox. Deploy gate: parallel k=4
 `scripts/run-bench --local browser-1015-eventim-request-card`.
 
-## k=4 evidence (in progress)
+## k=4 evidence
 
 - Hard filter + CF probe retry: promotes `steel_managed` with `requirePaymentCdn=true`
-  even when `avoidConfigKey=steel_managed` (attempt6 run2 @ 03:43:56Z / 03:47:38Z).
-- Attempt6 parallel: **2/4 PASS** (runs 1+3); runs 2+4 timed out at 900s without
-  `payment_approval` after repeated Steel re-promotes under full 6-candidate probes.
-- Follow-up: `recoverySearchPlan` focuses Steel-only first when `requirePaymentCdn`
-  (cuts concurrent Kernel probes that never clear Stripe.js) and clears avoid under
-  the payment-CDN hard filter.
+  even when `avoidConfigKey=steel_managed`.
+- Steel-first `recoverySearchPlan` when `requirePaymentCdn` (no avoid); api.stripe
+  healthcheck no longer burns the payment-CDN exit slot; cap=2 for post-promote flake.
+- **Attempt10 parallel k=4: 4/4 PASS** (90s stagger) — `K4_RESULT=PASS` @ 2026-08-17T05:01:40Z.
+  Artifact: `/opt/cursor/artifacts/eventim_k4_attempt10_summary.txt`.
 
 ## Human feedback
 
