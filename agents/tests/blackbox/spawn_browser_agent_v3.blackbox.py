@@ -8346,6 +8346,64 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     )
     assert recorder.pop_provider_exit_rejection() is None
 
+    # api.stripe.com/healthcheck must NOT rotate exits: steel often fails it
+    # while Stripe.js loads (paymentCdnOk). Burning the slot stranded Eventim.
+    api_only = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    api_only._network_generation = 4
+    api_only._provider_exit_rejections = []
+    api_only._rejected_network_generations = set()
+    api_only._payment_cdn_provider_exits = 0
+    api_only._ignored_request_ids = set()
+    api_only._active_request_ids = set()
+    api_only.agent_id = "agent"
+    api_only.task_id = "task"
+    api_only.entries = {
+        "4:r-api": {
+            "browser_generation": 4,
+            "url": "https://api.stripe.com/healthcheck",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "xhr",
+        }
+    }
+    api_only._on_loading_failed(
+        {"requestId": "r-api", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-4",
+        generation=4,
+    )
+    assert api_only.pop_provider_exit_rejection() is None
+    assert api_only._payment_cdn_provider_exits == 0
+
+    # Cap=2: a second browser generation may still rotate on js.stripe.com after
+    # the first Kernel→Steel promote consumed exit #1.
+    second_gen = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    second_gen._network_generation = 5
+    second_gen._provider_exit_rejections = []
+    second_gen._rejected_network_generations = {3}
+    second_gen._payment_cdn_provider_exits = 1
+    second_gen._ignored_request_ids = set()
+    second_gen._active_request_ids = set()
+    second_gen.agent_id = "agent"
+    second_gen.task_id = "task"
+    second_gen.entries = {
+        "5:r3": {
+            "browser_generation": 5,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+        }
+    }
+    second_gen._on_loading_failed(
+        {"requestId": "r3", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-5",
+        generation=5,
+    )
+    assert second_gen.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 5,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert second_gen._payment_cdn_provider_exits == 2
+
     # Ticket/event browse pages preload Stripe; do not rotate there.
     browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     browse._network_generation = 1

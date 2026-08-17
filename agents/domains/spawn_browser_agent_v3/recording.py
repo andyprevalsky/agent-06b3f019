@@ -2024,6 +2024,14 @@ _PAYMENT_TUNNEL_HOST_MARKERS = (
     "m.stripe.com",
     "m.stripe.network",
 )
+# Hosts whose tunnel failure should rotate the provider exit. Aligns with
+# paymentCdnOk (Stripe.js / window.Stripe). api.stripe.com is intentionally
+# omitted: live steel_managed often fails /healthcheck while js.stripe.com
+# loads — treating api-only failures as exits burns the recovery slot and
+# strands checkout (eventim k=4 attempt7 run2).
+_PAYMENT_CDN_EXIT_HOST_MARKERS = (
+    "js.stripe.com",
+)
 # Network failures that mean "this exit cannot fetch the resource" — includes
 # ORB (Eventim Stripe.js) and classic proxy tunnel deaths.
 _RESOURCE_BLOCK_MARKERS = (
@@ -2080,7 +2088,10 @@ _PAYMENT_DOCUMENT_URL_MARKERS = (
 _EVENT_BROWSE_DOCUMENT_MARKERS = ("/event/", "/events/")
 # Cap automatic payment-CDN exit rotations per recorder so a bad proxy cannot
 # thrash recover_from_challenge forever when every candidate still fails Stripe.
-_MAX_PAYMENT_CDN_PROVIDER_EXITS = 1
+# 2 (not 1): after hard-filter promotes steel, a second js.stripe.com flake on
+# the new generation must still be allowed to recover — task-lifetime 1 stranded
+# checkout once the first Kernel→Steel promote consumed the sole slot.
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = 2
 
 
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
@@ -2111,7 +2122,7 @@ def _is_critical_resource_block(
     host = (urlparse(url).hostname or "").lower()
     if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
         return False
-    if any(marker in lowered for marker in _PAYMENT_TUNNEL_HOST_MARKERS):
+    if any(marker in lowered for marker in _PAYMENT_CDN_EXIT_HOST_MARKERS):
         return True
     return (resource_type or "").lower() == "script"
 
