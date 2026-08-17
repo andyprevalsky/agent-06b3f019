@@ -1305,6 +1305,15 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       );
       return;
     }
+    // Same credential-health class as Anthropic WARN: exhausted API credits are
+    // not a harness regression. Subscription/OAuth tokens are preferred; when
+    // only a depleted API key is available, skip rather than fail /deploy.
+    if (/credit balance is too low/i.test(finalOutput)) {
+      console.log(
+        '    [skip] Claude E2B smoke reached the SDK server, but Anthropic credits are exhausted'
+      );
+      return;
+    }
     assert(
       finalOutput.includes('CLAUDE_E2B_DONE'),
       `Claude Code output does not contain CLAUDE_E2B_DONE: ${finalOutput.slice(-300)}`
