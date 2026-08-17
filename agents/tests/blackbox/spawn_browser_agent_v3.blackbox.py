@@ -8857,12 +8857,19 @@ def test_evicted_critical_request_meta_still_rejects_network_generation():
     assert stripe_key not in recorder._active_request_ids
 
     # Successful finish for the surviving request also clears its meta.
+    # Point at a binary URL so the finish path skips body fetch (no CDP client).
+    recorder._cdp_client = None
+    recorder._tasks = set()
+    recorder._closed = False
+    recorder.entries["3:other"]["url"] = "https://checkout.eventim.us/static/pixel.png"
     recorder._on_loading_finished(
         {"requestId": "other", "encodedDataLength": 12},
         session_id="cdp-3",
         generation=3,
     )
     assert "3:other" not in recorder._active_request_meta
+    assert "3:other" not in recorder._active_request_ids
+    assert recorder.entries["3:other"].get("terminal") is True
 
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
