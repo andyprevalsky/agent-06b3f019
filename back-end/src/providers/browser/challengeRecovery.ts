@@ -85,7 +85,36 @@ const CHALLENGE_TEXT = [
   'too many requests',
   'unusual traffic from your computer network',
   'verify you are human',
+  // Kernel proxy hard-blocks (e.g. checkout.stripe.com → provider_blacklisted).
+  // These 502 error pages are not Cloudflare walls, so without these markers a
+  // Kernel candidate "passes" the probe and recovery falsely reports success.
+  'provider_blacklisted',
+  'x-kernel-proxy-error',
+  'kernel-proxy-error',
 ];
+
+/** Hosts Kernel's shared proxy is known to hard-blacklist (502 provider_blacklisted). */
+const KERNEL_PROVIDER_BLACKLISTED_HOST_SUFFIXES = [
+  'checkout.stripe.com',
+  'pay.stripe.com',
+] as const;
+
+/**
+ * Prefer Steel candidates first when the target host is on Kernel's hard
+ * blacklist. Rotating Kernel residential/ISP exits cannot clear a domain
+ * denylist — probing Kernel first only burns recovery budget.
+ */
+export function shouldPreferSteelForChallengeTarget(targetUrl: string): boolean {
+  let hostname: string;
+  try {
+    hostname = new URL(targetUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return KERNEL_PROVIDER_BLACKLISTED_HOST_SUFFIXES.some(
+    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`)
+  );
+}
 
 function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecificity {
   if (location.city) return 'city';
@@ -94,7 +123,10 @@ function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecifi
 }
 
 /** The six independent browser/IP configurations searched after cookie isolation. */
-export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRecoveryConfig[] {
+export function browserRecoveryCandidates(
+  location: ProxyGeoLocation,
+  options?: { preferSteel?: boolean }
+): BrowserRecoveryConfig[] {
   const fallbackSpecificity = bestSpecificity(location);
   const candidates: BrowserRecoveryConfig[] = [];
   if (location.city) {
@@ -152,7 +184,11 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
       steelProxyMode: 'fixed',
     }
   );
-  return candidates;
+  if (!options?.preferSteel) return candidates;
+  return [
+    ...candidates.filter((candidate) => candidate.provider === 'steel'),
+    ...candidates.filter((candidate) => candidate.provider !== 'steel'),
+  ];
 }
 
 function candidateScore(candidate: SuccessfulRecoveryCandidate): [number, number] {
@@ -216,10 +252,13 @@ export function pageLooksChallenged(input: {
   bodyText: string;
   html: string;
 }): boolean {
-  if (input.status === 403 || input.status === 429) return true;
+  // 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
+  // as challenged keeps a blacklisted Kernel exit from winning the config search.
+  if (input.status === 403 || input.status === 429 || input.status === 502) return true;
   const content = `${input.title}\n${input.bodyText}`.toLowerCase();
   if (CHALLENGE_TEXT.some((marker) => content.includes(marker))) return true;
   const html = input.html.toLowerCase();
+  if (CHALLENGE_TEXT.some((marker) => html.includes(marker))) return true;
   const visibleMarkup = html.replace(/<[^>]+>/g, '').trim();
   if (!input.title.trim() && !input.bodyText.trim() && !visibleMarkup) return true;
   return (
@@ -437,7 +476,9 @@ export async function searchAndPromoteBrowserConfig(
         ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
       }
     : DEFAULT_GEOLOCATION;
-  const configs = browserRecoveryCandidates(proxyLocation);
+  const configs = browserRecoveryCandidates(proxyLocation, {
+    preferSteel: shouldPreferSteelForChallengeTarget(input.targetUrl),
+  });
 
   const winner = await runParallelBrowserConfigSearch(configs, {
     create: async (config) => {
