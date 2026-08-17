@@ -3202,32 +3202,6 @@ class BrowserNetworkRecorder:
             return None
         return rejections.pop(0)
 
-
-def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
-    """True when the blocked resource that triggered recovery is a payment CDN."""
-    if not url:
-        return False
-    lowered = str(url).strip().lower()
-    if not lowered:
-        return False
-    return any(marker in lowered for marker in _PAYMENT_TUNNEL_HOST_MARKERS)
-
-
-def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
-    """URL to re-verify after promote, or None when CF-clear alone is enough.
-
-    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
-    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
-    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
-    after a good Steel promote.
-    """
-    if not isinstance(rejection, Mapping):
-        return None
-    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
-        return None
-    url = str(rejection.get("url") or "").strip()
-    return url or None
-
     def query_requests(  # noqa: C901
         self,
         *,
@@ -3480,3 +3454,30 @@ def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> st
             console_entry_count=len(self.console_entries),
         )
         return self.network_index_path
+
+
+def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
+    """True when the blocked resource that triggered recovery is a payment CDN."""
+    if not url:
+        return False
+    lowered = str(url).strip().lower()
+    if not lowered:
+        return False
+    return any(marker in lowered for marker in _PAYMENT_TUNNEL_HOST_MARKERS)
+
+
+def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:
+    """URL to re-verify after promote, or None when CF-clear alone is enough.
+
+    Only critical third-party resource blocks (CDN/script ORB/tunnel) carry a
+    re-verify URL. Same-origin API-challenge exits (e.g. Eventim
+    ``checkaddtocart``) must NOT — GET-probing that path false-fails recovery
+    after a good Steel promote.
+    """
+    if not isinstance(rejection, Mapping):
+        return None
+    if str(rejection.get("reason") or "") != _CRITICAL_RESOURCE_BLOCK_REASON:
+        return None
+    url = str(rejection.get("url") or "").strip()
+    return url or None
+

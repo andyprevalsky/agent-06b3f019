@@ -7589,6 +7589,13 @@ def test_network_recorder_query_requests_filters_and_shapes():
         _redact_url_query,
     )
 
+    # Guard against mid-class module-level inserts orphaning query_requests (and
+    # sibling methods) as dead nested defs — that AttributeError fails live Eventim
+    # runs under the runtime-contract evaluator even after payment_approval.
+    assert hasattr(BrowserNetworkRecorder, "query_requests")
+    assert hasattr(BrowserNetworkRecorder, "close")
+    assert hasattr(BrowserNetworkRecorder, "export_diagnostics_bundle_bytes")
+
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
     recorder._max_body_bytes = 262144
