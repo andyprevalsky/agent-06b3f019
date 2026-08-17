@@ -65,9 +65,16 @@ export function recoveryOriginStorageScript(storageState: Record<string, unknown
         request.onsuccess = () => {
           try {
             const db = request.result;
-            const storeNames = (database.stores || [])
-              .map((store) => store.name)
-              .filter((name) => db.objectStoreNames.contains(name));
+            const requestedStoreNames = (database.stores || []).map((store) => store.name);
+            const storeNames = requestedStoreNames.filter((name) =>
+              db.objectStoreNames.contains(name)
+            );
+            if (storeNames.length !== requestedStoreNames.length) {
+              db.close();
+              clearTimeout(timer);
+              finish(false);
+              return;
+            }
             if (storeNames.length === 0) {
               db.close();
               clearTimeout(timer);

@@ -208,13 +208,19 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
+    const resolveMethod = (): string =>
+      init?.method ??
+      (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
+        ? input.method
+        : 'GET');
+
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
     // Captures are still recorded for outbound boundary assertions.
     if (shouldBypassOutboundReplay(url)) {
       const captureId = nextId++;
       const captureStart = Date.now();
-      const captureMethod = init?.method ?? 'GET';
+      const captureMethod = resolveMethod();
       try {
         const response = await originalFetch(input, init);
         const entry: CapturedCall = {
@@ -255,11 +261,7 @@ export function installFetchCapture(): Router {
 
     const id = nextId++;
     const start = Date.now();
-    const method =
-      init?.method ??
-      (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
-        ? input.method
-        : 'GET');
+    const method = resolveMethod();
 
     // Serialize request body (init.body, else Request body for fake markers).
     let requestBody: string | null = null;
@@ -283,6 +285,7 @@ export function installFetchCapture(): Router {
         requestBody = await input.clone().text();
       } catch {
         requestBody = null;
+        bodySerializable = false;
       }
     }
 

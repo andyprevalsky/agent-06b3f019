@@ -2110,14 +2110,20 @@ def _host_matches_markers(url: str, markers: tuple[str, ...]) -> bool:
 
 
 def _same_origin(a: str, b: str) -> bool:
-    """True when both URLs share scheme + netloc (case-insensitive)."""
+    """True when both URLs share scheme, host, and effective port."""
     left = urlparse(a or "")
     right = urlparse(b or "")
-    if not left.scheme or not right.scheme or not left.netloc or not right.netloc:
+    if not left.scheme or not right.scheme or not left.hostname or not right.hostname:
         return False
-    return (left.scheme.lower(), left.netloc.lower()) == (
+    try:
+        left_port = left.port or {"http": 80, "https": 443}.get(left.scheme.lower())
+        right_port = right.port or {"http": 80, "https": 443}.get(right.scheme.lower())
+    except ValueError:
+        return False
+    return (left.scheme.lower(), left.hostname.lower(), left_port) == (
         right.scheme.lower(),
-        right.netloc.lower(),
+        right.hostname.lower(),
+        right_port,
     )
 
 
