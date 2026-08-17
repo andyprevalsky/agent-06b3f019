@@ -208,11 +208,28 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
-    const resolveMethod = (): string =>
-      init?.method ??
-      (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
-        ? input.method
-        : 'GET');
+    const resolveMethod = (): string => {
+      const raw =
+        init?.method ??
+        (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
+          ? input.method
+          : 'GET');
+      const trimmed = String(raw || 'GET').trim();
+      const upper = trimmed.toUpperCase();
+      // Fetch canonicalizes the standard method tokens; preserve custom methods.
+      const standard = new Set([
+        'GET',
+        'HEAD',
+        'POST',
+        'PUT',
+        'DELETE',
+        'CONNECT',
+        'OPTIONS',
+        'TRACE',
+        'PATCH',
+      ]);
+      return standard.has(upper) ? upper : trimmed || 'GET';
+    };
 
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
