@@ -102,6 +102,58 @@ function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxySpecifi
   return 'country';
 }
 
+/**
+ * Payment-CDN hard-filter recoveries only need Stripe-capable exits. Live Eventim
+ * matrices show Kernel clears CF but never loads Stripe.js; probing them under
+ * sticky requirePaymentCdn burns parallel provider slots and CF-thrashes Steel
+ * at k=4. Focus Steel first; expand only if Steel finds no paymentCdnOk winner.
+ */
+export function paymentCdnFocusedCandidates(
+  configs: BrowserRecoveryConfig[]
+): BrowserRecoveryConfig[] {
+  return configs.filter((config) => config.provider === 'steel');
+}
+
+/**
+ * Build ordered search phases. When requirePaymentCdn is set, never apply
+ * avoidConfigKey: the avoided exit is usually the only Stripe-capable survivor
+ * that hit a transient CF, and avoid only wastes rank among empty Kernel sets.
+ */
+export function recoverySearchPlan(options: {
+  configs: BrowserRecoveryConfig[];
+  requirePaymentCdn: boolean;
+  avoidConfigKey?: string;
+}): Array<{ configs: BrowserRecoveryConfig[]; avoidConfigKey?: string; label: string }> {
+  if (!options.requirePaymentCdn) {
+    return [
+      {
+        configs: options.configs,
+        avoidConfigKey: options.avoidConfigKey,
+        label: 'full',
+      },
+    ];
+  }
+  const focused = paymentCdnFocusedCandidates(options.configs);
+  const phases: Array<{
+    configs: BrowserRecoveryConfig[];
+    avoidConfigKey?: string;
+    label: string;
+  }> = [];
+  if (focused.length > 0) {
+    phases.push({
+      configs: focused,
+      avoidConfigKey: undefined,
+      label: 'payment_cdn_steel',
+    });
+  }
+  phases.push({
+    configs: options.configs,
+    avoidConfigKey: undefined,
+    label: 'payment_cdn_full',
+  });
+  return phases;
+}
+
 /** The six independent browser/IP configurations searched after cookie isolation. */
 export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRecoveryConfig[] {
   const fallbackSpecificity = bestSpecificity(location);
@@ -496,15 +548,10 @@ export async function searchAndPromoteBrowserConfig(
       }
     : DEFAULT_GEOLOCATION;
   const configs = browserRecoveryCandidates(proxyLocation);
-  const avoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
-  if (avoidConfigKey) {
-    log.info('Challenge recovery will deprioritize current failing exit', {
-      taskId: input.taskId,
-      avoidConfigKey,
-      provider: current.provider,
-      proxyTier: current.proxyTier,
-    });
-  }
+  const sessionAvoidConfigKey = recoveryConfigKeyForSession(
+    current.provider,
+    current.proxyTier
+  );
   // Hard filter from the failure that triggered recovery (or sticky agent flag).
   // Never from target URL heuristics — that false-negatives non-Stripe /cart.
   const requirePaymentCdn =
@@ -515,12 +562,18 @@ export async function searchAndPromoteBrowserConfig(
       taskId: input.taskId,
       blockedResourceUrl: input.blockedResourceUrl ?? null,
       stickyRequirePaymentCdn: Boolean(input.requirePaymentCdn),
+      sessionAvoidConfigKey: sessionAvoidConfigKey ?? null,
+    });
+  } else if (sessionAvoidConfigKey) {
+    log.info('Challenge recovery will deprioritize current failing exit', {
+      taskId: input.taskId,
+      avoidConfigKey: sessionAvoidConfigKey,
+      provider: current.provider,
+      proxyTier: current.proxyTier,
     });
   }
 
-  const winner = await runParallelBrowserConfigSearch(
-    configs,
-    {
+  const searchDependencies: ConfigSearchDependencies = {
     create: async (config) => {
       if (config.provider === 'kernel') {
         const session = await dependencies.createKernel(current.agentId, proxyLocation, {
@@ -583,12 +636,47 @@ export async function searchAndPromoteBrowserConfig(
       if (session.provider === 'kernel') await dependencies.releaseKernel(session.sessionId);
       else await dependencies.releaseSteel(session.sessionId);
     },
-    },
-    {
-      avoidConfigKey,
+  };
+
+  const phases = recoverySearchPlan({
+    configs,
+    requirePaymentCdn,
+    avoidConfigKey: sessionAvoidConfigKey,
+  });
+  let winner: SuccessfulRecoveryCandidate | undefined;
+  let lastError: unknown;
+  for (let index = 0; index < phases.length; index += 1) {
+    const phase = phases[index]!;
+    log.info('Challenge recovery search phase', {
+      taskId: input.taskId,
+      phase: phase.label,
+      configKeys: phase.configs.map((config) => config.key),
+      avoidConfigKey: phase.avoidConfigKey ?? null,
       requirePaymentCdn,
+    });
+    try {
+      winner = await runParallelBrowserConfigSearch(phase.configs, searchDependencies, {
+        avoidConfigKey: phase.avoidConfigKey,
+        requirePaymentCdn,
+      });
+      break;
+    } catch (error) {
+      lastError = error;
+      const hasNext = index < phases.length - 1;
+      log.warn('Challenge recovery search phase failed', {
+        taskId: input.taskId,
+        phase: phase.label,
+        hasNext,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!hasNext) throw error;
     }
-  );
+  }
+  if (winner === undefined) {
+    throw lastError instanceof Error
+      ? lastError
+      : new Error('No stable browser configuration cleared the challenge');
+  }
 
   return {
     task_id: current.id,

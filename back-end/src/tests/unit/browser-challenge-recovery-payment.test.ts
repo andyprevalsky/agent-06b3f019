@@ -9,7 +9,9 @@ import type { Browser } from 'playwright';
 import {
   blockedResourceRequiresPaymentCdn,
   browserRecoveryCandidates,
+  paymentCdnFocusedCandidates,
   probeCandidateBrowser,
+  recoverySearchPlan,
   runParallelBrowserConfigSearch,
   targetLooksLikePaymentDocument,
   type BrowserRecoveryConfig,
@@ -28,6 +30,48 @@ function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
     profileSource: 'challenge_candidate_ephemeral',
     validationBrowser: {} as Browser,
   };
+}
+
+function testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst(): void {
+  // k=4 thrash: sticky requirePaymentCdn re-probed all Kernel exits (CF-clear,
+  // Stripe.js=false) while Steel was the only paymentCdnOk survivor — multiplying
+  // concurrent provider sessions. Focus Steel first and never avoid under the
+  // payment-CDN hard filter (avoided exit is usually that Steel winner).
+  const configs = browserRecoveryCandidates({
+    country: 'US',
+    state: 'CA',
+    city: 'SAN FRANCISCO',
+  });
+  const focused = paymentCdnFocusedCandidates(configs);
+  assert.ok(focused.length > 0);
+  assert.ok(focused.every((config) => config.provider === 'steel'));
+  assert.ok(focused.some((config) => config.key === 'steel_managed'));
+
+  const cfOnly = recoverySearchPlan({
+    configs,
+    requirePaymentCdn: false,
+    avoidConfigKey: 'steel_managed',
+  });
+  assert.strictEqual(cfOnly.length, 1);
+  assert.strictEqual(cfOnly[0]?.label, 'full');
+  assert.strictEqual(cfOnly[0]?.avoidConfigKey, 'steel_managed');
+  assert.strictEqual(cfOnly[0]?.configs.length, configs.length);
+
+  const payment = recoverySearchPlan({
+    configs,
+    requirePaymentCdn: true,
+    avoidConfigKey: 'steel_managed',
+  });
+  assert.strictEqual(payment.length, 2);
+  assert.strictEqual(payment[0]?.label, 'payment_cdn_steel');
+  assert.strictEqual(payment[0]?.avoidConfigKey, undefined);
+  assert.deepStrictEqual(
+    payment[0]?.configs.map((config) => config.key),
+    focused.map((config) => config.key)
+  );
+  assert.strictEqual(payment[1]?.label, 'payment_cdn_full');
+  assert.strictEqual(payment[1]?.avoidConfigKey, undefined);
+  assert.strictEqual(payment[1]?.configs.length, configs.length);
 }
 
 async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void> {
@@ -596,6 +640,7 @@ function testBlockedResourceRequiresPaymentCdn(): void {
 }
 
 async function main(): Promise<void> {
+  testPaymentCdnFocusedSearchPlanSkipsAvoidAndKernelsFirst();
   await testRequirePaymentCdnHardFilterPicksStripeCapable();
   await testCfOnlyAvoidPicksFastestNonAvoided();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
