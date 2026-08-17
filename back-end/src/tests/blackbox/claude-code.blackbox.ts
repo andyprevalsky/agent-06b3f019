@@ -1218,6 +1218,18 @@ async function testSmoke_claudeCodeAnswersQuestion() {
       user_id: DEV_USER_ID,
     }),
   });
+  if (res.status === 500) {
+    const error =
+      typeof res.data === 'object' && res.data !== null && 'error' in res.data
+        ? String((res.data as { error?: unknown }).error ?? '')
+        : '';
+    if (error.includes(CODE_AGENT_CREDENTIALS_UNAVAILABLE)) {
+      console.log(
+        '    [skip] Claude E2B smoke could not start: code-agent credentials unavailable (credits/cooldown/auth)'
+      );
+      return;
+    }
+  }
   assertStatus(res.status, 200, res.data);
 
   const body = res.data as { ws_url: string; task_id: string; sandbox_id: string };
