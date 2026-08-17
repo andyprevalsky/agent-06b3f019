@@ -5372,6 +5372,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "https://example.com/current",
         storage_state,
         user_agent="test-agent",
+        blocked_resource_url="https://js.stripe.com/v3",
+        require_payment_cdn=True,
     )
     assert out["recovery_action"] == "config_selected"
     call = assert_captured_call(
@@ -5383,6 +5385,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "current_url": "https://example.com/current",
         "storage_state": storage_state,
         "user_agent": "test-agent",
+        "blocked_resource_url": "https://js.stripe.com/v3",
+        "require_payment_cdn": True,
     }
 
 async def test_rotation_storage_state_survives_provider_switch():

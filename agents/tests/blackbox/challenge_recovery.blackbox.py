@@ -405,6 +405,16 @@ def test_payment_document_url_detection():
     assert not target_looks_like_payment_document("https://wl.eventim.us/event/lyny/692405")
 
 
+def test_blocked_resource_requires_payment_cdn():
+    from domains.spawn_browser_agent_v3.recording import blocked_resource_requires_payment_cdn
+
+    assert blocked_resource_requires_payment_cdn("https://js.stripe.com/v3")
+    assert blocked_resource_requires_payment_cdn("https://api.stripe.com/v1/tokens")
+    assert not blocked_resource_requires_payment_cdn("https://wl.eventim.us/cdn-cgi/challenge")
+    assert not blocked_resource_requires_payment_cdn(None)
+    assert not blocked_resource_requires_payment_cdn("")
+
+
 def test_blocked_resource_urls_for_verify_dedupes_and_strips_query():
     assert blocked_resource_urls_for_verify(
         [
@@ -686,6 +696,10 @@ async def run_all_tests():
         test_live_tab_verify_accepts_clean_and_rejects_access_denied,
     )
     result.record("payment_document_url_detection", test_payment_document_url_detection)
+    result.record(
+        "blocked_resource_requires_payment_cdn",
+        test_blocked_resource_requires_payment_cdn,
+    )
     result.record(
         "blocked_resource_url_normalize",
         test_blocked_resource_urls_for_verify_dedupes_and_strips_query,

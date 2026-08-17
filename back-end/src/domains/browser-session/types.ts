@@ -48,6 +48,13 @@ export const recoverChallengeSchema = z.object({
     })
     .passthrough(),
   user_agent: z.string().max(2048).optional(),
+  /** Failure-driven blocked third-party URL that triggered this recovery. */
+  blocked_resource_url: z.string().url().max(8192).optional(),
+  /**
+   * Sticky hard filter: after a prior payment-CDN failure on this task, keep
+   * requiring Stripe.js even on later CF-only recoveries.
+   */
+  require_payment_cdn: z.boolean().optional(),
 });
 
 export const injectLocalStorageSchema = z.object({

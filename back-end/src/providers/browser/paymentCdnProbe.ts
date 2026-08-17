@@ -15,6 +15,30 @@ export function targetLooksLikePaymentDocument(url: string): boolean {
   return PAYMENT_DOCUMENT_URL_MARKERS.some((marker) => lowered.includes(marker));
 }
 
+const PAYMENT_CDN_HOST_MARKERS = [
+  'js.stripe.com',
+  'api.stripe.com',
+  'm.stripe.com',
+  'r.stripe.com',
+] as const;
+
+/**
+ * True when the blocked resource that triggered recovery is a payment CDN.
+ * Used as a hard filter for config search — not a URL-path heuristic.
+ */
+export function blockedResourceRequiresPaymentCdn(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return PAYMENT_CDN_HOST_MARKERS.some(
+      (marker) => host === marker || host.endsWith(`.${marker}`)
+    );
+  } catch {
+    const lowered = url.toLowerCase();
+    return PAYMENT_CDN_HOST_MARKERS.some((marker) => lowered.includes(marker));
+  }
+}
+
 export interface PaymentCdnProbeResult {
   paymentCdnOk: boolean;
   paymentCdnHosts: Record<string, boolean>;

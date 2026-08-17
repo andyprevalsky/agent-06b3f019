@@ -513,8 +513,12 @@ function testRecoveryRequestSchema(): void {
     current_url: 'https://order.online/store/blue-bottle',
     storage_state: { cookies: [], origins: [] },
     user_agent: 'test-agent',
+    blocked_resource_url: 'https://js.stripe.com/v3',
+    require_payment_cdn: true,
   });
   assert.deepStrictEqual(parsed.storage_state, { cookies: [], origins: [] });
+  assert.strictEqual(parsed.blocked_resource_url, 'https://js.stripe.com/v3');
+  assert.strictEqual(parsed.require_payment_cdn, true);
   assert.strictEqual(
     recoverChallengeSchema.safeParse({
       task_id: '00000000-0000-4000-8000-000000000001',

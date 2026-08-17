@@ -94,6 +94,7 @@ from .recording import (
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
     blocked_resource_url_for_recovery,
+    blocked_resource_requires_payment_cdn,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -4918,6 +4919,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
     cookie_recovery_successes = 0
+    # Sticky hard filter: once a payment-CDN block triggered recovery on this
+    # task, later CF-only recoveries still require Stripe.js-capable configs.
+    require_payment_cdn = False
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
@@ -6905,15 +6909,23 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                 async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                    nonlocal require_payment_cdn
                     user_agent = ""
                     with contextlib.suppress(Exception):
                         user_agent = str(await input_page.evaluate("() => navigator.userAgent"))
+                    blocked_resource_url = str(
+                        unified_action.get("params", {}).get("blocked_resource_url") or ""
+                    ).strip()
+                    if blocked_resource_requires_payment_cdn(blocked_resource_url):
+                        require_payment_cdn = True
                     result = await recover_browser_challenge(
                         config,
                         task_id,
                         current_url,
                         storage_state,
                         user_agent,
+                        blocked_resource_url=blocked_resource_url,
+                        require_payment_cdn=require_payment_cdn,
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")

@@ -11,12 +11,18 @@ import {
   type KernelRecoveryProxySpecificity,
 } from './kernel';
 import type { KernelProxyType } from './kernelProxy';
-import { probePaymentCdnReachable } from './paymentCdnProbe';
+import {
+  blockedResourceRequiresPaymentCdn,
+  probePaymentCdnReachable,
+} from './paymentCdnProbe';
 import { recoveryOriginStorageScript } from './recoveryOriginStorage';
 import type { BrowserProviderName } from './types';
 
 export { challengeDetectionReason, pageLooksChallenged } from './challengePageDetect';
-export { targetLooksLikePaymentDocument } from './paymentCdnProbe';
+export {
+  blockedResourceRequiresPaymentCdn,
+  targetLooksLikePaymentDocument,
+} from './paymentCdnProbe';
 
 const log = createLogger('BrowserChallengeRecovery');
 
@@ -158,38 +164,15 @@ export function browserRecoveryCandidates(location: ProxyGeoLocation): BrowserRe
   return candidates;
 }
 
-function paymentHostsOkCount(probe: CandidateProbeResult): number {
-  const hosts = probe.paymentCdnHosts;
-  // Prefer candidates that clear more Stripe hosts (js/api/m + stripe.js).
-  if (!hosts) return probe.paymentCdnOk ? 2 : 0;
-  return Object.values(hosts).filter(Boolean).length;
-}
-
 function candidateScore(
   candidate: SuccessfulRecoveryCandidate,
   avoidConfigKey?: string
-): [number, number, number, number, number, number] {
-  // Prefer CF-stable, then leave the currently-failing exit (must beat partial
-  // Stripe host clears — Eventim re-promoted steel_managed on js-only while
-  // avoidConfigKey=steel_managed), then full payment-CDN reachability
-  // (js+api.stripe.com), then partial host clears. When rotating off a
-  // non-avoided exit and nobody cleared Stripe, prefer Steel managed
-  // (historical payment-tunnel winner) before raw probe latency.
-  const rotatingOffFailedExit = Boolean(avoidConfigKey);
+): [number, number, number] {
+  // Hard filters (CF-stable, optional paymentCdnOk) already applied. Among
+  // survivors: prefer the currently-failing exit least, then lowest latency.
+  // No soft payment-CDN ranking — a config either passed the hard filter or not.
   const isAvoided = Boolean(avoidConfigKey && candidate.config.key === avoidConfigKey);
-  return [
-    -candidate.probe.stablePasses,
-    isAvoided ? 1 : 0,
-    candidate.probe.paymentCdnOk ? 0 : 1,
-    -paymentHostsOkCount(candidate.probe),
-    rotatingOffFailedExit &&
-    !isAvoided &&
-    !candidate.probe.paymentCdnOk &&
-    candidate.config.key === 'steel_managed'
-      ? 0
-      : 1,
-    candidate.probe.latencyMs,
-  ];
+  return [-candidate.probe.stablePasses, isAvoided ? 1 : 0, candidate.probe.latencyMs];
 }
 
 /** Map a live session's provider + proxyTier back to a recovery candidate key. */
@@ -478,6 +461,14 @@ export async function searchAndPromoteBrowserConfig(
     targetUrl: string;
     storageState: Record<string, unknown>;
     userAgent?: string;
+    /** Failure-driven: blocked third-party URL that triggered this recovery. */
+    blockedResourceUrl?: string;
+    /**
+     * Sticky hard filter from the agent after a prior payment-CDN failure on
+     * this task. When true (or when blockedResourceUrl is a payment CDN), only
+     * paymentCdnOk candidates are eligible.
+     */
+    requirePaymentCdn?: boolean;
   },
   dependencies: BrowserConfigSearchRuntimeDependencies = browserConfigSearchRuntimeDependencies
 ) {
@@ -508,6 +499,18 @@ export async function searchAndPromoteBrowserConfig(
       avoidConfigKey,
       provider: current.provider,
       proxyTier: current.proxyTier,
+    });
+  }
+  // Hard filter from the failure that triggered recovery (or sticky agent flag).
+  // Never from target URL heuristics — that false-negatives non-Stripe /cart.
+  const requirePaymentCdn =
+    Boolean(input.requirePaymentCdn) ||
+    blockedResourceRequiresPaymentCdn(input.blockedResourceUrl);
+  if (requirePaymentCdn) {
+    log.info('Challenge recovery requiring payment CDN / Stripe.js hard filter', {
+      taskId: input.taskId,
+      blockedResourceUrl: input.blockedResourceUrl ?? null,
+      stickyRequirePaymentCdn: Boolean(input.requirePaymentCdn),
     });
   }
 
@@ -579,11 +582,7 @@ export async function searchAndPromoteBrowserConfig(
     },
     {
       avoidConfigKey,
-      // Hard resource re-verify is failure-driven on the agent (blocked URL from
-      // the provider-exit rejection). Do not require Stripe.js from URL heuristics
-      // here — that false-negatives non-Stripe /cart recoveries. paymentCdnOk
-      // remains a soft ranking signal when candidates otherwise tie.
-      requirePaymentCdn: false,
+      requirePaymentCdn,
     }
   );
 

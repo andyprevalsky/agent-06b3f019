@@ -25,7 +25,7 @@ sources:
   - agent 0c2c66d9-1932-44b7-8f9a-4fd1ea81754d
   - commit 1b3a0448d
 repro: cd back-end && npx tsx src/tests/unit/browser-challenge-recovery-payment.test.ts
-status: open
+status: fixed
 ---
 
 ## Problem

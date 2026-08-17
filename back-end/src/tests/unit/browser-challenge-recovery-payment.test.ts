@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import type { Browser } from 'playwright';
 import {
+  blockedResourceRequiresPaymentCdn,
   browserRecoveryCandidates,
   probeCandidateBrowser,
   runParallelBrowserConfigSearch,
@@ -29,31 +30,34 @@ function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
   };
 }
 
-async function testPrefersPaymentCdnReachableWinnerWhenStablePassesTie(): Promise<void> {
+async function testRequirePaymentCdnHardFilterPicksStripeCapable(): Promise<void> {
+  // Hard filter: only paymentCdnOk configs are eligible. Soft latency ranking
+  // among CF-clears must not promote Kernel when Stripe.js is required.
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
-  const winner = await runParallelBrowserConfigSearch(configs, {
-    create: async (config) => fakeSession(config),
-    probe: async (config) => ({
-      stablePasses: 2,
-      attempts: 2,
-      // steel_managed is slower but payment-CDN reachable — must win over a
-      // faster CF-only clear (Eventim card fields need js+api.stripe.com).
-      latencyMs: config.key === 'steel_managed' ? 500 : 1,
-      paymentCdnOk: config.key === 'steel_managed',
-    }),
-    promote: async (candidate) => {
-      promoted.push(candidate.config.key);
+  const winner = await runParallelBrowserConfigSearch(
+    configs,
+    {
+      create: async (config) => fakeSession(config),
+      probe: async (config) => ({
+        stablePasses: 2,
+        attempts: 2,
+        latencyMs: config.key === 'steel_managed' ? 500 : 1,
+        paymentCdnOk: config.key === 'steel_managed',
+      }),
+      promote: async (candidate) => {
+        promoted.push(candidate.config.key);
+      },
+      release: async () => undefined,
     },
-    release: async () => undefined,
-  });
+    { requirePaymentCdn: true }
+  );
   assert.strictEqual(winner.config.key, 'steel_managed');
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
-async function testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable(): Promise<void> {
-  // Eventim checkout: kernel_isp cleared CF but Stripe tunnel failed. Re-search
-  // with avoidConfigKey must not re-promote the same fastest Kernel exit.
+async function testCfOnlyAvoidPicksFastestNonAvoided(): Promise<void> {
+  // CF-only (no payment CDN hard filter): drop avoided exit; pick lowest latency.
   const configs = browserRecoveryCandidates({ country: 'US' });
   const promoted: string[] = [];
   const winner = await runParallelBrowserConfigSearch(
@@ -74,43 +78,17 @@ async function testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable
     },
     { avoidConfigKey: 'kernel_isp' }
   );
-  assert.strictEqual(winner.config.key, 'steel_managed');
-  assert.deepStrictEqual(promoted, ['steel_managed']);
-}
-
-async function testPrefersPartialPaymentHostClearOverSteelBias(): Promise<void> {
-  const configs = browserRecoveryCandidates({
-    country: 'US',
-    state: 'CA',
-    city: 'SAN FRANCISCO',
-  });
-  const winner = await runParallelBrowserConfigSearch(
-    configs,
-    {
-      create: async (config) => fakeSession(config),
-      probe: async (config) => ({
-        stablePasses: 2,
-        attempts: 2,
-        latencyMs: 50,
-        paymentCdnOk: false,
-        paymentCdnHosts:
-          config.key === 'kernel_residential_city'
-            ? { 'js.stripe.com': true, 'api.stripe.com': false, 'stripe.js': false }
-            : { 'js.stripe.com': false, 'api.stripe.com': false, 'stripe.js': false },
-      }),
-      promote: async () => undefined,
-      release: async () => undefined,
-    },
-    { avoidConfigKey: 'kernel_isp' }
-  );
-  assert.strictEqual(winner.config.key, 'kernel_residential_city');
+  // Fastest non-avoided CF-stable (not steel soft-bias).
+  assert.notStrictEqual(winner.config.key, 'kernel_isp');
+  assert.ok(winner.probe.latencyMs <= 100);
+  assert.deepStrictEqual(promoted, [winner.config.key]);
 }
 
 async function testAvoidConfigKeyBeatsPartialPaymentHostClear(): Promise<void> {
   // Eventim guest checkout (agent 48ef13f0, 2026-08-10): recover-challenge logged
   // avoidConfigKey=steel_managed then re-promoted steel_managed because js.stripe.com
-  // alone outranked the avoid penalty. Live tab stayed challenged / customer-api
-  // ERR_FAILED; no payment_approval.
+  // alone outranked the avoid penalty. With hard filters (no soft host ranking),
+  // CF-only + avoid must pick the fastest non-avoided CF-stable config.
   const configs = browserRecoveryCandidates({
     country: 'US',
     state: 'CA',
@@ -539,10 +517,25 @@ async function testRequirePaymentCdnPromotesStripeJsWinner(): Promise<void> {
   assert.deepStrictEqual(promoted, ['steel_managed']);
 }
 
+function testBlockedResourceRequiresPaymentCdn(): void {
+  assert.strictEqual(
+    blockedResourceRequiresPaymentCdn('https://js.stripe.com/v3'),
+    true
+  );
+  assert.strictEqual(
+    blockedResourceRequiresPaymentCdn('https://m.stripe.com/6'),
+    true
+  );
+  assert.strictEqual(
+    blockedResourceRequiresPaymentCdn('https://wl.eventim.us/cdn-cgi/challenge'),
+    false
+  );
+  assert.strictEqual(blockedResourceRequiresPaymentCdn(undefined), false);
+}
+
 async function main(): Promise<void> {
-  await testPrefersPaymentCdnReachableWinnerWhenStablePassesTie();
-  await testPrefersSteelWhenRotatingOffFailedExitAndPaymentCdnUnavailable();
-  await testPrefersPartialPaymentHostClearOverSteelBias();
+  await testRequirePaymentCdnHardFilterPicksStripeCapable();
+  await testCfOnlyAvoidPicksFastestNonAvoided();
   await testAvoidConfigKeyBeatsPartialPaymentHostClear();
   await testHardPaymentCdnFilterKeepsOnlyWorkingConfig();
   await testCandidateProbeUsesThePromotedDefaultContext();
@@ -551,6 +544,7 @@ async function main(): Promise<void> {
   await testPaymentCdnOkWhenStripeJsLoadsWithoutApi();
   await testRequirePaymentCdnRejectsCfOnlyWinners();
   await testRequirePaymentCdnPromotesStripeJsWinner();
+  testBlockedResourceRequiresPaymentCdn();
   process.stdout.write('PASS staged browser challenge recovery payment gates\n');
 }
 
