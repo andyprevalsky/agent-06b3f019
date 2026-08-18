@@ -382,6 +382,71 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    // RCA: leftover HELD $1 rows made sequential AgentCard getDetails hang Place order for minutes.
+    // last4 proofs across amount candidates must run concurrently (still fail-closed on duplicates).
+    'checkout-session proves candidate last4s concurrently',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_parallel_last4',
+            url: 'https://checkout.stripe.com/c/pay/cs_test_parallel_last4',
+            retrieved: {},
+          },
+          async () => {
+            let inFlight = 0;
+            let maxInFlight = 0;
+            const release: Array<() => void> = [];
+            const getCardLast4 = async (_userId: string, _agentId: string | null, cardId: string) => {
+              inFlight += 1;
+              maxInFlight = Math.max(maxInFlight, inFlight);
+              await new Promise<void>((resolve) => {
+                release.push(() => {
+                  inFlight -= 1;
+                  resolve();
+                });
+              });
+              return cardId === 'card-current' ? '8945' : '1111';
+            };
+            const pending = createTestPaymentCheckoutSession(
+              {
+                items: [{ id: 'agentcard-lifecycle-probe', quantity: 1 }],
+                cardLast4: '8945',
+              },
+              {
+                findHeldPurchasesByTotal: async () => [
+                  {
+                    id: 'purchase-stale-sibling',
+                    userId: 'user-bench',
+                    agentId: 'agent-older',
+                    cardId: 'card-older',
+                    stripePaymentIntentId: 'pi_hold_older',
+                  },
+                  {
+                    id: 'purchase-current',
+                    userId: 'user-bench',
+                    agentId: 'agent-current',
+                    cardId: 'card-current',
+                    stripePaymentIntentId: 'pi_hold_current',
+                  },
+                ],
+                getCardLast4,
+              }
+            );
+            // Both proofs must be in-flight before either resolves — sequential await maxes at 1.
+            await new Promise((resolve) => setImmediate(resolve));
+            assert(maxInFlight === 2, `expected concurrent last4 proofs, maxInFlight=${maxInFlight}`);
+            for (const done of release) done();
+            const created = await pending;
+            assert(created.sessionId === 'cs_test_parallel_last4', 'parallel last4 path must still create');
+          }
+        );
+      });
+    },
+  ],
+  [
     // RCA: agent-payment-production-purchase (bc64fd0a) — prod had two HELD $1.00 Rose
     // purchases from different agents; checkout-session matched by total only and 409'd
     // "Multiple held Rose purchases match this checkout total; refusing an ambiguous charge".
