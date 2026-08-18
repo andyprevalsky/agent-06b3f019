@@ -65,6 +65,10 @@ class BenchmarkTask:
     success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
     payment_card_request_action: Optional[str] = None  # Benchmark lifecycle action after card issuance (for example, abandon)
     production_only: bool = False  # Refuse to run against a local/sandbox backend
+    # When True, harness closes leftover HELD $1 lifecycle-probe cards for the
+    # prod lifecycle user before create_agent so lookup cannot skip payment_approval.
+    # Only agent-payment-production-purchase sets this; other Stripe reuse tests stay enabled.
+    disable_purchase_reuse: bool = False
     response_schema: Optional[dict] = None  # Explicit root verifier contract when prompt inference is ambiguous
     phone_persona: Optional[dict] = None  # Vapi callee persona (system_prompt, first_message, structured_data_schema)
     pinned_facts: Optional[dict] = None  # Ground-truth facts fixed before the run and cross-validated afterward

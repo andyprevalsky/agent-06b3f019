@@ -1717,6 +1717,32 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     )
 
 
+async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
+    """Close leftover HELD $1 lifecycle-probe cards so this run must request payment_approval.
+
+    Only `agent-payment-production-purchase` sets disable_purchase_reuse. Other prod Stripe
+    tasks keep the 24h cart-fingerprint reuse path.
+    """
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/close-held-reuse",
+            headers=headers,
+            json={"userId": AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to close held purchase reuse for {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}: "
+            f"{resp.status_code} {resp.text[:300]}"
+        )
+    payload = resp.json() if resp.content else {}
+    print(
+        "    💳 Closed held purchase reuse for production purchase probe: "
+        f"heldFound={payload.get('heldFound')} agentsCleaned={payload.get('agentsCleaned')} "
+        f"orphanHeldIgnored={payload.get('orphanHeldIgnored')}"
+    )
+
+
 def _benchmark_agent_source_override() -> str:
     source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "MAC_APP").strip().upper()
     if source not in {"WEB", "MAC_APP", "SMS"}:
@@ -8374,6 +8400,10 @@ async def run_single_task(
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
+    if getattr(task, "disable_purchase_reuse", False):
+        if _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} disable_purchase_reuse requires a remote/production backend")
+        await _preflight_close_purchase_reuse_gate(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
