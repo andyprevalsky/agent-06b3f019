@@ -166,15 +166,11 @@ export function browserRecoveryCandidates(
     }
   );
   if (!options?.preferSteel) return candidates;
-  // Kernel's managed proxy hard-blacklists Stripe Checkout. Prefer a direct
-  // (no managed proxy) Kernel session first, then Steel — never burn budget on
-  // residential/ISP/mobile Kernel exits that cannot reach the host. Probes run
-  // concurrently, so reordering alone does not skip managed Kernel; filter them.
-  const directKernel: BrowserRecoveryConfig = {
-    key: 'kernel_direct',
-    provider: 'kernel',
-    proxyMode: 'none',
-    omitManagedProxy: true,
-  };
-  return [directKernel, ...candidates.filter((candidate) => candidate.provider === 'steel')];
+  // Kernel hard-blacklists Stripe Checkout on managed proxies AND on
+  // omitManagedProxy/stealth exits (prod: text:provider_blacklisted ~93s per
+  // probe). Parallel Promise.allSettled waits for every candidate, so including
+  // kernel_direct delayed promoting a clean steel_managed winner by ~85s each
+  // recovery cycle and burned agent-payment-production-purchase's 900s budget.
+  // Steel-only for these hosts.
+  return candidates.filter((candidate) => candidate.provider === 'steel');
 }

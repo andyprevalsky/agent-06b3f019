@@ -340,9 +340,9 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
   );
   assert.deepStrictEqual(
     preferred.map((candidate) => candidate.key),
-    ['kernel_direct', 'steel_managed', 'steel_fixed']
+    ['steel_managed', 'steel_fixed']
   );
-  assert.ok(preferred[0]?.omitManagedProxy === true);
+  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
 
 function testPreferredConfigCompatibility(): void {
