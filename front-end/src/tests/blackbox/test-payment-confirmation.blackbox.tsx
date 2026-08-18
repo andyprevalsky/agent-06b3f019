@@ -96,7 +96,22 @@ describe('test-payment Confirmation receipt', () => {
 
     expect(screen.getByRole('heading', { name: 'Test Payment' })).toBeInTheDocument();
     expect(screen.getByText('Agent Card Lifecycle Probe')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeEnabled();
+    // Live Place order stays disabled until the one-time card last4 is filled — that last4 is
+    // what checkout-session uses to disambiguate multiple HELD same-total purchases.
+    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeDisabled();
+  });
+
+  it('enables live Place order only after the one-time card last4 is present', () => {
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
+    render(<TestPaymentPage />);
+
+    const placeOrder = screen.getByRole('button', { name: 'Place order $1.00' });
+    expect(placeOrder).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/Card number/i), {
+      target: { value: '4413696996398945' },
+    });
+    expect(placeOrder).toBeEnabled();
   });
 
   it('issues cards without allowing merchant submission in the abandonment fixture', async () => {

@@ -19,6 +19,7 @@ import {
   findHeldPurchasesByTotal,
   type HeldPurchase,
 } from '../../providers/agentcard/sandbox-settlement';
+import { createCardProviderForAgent } from '../../providers/card-provider';
 import { getTestPaymentMerchantStripeClient, type Stripe } from '../../providers/stripe';
 import { calculateTotals, normalizeLineItems } from './catalog';
 import { TEST_PAYMENT_CHECKOUT_RETURN_URL, TEST_PAYMENT_LIVE_LIFECYCLE_QUERY } from './config';
@@ -50,6 +51,13 @@ function merchantStripe(): Stripe {
  */
 interface CheckoutSessionDependencies {
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
+  /**
+   * Resolve the minted card's last4 for a HELD purchase. Hosted Checkout is created BEFORE Stripe
+   * collects the PAN, so amount-only matching cannot tell two same-total HELD rows apart — the
+   * browser must send the card last4 it was given, and we prove it against the candidate cards
+   * the same way sandbox settle proves by full PAN.
+   */
+  getCardLast4?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
 }
 
 function checkoutFeeLineItem(name: string, amountCents: number) {
@@ -63,26 +71,100 @@ function checkoutFeeLineItem(name: string, amountCents: number) {
   };
 }
 
+function normalizeCardLast4(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const digits = value.replace(/\D/g, '');
+  if (digits.length < 4) return undefined;
+  return digits.slice(-4);
+}
+
+async function defaultGetCardLast4(
+  userId: string,
+  agentId: string | null,
+  cardId: string
+): Promise<string> {
+  const provider = await createCardProviderForAgent(userId, agentId);
+  const details = await provider.getDetails(cardId);
+  return details.pan.replace(/\s+/g, '').slice(-4);
+}
+
+/**
+ * Pick the single HELD purchase this hosted Checkout is allowed to clear.
+ *
+ * Amount alone is not an identity: leftover HELD rows from prior / concurrent agents at the same
+ * total (common for the $1.00 lifecycle probe) make a global amount scan return >1. Sandbox settle
+ * already walks candidates and matches the charged PAN; hosted session creation happens *before*
+ * Stripe sees a card, so the shopper/agent must supply the last4 of the Rose card they intend to
+ * pay with.
+ *
+ * When `cardLast4` is present it is authoritative even if the amount scan returned exactly one
+ * row — otherwise a lone stale HELD at $1.00 would silently bind the wrong purchase. Missing
+ * last4 keeps the legacy single-match path and still fail-closes on ambiguity.
+ */
+async function resolveHeldPurchaseForCheckout(
+  candidates: HeldPurchase[],
+  cardLast4: string | undefined,
+  getCardLast4: (userId: string, agentId: string | null, cardId: string) => Promise<string>
+): Promise<HeldPurchase> {
+  if (candidates.length === 0) {
+    throw new TestPaymentError('No held Rose purchase matches this checkout total', 409);
+  }
+
+  if (cardLast4 !== undefined) {
+    const matched: HeldPurchase[] = [];
+    for (const candidate of candidates) {
+      if (candidate.cardId === null) continue;
+      let last4: string;
+      try {
+        last4 = (await getCardLast4(candidate.userId, candidate.agentId, candidate.cardId))
+          .replace(/\D/g, '')
+          .slice(-4);
+      } catch {
+        // Unreadable card is not evidence of a match — skip and keep scanning.
+        continue;
+      }
+      if (last4 === cardLast4) matched.push(candidate);
+    }
+    if (matched.length === 1) {
+      const purchase = matched[0];
+      if (purchase !== undefined) return purchase;
+    }
+    if (matched.length === 0) {
+      throw new TestPaymentError('No held Rose purchase matches this checkout card', 409);
+    }
+    throw new TestPaymentError(
+      'Multiple held Rose purchases match this checkout total; refusing an ambiguous charge',
+      409
+    );
+  }
+
+  if (candidates.length === 1) {
+    const only = candidates[0];
+    if (only === undefined) {
+      throw new TestPaymentError('No held Rose purchase matches this checkout total', 409);
+    }
+    return only;
+  }
+  throw new TestPaymentError(
+    'Multiple held Rose purchases match this checkout total; refusing an ambiguous charge',
+    409
+  );
+}
+
 export async function createTestPaymentCheckoutSession(
-  input: { items?: TestPaymentLineItem[] } | null | undefined,
+  input: { items?: TestPaymentLineItem[]; cardLast4?: unknown } | null | undefined,
   dependencies: CheckoutSessionDependencies = {}
 ): Promise<{ sessionId: string; url: string; totalCents: number }> {
   const lineItems = normalizeLineItems(input?.items ?? []);
   const totals = calculateTotals(lineItems);
   const findPurchases = dependencies.findHeldPurchasesByTotal ?? findHeldPurchasesByTotal;
+  const getCardLast4 = dependencies.getCardLast4 ?? defaultGetCardLast4;
   const candidates = await findPurchases(totals.totalCents);
-  if (candidates.length !== 1) {
-    throw new TestPaymentError(
-      candidates.length === 0
-        ? 'No held Rose purchase matches this checkout total'
-        : 'Multiple held Rose purchases match this checkout total; refusing an ambiguous charge',
-      409
-    );
-  }
-  const purchase = candidates[0];
-  if (purchase === undefined) {
-    throw new TestPaymentError('No held Rose purchase matches this checkout total', 409);
-  }
+  const purchase = await resolveHeldPurchaseForCheckout(
+    candidates,
+    normalizeCardLast4(input?.cardLast4),
+    getCardLast4
+  );
   const stripeLineItems = [
     ...lineItems.map((item) => ({
       price_data: {
