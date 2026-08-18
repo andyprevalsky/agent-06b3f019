@@ -7,18 +7,19 @@
  * [LOADING_ITEMS] -- success --> [SHOPPING]
  * [LIVE_FIXTURE] -- static item loaded --> [CHECKOUT_READY]
  * [SHOPPING] -- user selects required items --> [CHECKOUT_READY]
- * [CHECKOUT_READY] -- live + card last4 filled + Place order --> [HOSTED_CHECKOUT_REDIRECT]
- * [CHECKOUT_READY] -- live without card last4 --> Place order disabled
+ * [CHECKOUT_READY] -- live Place order --> [HOSTED_CHECKOUT_REDIRECT]
+ * [CHECKOUT_READY] -- live Place order (optional last4 when card number filled) --> checkout-session
  * [CHECKOUT_READY] -- submit card (sandbox) --> [CONFIRMING]
  * [CONFIRMING] -- success --> [CONFIRMED]
  * [CONFIRMING] -- API/Stripe error --> [CHECKOUT_ERROR]
  *
  * This page is a local benchmark merchant. It intentionally exposes real card
- * fields so browser agents must use request_payment_card and produce a full
- * receipt approval before filling the one-time card. Live Place order requires
- * the filled card's last4 and sends it on checkout-session so the backend can
- * disambiguate multiple HELD same-total purchases (sandbox settle already
- * matches by full PAN).
+ * fields so browser agents can use request_payment_card before Stripe hosted
+ * Checkout. Live authorization happens on Stripe's page — merchant Place order
+ * only creates the Checkout session. Optional card last4 is sent when the
+ * number field is filled so checkout-session can disambiguate multiple HELD
+ * same-total purchases; Place order must stay clickable without it so agents
+ * that only fill Stripe (not this merchant form) can still redirect.
  *
  * Each product card renders the fields a payment-line-item receipt requires:
  * name, description, imageUrl, priceCents, an absolute productUrl
@@ -257,16 +258,10 @@ function CardForm({
         <CreditCard className="h-5 w-5" />
         <h2 className="text-lg font-semibold">Payment details</h2>
       </div>
-      <label className="block text-sm font-medium" htmlFor="card-name">
-        Name on card
-      </label>
-      <input
-        id="card-name"
-        value={card.name}
-        disabled={disabled}
-        onChange={(e) => update('name', e.target.value)}
-        className="w-full rounded-md border px-3 py-2"
-      />
+      <p className="text-sm text-muted-foreground">
+        Live checkout charges on Stripe&apos;s hosted page. Filling the card number here is
+        optional — it only helps disambiguate leftover holds via last4.
+      </p>
       <label className="block text-sm font-medium" htmlFor="card-number">
         Card number
       </label>
@@ -277,6 +272,16 @@ function CardForm({
         value={card.number}
         disabled={disabled}
         onChange={(e) => update('number', e.target.value)}
+        className="w-full rounded-md border px-3 py-2"
+      />
+      <label className="block text-sm font-medium" htmlFor="card-name">
+        Name on card
+      </label>
+      <input
+        id="card-name"
+        value={card.name}
+        disabled={disabled}
+        onChange={(e) => update('name', e.target.value)}
         className="w-full rounded-md border px-3 py-2"
       />
       <div className="grid grid-cols-2 gap-3">
@@ -450,13 +455,11 @@ export default function TestPaymentPage() {
     [isLiveLifecycleFixture, items, selectedIds],
   );
   const expectedItemCount = isLiveLifecycleFixture ? 1 : 3;
-  const cardDigits = card.number.replace(/\D/g, '');
-  // Live hosted Checkout correlates the session to a HELD Rose purchase by card last4 when more
-  // than one same-total hold exists. Require the one-time card to be filled before Place order so
-  // that disambiguator is always present (sandbox Pay already required a full card form).
-  const liveCardReady = !isLiveLifecycleFixture || cardDigits.length >= 4;
-  const canSubmit =
-    selectedIds.length === expectedItemCount && !submitting && items.length > 0 && liveCardReady;
+  // Live Place order must stay enabled without a merchant-form PAN: authorization happens on
+  // Stripe Checkout, and browser agents often skip this form (fleet evidence: only #card-name
+  // filled → disabled button → zero checkout-session calls). Optional last4 is still sent when
+  // the number field has ≥4 digits.
+  const canSubmit = selectedIds.length === expectedItemCount && !submitting && items.length > 0;
 
   if (!isEnabled) return <DisabledPage />;
   if (confirmation) return <Confirmation confirmation={confirmation} />;

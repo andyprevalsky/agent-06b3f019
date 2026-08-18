@@ -6,14 +6,26 @@
  * (it docked the score for "no itemized list on the confirmation page"). The
  * screen now renders the full receipt returned by the backend.
  */
-import { afterEach, describe, expect, it } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TestPaymentPage, {
   Confirmation,
   ReceiptSummary,
 } from '@/features/test-payment/components/TestPaymentPage';
 import { LIVE_LIFECYCLE_ITEM, TEST_PAYMENT_MERCHANT_NAME } from '@/features/test-payment/config';
 import type { TestPaymentConfirmation } from '@/features/test-payment/types';
+
+const startTestPaymentCheckout = vi.fn().mockResolvedValue({
+  url: 'https://checkout.stripe.com/c/pay/cs_test',
+});
+
+vi.mock('@/features/test-payment/hooks', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/test-payment/hooks')>();
+  return {
+    ...actual,
+    startTestPaymentCheckout: (...args: unknown[]) => startTestPaymentCheckout(...args),
+  };
+});
 
 const CONFIRMATION: TestPaymentConfirmation = {
   orderId: 'tp_abc12345',
@@ -58,6 +70,8 @@ const CONFIRMATION: TestPaymentConfirmation = {
 describe('test-payment Confirmation receipt', () => {
   afterEach(() => {
     window.history.replaceState({}, '', '/');
+    startTestPaymentCheckout.mockClear();
+    startTestPaymentCheckout.mockResolvedValue({ url: 'https://checkout.stripe.com/c/pay/cs_test' });
   });
 
   it('shows a stable pre-submit checkout reference', () => {
@@ -90,28 +104,36 @@ describe('test-payment Confirmation receipt', () => {
     expect(screen.queryByText('Shipping')).not.toBeInTheDocument();
   });
 
-  it('opens the bounded lifecycle checkout through the production benchmark query', () => {
+  it('keeps live Place order enabled without a merchant-form card number', () => {
     window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
     render(<TestPaymentPage />);
 
     expect(screen.getByRole('heading', { name: 'Test Payment' })).toBeInTheDocument();
     expect(screen.getByText('Agent Card Lifecycle Probe')).toBeInTheDocument();
-    // Live Place order stays disabled until the one-time card last4 is filled — that last4 is
-    // what checkout-session uses to disambiguate multiple HELD same-total purchases.
-    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeDisabled();
+    // Live authorization is on Stripe Checkout — gating Place order on this form's PAN left
+    // fleet agents clicking a disabled button after only filling #card-name (zero checkout-session).
+    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeEnabled();
   });
 
-  it('enables live Place order only after the one-time card last4 is present', () => {
+  it('starts hosted checkout without last4 when the merchant card number is empty', async () => {
     window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
     render(<TestPaymentPage />);
 
-    const placeOrder = screen.getByRole('button', { name: 'Place order $1.00' });
-    expect(placeOrder).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Place order $1.00' }));
+    await waitFor(() => expect(startTestPaymentCheckout).toHaveBeenCalledTimes(1));
+    expect(startTestPaymentCheckout).toHaveBeenCalledWith(['agentcard-lifecycle-probe'], undefined);
+  });
+
+  it('sends optional last4 on live Place order when the card number is filled', async () => {
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
+    render(<TestPaymentPage />);
 
     fireEvent.change(screen.getByLabelText(/Card number/i), {
       target: { value: '4413696996398945' },
     });
-    expect(placeOrder).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Place order $1.00' }));
+    await waitFor(() => expect(startTestPaymentCheckout).toHaveBeenCalledTimes(1));
+    expect(startTestPaymentCheckout).toHaveBeenCalledWith(['agentcard-lifecycle-probe'], '8945');
   });
 
   it('issues cards without allowing merchant submission in the abandonment fixture', async () => {
