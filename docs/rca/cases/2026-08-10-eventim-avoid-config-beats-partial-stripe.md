@@ -2,7 +2,7 @@
 id: 2026-08-10-eventim-avoid-config-beats-partial-stripe
 date: 2026-08-10
 title: Eventim recover-challenge re-promoted avoidConfigKey=steel_managed on js.stripe.com-only probe
-surface: backend
+surface: back-end
 component: browser-challenge-recovery
 classification: our-bug
 problem_class: logical-inconsistency-in-harness-contracts
@@ -22,8 +22,7 @@ tags:
   - payment-cdn
 sources:
   - agent 48ef13f0-e777-4293-96bb-ae9ddfa0716d
-  - run agents/benchmarks/runs/20260810_174611_browser-1015-eventim-request-card.json
-  - descend eventim-20260810T172431Z
+  - commit 817c9195499a491f531cfa459f7e8356be34dba0
 repro: cd back-end && npx tsx src/tests/unit/browser-challenge-recovery.test.ts
 status: fixed
 ---
@@ -93,4 +92,8 @@ Benchmark outcome proof remains pending Andy's HARNESS_FIX_DECISION + exact
 
 ## Human feedback
 
-(none yet)
+None recorded.
+
+## Reusable lesson
+
+Rank `avoidConfigKey` ahead of partial payment-host clears in `candidateScore` so a one-host Stripe probe cannot re-promote the failing exit.

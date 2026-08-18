@@ -4,7 +4,7 @@ date: 2026-08-10
 title: Eventim Billing/Payment fields missing for LLM because page shell never mounts them
 surface: agents
 component: spawn-browser-agent-v3
-classification: external
+classification: third-party-failure
 problem_class: other
 first_bad_boundary: Eventim guest checkout page — Billing Address / Payment Details render headers only (0 inputs/selects/iframes in those sections)
 symptoms:
@@ -18,13 +18,11 @@ tags:
   - empty-shell
   - stripe
 sources:
-  - agent 5d59430b-8c5c-4b93-98ab-da7b77a46af7 (FAIL)
-  - agent 7f91554e-9cc5-4ea2-bf29-1dc75578511f (PASS)
-  - agent ce52f350-ec60-417a-89d1-ecef08a391ea (post-H-03 FAIL)
-  - run agents/benchmarks/runs/20260810_205819_browser-1015-eventim-request-card.json
-  - run agents/benchmarks/runs/20260810_073019_browser-1015-eventim-request-card.json
-  - run agents/benchmarks/runs/20260810_215512_browser-1015-eventim-request-card.json
-status: closed
+  - agent 5d59430b-8c5c-4b93-98ab-da7b77a46af7
+  - agent 7f91554e-9cc5-4ea2-bf29-1dc75578511f
+  - agent ce52f350-ec60-417a-89d1-ecef08a391ea
+repro: none-recorded
+status: wontfix
 ---
 
 ## Problem
@@ -33,7 +31,7 @@ After H-01 recovery scoring fix, Eventim checkout still showed Billing Address /
 Payment Details as empty headers. Question: why did those fields not appear for
 the LLM — observation pipeline gap, or page truth?
 
-## Diagnosis (evidence)
+## Diagnosis
 
 1. **DOM / evaluate (FAIL):** section probe returned
    `Billing Address {inputs:0, selects:0, iframes:0}` and
@@ -85,3 +83,7 @@ Country/Stripe inputs to mount.
 
 Andy asked to RCA why fields were not appearing for the LLM (after rejecting an
 empty-shell nudge).
+
+## Reusable lesson
+
+When Billing/Payment sections show 0 inputs and screenshots match, treat empty shells as page truth and do not wait for Stripe fields before `request_payment_card`.
