@@ -26,7 +26,7 @@ checkoutRouter.post(
     try {
       const body =
         typeof req.body === 'object' && req.body !== null && !Array.isArray(req.body)
-          ? (req.body as { items?: TestPaymentLineItem[] })
+          ? (req.body as { items?: TestPaymentLineItem[]; cardLast4?: unknown })
           : null;
       res.json(await createTestPaymentCheckoutSession(body));
     } catch (error) {

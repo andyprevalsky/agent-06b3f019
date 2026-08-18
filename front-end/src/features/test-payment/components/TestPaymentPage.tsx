@@ -7,13 +7,18 @@
  * [LOADING_ITEMS] -- success --> [SHOPPING]
  * [LIVE_FIXTURE] -- static item loaded --> [CHECKOUT_READY]
  * [SHOPPING] -- user selects required items --> [CHECKOUT_READY]
- * [CHECKOUT_READY] -- submit card --> [CONFIRMING]
+ * [CHECKOUT_READY] -- live + card last4 filled + Place order --> [HOSTED_CHECKOUT_REDIRECT]
+ * [CHECKOUT_READY] -- live without card last4 --> Place order disabled
+ * [CHECKOUT_READY] -- submit card (sandbox) --> [CONFIRMING]
  * [CONFIRMING] -- success --> [CONFIRMED]
  * [CONFIRMING] -- API/Stripe error --> [CHECKOUT_ERROR]
  *
  * This page is a local benchmark merchant. It intentionally exposes real card
  * fields so browser agents must use request_payment_card and produce a full
- * receipt approval before filling the one-time card.
+ * receipt approval before filling the one-time card. Live Place order requires
+ * the filled card's last4 and sends it on checkout-session so the backend can
+ * disambiguate multiple HELD same-total purchases (sandbox settle already
+ * matches by full PAN).
  *
  * Each product card renders the fields a payment-line-item receipt requires:
  * name, description, imageUrl, priceCents, an absolute productUrl
@@ -445,7 +450,13 @@ export default function TestPaymentPage() {
     [isLiveLifecycleFixture, items, selectedIds],
   );
   const expectedItemCount = isLiveLifecycleFixture ? 1 : 3;
-  const canSubmit = selectedIds.length === expectedItemCount && !submitting && items.length > 0;
+  const cardDigits = card.number.replace(/\D/g, '');
+  // Live hosted Checkout correlates the session to a HELD Rose purchase by card last4 when more
+  // than one same-total hold exists. Require the one-time card to be filled before Place order so
+  // that disambiguator is always present (sandbox Pay already required a full card form).
+  const liveCardReady = !isLiveLifecycleFixture || cardDigits.length >= 4;
+  const canSubmit =
+    selectedIds.length === expectedItemCount && !submitting && items.length > 0 && liveCardReady;
 
   if (!isEnabled) return <DisabledPage />;
   if (confirmation) return <Confirmation confirmation={confirmation} />;
@@ -500,7 +511,11 @@ export default function TestPaymentPage() {
               // Stripe blocks live-mode raw-PAN tokenization — so this is what makes the page an
               // actual merchant rather than a fixture.
               if (isLiveLifecycleFixture) {
-                const { url } = await startTestPaymentCheckout(selectedIds);
+                const cardLast4 = card.number.replace(/\D/g, '').slice(-4);
+                const { url } = await startTestPaymentCheckout(
+                  selectedIds,
+                  cardLast4.length === 4 ? cardLast4 : undefined,
+                );
                 window.location.assign(url);
                 return;
               }

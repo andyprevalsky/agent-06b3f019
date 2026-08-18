@@ -382,6 +382,169 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    // RCA: agent-payment-production-purchase (bc64fd0a) — prod had two HELD $1.00 Rose
+    // purchases from different agents; checkout-session matched by total only and 409'd
+    // "Multiple held Rose purchases match this checkout total; refusing an ambiguous charge".
+    // Sandbox settle already disambiguates by PAN among amount matches; hosted checkout must
+    // accept the same class of card hint (last4) so leftover/sibling holds cannot block Place order.
+    'checkout-session disambiguates multiple HELD same-total purchases by card last4',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_test_disambiguated',
+            url: 'https://checkout.stripe.com/c/pay/cs_test_disambiguated',
+            retrieved: {},
+          },
+          async (calls) => {
+            const created = await createTestPaymentCheckoutSession(
+              {
+                items: [{ id: 'agentcard-lifecycle-probe', quantity: 1 }],
+                cardLast4: '8945',
+              },
+              {
+                findHeldPurchasesByTotal: async () => [
+                  {
+                    id: 'purchase-stale-sibling',
+                    userId: 'user-bench',
+                    agentId: 'agent-older',
+                    cardId: 'card-older',
+                    stripePaymentIntentId: 'pi_hold_older',
+                  },
+                  {
+                    id: 'purchase-current',
+                    userId: 'user-bench',
+                    agentId: 'agent-current',
+                    cardId: 'card-current',
+                    stripePaymentIntentId: 'pi_hold_current',
+                  },
+                ],
+                getCardLast4: async (_userId, _agentId, cardId) =>
+                  cardId === 'card-current' ? '8945' : '1111',
+              }
+            );
+            assert(
+              created.sessionId === 'cs_test_disambiguated',
+              'ambiguous totals must still create a session once last4 selects one purchase'
+            );
+            const params = calls[0]?.params as {
+              client_reference_id?: string;
+              metadata?: { purchaseId?: string };
+            };
+            assert(
+              params.client_reference_id === 'purchase-current' &&
+                params.metadata?.purchaseId === 'purchase-current',
+              `must correlate Stripe to the last4-matched purchase, got ${JSON.stringify(params)}`
+            );
+          }
+        );
+      });
+    },
+  ],
+  [
+    'checkout-session still refuses when last4 cannot uniquely select among HELD totals',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_should_not_create',
+            url: 'https://checkout.stripe.com/c/pay/cs_should_not_create',
+            retrieved: {},
+          },
+          async (calls) => {
+            let failure: unknown;
+            try {
+              await createTestPaymentCheckoutSession(
+                {
+                  items: [{ id: 'agentcard-lifecycle-probe', quantity: 1 }],
+                  cardLast4: '0000',
+                },
+                {
+                  findHeldPurchasesByTotal: async () => [
+                    {
+                      id: 'purchase-a',
+                      userId: 'user-bench',
+                      agentId: 'agent-a',
+                      cardId: 'card-a',
+                      stripePaymentIntentId: 'pi_a',
+                    },
+                    {
+                      id: 'purchase-b',
+                      userId: 'user-bench',
+                      agentId: 'agent-b',
+                      cardId: 'card-b',
+                      stripePaymentIntentId: 'pi_b',
+                    },
+                  ],
+                  getCardLast4: async () => '8945',
+                }
+              );
+            } catch (error) {
+              failure = error;
+            }
+            assert(
+              failure instanceof Error &&
+                /No held Rose purchase matches this checkout card/.test(failure.message),
+              `unmatched last4 must fail closed without binding a wrong hold, got ${String(failure)}`
+            );
+            assert(calls.length === 0, 'must not create a Stripe session when still ambiguous');
+          }
+        );
+      });
+    },
+  ],
+  [
+    'checkout-session rejects a lone HELD when supplied last4 does not match that card',
+    async () => {
+      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
+        const merchant = getTestPaymentMerchantStripeClient();
+        await withBothCheckoutClientsStubbed(
+          merchant,
+          {
+            id: 'cs_stale_only',
+            url: 'https://checkout.stripe.com/c/pay/cs_stale_only',
+            retrieved: {},
+          },
+          async (calls) => {
+            let failure: unknown;
+            try {
+              await createTestPaymentCheckoutSession(
+                {
+                  items: [{ id: 'agentcard-lifecycle-probe', quantity: 1 }],
+                  cardLast4: '8945',
+                },
+                {
+                  findHeldPurchasesByTotal: async () => [
+                    {
+                      id: 'purchase-stale-only',
+                      userId: 'user-bench',
+                      agentId: 'agent-stale',
+                      cardId: 'card-stale',
+                      stripePaymentIntentId: 'pi_stale',
+                    },
+                  ],
+                  getCardLast4: async () => '1111',
+                }
+              );
+            } catch (error) {
+              failure = error;
+            }
+            assert(
+              failure instanceof Error &&
+                /No held Rose purchase matches this checkout card/.test(failure.message),
+              `a single wrong-last4 hold must not be bound, got ${String(failure)}`
+            );
+            assert(calls.length === 0, 'must not create a Stripe session for a last4 mismatch');
+          }
+        );
+      });
+    },
+  ],
+  [
     'settling a checkout session reads it back on the MERCHANT key, never billing',
     async () => {
       await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
