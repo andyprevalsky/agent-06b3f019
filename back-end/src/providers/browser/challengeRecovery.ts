@@ -3,7 +3,8 @@ import type { Browser, Cookie } from 'playwright';
 import { prisma } from '../database';
 import { DEFAULT_GEOLOCATION, type ProxyGeoLocation } from '../geoip';
 import { createLogger } from '../logger';
-import { createSteelRecoverySession, releaseSteelRemoteSession } from '../steel/session';
+import { releaseSteelRemoteSession } from '../steel/session';
+import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
 import {
   createKernelRecoverySession,

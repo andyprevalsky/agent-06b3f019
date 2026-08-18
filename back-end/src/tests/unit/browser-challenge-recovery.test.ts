@@ -18,7 +18,7 @@ import {
   type BrowserSessionCreationDependencies,
 } from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
-import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/session';
+import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import { recoverChallengeSchema } from '../../domains/browser-session/types';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
@@ -99,16 +99,9 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
     /browserSession\.create\s*\(/,
     'Kernel recovery candidates must remain remote-only'
   );
-  const steelSource = readFileSync(
-    new URL('../../providers/steel/session.ts', import.meta.url),
+  const steelRecoveryFactory = readFileSync(
+    new URL('../../providers/steel/sessionRecovery.ts', import.meta.url),
     'utf8'
-  );
-  const steelRecoveryFactory = steelSource.slice(
-    steelSource.indexOf('export async function createSteelRecoverySession'),
-    steelSource.indexOf(
-      '/**\n * Close a browser session',
-      steelSource.indexOf('createSteelRecoverySession')
-    )
   );
   assert.doesNotMatch(
     steelRecoveryFactory,
@@ -605,6 +598,7 @@ async function main(): Promise<void> {
   await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
+  // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
   testSteelPreferredForKernelBlacklistedHosts();
