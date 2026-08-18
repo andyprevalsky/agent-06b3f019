@@ -22,7 +22,7 @@ sources:
   - agent dc9cc4c9-6a76-44b5-8c6c-ba408e8a8484
   - agent 158e7db5-a104-46e1-b23c-c81c5633bfc4
 repro: back-end/src/tests/unit/browser-challenge-recovery.test.ts (testSteelRecoverySessionDropsUnsupportedCity)
-status: open
+status: fixed
 ---
 
 ## Problem
@@ -63,3 +63,11 @@ merged; fleet purchase still red on Stripe challenge recovery.
 Any session-create path that builds Steel geolocation proxies must share the
 city-drop retry used by the primary create path — recovery/candidate factories
 are not exempt.
+
+## Outcome
+
+Shipped in PR #983 (`f4cec5975`). Prod recovery now drops unsupported
+city and promotes `steel_managed` with `stablePasses=2` / title Stripe Checkout.
+Purchase still timed out because parallel search also waited ~93s for
+`kernel_direct` (still blacklisted) each cycle — follow-on fix removes it from
+preferSteel candidates.
