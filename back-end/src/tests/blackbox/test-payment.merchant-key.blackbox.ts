@@ -399,7 +399,11 @@ const tests: Array<[string, () => Promise<void>]> = [
             let inFlight = 0;
             let maxInFlight = 0;
             const release: Array<() => void> = [];
-            const getCardLast4 = async (_userId: string, _agentId: string | null, cardId: string) => {
+            const getCardLast4 = async (
+              _userId: string,
+              _agentId: string | null,
+              cardId: string
+            ) => {
               inFlight += 1;
               maxInFlight = Math.max(maxInFlight, inFlight);
               await new Promise<void>((resolve) => {
@@ -437,10 +441,16 @@ const tests: Array<[string, () => Promise<void>]> = [
             );
             // Both proofs must be in-flight before either resolves — sequential await maxes at 1.
             await new Promise((resolve) => setImmediate(resolve));
-            assert(maxInFlight === 2, `expected concurrent last4 proofs, maxInFlight=${maxInFlight}`);
+            assert(
+              maxInFlight === 2,
+              `expected concurrent last4 proofs, maxInFlight=${maxInFlight}`
+            );
             for (const done of release) done();
             const created = await pending;
-            assert(created.sessionId === 'cs_test_parallel_last4', 'parallel last4 path must still create');
+            assert(
+              created.sessionId === 'cs_test_parallel_last4',
+              'parallel last4 path must still create'
+            );
           }
         );
       });

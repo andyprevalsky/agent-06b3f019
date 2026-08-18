@@ -26,7 +26,9 @@ export type CloseHeldReuseResult = {
 };
 
 export type CloseHeldReuseDeps = {
-  findHeldProbePurchases?: (userId: string) => Promise<Array<{ id: string; agentId: string | null }>>;
+  findHeldProbePurchases?: (
+    userId: string
+  ) => Promise<Array<{ id: string; agentId: string | null }>>;
   cleanupAgent?: (agentId: string) => Promise<void>;
 };
 
@@ -67,7 +69,9 @@ export async function closeHeldPurchaseReuseForLifecycleProbe(
     ...new Set(
       held
         .map((row) => row.agentId)
-        .filter((agentId): agentId is string => typeof agentId === 'string' && agentId.trim() !== '')
+        .filter(
+          (agentId): agentId is string => typeof agentId === 'string' && agentId.trim() !== ''
+        )
     ),
   ];
   const orphanHeldIgnored = held.filter((row) => row.agentId === null).length;

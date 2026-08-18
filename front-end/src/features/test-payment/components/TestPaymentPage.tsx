@@ -259,8 +259,8 @@ function CardForm({
         <h2 className="text-lg font-semibold">Payment details</h2>
       </div>
       <p className="text-sm text-muted-foreground">
-        Live checkout charges on Stripe&apos;s hosted page. Filling the card number here is
-        optional — it only helps disambiguate leftover holds via last4.
+        Live checkout charges on Stripe&apos;s hosted page. Filling the card number here is optional
+        — it only helps disambiguate leftover holds via last4.
       </p>
       <label className="block text-sm font-medium" htmlFor="card-number">
         Card number

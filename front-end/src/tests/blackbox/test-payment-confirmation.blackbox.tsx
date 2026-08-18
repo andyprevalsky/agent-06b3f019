@@ -71,7 +71,9 @@ describe('test-payment Confirmation receipt', () => {
   afterEach(() => {
     window.history.replaceState({}, '', '/');
     startTestPaymentCheckout.mockClear();
-    startTestPaymentCheckout.mockResolvedValue({ url: 'https://checkout.stripe.com/c/pay/cs_test' });
+    startTestPaymentCheckout.mockResolvedValue({
+      url: 'https://checkout.stripe.com/c/pay/cs_test',
+    });
   });
 
   it('shows a stable pre-submit checkout reference', () => {
