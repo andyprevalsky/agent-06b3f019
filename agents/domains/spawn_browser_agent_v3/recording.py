@@ -1196,7 +1196,10 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        await self.capture(label, action=action, metadata=next_metadata, force=force)
+        # capture() already swallows screenshot/write failures; suppress any
+        # unexpected escape so a recording glitch cannot abort Place order.
+        with contextlib.suppress(Exception):
+            await self.capture(label, action=action, metadata=next_metadata, force=force)
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
         # Forced (action) frames get the full budget; best-effort idle frames use
@@ -1224,6 +1227,9 @@ class BrowserAgentRecorder:
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> None:
+        # Recording is best-effort diagnostics. A missing /tmp scratch dir,
+        # mid-run cleanup, or write failure must NEVER abort the browser agent
+        # (prod purchase fleet died on FileNotFoundError during post-click mark).
         if self.uses_kernel_replay or self._closed or len(self.frames) >= self.max_frames:
             return
         async with self._capture_lock:
@@ -1247,7 +1253,19 @@ class BrowserAgentRecorder:
             self._frame_index += 1
             filename = f"frame_{self._frame_index:05d}.jpg"
             frame_path = self.frames_dir / filename
-            frame_path.write_bytes(image_bytes)
+            try:
+                self.frames_dir.mkdir(parents=True, exist_ok=True)
+                frame_path.write_bytes(image_bytes)
+            except OSError as exc:
+                self._consecutive_failures += 1
+                logger.warning(
+                    "Browser agent recording frame write failed",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    frame=filename,
+                    error=str(exc),
+                )
+                return
             self.frames.append(
                 {
                     "src": f"frames/{filename}",

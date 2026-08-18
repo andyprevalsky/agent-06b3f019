@@ -759,6 +759,73 @@ async def test_browser_agent_recording_captures_visible_active_tab_url():
         else:
             os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = previous_interval
 
+
+async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
+    """Prod purchase fleet died when /tmp recording scratch vanished mid-run.
+
+    Post-click ``mark()`` called ``capture()`` → ``write_bytes`` raised
+    FileNotFoundError and aborted the browser agent after Place order succeeded.
+    Recording must recreate the frames dir (or soft-fail) and never raise.
+    """
+    import shutil
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        url = "https://roselabs.ai/test_payment"
+        context = None
+
+        async def evaluate(self, script):
+            return False
+
+        async def screenshot(self, **kwargs):
+            return b"jpeg-bytes"
+
+    previous = {
+        "BROWSER_AGENT_RECORDINGS": os.environ.get("BROWSER_AGENT_RECORDINGS"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+        "BROWSER_AGENT_RECORDING_INTERVAL_SECONDS": os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"),
+        "BROWSER_AGENT_KERNEL_REPLAY": os.environ.get("BROWSER_AGENT_KERNEL_REPLAY"),
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = "60"
+            os.environ["BROWSER_AGENT_KERNEL_REPLAY"] = "0"
+            page = FakePage()
+            page.context = SimpleNamespace(pages=[page])
+
+            recorder = await BrowserAgentRecorder.create(
+                page=page,
+                agent_id="agent-purchase",
+                task_id="task-place-order",
+                session_id="session-steel",
+                browser_url="https://connect.steel.dev/v1/sessions/x/player",
+                session_metadata={"provider": "steel"},
+            )
+            assert recorder is not None
+            frames_before_wipe = len(recorder.frames)
+            assert frames_before_wipe >= 1
+
+            shutil.rmtree(recorder.output_dir)
+            assert not recorder.frames_dir.exists()
+
+            # Must not raise — this is the Place-order finish mark path.
+            await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+
+            assert recorder.frames_dir.exists()
+            assert len(recorder.frames) == frames_before_wipe + 1
+            restored = recorder.output_dir / recorder.frames[-1]["src"]
+            assert restored.read_bytes() == b"jpeg-bytes"
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
 async def test_browser_agent_recording_respects_disabled_env():
     from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
 
