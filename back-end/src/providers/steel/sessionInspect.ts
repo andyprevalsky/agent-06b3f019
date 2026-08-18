@@ -95,8 +95,10 @@ export async function getSteelSessionCookieSummary(
 export async function closeAllActiveSessions(): Promise<number> {
   log.info('🌐 Finding all active browser sessions...');
 
+  // Steel-only closeSession: Kernel ACTIVE rows must not be selected or they
+  // get marked CLOSED while the Kernel remote browser stays alive.
   const activeSessions = await prisma.browserSession.findMany({
-    where: { status: 'ACTIVE' },
+    where: { status: 'ACTIVE', provider: 'steel' },
     select: { sessionId: true, agentId: true },
   });
 
