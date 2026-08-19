@@ -12133,16 +12133,17 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "Auto-returning to pinned handoff host" in source
     assert "navigation_origin_base_domain" in source
     assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Injected handoff payment-fill nudge after auto-fill miss" in source
-    assert "handoff_payment_fill_attempted" in source
+    assert "Released handoff pin after payment auto-fill exhausted" in source
+    assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
     # Auto-fill gate must stay host/path agnostic.
-    auto_fill_start = source.index("handoff_payment_fill_attempted = True")
+    auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
     auto_fill_block = source[auto_fill_start:auto_fill_end]
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
+    assert "Released handoff pin — no payment fields found" in auto_fill_block
 
 
 def test_recovery_skips_when_live_tab_already_clear():
