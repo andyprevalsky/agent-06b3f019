@@ -1674,27 +1674,20 @@ async def run_agent(
                     error = tool_result["error"]
 
                     if error:
-                        # Tool failed - add error to context
-                        if is_inside_temporal_activity and post_message:
-                            async with span(
-                                "run_loop.post_tool_error_message",
-                                agent_id=agent_id,
-                                iteration=iteration,
-                                tool_name=tool_name,
-                                agent_type="explore" if cache_call_site == "explore_agent" else None,
-                            ):
-                                await post_message(
-                                    str(error),
-                                    "TOOL",
-                                    {
-                                        "toolCallId": tool_call_id,
-                                        "toolName": tool_name,
-                                        "toolStatus": "ERROR",
-                                        "title": f"{tool_name} failed",
-                                        "error": True,
-                                        "subAgentId": task_id,
-                                    },
-                                )
+                        # Tool failed. Do NOT post an FE chip here: the tool layer
+                        # already owns the terminal chip for this tool_call_id and
+                        # posts a formatted one (params, elapsed, cost) before it
+                        # re-raises — see domains/web_fetch/handler.py,
+                        # domains/grep/service.py, tools/web_search/handler.py,
+                        # tools/people_search/handler.py. The FE resolves a chip by
+                        # toolCallId with last write wins, so a second row here
+                        # DELETED the tool's formatted chip and replaced it with a
+                        # bare exception string.
+                        # docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+                        #
+                        # The model's own error feedback is the context.append below,
+                        # which is independent of the FE post.
+                        #
                         # When no poll_messages, locally append error so agent sees it
                         # (omit subAgentId so convert_context_to_messages doesn't filter it)
                         if not poll_messages:

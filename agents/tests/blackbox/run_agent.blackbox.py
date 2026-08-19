@@ -657,8 +657,15 @@ async def test_no_tool_calls_nudges_then_errors_after_3_consecutive():
     assert "no tool calls" in result["message"].lower()
 
 
-async def test_tool_exception_continues_loop_and_posts_error():
-    """Exception in execute_tool → error message posted, loop continues, max_iterations reached."""
+async def test_tool_exception_continues_loop_without_posting_a_duplicate_chip():
+    """Exception in execute_tool → loop continues; the TOOL owns the error chip.
+
+    This test previously asserted run_agent posts the ERROR chip itself. That
+    was the defect: every tool already posts a formatted terminal chip and then
+    re-raises, so run_agent's row landed second at the same toolCallId and the
+    frontend (last write wins) dropped the formatted one.
+    docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+    """
     tool_calls = [{"tool": "web_search", "query": "fail"}]
     detected_tools = [("web_search", "tc-1", 1.0)]
 
@@ -672,10 +679,10 @@ async def test_tool_exception_continues_loop_and_posts_error():
         execute_tool_override=mock_execute_tool,
     )
 
+    # The loop still survives the exception and runs to its iteration budget.
     assert result["status"] == "max_iterations"
     error_posts = [m for m in posted if m["role"] == "TOOL" and (m.get("metadata") or {}).get("toolStatus") == "ERROR"]
-    assert len(error_posts) == 1
-    assert "oops" in error_posts[0]["text"]
+    assert not error_posts, f"run_agent must not post a tool's ERROR chip: {error_posts}"
 
 
 async def test_status_needs_user_help_returned_from_tool():
@@ -1933,6 +1940,47 @@ async def test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler():
     assert not llm_called, "LLM must never run while the agent is paused"
 
 
+async def test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context():
+    """The tool layer owns a failed tool's chip; run_agent must not post a second.
+
+    Every tool posts its own formatted terminal ERROR chip (params, elapsed,
+    cost) and then re-raises — domains/web_fetch/handler.py:319,
+    domains/grep/service.py:317, tools/web_search/handler.py:180,
+    tools/people_search/handler.py:177. run_agent posting another row at the SAME
+    toolCallId is not extra visibility: the FE resolves a chip by toolCallId with
+    last write wins, so the second row DELETED the formatted chip and left the
+    user a bare exception string attributed to the sub-agent.
+    docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md
+
+    The agent's own error feedback is the local context.append, which is
+    independent of the FE post — asserted here so this can never be "fixed"
+    by silencing the model's error feedback as well.
+    """
+
+    async def failing_execute_tool(tool_name, tool_args, tool_call_id):
+        raise RuntimeError("WebFetchProvidersFailed: web_fetch cannot fetch 'documents/generic/x'")
+
+    tool_calls = [{"tool": "web_fetch", "url": "documents/generic/x", "objective": "y"}]
+    detected = [("web_fetch", "10a6cbd0-346e-437f-af57-14c0a2c8b0d6", 1.0)]
+
+    _, posted, _ = await _run_single_iteration(
+        tool_calls,
+        detected,
+        execute_tool_override=failing_execute_tool,
+        is_inside_temporal_activity=True,
+    )
+
+    duplicate_chips = [
+        p
+        for p in posted
+        if p["role"] == "TOOL" and (p.get("metadata") or {}).get("toolStatus") == "ERROR"
+    ]
+    assert not duplicate_chips, (
+        "run_agent posted a duplicate ERROR chip for a failed tool; it collides "
+        f"with the tool's own chip at the same toolCallId: {duplicate_chips}"
+    )
+
+
 async def run_all_tests():
     print("run-agent blackbox tests:")
     r = BlackboxResult()
@@ -1991,7 +2039,8 @@ async def run_all_tests():
         test_no_tool_calls_nudges_then_errors_after_3_consecutive,
     )
     await r.record_async(
-        "tool_exception_continues_loop_and_posts_error", test_tool_exception_continues_loop_and_posts_error
+        "tool_exception_continues_loop_no_duplicate_chip",
+        test_tool_exception_continues_loop_without_posting_a_duplicate_chip,
     )
     await r.record_async(
         "failed_llm_call_does_not_consume_iteration_budget",
@@ -2067,6 +2116,10 @@ async def run_all_tests():
     await r.record_async(
         "paused_agent_does_not_busy_spin_and_yields_to_cold_handler",
         test_paused_agent_does_not_busy_spin_and_yields_to_cold_handler,
+    )
+    await r.record_async(
+        "failed_tool_posts_no_duplicate_chip",
+        test_failed_tool_posts_no_duplicate_chip_but_still_reaches_context,
     )
     teardown_mock()
     return r.summary()
