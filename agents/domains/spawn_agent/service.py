@@ -447,11 +447,6 @@ async def spawn_explore_agent_activity(
         # every result so we can surface failures instead.
         pending = list(_pending_fe_posts)
         _pending_fe_posts.clear()
-        # Drop chain tails we are about to await; otherwise every chip's last
-        # task (and its result) stays referenced for the whole activity.
-        for key, task in list(_fe_post_chain.items()):
-            if task in pending:
-                _fe_post_chain.pop(key, None)
         if pending:
             async with span(
                 "explore_fe_posts.drain",
@@ -460,6 +455,17 @@ async def spawn_explore_agent_activity(
                 pending_count=len(pending),
             ):
                 results = await asyncio.gather(*pending, return_exceptions=True)
+            # Only NOW drop the chain tails, and only those still pointing at a
+            # task we just drained. Clearing them before the gather would publish
+            # "no predecessor" across an await: a concurrent post for the same
+            # toolCallId would then start unchained and could overtake the one
+            # still draining — recreating the very write inversion the chain
+            # exists to prevent. A key whose tail was replaced during the await
+            # belongs to a newer in-flight post and must be left alone.
+            drained = set(pending)
+            for key, task in list(_fe_post_chain.items()):
+                if task in drained:
+                    _fe_post_chain.pop(key, None)
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
