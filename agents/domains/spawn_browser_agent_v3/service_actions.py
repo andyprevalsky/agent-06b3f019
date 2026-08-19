@@ -112,6 +112,26 @@ def effective_navigation_pin_host(
     return pin or None
 
 
+def evaluate_code_looks_like_navigation(code: str) -> bool:
+    """True when JS evaluate would navigate / open windows (bypass for goto guards)."""
+    lowered = (code or "").lower()
+    markers = (
+        "location.href",
+        "location.assign",
+        "location.replace",
+        "location.reload",
+        "document.location",
+        "window.location",
+        "history.pushstate",
+        "history.replacestate",
+        "history.back",
+        "history.go",
+        "window.open",
+        "window.navigate",
+    )
+    return any(marker in lowered for marker in markers)
+
+
 def navigation_leaves_pinned_host(
     *,
     current_url: str,
@@ -633,6 +653,30 @@ def _navigation_guard_error(
     return None
 
 
+def _pinned_evaluate_guard_error(context: _ActionContext, code: str) -> Optional[str]:
+    """Refuse navigation-shaped evaluate while a host pin is active."""
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
+    if not pin_host:
+        return None
+    current_host = (urlparse(context.current_url or "").hostname or "").lower()
+    on_pin = bool(current_host) and (
+        current_host == pin_host or current_host.endswith(f".{pin_host}")
+    )
+    if not on_pin:
+        return None
+    if evaluate_code_looks_like_navigation(code):
+        return (
+            f"Refusing evaluate that would navigate away from pinned host {pin_host!r}. "
+            f"Current page URL: {context.current_url}. Use input_text/click on this page "
+            "instead of location/history/window.open scripts."
+        )
+    return None
+
+
 _INTERACTION_ACTIONS = {
     "click",
     "input_text",
@@ -991,6 +1035,14 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        guard = _pinned_evaluate_guard_error(context, code)
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="evaluate",
+                error=guard,
+                params={"code": code[:500]},
+            )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
             params={"expression": code, "returnByValue": True},

@@ -22,9 +22,11 @@ sources:
   - agent 641444dc-7bf3-4eee-b57c-c58e364467c1
   - agent ea340c81-b65b-43c3-b3ae-89736f7f7279
   - agent 1bffacc0-a587-48f9-8282-3f39fe584ddb
+  - agent 0b3b582b-19d6-4aea-ad4f-df81248b27c3
   - fleet run 20260819-002102-843616 ref e277cf645
   - fleet run 20260819-004041-887409 ref a239a2b36
   - fleet run 20260819-033204-1139373 ref be4c560af
+  - fleet run 20260819-040130-1177499 ref d143e0b47
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (test_live_tab_looks_challenged_helpers, test_recovery_skips_when_live_tab_already_clear, test_url_looks_like_api_surface_and_navigation_pin, test_execute_goto_refuses_api_surface_urls, test_execute_navback_refuses_when_host_pinned, test_execute_navback_refuses_on_cross_origin_handoff, test_execute_close_tab_refuses_on_cross_origin_handoff, test_navigation_guard_has_no_endpoint_path_allowlists)
 status: open
 ---
@@ -59,6 +61,12 @@ browser automation failed → parent respawned a new browser on the merchant
 and Place-ordered again. Timed out with purchase HELD; almost no Checkout
 field `input_text`.
 
+Fleet `0b3b582b` after close_tab refuse (#993): pin held for goto/navback, but
+the model escaped via `evaluate` / clicks back to the merchant. Ephemeral
+handoff detection cleared once live URL returned to the origin domain, so the
+agent looped merchant `#card-number` + Place order until max steps; purchase
+stayed HELD.
+
 ## Diagnosis
 
 1. Place order redirects to a Kernel-blacklisted challenge target → provider
@@ -79,12 +87,12 @@ checkout host labels. General harness rules only:
 2. After successful recovery, keep an explicit host pin for `goto`/`navback`/
    `open_new_tab`.
 3. **Cross-origin handoff pin:** when the live page's registrable domain differs
-   from the session `start_url` origin, pin navigation to the live host. This
-   covers Place-order / OAuth / 3DS redirects without `checkout`/`payment` path
-   allowlists (those wrongly treated merchant `/test_payment` and hosted
-   Checkout as interchangeable). Refuse `goto`/`navback`/`open_new_tab` **and**
-   `close_tab`/`switch_tab` while pinned — closing the handoff tab abandons the
-   surface and has crashed the session (fleet `1bffacc0`).
+   from the session `start_url` origin, **persist** a pin host + URL (not only
+   compute ephemerally — returning to the origin must not clear it). Refuse
+   `goto`/`navback`/`open_new_tab`/`close_tab`/`switch_tab` while on the pin,
+   refuse navigation-shaped `evaluate` (`location`/`history`/`window.open`),
+   and auto-`goto` back to the pinned URL if the live tab leaves the pin host
+   via click/redirect. No `checkout`/`payment` path allowlists.
 4. Refuse navigation to API/non-document URL *shapes* (`api.*`, `/v1/`,
    `/healthcheck`, …) — no vendor host names in the label list.
 5. Keep existing provider-level preferSteel for Kernel-blacklisted *challenge
