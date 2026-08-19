@@ -33,11 +33,6 @@ from temporalio.exceptions import CancelledError as TemporalCancelledError
 
 from browser_tools.schemas import AVAILABLE_ACTIONS, BrowserToolArgsValidationError
 from config import load_config
-from utils.payment_card import (
-    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
-    build_payment_question,
-    normalize_payment_payload,
-)
 from helpers.attachments import extract_attachments_from_context, upload_to_storage
 from helpers.file_resolution import (
     resolve_file_pointers_from_extracted,
@@ -55,6 +50,11 @@ from providers.rose import ClaudeAuthContext, GptAuthContext, RoseClient
 from providers.rose.browser_use import build_browser_state_message_content
 from tools.base import AssistantEvent, EventType, MessageStatus, ToolEvent, ToolManager
 from utils.error_utils import extract_error_message
+from utils.payment_card import (
+    MINT_PURCHASE_CARD_ACTIVITY_TIMEOUT_SECONDS,
+    build_payment_question,
+    normalize_payment_payload,
+)
 from utils.prompts import build_verifier_prompt
 
 from .cdp_urls import steel_cdp_connection_url
@@ -94,8 +94,8 @@ from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
-    blocked_resource_url_for_recovery,
     blocked_resource_requires_payment_cdn,
+    blocked_resource_url_for_recovery,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -7256,7 +7256,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     and not await live_tab_looks_challenged(input_page)
                 ):
                     skip_message = (
-                        f"Current page does not look challenged"
+                        "Current page does not look challenged"
                         + (f" ({current_url})" if current_url else "")
                         + ". Continue the task on this page — do not start "
                         "challenge recovery unless the document itself is blocked."
@@ -8831,7 +8831,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
             title="Starting up a browser",
             message="",
             status=MessageStatus.IN_PROGRESS,
-            metadata={"toolName": "spawn_browser_agent"},
+            metadata={"toolName": "spawn_browser_agent", "action_type": "session_starting"},
         )
 
         try:
@@ -9045,6 +9045,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             status=MessageStatus.FINISHED,
                             metadata={
                                 "toolName": "spawn_browser_agent",
+                                # Progress, not a terminal: the browser task
+                                # resumes on the same session right after this.
+                                "action_type": "write_lock_granted",
                                 "task_id": write_lock_resume_state.get("task_id"),
                                 "requestUserApproval": {
                                     "writePermission": True,
@@ -9540,6 +9543,9 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         status=MessageStatus.FINISHED,
                         metadata={
                             "toolName": "spawn_browser_agent",
+                            # Progress, not a terminal: the browser task resumes
+                            # on the same session right after this event.
+                            "action_type": "payment_card_ready",
                             "task_id": result.get("task_id"),
                             "requestUserApproval": {
                                 "writePermission": True,
@@ -9660,7 +9666,10 @@ class SpawnBrowserAgentManagerV3(ToolManager):
 
             output_files = result.get("output_files", [])
             final_status = MessageStatus.FINISHED if result.get("success", True) else MessageStatus.ERROR
-            final_metadata = {"toolName": "spawn_browser_agent"}
+            # Declare terminality explicitly. The front-end must never have to
+            # infer "this browser task is over" from a missing action_type — a
+            # workflow-scope progress event would look identical.
+            final_metadata = {"toolName": "spawn_browser_agent", "action_type": "task_complete"}
             for key in (
                 "task_id",
                 "world_model_simulated",
@@ -9742,7 +9751,7 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                 title="Browser automation failed",
                 message=extract_error_message(e),
                 status=MessageStatus.ERROR,
-                metadata={"toolName": "spawn_browser_agent"},
+                metadata={"toolName": "spawn_browser_agent", "action_type": "task_complete"},
             )
 
 

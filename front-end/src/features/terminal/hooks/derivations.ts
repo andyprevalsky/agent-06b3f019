@@ -115,8 +115,7 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
-const LEGACY_TERMINAL_BROWSER_ACTION_TYPES = new Set(['system']);
-const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started']);
+const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started', 'session_init']);
 const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
 
 function isBrowserInitMessage(message: Message): boolean {
@@ -129,6 +128,19 @@ function isBrowserInitMessage(message: Message): boolean {
   );
 }
 
+// Terminality is declared by the producer, never inferred from the absence of a
+// field. Every browser terminal carries an explicit action_type
+// (agents/domains/spawn_browser_agent_v3/handler.py), enforced by
+// agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py::
+// testBrowserToolEventsDeclareActionType.
+//
+// The untyped branch below is retained ONLY for tool-call scope (task_id ==
+// null) so historical transcripts predating that contract still close their
+// chips. It must never apply to a task-scoped message: workflow-scope progress
+// events such as "Payment card ready" and "✓ Write permission granted" carry a
+// task_id and are emitted between two halves of ONE live browser task, so
+// treating them as terminal permanently hides a running browser
+// (prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f).
 function isBrowserTaskTerminalMessage(message: Message): boolean {
   const actionType = message.metadata?.action_type;
   if (typeof actionType === 'string' && TERMINAL_BROWSER_ACTION_TYPES.has(actionType)) {
@@ -138,7 +150,8 @@ function isBrowserTaskTerminalMessage(message: Message): boolean {
   return (
     message.metadata?.toolName === 'spawn_browser_agent' &&
     message.metadata?.subAgentId == null &&
-    (actionType == null || LEGACY_TERMINAL_BROWSER_ACTION_TYPES.has(actionType)) &&
+    message.metadata?.task_id == null &&
+    actionType == null &&
     typeof message.metadata?.toolStatus === 'string' &&
     TERMINAL_BROWSER_TOOL_STATUSES.has(message.metadata.toolStatus)
   );

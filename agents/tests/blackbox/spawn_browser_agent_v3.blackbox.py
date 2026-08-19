@@ -15673,6 +15673,97 @@ async def test_browser_tool_validation_error_feeds_back_through_normal_path():
     save_mock.assert_awaited_once()
     assert save_mock.await_args.kwargs["action_type"] == "request_payment_card"
 
+def test_browser_tool_events_declare_action_type():
+    """Every workflow-scope spawn_browser_agent event must declare action_type.
+
+    The front-end decides whether a browser task is over from `action_type`
+    alone (front-end/src/features/terminal/hooks/derivations.ts,
+    .../message-bubble/useMessageRouting.ts). An event that omits it is
+    indistinguishable from the legacy untyped terminal, so a *progress* event
+    silently closes a live browser panel and renders the chip as "Done".
+
+    Prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f hit exactly that: "Payment
+    card ready" (untyped) closed the panel while the same browser task ran for
+    another five minutes. Commit e5f87f9a4 had already fixed this class for the
+    auth-handoff events but nothing enforced it, so the payment and write-lock
+    events were missed. This test is that enforcement.
+    """
+    handler_path = (
+        Path(__file__).resolve().parents[2]
+        / "domains"
+        / "spawn_browser_agent_v3"
+        / "handler.py"
+    )
+    tree = ast.parse(handler_path.read_text())
+
+    untyped_lines = []
+    typed_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        literal_items = {
+            key.value: value.value
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant)
+            and isinstance(key.value, str)
+            and isinstance(value, ast.Constant)
+        }
+        if literal_items.get("toolName") != "spawn_browser_agent":
+            continue
+        declared_keys = {
+            key.value
+            for key in node.keys
+            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+        }
+        if "action_type" in declared_keys:
+            typed_count += 1
+        else:
+            untyped_lines.append(node.lineno)
+
+    assert not untyped_lines, (
+        "spawn_browser_agent event metadata missing an explicit action_type at "
+        f"handler.py lines {untyped_lines}. Add a terminal action_type "
+        "('task_complete'/'session_paused') for real terminals, or a distinct "
+        "progress action_type — never leave it absent."
+    )
+    assert typed_count >= 18, (
+        f"expected at least 18 typed spawn_browser_agent events, found {typed_count} "
+        "— did the scan stop matching?"
+    )
+
+    # The other half of the contract: a completion message
+    # (is_completion_message drops subAgentId, so it lands in the main chat and
+    # closes the chip) must declare an explicitly terminal action_type. Without
+    # this, a terminal is inferred from message shape — the same failure mode in
+    # reverse.
+    terminal_action_types = {"task_complete", "session_paused"}
+    untyped_completions = []
+    completion_count = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        keywords = {kw.arg: kw.value for kw in node.keywords if kw.arg}
+        flag = keywords.get("is_completion_message")
+        if not (isinstance(flag, ast.Constant) and flag.value is True):
+            continue
+        completion_count += 1
+        action_type = keywords.get("action_type")
+        if not (
+            isinstance(action_type, ast.Constant)
+            and action_type.value in terminal_action_types
+        ):
+            untyped_completions.append(node.lineno)
+
+    assert not untyped_completions, (
+        "browser completion messages must declare a terminal action_type "
+        f"({sorted(terminal_action_types)}) at handler.py lines {untyped_completions}"
+    )
+    assert completion_count >= 5, (
+        f"expected at least 5 completion-message call sites, found {completion_count} "
+        "— did the scan stop matching?"
+    )
+
+
 async def run_all_tests():
     print("spawn-browser-agent-v3 blackbox tests:")
     r = BlackboxResult()
@@ -17142,6 +17233,10 @@ async def run_all_tests():
     await r.record_async(
         "goto_action_returns_current_url_for_recovery_fallback",
         test_goto_action_returns_current_url_for_recovery_fallback,
+    )
+    r.record(
+        "browser_tool_events_declare_action_type",
+        test_browser_tool_events_declare_action_type,
     )
     return r.all_passed
 
