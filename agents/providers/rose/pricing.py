@@ -65,27 +65,24 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.6-sol-gpt":          {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
+# Direct OpenAI API pricing (the `-openai` suffix == GPT_API_KEY -> api.openai.com).
+#
+# These are OpenAI's own list prices and are DELIBERATELY NOT derived from
+# `_PROVIDER_PRICING`. That table holds OpenRouter's `openai/*` rates, which are
+# a different commercial route and genuinely cheaper -- gpt-5.6-sol is
+# $2.50/$15 per M on OpenRouter but $5.00/$30 per M direct from OpenAI. The old
+# derivation asserted the two routes were the same price, so correcting the
+# OpenRouter side silently halved what we believe our own funded key costs.
+# Keep the two tables independent; verify each against its own provider.
+#
+# Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
+# above 272k input tokens, which this flat table does not model.
 _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-5.4-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.5-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-luna-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-terra-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-sol-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["completion"] * 1000 * 100,
-    },
+    "gpt-5.4-openai":       {"input_cents_per_1k": 0.175, "output_cents_per_1k": 1.4},
+    "gpt-5.5-openai":       {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
+    "gpt-5.6-luna-openai":  {"input_cents_per_1k": 0.1,   "output_cents_per_1k": 0.6},
+    "gpt-5.6-terra-openai": {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},
+    "gpt-5.6-sol-openai":   {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
 }
 
 

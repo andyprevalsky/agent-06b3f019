@@ -30,29 +30,34 @@ interface OpenRouterModel {
 // per spawn during sub-agent fan-outs.
 const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }>();
 
-// Reconciled against the live OpenRouter catalog on 2026-08-18; sol, terra,
-// luna and 5.4 had all drifted. Keep in sync with `_PROVIDER_PRICING` in
-// agents/providers/rose/pricing.py and MODEL_RATES in admin-health/costs.ts.
+// The `-openai` suffix means the DIRECT OpenAI API (GPT_API_KEY ->
+// api.openai.com), so these are OpenAI's own list prices — NOT OpenRouter's
+// `openai/*` rates, which are a different commercial route and genuinely
+// cheaper (sol is $2.50/$15 per M on OpenRouter vs $5/$30 direct). Keep these
+// independent of `_PROVIDER_PRICING` in agents/providers/rose/pricing.py;
+// only the OpenRouter waterfall should track that table.
+// Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
+// above 272k input tokens, which this flat table does not model.
 const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
   'gpt-5.4-openai': {
-    prompt: (2.5 / 1_000_000).toString(),
-    completion: (15.0 / 1_000_000).toString(),
+    prompt: (1.75 / 1_000_000).toString(),
+    completion: (14.0 / 1_000_000).toString(),
   },
   'gpt-5.5-openai': {
     prompt: (5.0 / 1_000_000).toString(),
     completion: (30.0 / 1_000_000).toString(),
   },
   'gpt-5.6-luna-openai': {
-    prompt: (0.2 / 1_000_000).toString(),
-    completion: (1.2 / 1_000_000).toString(),
+    prompt: (1.0 / 1_000_000).toString(),
+    completion: (6.0 / 1_000_000).toString(),
   },
   'gpt-5.6-terra-openai': {
-    prompt: (2.0 / 1_000_000).toString(),
-    completion: (12.0 / 1_000_000).toString(),
-  },
-  'gpt-5.6-sol-openai': {
     prompt: (2.5 / 1_000_000).toString(),
     completion: (15.0 / 1_000_000).toString(),
+  },
+  'gpt-5.6-sol-openai': {
+    prompt: (5.0 / 1_000_000).toString(),
+    completion: (30.0 / 1_000_000).toString(),
   },
 };
 

@@ -345,18 +345,48 @@ assert.strictEqual(
   1_500,
   'Unpriceable LLM tokens must be surfaced as coverage loss, not silently averaged in as $0'
 );
+// `gpt-5.4` (bare) is the DIRECT OpenAI route, so it keeps OpenAI's list price
+// of $1.75/$14 -- not OpenRouter's $2.50/$15, which is keyed separately under
+// `openai/gpt-5.4`.
 // gpt-5.4 leg: prompt total is inclusive, so the 400k cache-read and 100k
 // cache-write are subtracted from the 1M before charging full rate --
-// 500k*$2.50 + 400k*$0.25 + 100k*$2.50 per M = $1.60.
+// 500k*$1.75 + 400k*$0.175 + 100k*$1.75 per M = $1.12.
 // claude-sonnet-5 leg: input is exclusive, so all three buckets are additive --
-// 500k*$2 + 400k*$0.20 + 100k*$2.50 per M = $1.33. Total $2.93.
-// Was 2.45 while gpt-5.4 was priced at $1.75/$14; the live OpenRouter catalog
-// lists $2.50/$15, so the old figure under-billed this leg by 30%.
+// 500k*$2 + 400k*$0.20 + 100k*$2.50 per M = $1.33. Total $2.45.
 assert.strictEqual(
   providerCacheSemantics.apiRateDollars,
-  2.93,
+  2.45,
   'OpenAI prompt totals must subtract cache tokens while Anthropic input totals remain exclusive'
 );
+// The OpenRouter route and the direct OpenAI API are separate contracts for the
+// same model: gpt-5.6-sol is $2.50/$15 per M through OpenRouter and $5/$30
+// direct. normalizeModel used to strip the `openai/` prefix, collapsing both
+// onto one rate, so one of the two routes was always billed at the other's
+// price. Anthropic may still collapse because its rates match on both routes.
+const openRouterSol = calculateTaskCostPerTask(
+  [{ taskId: 'route-split' }],
+  [usage('route-split', { kind: 'llm', model: 'openai/gpt-5.6-sol', tokensIn: 1_000_000 })]
+);
+const directSol = calculateTaskCostPerTask(
+  [{ taskId: 'route-split' }],
+  [usage('route-split', { kind: 'llm', model: 'gpt-5.6-sol-openai', tokensIn: 1_000_000 })]
+);
+assert.strictEqual(
+  openRouterSol.apiRateDollars,
+  2.5,
+  'OpenRouter-routed gpt-5.6-sol must bill at OpenRouter rates'
+);
+assert.strictEqual(
+  directSol.apiRateDollars,
+  5,
+  'Direct OpenAI gpt-5.6-sol must bill at OpenAI list rates, not OpenRouter rates'
+);
+assert.notStrictEqual(
+  openRouterSol.apiRateDollars,
+  directSol.apiRateDollars,
+  'the two OpenAI routes must not collapse onto a single rate'
+);
+
 const sonnetFiveUsage = [
   usage('root-task', {
     kind: 'llm',

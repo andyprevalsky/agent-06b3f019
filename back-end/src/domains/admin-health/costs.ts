@@ -74,11 +74,24 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'claude-sonnet-4-6': anthropic(3, 15),
   'claude-haiku-4.5': anthropic(1, 5),
   'claude-haiku-4-5': anthropic(1, 5),
-  'gpt-5.6-sol': openAi(2.5, 15, 1.25),
-  'gpt-5.6-terra': openAi(2, 12, 1.25),
-  'gpt-5.6-luna': openAi(0.2, 1.2, 1.25),
+  // Bare / `-openai` ids are the DIRECT OpenAI API route (our funded
+  // GPT_API_KEY), so these carry OpenAI's own list prices. The OpenRouter
+  // route for the same models is a separate, cheaper contract and is keyed
+  // under `openai/*` below — normalizeModel deliberately keeps that prefix so
+  // the two cannot collapse onto one rate.
+  'gpt-5.6-sol': openAi(5, 30, 1.25),
+  'gpt-5.6-terra': openAi(2.5, 15, 1.25),
+  'gpt-5.6-luna': openAi(1, 6, 1.25),
   'gpt-5.5': openAi(5, 30),
-  'gpt-5.4': openAi(2.5, 15),
+  'gpt-5.4': openAi(1.75, 14),
+  // OpenRouter-routed OpenAI models (waterfall). Same cache semantics as the
+  // direct route (inclusive prompt totals, 0.1x read, 1.25x write) but
+  // OpenRouter's cheaper per-token rates.
+  'openai/gpt-5.6-sol': openAi(2.5, 15, 1.25),
+  'openai/gpt-5.6-terra': openAi(2, 12, 1.25),
+  'openai/gpt-5.6-luna': openAi(0.2, 1.2, 1.25),
+  'openai/gpt-5.5': openAi(5, 30),
+  'openai/gpt-5.4': openAi(2.5, 15),
   'google/gemini-3-flash-preview': openRouter(0.5, 3),
   'google/gemini-3.5-flash': openRouter(1.5, 9),
   'google/gemini-3.6-flash': openRouter(0.75, 3.75),
@@ -116,8 +129,13 @@ function normalizeModel(model: string): string {
     .toLowerCase()
     .trim()
     .replace(/-(claude|gpt)$/, '');
+  // Anthropic's OpenRouter and direct rates are identical, so collapsing that
+  // prefix is lossless. OpenAI's are NOT — gpt-5.6-sol is $2.50/$15 per M via
+  // OpenRouter and $5/$30 direct — so `openai/*` keeps its prefix and is
+  // priced separately. Collapsing it billed every waterfall call at the direct
+  // rate (2x over) and every direct call at the OpenRouter rate, depending on
+  // which value happened to be in the table.
   if (normalized.startsWith('anthropic/')) return normalized.slice('anthropic/'.length);
-  if (normalized.startsWith('openai/')) return normalized.slice('openai/'.length);
   if (normalized.endsWith('-openai')) return normalized.slice(0, -'-openai'.length);
   return normalized;
 }
