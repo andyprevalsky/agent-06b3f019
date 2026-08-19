@@ -100,6 +100,8 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'rose-labs/rose-1-lite': openRouter(1.875, 9.375),
   'rose-labs/rose-1-ultra': openRouter(2.75, 15),
   'rose-labs/rose-1-browser-use': openRouter(2.75, 15),
+  // Open-weights-only pool; its waterfall is the single kimi-k3 layer.
+  'rose-labs/rose-1-oss': openRouter(3, 15),
 };
 
 function currentModelRates(model: string, now = Date.now()): ModelRates | undefined {
