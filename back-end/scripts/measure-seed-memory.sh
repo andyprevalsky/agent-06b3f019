@@ -142,23 +142,45 @@ else
             echo "❌ could not start source postgres ($SRC_PG_IMAGE)" | tee -a "$SUMMARY"; exit 1; }
     SRC_PORT="$(docker port "$SRC_CONTAINER" 5432/tcp | tail -1 | sed 's/.*://')"
     [ -n "$SRC_PORT" ] || { echo "❌ could not resolve source postgres port" | tee -a "$SUMMARY"; exit 1; }
+    SRC_READY=0
     for _ in $(seq 1 60); do
-        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
         sleep 1
     done
-    echo "   restoring source…" | tee -a "$SUMMARY"
-    # Role/extension noise is expected and non-fatal, but a header-level refusal
-    # (wrong archive version, truncated file) means NOTHING was restored. Keep
-    # the errors so that case names itself instead of surfacing as "no rows".
-    SRC_RESTORE_ERR="$OUT_DIR/source-restore.err"
-    docker exec -i "$SRC_CONTAINER" pg_restore -U postgres -d postgres --no-owner --no-acl \
-        < "$DUMP" >/dev/null 2>"$SRC_RESTORE_ERR" || true
-    if grep -q "unsupported version\|did not find magic string\|input file does not appear" \
-        "$SRC_RESTORE_ERR" 2>/dev/null; then
-        echo "❌ pg_restore could not read $DUMP:" | tee -a "$SUMMARY"
-        head -3 "$SRC_RESTORE_ERR" | tee -a "$SUMMARY"
-        echo "   Republish the seed dump, or extend the image map above." | tee -a "$SUMMARY"
+    # Falling through the timeout used to continue into pg_restore against a
+    # server that never accepted connections, which produced an empty source db
+    # and the misleading "no Cookie rows" error further down.
+    if [ "$SRC_READY" != 1 ]; then
+        echo "❌ source postgres ($SRC_PG_IMAGE) never became ready in 60s" | tee -a "$SUMMARY"
+        docker logs --tail 20 "$SRC_CONTAINER" 2>&1 | tee -a "$SUMMARY"
         exit 1
+    fi
+    echo "   restoring source…" | tee -a "$SUMMARY"
+    SRC_RESTORE_ERR="$OUT_DIR/source-restore.err"
+    set +e
+    docker exec -i "$SRC_CONTAINER" pg_restore -U postgres -d postgres --no-owner --no-acl \
+        < "$DUMP" >/dev/null 2>"$SRC_RESTORE_ERR"
+    SRC_RESTORE_STATUS=$?
+    set -e
+    if [ "$SRC_RESTORE_STATUS" -ne 0 ]; then
+        # pg_restore exits non-zero for genuinely benign noise: the dump names
+        # roles/extensions/owners that do not exist in a throwaway container.
+        # Strip exactly those, and treat ANY remaining diagnostic as fatal — a
+        # header refusal, a truncated archive, or a restore-time SQL error all
+        # leave an incomplete source db, which silently invalidates the whole
+        # measurement. Previously every failure was discarded by `|| true`.
+        SRC_RESTORE_UNEXPECTED="$(grep -vE \
+            'warning:|WARNING:|role "[^"]*" does not exist|extension "[^"]*" already exists|schema "[^"]*" already exists|must be owner of|no privileges (could be revoked|were granted)|^[[:space:]]*$|^pg_restore: while PROCESSING|^pg_restore: from TOC entry|^[[:space:]]*Command was:' \
+            "$SRC_RESTORE_ERR" 2>/dev/null || true)"
+        if [ -n "$SRC_RESTORE_UNEXPECTED" ]; then
+            echo "❌ pg_restore failed on $DUMP (exit $SRC_RESTORE_STATUS):" | tee -a "$SUMMARY"
+            printf '%s\n' "$SRC_RESTORE_UNEXPECTED" | head -5 | tee -a "$SUMMARY"
+            echo "   Full log: $SRC_RESTORE_ERR" | tee -a "$SUMMARY"
+            echo "   A version refusal means the dump was published by a newer" | tee -a "$SUMMARY"
+            echo "   pg_dump than this reader — republish it, or extend the image map above." | tee -a "$SUMMARY"
+            exit 1
+        fi
+        echo "   pg_restore reported only role/extension noise (exit $SRC_RESTORE_STATUS)" | tee -a "$SUMMARY"
     fi
     # Cookie is the fidelity-critical table the gate fingerprints below. Canonical
     # base dumps can have empty MessageRecord (messages still live in Message), so
