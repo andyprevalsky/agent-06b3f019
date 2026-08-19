@@ -6,7 +6,7 @@
 import { type Prisma, IntegrationType, IntegrationStatus, mergeJson } from './types';
 import { createLogger } from '../../providers/logger';
 import { sendSms } from '../../providers/smsQueue';
-import { getAdminPhone, isAnthropicApiKeyConfigured } from './config';
+import { getAdminPhone, isAnthropicApiKeyConfigured, isEmailProviderSlug } from './config';
 import {
   fetchClaudeCodeAccessToken,
   fetchPoolToken,
@@ -110,13 +110,45 @@ import {
 // Integration CRUD
 // ---------------------------------------------------------------------------
 
+/**
+ * Overlay each email integration's connected addresses from its credential rows.
+ *
+ * `config.connectedEmails` is a denormalized copy; the credential table is the
+ * source of truth. Any writer that replaced `config` wholesale (an OAuth start,
+ * a sync) silently dropped that copy and the UI's account chips vanished for a
+ * still-connected account. Deriving here means the response cannot disagree
+ * with reality, and a config that already lost the field self-heals on read.
+ */
+function withDerivedConnectedEmails<
+  T extends { name: string; config: unknown; emailCredentials: Array<{ email: string | null }> },
+>(integrations: T[]): T[] {
+  return integrations.map((integration) => {
+    if (!isEmailProviderSlug(integration.name)) return integration;
+
+    const derived = integration.emailCredentials
+      .map((c) => c.email)
+      .filter((e): e is string => e !== null && e !== '');
+    const base =
+      typeof integration.config === 'object' &&
+      integration.config !== null &&
+      !Array.isArray(integration.config)
+        ? (integration.config as Record<string, unknown>)
+        : {};
+
+    return {
+      ...integration,
+      config: { ...base, connectedEmail: derived[0] ?? null, connectedEmails: derived },
+    };
+  });
+}
+
 export async function getIntegrations(userId: string) {
   const queryStart = Date.now();
   const hasCachedDomains = repo.isAuthDomainsCached(userId);
 
   log.info('Fetching integrations', { userId, domainsCached: hasCachedDomains });
 
-  const integrations = await repo.findIntegrationsByUser(userId);
+  const integrations = withDerivedConnectedEmails(await repo.findIntegrationsByUser(userId));
   log.info('Integrations query done', { durationMs: Date.now() - queryStart });
 
   const authenticatedDomains = await repo.getAuthenticatedDomains(userId);

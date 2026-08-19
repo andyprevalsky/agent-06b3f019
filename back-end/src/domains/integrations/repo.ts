@@ -19,7 +19,12 @@ export async function findIntegrationsByUser(userId: string) {
     where: { userId },
     orderBy: { updatedAt: 'desc' },
     include: {
+      // Scoped to genuinely-connected accounts so callers can derive the
+      // connected-address list from the source of truth in this one query
+      // (no per-integration follow-up). An abandoned OAuth flow leaves a
+      // null-email, tokenless row, which must never surface as an account.
       emailCredentials: {
+        where: { email: { not: null }, accessToken: { not: null } },
         select: { email: true },
       },
     },
@@ -196,6 +201,56 @@ export async function upsertIntegrationForUpload(params: {
     update: {
       status: IntegrationStatus.SYNCING,
       config: params.config,
+    },
+  });
+}
+
+/**
+ * Reserve the integration row for an OAuth flow that is only just STARTING.
+ *
+ * Deliberately not `upsertIntegrationForUpload`: that helper REPLACES `config`
+ * wholesale, so merely opening the Google consent screen destroyed the
+ * `connectedEmails` the UI renders its account chips from. A user who then
+ * abandoned the flow never reached the callback that rewrites them, so a
+ * still-connected account silently lost its chips (prod, 2026-08-18).
+ *
+ * Nothing is known about the new grant yet, so this must be purely additive:
+ * merge the flow marker over existing config, and never downgrade a healthy
+ * integration's status — no credential has changed at this point.
+ */
+export async function upsertIntegrationForOAuthStart(params: {
+  userId: string;
+  name: string;
+  config: Record<string, unknown>;
+}) {
+  const existing = await prisma.integration.findUnique({
+    where: { userId_name: { userId: params.userId, name: params.name } },
+    select: { id: true, config: true, status: true },
+  });
+
+  if (existing === null) {
+    return prisma.integration.create({
+      data: {
+        userId: params.userId,
+        name: params.name,
+        type: IntegrationType.DATA_SOURCE,
+        status: IntegrationStatus.SYNCING,
+        config: params.config as Prisma.InputJsonValue,
+      },
+    });
+  }
+
+  const existingConfig =
+    typeof existing.config === 'object' &&
+    existing.config !== null &&
+    !Array.isArray(existing.config)
+      ? (existing.config as Record<string, unknown>)
+      : {};
+
+  return prisma.integration.update({
+    where: { id: existing.id },
+    data: {
+      config: { ...existingConfig, ...params.config } as Prisma.InputJsonValue,
     },
   });
 }

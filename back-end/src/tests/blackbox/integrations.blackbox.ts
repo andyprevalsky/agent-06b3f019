@@ -2412,6 +2412,109 @@ async function testEmailMessages_gmailNotConnected() {
   assertSchema(ErrorResponse, res.data, 'email messages not connected');
 }
 
+/**
+ * Regression (prod, 2026-08-18): starting an OAuth flow replaced `config`
+ * wholesale, so merely opening the consent screen destroyed `connectedEmails`.
+ * A user who abandoned the flow never reached the callback that rewrites them,
+ * and a still-connected account silently lost its UI account chips.
+ */
+async function testEmailOAuthStart_preservesConnectedEmailsOnAbandonedFlow() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      status: 'CONNECTED',
+      isActive: true,
+      config: {
+        provider: 'gmail',
+        contacts: 229,
+        connectedEmail: 'primary@gmail.com',
+        connectedEmails: ['primary@gmail.com', 'secondary@gmail.com'],
+      },
+    },
+  });
+
+  // Start a flow and then abandon it -- never hit the callback.
+  const res = await request(`${BASE_URL}/api/integrations/email/gmail/start`, {
+    method: 'POST',
+    headers: authHeaders(accessToken),
+  });
+  assert(res.status === 200 || res.status === 400, `oauth start responded ${res.status}`);
+
+  const after = await prisma.integration.findUnique({ where: { id: integration.id } });
+  const config = after?.config as {
+    connectedEmails?: unknown;
+    connectedEmail?: unknown;
+    contacts?: unknown;
+    startedAt?: unknown;
+  };
+  assert(
+    Array.isArray(config.connectedEmails) && config.connectedEmails.length === 2,
+    `abandoned OAuth start must preserve connectedEmails, got ${JSON.stringify(config.connectedEmails)}`
+  );
+  assert(
+    config.connectedEmail === 'primary@gmail.com',
+    `abandoned OAuth start must preserve connectedEmail, got ${String(config.connectedEmail)}`
+  );
+  assert(config.contacts === 229, 'unrelated config keys must survive an OAuth start');
+  assert(config.startedAt !== undefined, 'OAuth start must still record its flow marker');
+  assert(
+    after?.status === 'CONNECTED',
+    `a healthy integration must not be downgraded by starting a flow, got ${String(after?.status)}`
+  );
+}
+
+/**
+ * Even if some other writer already stripped the denormalized copy, the list
+ * response must still show the accounts: credentials are the source of truth.
+ */
+async function testGetIntegrations_derivesConnectedEmailsFromCredentials() {
+  const { accessToken, userId } = await createAnonSession();
+  const integration = await prisma.integration.create({
+    data: {
+      userId,
+      name: 'gmail',
+      type: 'DATA_SOURCE',
+      // Exactly the damaged prod shape: no connectedEmails, failed sync.
+      status: 'SYNC_FAILED',
+      isActive: true,
+      config: { provider: 'gmail', contacts: 229, messages: 533 },
+    },
+  });
+  await prisma.emailIntegrationCredential.createMany({
+    data: [
+      {
+        userId,
+        integrationId: integration.id,
+        provider: 'GMAIL',
+        email: 'live@roselabs.ai',
+        accessToken: 'access-live',
+        refreshToken: 'refresh-live',
+      },
+      // An abandoned flow leaves a null-email, tokenless row; it must not appear.
+      { userId, integrationId: integration.id, provider: 'GMAIL', email: null },
+    ],
+  });
+
+  const res = await request(`${BASE_URL}/api/integrations`, { headers: authHeaders(accessToken) });
+  assertStatus(res.status, 200, res.data);
+  const body = res.data as { integrations?: Array<{ name: string; config?: unknown }> };
+  const gmail = body.integrations?.find((i) => i.name === 'gmail');
+  const config = gmail?.config as { connectedEmails?: unknown; connectedEmail?: unknown };
+  assert(
+    Array.isArray(config.connectedEmails) &&
+      config.connectedEmails.length === 1 &&
+      config.connectedEmails[0] === 'live@roselabs.ai',
+    `stripped config must self-heal from credentials, got ${JSON.stringify(config.connectedEmails)}`
+  );
+  assert(
+    config.connectedEmail === 'live@roselabs.ai',
+    `connectedEmail must derive too, got ${String(config.connectedEmail)}`
+  );
+}
+
 async function testEmailGmailAccountDelete_removesOneCredential() {
   const { accessToken, userId } = await createAnonSession();
   const integration = await prisma.integration.create({
@@ -6353,6 +6456,14 @@ async function runAll() {
     {
       name: 'DELETE /email/gmail/accounts/:email removes one credential',
       fn: testEmailGmailAccountDelete_removesOneCredential,
+    },
+    {
+      name: 'POST /email/gmail/start abandoned flow preserves connectedEmails',
+      fn: testEmailOAuthStart_preservesConnectedEmailsOnAbandonedFlow,
+    },
+    {
+      name: 'GET / derives connectedEmails from credentials when config is stripped',
+      fn: testGetIntegrations_derivesConnectedEmailsFromCredentials,
     },
 
     // File upload validation
