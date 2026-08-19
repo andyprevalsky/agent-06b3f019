@@ -57,6 +57,13 @@ export type AuthAssistanceCompletionResult =
       status: 'completed';
       request: AuthAssistanceRequestRecord;
       steelSessionAuthId: string | null;
+      /**
+       * True when the attention row was already terminal before this completion —
+       * the deploy fence answered it with DEPLOY_INTERRUPTED. The credential is
+       * still captured (it is the whole point of the user signing in), but the
+       * fence marker is preserved and the dead generation is not signaled.
+       */
+      interrupted: boolean;
       workflowId: string;
     };
 
@@ -196,8 +203,13 @@ export async function completeAuthAssistanceForUser(
       where: { id },
       data: { completedAt: now },
     });
-    await tx.agentAttentionRequest.update({
-      where: { id },
+    // Compare-and-swap on the pending predicate, exactly like every other
+    // resolver (`gateResolution.resolveAndSignal`). An unconditional write would
+    // overwrite whatever already answered the row — in practice the deploy fence's
+    // DEPLOY_INTERRUPTED marker, erasing the only record that the handoff died with
+    // its workflow generation.
+    const answered = await tx.agentAttentionRequest.updateMany({
+      where: { id, userResponse: null },
       data: { userResponse: AUTH_ASSISTANCE_COMPLETED_RESPONSE },
     });
 
@@ -205,6 +217,7 @@ export async function completeAuthAssistanceForUser(
       status: 'completed' as const,
       request: completed,
       steelSessionAuthId,
+      interrupted: answered.count === 0,
       workflowId: request.attentionRequest.workflowId,
     };
   });
@@ -230,11 +243,23 @@ export async function completeAuthAssistanceForUser(
         });
       }
     }
-    await signalAuthAssistanceCompleted(
-      result.workflowId,
-      result.request.agentId,
-      result.request.id
-    );
+    if (result.interrupted) {
+      // `workflowId` is the generation snapshotted when the request was raised.
+      // It is terminated, and the replacement carries no `_signal_responses` entry
+      // for this id, so the signal can only fail. Resume is still correct — the
+      // surviving generation decides what to retry now that the credential exists.
+      log.warn('Auth assistance completed after its workflow generation was fenced', {
+        request_id: result.request.id,
+        agent_id: result.request.agentId,
+        workflow_id: result.workflowId,
+      });
+    } else {
+      await signalAuthAssistanceCompleted(
+        result.workflowId,
+        result.request.agentId,
+        result.request.id
+      );
+    }
     await resumeAgentWorkflow(result.request.agentId);
   }
 

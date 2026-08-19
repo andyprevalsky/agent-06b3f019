@@ -1,3 +1,4 @@
+import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
 import { broadcastAgentUpdate } from '../../providers/chat';
 import { classifyAgentFailureForSurface } from '../../providers/credentialPropagation';
 import { createLogger } from '../../providers/logger';
@@ -13,6 +14,7 @@ const NON_TERMINAL_STATUSES = new Set(['STARTING_UP', 'ACTIVE', 'PAUSED']);
 
 interface UpdateAgentStatusDependencies {
   cleanupPurchaseCards?: (agentId: string) => Promise<void>;
+  releaseBrowserSessions?: (agentId: string) => Promise<number>;
 }
 
 async function runTerminalAgentCleanup(
@@ -24,6 +26,18 @@ async function runTerminalAgentCleanup(
     await (dependencies.cleanupPurchaseCards ?? cleanupAgentPurchaseCards)(agentId);
   } catch (error) {
     log.warn('Terminal purchase-card cleanup unavailable; cron will retry', {
+      agent_id: agentId,
+      status,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  // A terminal agent is not running a browser any more; release the rented remote
+  // session with the same certainty we release its purchase cards. Hanging this off
+  // agent DELETION alone leaked one provider browser per finished agent.
+  try {
+    await (dependencies.releaseBrowserSessions ?? releaseAgentBrowserSessions)(agentId);
+  } catch (error) {
+    log.warn('Terminal browser-session release unavailable', {
       agent_id: agentId,
       status,
       error: error instanceof Error ? error.message : String(error),

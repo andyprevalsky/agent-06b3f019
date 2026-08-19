@@ -65,7 +65,7 @@ rules live in the validator: `scripts/rca_archive.py`.
 | `first_bad_boundary` | where data first went wrong                                                           |
 | `symptoms`           | the literal strings a future engineer would grep for — **the primary search surface** |
 | `tags`               | lowercase kebab keywords: technology + failure mode                                   |
-| `sources`            | provenance: `PR #N`, `commit <sha>`, `memory:<name>`, `plan:<path>`, `agent <uuid>`   |
+| `sources`            | provenance: `PR #N`, `commit <sha>`, `memory:<name>`, `plan:<path>`, `agent <uuid>`, `fleet run <run-id>` |
 | `repro`              | the checked-in test that fails pre-fix and passes post-fix, or `none-recorded`        |
 | `status`             | `fixed`, `open`, `mitigated`, `wontfix`, `superseded`                                 |
 

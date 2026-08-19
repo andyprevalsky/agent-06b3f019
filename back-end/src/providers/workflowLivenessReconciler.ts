@@ -23,6 +23,7 @@
  */
 
 import { WorkflowNotFoundError } from '@temporalio/client';
+import { releaseAgentBrowserSessions } from './agentCleanup';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import {
@@ -126,7 +127,15 @@ export async function findLivenessCandidates(
  * without producing a second transition.
  */
 async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): Promise<boolean> {
-  const inProgressTools = await captureInProgressWorkflowTools(candidate.agentId);
+  // Reconcile the generation that actually died — `candidate.workflowId` — not the
+  // agent id. They differ for every agent that already survived a deploy
+  // (`<agentId>:replacement:<token>`), and chips plus attention requests are both
+  // keyed on the generation that wrote them, so defaulting to the agent id silently
+  // matched nothing and left the chip IN_PROGRESS and the request pending forever.
+  const inProgressTools = await captureInProgressWorkflowTools(
+    candidate.agentId,
+    candidate.workflowId
+  );
 
   const { count } = await prisma.agent.updateMany({
     where: {
@@ -140,7 +149,11 @@ async function sealAgent(candidate: LivenessCandidate, temporalStatus: string): 
   if (count === 0) return false;
 
   // Close dangling IN_PROGRESS chips and open approvals so the UI settles too.
-  await finalizeInterruptedWorkflowTools(candidate.agentId, candidate.agentId, inProgressTools);
+  await finalizeInterruptedWorkflowTools(candidate.agentId, candidate.workflowId, inProgressTools);
+  // This seal writes the row directly, so it bypasses `updateAgentStatus`'s terminal
+  // hook. Release the rented browser here too, or an out-of-band kill leaves a
+  // provider session running forever (prod agent bfcfc074-0e61-41ef-b072-23376583b85a).
+  await releaseAgentBrowserSessions(candidate.agentId);
   log.warn('Sealed agent whose workflow was already closed', {
     agentId: candidate.agentId,
     workflowId: candidate.workflowId,

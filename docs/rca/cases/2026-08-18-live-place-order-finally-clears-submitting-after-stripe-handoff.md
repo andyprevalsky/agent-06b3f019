@@ -21,7 +21,7 @@ tags:
 sources:
   - agent 4a2ff6aa-fd5d-4d6d-bbad-f3e09380281a
   - fleet run 20260818-235000-804185
-  - prior fix PR #987 (Place order without merchant PAN)
+  - PR #987 (prior fix — Place order without merchant PAN)
 repro: front-end/src/tests/blackbox/test-payment-confirmation.blackbox.tsx (keeps Place order submitting and exposes Stripe continue link after handoff)
 status: open
 ---
