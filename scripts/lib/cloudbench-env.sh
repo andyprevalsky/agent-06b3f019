@@ -502,18 +502,21 @@ cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
 }
 
 cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
-  # Fly guests can fetch only objects reachable from an advertised origin ref.
-  # When the requested local commit is unpushed, run from its fetchable
-  # origin/main ancestor and let create-worktree-patch carry the complete
-  # committed + uncommitted workspace delta.
+  # Fly guests can fetch only objects already reachable from origin/main.
+  # A SHA that exists only on a pushed feature branch is not guest-fetchable:
+  # warm-box git-sync has no interactive GitHub credentials, and treating any
+  # origin/* containment as fetchable made --refresh-deps fetch a feature SHA
+  # over unauthenticated HTTPS (`could not read Username for 'https://github.com'`).
+  # When the requested commit is not on origin/main, run from that ancestor and
+  # let create-worktree-patch carry the complete committed + uncommitted delta.
   local root="$1" requested="$2" allow_patch="$3" resolved base
   if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
     # Preserve remote-only branch/tag names that this checkout cannot resolve.
     printf '%s' "$requested"
     return 0
   fi
-  if git -C "$root" branch -r --contains "$resolved" --format='%(refname:short)' 2>/dev/null \
-      | grep -q '^origin/'; then
+  if git -C "$root" rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1 \
+      && git -C "$root" merge-base --is-ancestor "$resolved" origin/main 2>/dev/null; then
     printf '%s' "$resolved"
     return 0
   fi
