@@ -5,6 +5,8 @@
  * Used by hooks and components via useMemo. No React hooks here.
  */
 
+import { BROWSER_INIT_ACTION_TYPES } from '@/lib/backendToolNames';
+
 import { DEFAULT_CONTEXT_WINDOW, PAUSED_STATUSES } from '../config';
 import type {
   Agent,
@@ -115,7 +117,7 @@ export function sortAgents(agents: Agent[]): Agent[] {
 
 const TERMINAL_BROWSER_ACTION_TYPES = new Set(['task_complete', 'session_paused']);
 const TERMINAL_BROWSER_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
-const BROWSER_INIT_ACTION_TYPES = new Set(['browser', 'system', 'session_started', 'session_init']);
+
 const BROWSER_CLEANUP_ACTION_TYPES = new Set(['diagnostics', 'network_recording', 'recording']);
 
 function isBrowserInitMessage(message: Message): boolean {

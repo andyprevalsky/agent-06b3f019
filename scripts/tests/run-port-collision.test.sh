@@ -89,6 +89,34 @@ if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; t
 fi
 echo "PASS: isolated benchmark runs survive a slow docker info without losing Docker"
 
+# A healthy `docker info` alone must select Docker, with no container-name check.
+# DOCKER_OK is precisely what makes run.sh *create* the workspace DB container
+# (create_db_container), so demanding the container already exist is circular: a
+# first-ever workspace has none, would be denied Docker, and would silently run
+# on the shared system Postgres forever. Do not "harden" the fast path by
+# requiring container_may_not_exist_yet here.
+HEALTHY_DOCKER_PS_CALLS=0
+docker_info_quick() {
+    return 0
+}
+docker_ps_ports_quick() {
+    HEALTHY_DOCKER_PS_CALLS=$((HEALTHY_DOCKER_PS_CALLS + 1))
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-never-created'; then
+    echo "FAIL: a healthy docker info must select Docker for a not-yet-created workspace DB" >&2
+    exit 1
+fi
+if ! docker_available_for_workspace_db 'victoria-db-never-created' true; then
+    echo "FAIL: a healthy docker info must select Docker for an isolated run too" >&2
+    exit 1
+fi
+[ "$HEALTHY_DOCKER_PS_CALLS" -eq 0 ] || {
+    echo "FAIL: a healthy docker info must not need a container listing" >&2
+    exit 1
+}
+echo "PASS: a healthy docker info selects Docker without requiring an existing container"
+
 DOCKER_COLD_SEED_PROBES=0
 docker_info_quick() {
     DOCKER_COLD_SEED_PROBES=$((DOCKER_COLD_SEED_PROBES + 1))
