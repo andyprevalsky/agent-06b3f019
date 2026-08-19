@@ -5689,6 +5689,9 @@ def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls
         assert bench._local_benchmark_task_queue("http://localhost:55020") == "navi-agent-tasks-washington"
         assert bench._local_benchmark_task_queue("http://127.0.0.1:55020") == "navi-agent-tasks-washington"
         assert bench._local_benchmark_task_queue("https://navi-j9a9.onrender.com") is None
+        os.environ["CONDUCTOR_WORKSPACE_NAME"] = "flt-agent-payment-production-purchase-1"
+        # --prod must not divert onto an isolated queue the shared API cannot feed.
+        assert bench._local_benchmark_task_queue("https://navi-j9a9.onrender.com") is None
     finally:
         if previous_workspace is None:
             os.environ.pop("CONDUCTOR_WORKSPACE_NAME", None)

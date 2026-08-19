@@ -1759,6 +1759,14 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
 
 
 def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
+    """Local benchmark agents are scheduled onto the queue the harness preflights.
+
+    Production ``--prod`` agents must stay on the shared production Temporal
+    queue (generation-scoped workers). Cloudbench starts local workers too, but
+    they do not reliably consume prod-API workflows on an isolated queue —
+    routing ``--prod`` there leaves agents STARTING_UP until the liveness
+    reconciler fails them (fleet 8bfe3691).
+    """
     if not _is_local_base_url(base_url):
         return None
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")

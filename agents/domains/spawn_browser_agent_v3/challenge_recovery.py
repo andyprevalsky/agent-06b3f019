@@ -331,6 +331,39 @@ async def verify_live_page_cleared_challenge(
     )
 
 
+async def live_tab_looks_challenged(page: Any) -> bool:
+    """True when the live tab's current document still looks challenged.
+
+    Used to no-op LLM-requested ``recover_from_challenge`` when the page is
+    already clean — avoids burning the step budget on recovery loops that the
+    model invents from network noise. Does NOT replace provider-exit recovery:
+    callers must still run full recovery when ``provider_exit_rejected`` is set
+    (page shell can look clean while a critical third-party resource is blocked).
+    """
+    try:
+        snapshot = await asyncio.wait_for(
+            asyncio.gather(
+                page.title(),
+                page.locator("body").inner_text(timeout=2_000),
+                page.content(),
+                return_exceptions=True,
+            ),
+            timeout=15,
+        )
+    except Exception:
+        # Unknown page state — do not claim "clean" and skip recovery.
+        return True
+    title = snapshot[0] if isinstance(snapshot[0], str) else ""
+    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+    html = snapshot[2] if isinstance(snapshot[2], str) else ""
+    return page_looks_challenged(
+        status=None,
+        title=title[:1_000],
+        body_text=body_text[:20_000],
+        html=html[:100_000],
+    )
+
+
 _PAYMENT_DOCUMENT_URL_MARKERS = (
     "checkout",
     "payment",

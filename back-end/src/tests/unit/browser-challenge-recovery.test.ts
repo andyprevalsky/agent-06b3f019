@@ -345,6 +345,7 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
   assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
 
+
 function testPreferredConfigCompatibility(): void {
   const preferred = {
     version: 1,
@@ -567,6 +568,8 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
   assert.strictEqual(kernelCalls, 1);
   assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
 }
+
+
 
 function testRecoveryRequestSchema(): void {
   const parsed = recoverChallengeSchema.parse({

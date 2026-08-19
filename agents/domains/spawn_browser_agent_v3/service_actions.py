@@ -43,6 +43,88 @@ STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
 STEEL_VIEWPORT_CROP_HEIGHT = 800
 
+# Host labels that almost always serve machine/API surfaces, not HTML documents
+# the agent should browse. Vendor-agnostic — blocks api.*, js.*, /v1/, /health, …
+_API_SURFACE_HOST_LABELS = frozenset(
+    {
+        "api",
+        "r",
+        "q",
+        "js",
+        "files",
+        "hooks",
+        "events",
+        "merchant-ui-api",
+        "graphql",
+        "ws",
+        "wss",
+    }
+)
+_API_SURFACE_PATHS = frozenset(
+    {
+        "/health",
+        "/healthz",
+        "/healthcheck",
+        "/ready",
+        "/readyz",
+        "/livez",
+        "/status",
+        "/ping",
+    }
+)
+
+
+def url_looks_like_api_surface(url: str) -> bool:
+    """True when a URL is a machine/API surface, not a browsable document.
+
+    Network-log hosts (api.*, /v1/*, /healthcheck) are not pages — navigating
+    there after reading traffic strands the agent. Vendor-agnostic heuristic.
+    """
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "/").lower().rstrip("/") or "/"
+    if host:
+        label = host.split(".", 1)[0]
+        if label in _API_SURFACE_HOST_LABELS:
+            return True
+    if path in _API_SURFACE_PATHS:
+        return True
+    if path.startswith(("/v1/", "/v2/", "/v3/", "/v4/")):
+        return True
+    if path in {"/v1", "/v2", "/v3", "/v4"}:
+        return True
+    return False
+
+
+def navigation_leaves_pinned_host(
+    *,
+    current_url: str,
+    target_url: Optional[str],
+    pin_host: Optional[str],
+    action: str,
+) -> bool:
+    """True when a nav action would leave the post-recovery pinned browse host."""
+    pin = (pin_host or "").lower().strip(".")
+    if not pin:
+        return False
+    current_host = (urlparse(current_url or "").hostname or "").lower()
+    if not current_host:
+        return False
+    on_pin = current_host == pin or current_host.endswith(f".{pin}")
+    if not on_pin:
+        # Clicks may have already moved us off the pin — do not trap elsewhere.
+        return False
+    if action == "navback":
+        return True
+    if action in {"goto", "open_new_tab"}:
+        target_host = (urlparse(target_url or "").hostname or "").lower()
+        if not target_host:
+            return True
+        if target_host == pin or target_host.endswith(f".{pin}"):
+            return False
+        return True
+    return False
+
 
 # ========================================
 # ELEMENT DESCRIPTION
@@ -480,6 +562,51 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
+    navigation_pin_host: Optional[str] = None
+
+
+async def _refuse_navigation(
+    context: _ActionContext,
+    *,
+    action: str,
+    error: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = {"success": False, "error": error, "current_url": context.current_url}
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action=action,
+        thinking=context.thinking,
+        params=params,
+        result=result,
+    )
+    return result
+
+
+def _navigation_guard_error(
+    context: _ActionContext,
+    *,
+    action: str,
+    target_url: Optional[str] = None,
+) -> Optional[str]:
+    if target_url and url_looks_like_api_surface(target_url):
+        return (
+            f"Refusing navigation to API/non-document URL {target_url!r}. "
+            "Network request hosts are not pages — stay on the current document "
+            f"({context.current_url or 'current page'}) and continue the task there."
+        )
+    if navigation_leaves_pinned_host(
+        current_url=context.current_url,
+        target_url=target_url,
+        pin_host=context.navigation_pin_host,
+        action=action,
+    ):
+        return (
+            f"Refusing to leave recovered page host {context.navigation_pin_host!r}. "
+            f"Current page URL: {context.current_url}. Continue the task on this page "
+            "(do not go back or navigate to another host until this page is done)."
+        )
+    return None
 
 
 _INTERACTION_ACTIONS = {
@@ -723,6 +850,18 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
     from browser_use.browser.events import GoBackEvent, NavigateToUrlEvent, WaitEvent
 
     if context.action_name == "goto":
+        guard = _navigation_guard_error(
+            context,
+            action="goto",
+            target_url=context.params.get("url") or "",
+        )
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="goto",
+                error=guard,
+                params={"url": context.params.get("url")},
+            )
         return await _execute_goto(
             session=context.session,
             dom_service=context.dom_service,
@@ -735,6 +874,9 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             prepare_credentials_for_url=context.prepare_credentials_for_url,
         )
     if context.action_name == "navback":
+        guard = _navigation_guard_error(context, action="navback")
+        if guard:
+            return await _refuse_navigation(context, action="navback", error=guard)
         event = context.session.event_bus.dispatch(GoBackEvent())
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -779,6 +921,15 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
 
     url = context.params.get("url") or "about:blank"
+    if context.action_name == "open_new_tab":
+        guard = _navigation_guard_error(context, action="open_new_tab", target_url=url)
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="open_new_tab",
+                error=guard,
+                params={"url": url},
+            )
     event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -892,6 +1043,7 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
+    navigation_pin_host: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -941,6 +1093,7 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
+            navigation_pin_host=navigation_pin_host,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)
@@ -2165,7 +2318,7 @@ async def _execute_goto(
     navigation_waiter = wait_for_navigation or wait_for_navigation_ready
     await navigation_waiter(dom_service, url=url)
 
-    result: Dict[str, Any] = {"success": True, "message": "", "current_url": url}
+    result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
         # The preparation callback consumes encrypted credential material
         # internally. Only its deliberately non-sensitive summary may enter

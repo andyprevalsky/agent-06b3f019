@@ -5743,11 +5743,17 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
-    try_offset = recovery_block.index("try:")
-    guard_offset = recovery_block.index("if playwright_browser is None or input_page is None:")
+    # Clean-page skip may finalize early; measure the full recovery try/except path
+    # after that optional short-circuit.
     capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
-    except_offset = recovery_block.index("except Exception as exc:")
-    finish_offset = recovery_block.index("await _finalize_browser_recovery_action_result(")
+    try_offset = recovery_block.rfind("try:", 0, capture_offset)
+    guard_offset = recovery_block.index(
+        "if playwright_browser is None or input_page is None:", try_offset
+    )
+    except_offset = recovery_block.index("except Exception as exc:", capture_offset)
+    finish_offset = recovery_block.index(
+        "await _finalize_browser_recovery_action_result(", except_offset
+    )
 
     assert try_offset < guard_offset < capture_offset < except_offset < finish_offset
     assert 'action_result = {"success": False, "error": error_message}' in recovery_block
@@ -11581,6 +11587,184 @@ async def test_execute_goto_auto_adds_https():
     )
     assert out["success"] is True
 
+
+
+async def test_live_tab_looks_challenged_helpers():
+    """Clean live tabs must skip recovery; challenged tabs must still recover."""
+    from domains.spawn_browser_agent_v3.challenge_recovery import (
+        live_tab_looks_challenged,
+        page_looks_challenged,
+    )
+
+    class _CleanPage:
+        async def title(self):
+            return "Buy tickets"
+
+        def locator(self, _sel):
+            class _Body:
+                async def inner_text(self, timeout=0):
+                    return (
+                        "General Admission Tier 1 $25.00 Add to cart Select "
+                        "quantity and continue to checkout now."
+                    )
+
+            return _Body()
+
+        async def content(self):
+            return "<main>General Admission</main>"
+
+    class _ChallengedPage:
+        async def title(self):
+            return "Access denied"
+
+        def locator(self, _sel):
+            class _Body:
+                async def inner_text(self, timeout=0):
+                    return "Attention Required! | Cloudflare"
+
+            return _Body()
+
+        async def content(self):
+            return "<html><body>Attention Required! | Cloudflare</body></html>"
+
+    assert page_looks_challenged(
+        status=200,
+        title="Access denied",
+        body_text="Attention Required! | Cloudflare",
+        html="",
+    )
+    assert await live_tab_looks_challenged(_CleanPage()) is False
+    assert await live_tab_looks_challenged(_ChallengedPage()) is True
+
+
+def test_url_looks_like_api_surface_and_navigation_pin():
+    """Vendor-agnostic: API surfaces + post-recovery host pin (fleet 7c0cce61)."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        navigation_leaves_pinned_host,
+        url_looks_like_api_surface,
+    )
+
+    assert url_looks_like_api_surface("https://api.example.com/") is True
+    assert url_looks_like_api_surface("https://api.example.com/v1/payment_pages") is True
+    assert url_looks_like_api_surface("https://example.com/healthcheck") is True
+    assert url_looks_like_api_surface("https://checkout.example.com/c/pay/cs_live_x") is False
+    assert url_looks_like_api_surface("https://www.example.com/cart") is False
+
+    pin = "checkout.example.com"
+    current = "https://checkout.example.com/c/pay/cs_live_x"
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="navback",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://api.example.com/",
+            pin_host=pin,
+            action="goto",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://www.merchant.com/cart",
+            pin_host=pin,
+            action="goto",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://checkout.example.com/c/pay/other",
+            pin_host=pin,
+            action="goto",
+        )
+        is False
+    )
+    # Off the pin already — do not trap.
+    assert (
+        navigation_leaves_pinned_host(
+            current_url="https://www.merchant.com/cart",
+            target_url="https://elsewhere.com/",
+            pin_host=pin,
+            action="goto",
+        )
+        is False
+    )
+
+
+async def test_execute_goto_refuses_api_surface_urls():
+    """RCA cement: fleet 7c0cce61 navigated to an API host after Checkout recovery."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "goto", "params": {"url": "https://api.example.com/"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+    )
+    assert out["success"] is False
+    assert "API/non-document" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+    ah.record_action.assert_awaited_once()
+
+
+async def test_execute_navback_refuses_when_host_pinned():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "navback", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_pin_host="checkout.example.com",
+    )
+    assert out["success"] is False
+    assert "leave recovered page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+    ah.record_action.assert_awaited_once()
+
+
+def test_recovery_skips_when_live_tab_already_clear():
+    """LLM-invented recovery on a clean page must no-op (no host special-cases)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    assert "live_tab_looks_challenged" in recovery_block
+    assert "skipped_clean_page" in recovery_block
+    assert "provider_exit_rejected" in recovery_block
+    assert "is_hosted_stripe_checkout_url" not in recovery_block
+    assert "healthcheck_noise" not in recovery_block
+    assert "api.stripe.com" not in recovery_block
+    # Skip must run before capturing storage / rotating providers.
+    skip_offset = recovery_block.index("skipped_clean_page")
+    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
+    assert skip_offset < capture_offset
+
+
 async def test_execute_goto_injects_local_storage():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -16003,6 +16187,14 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    await r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
+    await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record(
+        "recovery_skips_clean_live_tab",
+        test_recovery_skips_when_live_tab_already_clear,
+    )
     await r.record_async("execute_goto_injects_ls", test_execute_goto_injects_local_storage)
     await r.record_async(
         "execute_goto_injects_ls_error",

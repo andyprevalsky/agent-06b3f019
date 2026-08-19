@@ -60,6 +60,7 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
+    live_tab_looks_challenged,
     page_looks_challenged,
     probe_storage_state,
     recover_from_challenge,
@@ -4933,6 +4934,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # Sticky hard filter: once a payment-CDN block triggered recovery on this
     # task, later CF-only recoveries still require Stripe.js-capable configs.
     require_payment_cdn = False
+    # After a successful challenge recovery, pin goto/navback to the recovered
+    # host so the model cannot leave the cleared page for network-log thrash.
+    navigation_pin_host: Optional[str] = None
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
@@ -6162,6 +6166,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_network_recorder=browser_network_recorder,
                     current_auth_realm=auth_realm,
                     prepare_credentials_for_url=_prepare_credentials_for_url,
+                    navigation_pin_host=navigation_pin_host,
                 )
 
                 if result.get("status") == "needs_write_approval":
@@ -6923,6 +6928,64 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 recovery_call_id = _browser_action_tool_call_id(llm_result)
                 logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
+                provider_exit_rejected = bool(
+                    unified_action.get("params", {}).get("provider_exit_rejected")
+                )
+                # If the live tab is already clean and this was not a hard
+                # provider-exit rejection, skip — avoids recovery loops the model
+                # invents from third-party network noise on an otherwise fine page.
+                if (
+                    not provider_exit_rejected
+                    and input_page is not None
+                    and not await live_tab_looks_challenged(input_page)
+                ):
+                    skip_message = (
+                        f"Current page does not look challenged"
+                        + (f" ({current_url})" if current_url else "")
+                        + ". Continue the task on this page — do not start "
+                        "challenge recovery unless the document itself is blocked."
+                    )
+                    if current_url:
+                        from urllib.parse import urlparse as _urlparse_pin
+
+                        pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
+                        if pin_host:
+                            navigation_pin_host = pin_host
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Page already clear — skip challenge recovery",
+                        task_id=task_id,
+                        message=skip_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={
+                            "recoveryStage": "skipped_clean_page",
+                            "resumeUrl": current_url,
+                        },
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": skip_message,
+                        "recovery_action": "skipped_clean_page",
+                        "current_url": current_url,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason=recovery_reason,
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state=browser_state,
+                        unified_action=unified_action,
+                        recovery_call_id=recovery_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
+
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
@@ -7169,6 +7232,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         recovery_message = (
                             "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
                         )
+                    if current_url:
+                        recovery_message = (
+                            f"{recovery_message} Current page URL: {current_url}. "
+                            "Continue the task on this page."
+                        )
+                        from urllib.parse import urlparse as _urlparse_pin
+
+                        pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
+                        if pin_host:
+                            navigation_pin_host = pin_host
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",
@@ -7183,6 +7256,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             "provider": config_result.get("provider") if config_result else None,
                             "proxyTier": config_result.get("proxy_tier") if config_result else None,
                             "configKey": config_result.get("config_key") if config_result else None,
+                            "resumeUrl": current_url,
                         },
                     )
                     action_result = {
@@ -7193,6 +7267,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         "proxy_tier": config_result.get("proxy_tier") if config_result else None,
                         "config_key": config_result.get("config_key") if config_result else None,
                         "removed_cookie_count": len(recovery.removed_cookie_keys),
+                        "current_url": current_url,
                     }
                 except Exception as exc:
                     error_message = extract_error_message(exc)
@@ -7659,6 +7734,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
+                        navigation_pin_host=navigation_pin_host,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
