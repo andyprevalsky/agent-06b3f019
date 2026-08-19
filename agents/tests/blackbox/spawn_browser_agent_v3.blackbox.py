@@ -11638,8 +11638,9 @@ async def test_live_tab_looks_challenged_helpers():
 
 
 def test_url_looks_like_api_surface_and_navigation_pin():
-    """Vendor-agnostic: API surfaces + post-recovery host pin (fleet 7c0cce61)."""
+    """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
     from domains.spawn_browser_agent_v3.service_actions import (
+        effective_navigation_pin_host,
         navigation_leaves_pinned_host,
         url_looks_like_api_surface,
         _navigation_guard_error,
@@ -11651,6 +11652,8 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     assert url_looks_like_api_surface("https://example.com/healthcheck") is True
     assert url_looks_like_api_surface("https://checkout.example.com/c/pay/cs_live_x") is False
     assert url_looks_like_api_surface("https://www.example.com/cart") is False
+    # Single-letter / vendor CDN labels are not special-cased.
+    assert url_looks_like_api_surface("https://r.example.com/") is False
 
     pin = "checkout.example.com"
     current = "https://checkout.example.com/c/pay/cs_live_x"
@@ -11701,7 +11704,32 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         is False
     )
 
-    # Payment-document stay: navback refused; merchant→checkout allowed.
+    # Cross-origin handoff: live host ≠ session origin → pin to live host.
+    assert (
+        effective_navigation_pin_host(
+            current_url=current,
+            recovery_pin_host=None,
+            origin_base_domain="merchant.com",
+        )
+        == "checkout.example.com"
+    )
+    assert (
+        effective_navigation_pin_host(
+            current_url="https://www.merchant.com/cart",
+            recovery_pin_host=None,
+            origin_base_domain="merchant.com",
+        )
+        is None
+    )
+    assert (
+        effective_navigation_pin_host(
+            current_url="https://www.merchant.com/cart",
+            recovery_pin_host="www.merchant.com",
+            origin_base_domain="merchant.com",
+        )
+        == "www.merchant.com"
+    )
+
     ctx = _ActionContext(
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
@@ -11728,8 +11756,9 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         current_auth_realm="",
         prepare_credentials_for_url=None,
         navigation_pin_host=None,
+        navigation_origin_base_domain="merchant.com",
     )
-    assert "navback away from payment page" in (_navigation_guard_error(ctx, action="navback") or "")
+    assert "leave pinned page host" in (_navigation_guard_error(ctx, action="navback") or "")
     ctx.action_name = "goto"
     assert (
         _navigation_guard_error(
@@ -11737,16 +11766,19 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         )
         is not None
     )
-    # Hosted checkout → another checkout/pay document stays allowed.
+    # Same handoff host stays allowed.
     assert (
         _navigation_guard_error(
             ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
         )
         is None
     )
+    # Still on origin domain — no handoff pin; free to navigate.
+    ctx.current_url = "https://www.merchant.com/cart"
+    assert _navigation_guard_error(ctx, action="navback") is None
     assert (
         _navigation_guard_error(
-            ctx, action="goto", target_url="https://www.shop.com/checkout/confirm"
+            ctx, action="goto", target_url="https://www.merchant.com/other"
         )
         is None
     )
@@ -11789,9 +11821,44 @@ async def test_execute_navback_refuses_when_host_pinned():
         navigation_pin_host="checkout.example.com",
     )
     assert out["success"] is False
-    assert "leave recovered page host" in out["error"]
+    assert "leave pinned page host" in out["error"]
     session.event_bus.dispatch.assert_not_called()
     ah.record_action.assert_awaited_once()
+
+
+async def test_execute_navback_refuses_on_cross_origin_handoff():
+    """Place-order handoff sticks without recovery pin or path allowlists (ea340c81)."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "navback", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "leave pinned page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+    out_goto = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "goto",
+            "params": {"url": "https://www.merchant.com/test_payment"},
+        },
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_goto["success"] is False
+    assert "leave pinned page host" in out_goto["error"]
+    session.event_bus.dispatch.assert_not_called()
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -11811,10 +11878,24 @@ def test_recovery_skips_when_live_tab_already_clear():
     assert "is_hosted_stripe_checkout_url" not in recovery_block
     assert "healthcheck_noise" not in recovery_block
     assert "api.stripe.com" not in recovery_block
+    assert "target_looks_like_payment_document" not in recovery_block
     # Skip must run before capturing storage / rotating providers.
     skip_offset = recovery_block.index("skipped_clean_page")
     capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
     assert skip_offset < capture_offset
+
+
+def test_navigation_guard_has_no_endpoint_path_allowlists():
+    """Nav guards must not special-case payment/checkout path markers."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    source = inspect.getsource(service_actions._navigation_guard_error)
+    assert "target_looks_like_payment_document" not in source
+    assert "payment page" not in source
+    assert "effective_navigation_pin_host" in source
+    assert "url_looks_like_api_surface" in source
 
 
 async def test_execute_goto_injects_local_storage():
@@ -16243,6 +16324,14 @@ async def run_all_tests():
     await r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record_async(
+        "navback_refuses_cross_origin_handoff",
+        test_execute_navback_refuses_on_cross_origin_handoff,
+    )
+    await r.record(
+        "nav_guard_no_endpoint_path_allowlists",
+        test_navigation_guard_has_no_endpoint_path_allowlists,
+    )
     await r.record(
         "recovery_skips_clean_live_tab",
         test_recovery_skips_when_live_tab_already_clear,
