@@ -6956,6 +6956,28 @@ def test_refresh_deps_mode_contract() -> None:
     assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
 
 
+def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
+    """RCA 2026-08-19: --refresh-deps fetched a private SHA with optional
+    box-side $GITHUB_TOKEN. The warm-box ssh login had no token, so git asked
+    for a username on https://github.com and aborted the whole fleet before any
+    task machine started ('exact remote checkout failed'). Guest drivers already
+    use cloudbench-fetch-ref.sh + CLOUDBENCH_GITHUB_TOKEN_B64; maintenance must
+    use that same controller-token path and fail closed when it is missing."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = cloud[cloud.index("warm_source_fetch_ref() {") : cloud.index("ssh_exec() {")]
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
+    wmh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert "cloudbench-fetch-ref.sh" in helper
+    assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
+    assert "No controller GitHub token" in helper
+    assert "warm_source_fetch_ref" in refresh
+    assert "warm_source_fetch_ref" in wmh
+    for mode in (refresh, wmh, helper):
+        assert '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' not in mode
+        assert "checkout -f FETCH_HEAD" not in mode
+
+
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the

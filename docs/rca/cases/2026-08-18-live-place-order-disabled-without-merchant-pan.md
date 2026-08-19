@@ -21,7 +21,6 @@ tags:
   - hosted-checkout
 sources:
   - agent bc7e1dc0-b405-4f20-975b-e15173cb832e
-  - fleet run 20260818-230924-743009
 repro: front-end/src/tests/blackbox/test-payment-confirmation.blackbox.tsx (live Place order enabled without merchant PAN; checkout called without last4)
 status: open
 ---

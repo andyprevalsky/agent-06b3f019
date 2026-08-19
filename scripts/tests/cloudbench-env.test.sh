@@ -881,6 +881,38 @@ if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
   fail "the shippable patch must still exclude append-only history ledgers"
 fi
 
+# A commit that exists only on a pushed feature branch is NOT guest-fetchable.
+# Fly guests authenticate through the controller token helper; treating any
+# origin/* containment as "already fetchable" made --refresh-deps fetch a
+# feature SHA over unauthenticated HTTPS and abort the fleet
+# (could not read Username for 'https://github.com').
+feature_repo="$TMP_ROOT/fetchable-ref"
+git init -q "$feature_repo"
+git -C "$feature_repo" config user.email cloudbench-test@example.com
+git -C "$feature_repo" config user.name cloudbench-test
+printf 'main\n' > "$feature_repo/payload.txt"
+git -C "$feature_repo" add payload.txt
+git -C "$feature_repo" commit -qm main
+git -C "$feature_repo" branch -M main
+git init -q --bare "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" remote add origin "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" push -q origin HEAD:main
+main_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" checkout -q -b cursor/example-53b6
+printf 'feature\n' >> "$feature_repo/payload.txt"
+git -C "$feature_repo" commit -qam feature
+git -C "$feature_repo" push -q origin HEAD:cursor/example-53b6
+feature_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" fetch -q origin
+resolved="$(cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1)"
+[ "$resolved" = "$main_sha" ] \
+  || fail "fetchable_ref must use origin/main for a feature-only SHA (got $resolved, want $main_sha)"
+if ! cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1 >/dev/null 2>"$TMP_ROOT/fetchable.err"; then
+  fail "allow-local-patch must succeed by falling back to origin/main"
+fi
+grep -Fq 'not on origin' "$TMP_ROOT/fetchable.err" \
+  || fail "fetchable_ref must explain that a feature-only SHA is not guest-fetchable"
+
 # A genuinely broken generation (unresolvable base ref) stays a hard failure.
 prepare_rc=0
 cloudbench_prepare_workspace_patch "$patch_repo" "definitely-not-a-ref" "$prepared_patch" \
