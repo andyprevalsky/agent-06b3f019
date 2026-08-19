@@ -77,10 +77,8 @@ function benchmarkModeEnabled(): boolean {
  * onto `chargeAndIssueCard` so `stripeHold` / `payment_approval` stay reachable.
  * Never honored in production process env: `benchmarkModeEnabled()` is false there.
  */
-export const BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH_ENV =
-  'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH';
-export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID =
-  '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+export const BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH_ENV = 'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH';
+export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 
 export function benchmarkForceCustomerPurchasePath(): boolean {
   if (!benchmarkModeEnabled()) return false;

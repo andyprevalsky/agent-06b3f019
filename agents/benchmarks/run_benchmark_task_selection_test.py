@@ -108,7 +108,7 @@ def test_payment_fixture_guards_identity_and_funds_non_admin_credit():
         repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts"
     ).read_text()
 
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "if (isAdminUser(userId))" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "pg_advisory_xact_lock" in fixture

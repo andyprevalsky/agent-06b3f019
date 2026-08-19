@@ -3,9 +3,9 @@ import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client
 import Stripe from 'stripe';
 import {
   BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID,
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
   BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
 } from '../src/domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';

@@ -311,11 +311,13 @@ async function benchmarkPaymentIdentityProducesTheAssertedStripeHold(): Promise<
   );
 }
 
-
 async function adminWithForcedCustomerPathProducesStripeHold(): Promise<void> {
   const userId = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID;
   assert(userId === ADMIN_USER_ID, 'sandbox lifecycle run-user must be the hardcoded admin');
-  assert(isAdminUser(userId), 'sandbox lifecycle run-user must remain an admin for unlimited credits');
+  assert(
+    isAdminUser(userId),
+    'sandbox lifecycle run-user must remain an admin for unlimited credits'
+  );
   const fingerprint = `admin-force-hold-${RUN_ID}-${randomUUID()}`;
   const provider = new FakeCardProvider();
   const walletFundingProvider = new FakeWalletFundingProvider();
@@ -406,27 +408,24 @@ async function forceFlagWithoutBenchmarkModeKeepsAdminPath(): Promise<void> {
     create: { userId: ADMIN_USER_ID, isAnonymous: true },
   });
   try {
-    await withForcePathEnv(
-      { BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH: '1' },
-      async () => {
-        assert(
-          !benchmarkForceCustomerPurchasePath(),
-          'force flag must be inert when BENCHMARK_MODE and BENCHMARK_ISOLATED_RUN are unset'
+    await withForcePathEnv({ BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH: '1' }, async () => {
+      assert(
+        !benchmarkForceCustomerPurchasePath(),
+        'force flag must be inert when BENCHMARK_MODE and BENCHMARK_ISOLATED_RUN are unset'
+      );
+      await withFakeStripe(async (calls) => {
+        const result = await purchasesService.mintPurchaseCard(
+          validMintBody({ userId: ADMIN_USER_ID, fingerprint, totalCents: 1000 }) as never,
+          provider,
+          walletFundingProvider
         );
-        await withFakeStripe(async (calls) => {
-          const result = await purchasesService.mintPurchaseCard(
-            validMintBody({ userId: ADMIN_USER_ID, fingerprint, totalCents: 1000 }) as never,
-            provider,
-            walletFundingProvider
-          );
-          assert(result.status === PurchaseSpendStatus.HELD, `expected HELD, got ${result.status}`);
-          assert(
-            calls.charges.length === 0,
-            `force flag without benchmark mode must keep the admin no-hold path, got ${calls.charges.length}`
-          );
-        });
-      }
-    );
+        assert(result.status === PurchaseSpendStatus.HELD, `expected HELD, got ${result.status}`);
+        assert(
+          calls.charges.length === 0,
+          `force flag without benchmark mode must keep the admin no-hold path, got ${calls.charges.length}`
+        );
+      });
+    });
   } finally {
     await prisma.purchaseSpend.deleteMany({ where: { userId: ADMIN_USER_ID, fingerprint } });
   }
