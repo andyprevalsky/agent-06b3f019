@@ -559,6 +559,55 @@ cloudbench_controller_github_token() {
   return 1
 }
 
+# Upsert KEY=value in a dotenv file without printing the value.
+cloudbench_upsert_env_key() {
+  local dest="$1" key="$2" val="$3"
+  [ -n "$dest" ] && [ -n "$key" ] || return 1
+  DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PY'
+import os
+from pathlib import Path
+
+p = Path(os.environ["DEST"])
+key = os.environ["KEY"]
+val = os.environ["VAL"]
+if any(ch in val for ch in ' \t\n"\'#$`\\'):
+    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+    rendered = f'{key}="{escaped}"'
+else:
+    rendered = f"{key}={val}"
+lines = p.read_text().splitlines() if p.exists() else []
+out = []
+found = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(rendered)
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(rendered)
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text("\n".join(out) + "\n")
+os.chmod(p, 0o600)
+PY
+}
+
+# I-03 ignored invalid $GITHUB_TOKEN for fetch-ref but left the process env and
+# local .env files on the injected github_pat_. Children that still read
+# $GITHUB_TOKEN (gh, git extraheader, dotenv) then 401. Export the working
+# hosts.yml / insteadOf credential into this process and any listed .env paths.
+cloudbench_export_controller_github_token() {
+  local token dest
+  token="$(cloudbench_controller_github_token)" || return 1
+  export GITHUB_TOKEN="$token"
+  for dest in "$@"; do
+    [ -n "$dest" ] || continue
+    cloudbench_upsert_env_key "$dest" GITHUB_TOKEN "$token" || return 1
+  done
+  echo "controller GITHUB_TOKEN exported (len=${#GITHUB_TOKEN})" >&2
+  return 0
+}
+
 cloudbench_retry_command() {
   local max_attempts="$1" retry_delay_seconds="$2"
   shift 2

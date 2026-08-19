@@ -75,10 +75,45 @@ stdout, resolver_len=390.
 
 ## Human feedback
 
-None recorded.
+I-04 (2026-08-19): GITHUB_TOKEN should be set correctly in the current env.
+Iterate until INFRA is fixed — I-03's ignore-invalid-token path is not enough
+when children still read `$GITHUB_TOKEN` / dotenv.
+
+## Recurrence — I-04 process env still held the invalid PAT
+
+I-03 selected the working `ghs_` token for fetch-ref only. After the
+infra-clean epoch-5 fleet, this Cloud session still had:
+
+- process `$GITHUB_TOKEN` len=93 `github_pat_`
+- `agents/.env` and `back-end/.env` the same invalid PAT
+- `gh auth token` echoed the injected PAT; `gh auth status` reported
+  `The token in GITHUB_TOKEN is invalid`
+
+Local owning-boundary pair (no token printed):
+
+- RED: extraheader `ls-remote` with process `$GITHUB_TOKEN` → rc=128,
+  `could not read Username` / terminal prompts disabled
+- GREEN: `cloudbench_export_controller_github_token` then extraheader
+  `ls-remote` → rc=0, out_len=57; process + both `.env` files len=390
+  `ghs_`; `gh auth status` uses GITHUB_TOKEN as the active account
+
+## Solution (I-04)
+
+`cloudbench_export_controller_github_token` exports the I-03 resolver
+into `$GITHUB_TOKEN` and upserts `GITHUB_TOKEN=` in listed dotenv files.
+`scripts/cloud-init.sh`, `scripts/run-bench-cloud`, and
+`scripts/run-bench-fleet` call it so the current env is corrected, not
+only the fetch-ref header.
+
+Cemented by `scripts/tests/cloudbench-env.test.sh`: with
+`GITHUB_TOKEN=github_pat_INVALID` the export helper overwrites process
+env and replaces a stale `GITHUB_TOKEN=` in dest `.env` files while
+preserving other keys.
 
 ## Reusable lesson
 
 A present GitHub token is not a working GitHub token. Ignore injected
-`$GITHUB_TOKEN` when resolving controller git credentials; use the
+`$GITHUB_TOKEN` when resolving controller git credentials; then **export
+the working credential back into the process env and local `.env`** so
+every child that still reads `$GITHUB_TOKEN` inherits it. Use the
 hosts.yml / insteadOf credential that already pushes this workspace.

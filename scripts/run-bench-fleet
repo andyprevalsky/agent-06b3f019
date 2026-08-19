@@ -56,6 +56,12 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Injected $GITHUB_TOKEN is often an invalid github_pat_. Overwrite process env
+# and local .env so children inherit the working hosts.yml / insteadOf token.
+cloudbench_export_controller_github_token \
+  "$ROOT_DIR/agents/.env" \
+  "$ROOT_DIR/back-end/.env" \
+  || echo "WARN: controller GITHUB_TOKEN export failed; fetch-ref still uses cloudbench_controller_github_token" >&2
 
 # ── Run from a script SNAPSHOT, never the live checkout ─────────────────────
 # bash reads scripts lazily from disk: editing run-bench-fleet/run-bench-cloud
