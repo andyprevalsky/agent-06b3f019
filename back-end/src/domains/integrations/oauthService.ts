@@ -270,7 +270,9 @@ export async function startEmailOAuth(
   const codeChallenge = createCodeChallenge(codeVerifier);
   const state = generateStateToken();
 
-  const integration = await repo.upsertIntegrationForUpload({
+  // Merge, never replace: an abandoned consent screen must not strip the
+  // connected-account metadata of an integration that is still connected.
+  const integration = await repo.upsertIntegrationForOAuthStart({
     userId,
     name: providerKey,
     config: { provider: providerKey, startedAt: new Date().toISOString() },

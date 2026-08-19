@@ -6,7 +6,7 @@
 import { Router, type NextFunction, type Request, type Response } from 'express';
 import { authenticate, type AuthRequest } from '../../providers/auth';
 import { asyncHandler } from '../../utils/asyncHandler';
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import { closeHeldPurchaseReuseForLifecycleProbe } from './closeHeldReuse';
 import { isProductionEnv, PRODUCTION_BENCHMARK_USER_ID } from './config';
 import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';

@@ -6377,16 +6377,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     if _on_pin:
                         handoff_payment_fill_attempts += 1
-                        # Hosted payment widgets often mount fields in child
-                        # frames a few seconds after the document URL settles.
+                        # Hosted payment widgets mount fields in child frames
+                        # after the document URL settles — poll for semantic
+                        # payment inputs across frames (not just main-doc ready).
+                        from domains.spawn_browser_agent_v3.service_actions import (
+                            wait_for_payment_ref_fields,
+                        )
+
+                        _autofill_page = None
+                        if humanizer is not None and "input_page" in getattr(
+                            humanizer, "__dict__", {}
+                        ):
+                            _autofill_page = getattr(humanizer, "input_page", None)
+                        await wait_for_payment_ref_fields(
+                            dom_service.session,
+                            ref_names=["card_number"],
+                            input_page=_autofill_page,
+                            timeout_seconds=12.0 if handoff_payment_fill_attempts == 1 else 8.0,
+                        )
                         if handoff_payment_fill_attempts > 1:
-                            await wait_for_navigation_ready(
-                                dom_service,
-                                url=current_url,
-                                timeout_seconds=8.0,
-                                reload_blank_spa_once=False,
-                            )
-                            await asyncio.sleep(2.5)
+                            await asyncio.sleep(1.0)
                         auto_fill_result: Dict[str, Any] = {}
                         auto_fill_call_id = f"handoff-autofill-{task_id}-{iteration}"
                         await save_browser_action_message(
