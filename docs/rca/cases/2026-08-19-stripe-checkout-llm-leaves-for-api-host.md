@@ -72,8 +72,17 @@ stayed HELD.
 Fleet `d2a9805f` / `a6df3704` after sticky pin + key/click refuses: all leave
 paths ERROR'd, but **0 `input_text` after Checkout** — model waited / reloaded /
 read network until timeout. Payment card secret refs were already minted;
-harness now injects one handoff fill nudge (`input_text` with `card_number`…)
+harness injected one handoff fill nudge (`input_text` with `card_number`…)
 when pinned with payment refs ready.
+
+Fleet `fb84d4d2` after nudge (#996): pin held, still **0 fills after Checkout**
+(HELD / ~901s). Nudge alone was insufficient — hosted payment fields live in
+child frames/OOPIFs and often reject programmatic value-set; main-document
+`page.evaluate` never saw them. Fix: frame-aware payment-ref fill (Playwright
+frames + CDP `get_all_frames` targets) with focus+keyboard fallback, plus
+**auto-attempt** `input_text card_number` on the pinned handoff page when refs
+are ready (nudge only if auto-fill misses). Still no Stripe/checkout path
+special-cases.
 
 ## Diagnosis
 

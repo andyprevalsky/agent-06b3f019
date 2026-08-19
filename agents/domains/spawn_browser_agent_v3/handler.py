@@ -4939,7 +4939,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # host so the model cannot leave the cleared page for network-log thrash.
     navigation_pin_host: Optional[str] = None
     navigation_pin_url: Optional[str] = None
-    handoff_payment_fill_nudge_sent = False
+    handoff_payment_fill_attempted = False
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -6362,7 +6362,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     navigation_pin_host
                     and navigation_pin_url
                     and has_payment_card_secret_refs(secret_refs)
-                    and not handoff_payment_fill_nudge_sent
+                    and not handoff_payment_fill_attempted
                 ):
                     from urllib.parse import urlparse as _urlparse_nudge
 
@@ -6372,28 +6372,103 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         or _nudge_host.endswith(f".{navigation_pin_host}")
                     )
                     if _on_pin:
-                        handoff_payment_fill_nudge_sent = True
-                        browser_turn_messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Cross-origin handoff page is pinned "
-                                    f"({navigation_pin_url}). Payment card secret refs "
-                                    "are ready. Call input_text with text=card_number "
-                                    "(then card_name, card_expiry, card_cvv) to fill the "
-                                    "visible payment fields on THIS page, then submit. "
-                                    "Do not navigate away, close tabs, or thrash "
-                                    "network/evaluate — stay and complete the form."
+                        handoff_payment_fill_attempted = True
+                        auto_fill_result: Dict[str, Any] = {}
+                        try:
+                            auto_fill_result = await asyncio.wait_for(
+                                execute_action(
+                                    dom_service,
+                                    action_history,
+                                    {
+                                        "action": "input_text",
+                                        "thinking": (
+                                            "Auto-fill approved payment card secret refs "
+                                            "on the pinned cross-origin handoff page."
+                                        ),
+                                        "params": {"text": "card_number"},
+                                    },
+                                    available_file_paths=available_file_paths,
+                                    session_id=session_id,
+                                    config=config,
+                                    humanizer=humanizer,
+                                    secret_refs=secret_refs,
+                                    password_origins=password_origins,
+                                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                                    user_id=user_id,
+                                    current_url=current_url,
+                                    trusted_page_urls=visited_urls,
+                                    write_lock_enabled=write_lock_enabled,
+                                    write_lock_approvals=write_lock_approvals,
+                                    system_name=system_name,
+                                    browser_network_recorder=browser_network_recorder,
+                                    current_auth_realm=auth_realm,
+                                    prepare_credentials_for_url=_prepare_credentials_for_url,
+                                    navigation_pin_host=navigation_pin_host,
+                                    navigation_origin_base_domain=navigation_origin_base_domain,
                                 ),
+                                timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                            )
+                        except Exception as auto_fill_error:
+                            auto_fill_result = {
+                                "success": False,
+                                "error": str(auto_fill_error)[:300],
                             }
-                        )
-                        logger.info(
-                            "Injected handoff payment-fill nudge",
-                            pin_host=navigation_pin_host,
-                            agent_id=agent_id,
-                            task_id=task_id,
-                            iteration=iteration,
-                        )
+                            logger.warning(
+                                "Handoff payment auto-fill raised",
+                                error=str(auto_fill_error)[:300],
+                                pin_host=navigation_pin_host,
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                iteration=iteration,
+                            )
+                        filled_refs = auto_fill_result.get("payment_refs_filled") or []
+                        if auto_fill_result.get("success") and filled_refs:
+                            browser_turn_messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Cross-origin handoff page is pinned "
+                                        f"({navigation_pin_url}). Approved payment card "
+                                        f"secret refs were filled automatically "
+                                        f"({', '.join(str(r) for r in filled_refs)}). "
+                                        "Submit the payment form on THIS page now. "
+                                        "Do not navigate away, close tabs, or thrash "
+                                        "network/evaluate."
+                                    ),
+                                }
+                            )
+                            logger.info(
+                                "Auto-filled payment refs on pinned handoff page",
+                                pin_host=navigation_pin_host,
+                                filled_refs=filled_refs,
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                iteration=iteration,
+                            )
+                        else:
+                            browser_turn_messages.append(
+                                {
+                                    "role": "user",
+                                    "content": (
+                                        "Cross-origin handoff page is pinned "
+                                        f"({navigation_pin_url}). Payment card secret refs "
+                                        "are ready but auto-fill could not locate the fields "
+                                        "yet. Call input_text with text=card_number "
+                                        "(then card_name, card_expiry, card_cvv) to fill the "
+                                        "visible payment fields on THIS page, then submit. "
+                                        "Do not navigate away, close tabs, or thrash "
+                                        "network/evaluate — stay and complete the form."
+                                    ),
+                                }
+                            )
+                            logger.info(
+                                "Injected handoff payment-fill nudge after auto-fill miss",
+                                pin_host=navigation_pin_host,
+                                auto_fill_error=auto_fill_result.get("error"),
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                iteration=iteration,
+                            )
                 if browser_recorder:
                     await browser_recorder.record_observation(
                         iteration=iteration,
