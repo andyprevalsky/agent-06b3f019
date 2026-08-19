@@ -68,4 +68,53 @@ for table in LocalStorageOrigin IndexedDBOrigin CacheStorageOrigin; do
         "$table must remain on the streaming database boundary"
 done
 
+# ── Source restore must fail closed ──
+#
+# A restore that did not fully apply leaves an incomplete source database, and
+# the measurement silently becomes meaningless. Two real regressions came from
+# tolerating too much here: `|| true` swallowed a header-level version refusal
+# (surfacing as "no Cookie rows"), and a `grep -c ... || echo 0` produced the
+# non-integer "0\n0" so an empty stderr took the tolerant branch. Exercise the
+# actual classifier from the script against real pg_restore stderr shapes.
+RESTORE_FILTER="$(sed -nE "s/^[[:space:]]*'(warning:\|WARNING:.*Command was:)' \\\\$/\1/p" "$MEASUREMENT" | head -1)"
+[ -n "$RESTORE_FILTER" ] || fail "could not extract the benign-noise filter from measure-seed-memory.sh"
+
+classify_restore() {
+    local file="$1" unexpected lines
+    unexpected="$(grep -vE "$RESTORE_FILTER" "$file" 2>/dev/null || true)"
+    lines=$(grep -cvE '^[[:space:]]*$' "$file" 2>/dev/null) || lines=0
+    case "$lines" in ''|*[!0-9]*) lines=0 ;; esac
+    if [ -n "$unexpected" ] || [ "$lines" -eq 0 ]; then echo FATAL; else echo TOLERATED; fi
+}
+
+assert_restore_verdict() {
+    local label="$1" want="$2" payload="$3" tmp got
+    tmp="$(mktemp)"
+    printf '%b' "$payload" > "$tmp"
+    got="$(classify_restore "$tmp")"
+    rm -f "$tmp"
+    [ "$got" = "$want" ] || fail "restore classifier: $label -> $got (expected $want)"
+    echo "PASS: restore classifier treats $label as $want"
+}
+
+# Silence cannot be classified as benign — nothing explained itself.
+assert_restore_verdict "an empty stderr" FATAL ""
+assert_restore_verdict "a blank-only stderr" FATAL "\n\n   \n"
+# Header refusal: the dump was published by a newer pg_dump than this reader.
+assert_restore_verdict "a version refusal" FATAL \
+    "pg_restore: error: unsupported version (1.16) in file header\n"
+# A restore-time SQL error leaves a partial database.
+assert_restore_verdict "a restore-time SQL error" FATAL \
+    "pg_restore: error: could not execute query: ERROR:  out of memory\n"
+# Absent roles/extensions in a throwaway container are genuinely non-fatal.
+assert_restore_verdict "role and extension noise" TOLERATED \
+    "pg_restore: warning: errors ignored on restore: 2\npg_restore: error: role \"supabase_admin\" does not exist\npg_restore: error: extension \"pg_trgm\" already exists\npg_restore: while PROCESSING TOC:\npg_restore: from TOC entry 12; 1259 x\n    Command was: CREATE TABLE x;\n"
+
+require_text "$MEASUREMENT" \
+    'SRC_READY' \
+    "source postgres readiness must be tracked, not assumed after the timeout"
+require_text "$MEASUREMENT" \
+    'SRC_RESTORE_STATUS' \
+    "pg_restore exit status must be preserved, never discarded with || true"
+
 echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"
