@@ -82,3 +82,21 @@ export const resizeQuickQuery = async (
 export const setQuickQueryFileDrag = async (active: boolean): Promise<{ success: boolean }> => {
   return window.api.setQuickQueryFileDrag({ active });
 };
+
+/**
+ * Read a `file://` URI advertised on a macOS drop pasteboard into a Blob.
+ *
+ * Lives in the api layer because it is the feature's only outbound fetch;
+ * fileDrag.ts stays a pure DataTransfer parser. Resolves null rather than
+ * throwing: packaged/dev security policy may block `file://` reads, and the
+ * DataTransfer items path already covers most drops.
+ */
+export const readDroppedFileUrl = async (uri: string): Promise<Blob | null> => {
+  try {
+    const response = await fetch(uri);
+    if (!response.ok) return null;
+    return await response.blob();
+  } catch {
+    return null;
+  }
+};

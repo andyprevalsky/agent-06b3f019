@@ -14,6 +14,7 @@ interface SyncHandlers {
   handleClaudeCodeSync: () => Promise<void>;
   handleGptCodeSync: () => Promise<void>;
   handleIMessageSync: () => Promise<void>;
+  handleWhatsAppConnect: () => Promise<void>;
   handleLinkedInSync: () => Promise<void>;
   handleEmailConnect: (provider: 'gmail') => Promise<void>;
   handleEmailDisconnect: (email: string) => Promise<void>;
@@ -79,6 +80,11 @@ export function useIntegrationActions(handlers: SyncHandlers) {
       ),
       onGptCodeSync: wrapAction(h.handleGptCodeSync, setError, 'Failed to sync GPT credentials'),
       onIMessageSync: wrapAction(h.handleIMessageSync, setError, 'Failed to sync iMessage'),
+      onWhatsAppConnect: wrapAction(
+        h.handleWhatsAppConnect,
+        setError,
+        'Failed to connect WhatsApp',
+      ),
       onLinkedInSync: wrapAction(h.handleLinkedInSync, setError, 'Failed to start LinkedIn sync'),
       onGmailConnect: wrapAction(() => h.handleEmailConnect('gmail'), setError, 'Unknown error'),
       onGmailDisconnect: async (email: string) => {

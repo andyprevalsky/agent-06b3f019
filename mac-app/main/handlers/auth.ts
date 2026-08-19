@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import { AuthService } from '../services/auth';
 import { SyncManager } from '../services/sync/SyncManager';
-import { accessTokenIsImpersonated } from '../domains/auth/impersonation';
+import { accessTokenIsImpersonated } from '../base/impersonation';
 import { enrollPasskey } from '../domains/passkey-enroll/service';
 import { importPasskeysFromToken } from '../domains/passkey-import/service';
 import { getErrorMessage } from '../../shared/utils/error';
