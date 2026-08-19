@@ -6,12 +6,11 @@
  * prod Stripe reuse callers never hit this endpoint.
  */
 
-import { PurchaseSpendStatus } from '@prisma/client';
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../purchases/config';
-import { prisma } from '../../providers/database';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import { createLogger } from '../../providers/logger';
 import { cleanupAgentPurchaseCards } from '../../providers/purchaseCleanup';
 import { TestPaymentError } from './errors';
+import * as repo from './repo';
 
 const log = createLogger('TestPaymentCloseHeldReuse');
 
@@ -35,15 +34,7 @@ export type CloseHeldReuseDeps = {
 async function defaultFindHeldProbePurchases(
   userId: string
 ): Promise<Array<{ id: string; agentId: string | null }>> {
-  return prisma.purchaseSpend.findMany({
-    where: {
-      userId,
-      status: PurchaseSpendStatus.HELD,
-      cardId: { not: null },
-      totalCents: LIFECYCLE_PROBE_TOTAL_CENTS,
-    },
-    select: { id: true, agentId: true },
-  });
+  return repo.findHeldLifecycleProbePurchases(userId, LIFECYCLE_PROBE_TOTAL_CENTS);
 }
 
 export async function closeHeldPurchaseReuseForLifecycleProbe(

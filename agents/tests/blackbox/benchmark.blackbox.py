@@ -1167,9 +1167,19 @@ def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
     )
 
     repo_root = Path(__file__).resolve().parents[3]
-    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts)
-    assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    # Canonical home is providers/: domains/test-payment needs this id too, and a
+    # cross-domain import (or a re-export from a `config` layer) is a structural
+    # violation. The drift guard below is unchanged -- only the path moved.
+    identity_ts = (
+        repo_root / "back-end" / "src" / "providers" / "benchmarkPaymentIdentity.ts"
+    ).read_text()
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", identity_ts
+    )
+    assert match, (
+        "providers/benchmarkPaymentIdentity.ts must export "
+        "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
         "production payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
