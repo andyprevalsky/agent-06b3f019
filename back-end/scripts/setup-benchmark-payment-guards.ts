@@ -1,8 +1,9 @@
 import Stripe from 'stripe';
-import {
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
-  BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
-} from '../src/domains/purchases/config';
+// PROD id's canonical home is providers/benchmarkPaymentIdentity; purchases/config
+// only exports the sandbox id (and a domain file may not re-export from providers/
+// per the layer gate). Importing PROD from config resolved to `undefined`.
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
 
 /** Sandbox and live fixtures must never share their Stripe, user, or AgentCard identities. */
 export type FixtureMode = 'sandbox' | 'live';

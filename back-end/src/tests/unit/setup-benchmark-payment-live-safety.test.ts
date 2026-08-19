@@ -16,10 +16,8 @@
  */
 
 import assert from 'node:assert/strict';
-import {
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
-  BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
-} from '../../domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../../domains/purchases/config';
 import {
   assertLiveOrgWallet,
   requireLiveOrgWallet,
