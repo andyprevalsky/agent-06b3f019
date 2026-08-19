@@ -1470,13 +1470,18 @@ _PAYMENT_FIELD_FINDER_JS = """
         card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
         card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
     };
-    const isVisible = (el) => {
-        if (!el || el.disabled || el.readOnly) return false;
-        const rect = el.getBoundingClientRect();
+    // High-confidence autocomplete selectors may mount readOnly / zero-size until
+    // focused (hosted payment widgets). Still reject disabled + display:none.
+    const isHighConfidenceSelector = (selector) =>
+        typeof selector === 'string' && selector.includes('autocomplete');
+    const isVisible = (el, { allowCollapsed = false } = {}) => {
+        if (!el || el.disabled) return false;
+        if (el.readOnly && !allowCollapsed) return false;
         const style = window.getComputedStyle(el);
-        return rect.width > 0 && rect.height > 0
-            && style.visibility !== 'hidden'
-            && style.display !== 'none';
+        if (style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = el.getBoundingClientRect();
+        if (allowCollapsed) return true;
+        return rect.width > 0 && rect.height > 0;
     };
     const queryDeep = (root, selector) => {
         const out = [];
@@ -1515,8 +1520,11 @@ _PAYMENT_FIELD_FINDER_JS = """
     };
     const findField = (refName) => {
         for (const selector of selectorsByRef[refName] || []) {
+            const allowCollapsed = isHighConfidenceSelector(selector);
             for (const el of queryDeep(document, selector)) {
-                if (isVisible(el)) return { el, selector, score: 100 };
+                if (isVisible(el, { allowCollapsed })) {
+                    return { el, selector, score: 100 };
+                }
             }
         }
         let best = null;
@@ -1816,6 +1824,79 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PAYMENT_METHOD_EXPAND_JS = """
+(_unused) => {
+    const pattern = /\\b(card|credit|debit)\\b/i;
+    const candidates = Array.from(document.querySelectorAll(
+        'button, [role="button"], [role="radio"], [role="tab"], label, a'
+    ));
+    for (const el of candidates) {
+        const signal = [
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+            el.innerText || '',
+            el.textContent || '',
+        ].join(' ').replace(/\\s+/g, ' ').trim();
+        if (!pattern.test(signal)) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        el.click();
+        return { clicked: true, signal: signal.slice(0, 120) };
+    }
+    return { clicked: false };
+}
+"""
+
+
+async def _nudge_payment_method_expand(
+    session: Any,
+    *,
+    input_page: Any = None,
+) -> bool:
+    """Click a generic Card/Credit/Debit control if payment inputs are hidden behind it."""
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(target, _PAYMENT_METHOD_EXPAND_JS, None)
+        if result and result.get("clicked") is True:
+            logger.info(
+                "Expanded payment method control before fill",
+                target=label,
+                signal=result.get("signal"),
+            )
+            return True
+    return False
+
+
+async def wait_for_payment_ref_fields(
+    session: Any,
+    *,
+    ref_names: Optional[List[str]] = None,
+    input_page: Any = None,
+    timeout_seconds: float = 15.0,
+    poll_interval_seconds: float = 0.5,
+) -> bool:
+    """Poll every reachable frame until semantic payment inputs appear.
+
+    Main-document navigation readiness is not enough — hosted payment widgets
+    mount card inputs in child frames several seconds later.
+    """
+    names = list(ref_names or ["card_number"])
+    targets = await _iter_payment_fill_targets(session, input_page)
+    if not targets:
+        return False
+    deadline = time_module.monotonic() + max(0.5, float(timeout_seconds))
+    nudged = False
+    while True:
+        for name in names:
+            if await _resolve_payment_ref_coordinates(session, name, input_page=input_page):
+                return True
+        if not nudged and time_module.monotonic() + 2.0 < deadline:
+            nudged = True
+            await _nudge_payment_method_expand(session, input_page=input_page)
+        if time_module.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(poll_interval_seconds)
+
+
 async def _fill_payment_ref_via_playwright_locator(
     *,
     input_page: Any,
@@ -1905,10 +1986,9 @@ async def _fill_payment_ref_via_keyboard(
     if not value or (humanizer is None and input_page is None):
         return None
 
+    # Focus may land in a CDP-only OOPIF; type through page keyboard/humanizer
+    # so controlled inputs that reject JS value-set still receive real key events.
     for label, target in await _iter_payment_fill_targets(session, input_page):
-        if isinstance(target, tuple) and target[0] == "cdp":
-            # Keyboard focus must land in a Playwright-owned document.
-            continue
         located = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_FOCUS_JS, ref_name)
         if not located or located.get("focused") is not True:
             continue
@@ -2423,6 +2503,14 @@ async def _try_direct_payment_ref_fill(
     humanizer: Optional[BrowserHumanizer] = None,
 ) -> Optional[Dict[str, Any]]:
     input_page = _humanizer_input_page(humanizer)
+    # Hosted widgets mount payment inputs in child frames after the document URL
+    # settles — wait for a semantic field before the first fill attempt.
+    await wait_for_payment_ref_fields(
+        session,
+        ref_names=["card_number", secret_ref_name],
+        input_page=input_page,
+        timeout_seconds=12.0,
+    )
     fill_result = await _fill_payment_ref_directly(
         session,
         secret_ref_name,
@@ -2441,6 +2529,12 @@ async def _try_direct_payment_ref_fill(
             "Retried approved payment card direct fill after page readiness",
             ref_name=secret_ref_name,
             readiness=readiness,
+        )
+        await wait_for_payment_ref_fields(
+            session,
+            ref_names=["card_number", secret_ref_name],
+            input_page=input_page,
+            timeout_seconds=8.0,
         )
         fill_result = await _fill_payment_ref_directly(
             session,
@@ -2729,6 +2823,15 @@ async def _execute_input_text(
         )
         if direct_fill_result:
             return direct_fill_result
+        # Auto-fill / secret-ref typing without an element index must not fall
+        # through to "type into whatever is focused" — that reports success
+        # without payment_refs_filled and hides the real field_not_found miss.
+        if not element and not coords:
+            return {
+                "success": False,
+                "error": "field_not_found",
+                "payment_refs_filled": [],
+            }
 
     if element:
         return await _execute_indexed_input_text(
