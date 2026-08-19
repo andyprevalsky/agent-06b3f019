@@ -6971,6 +6971,7 @@ def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
     assert "cloudbench-fetch-ref.sh" in helper
     assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
     assert "No controller GitHub token" in helper
+    assert "rm -f /data/cloudbench-fetch-ref.sh" in helper
     assert "warm_source_fetch_ref" in refresh
     assert "warm_source_fetch_ref" in wmh
     for mode in (refresh, wmh, helper):

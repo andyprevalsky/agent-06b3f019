@@ -860,6 +860,7 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
         return 1
     }
     token_b64="$(printf '%s' "$token" | base64 | tr -d '\n')"
+    ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh" >/dev/null || true
     if ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
         "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh; then
         echo "❌ failed to upload cloudbench-fetch-ref.sh to $mid" >&2
