@@ -9,10 +9,13 @@ export {
   createSessionWithContext,
   closeSession,
   resumeSession,
+} from './session';
+export {
   getSession,
   getSteelSessionHealth,
   getSteelSessionCookieSummary,
   closeAllActiveSessions,
-} from './session';
+} from './sessionInspect';
+export { createSteelRecoverySession, buildSteelRecoveryBrowserOptions } from './sessionRecovery';
 export { injectUserData } from './injection';
 export { uploadFileToSession, listSessionFiles, getFingerprintInjectionData } from './files';

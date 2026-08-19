@@ -1167,9 +1167,19 @@ def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
     )
 
     repo_root = Path(__file__).resolve().parents[3]
-    config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", config_ts)
-    assert match, "purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    # Canonical home is providers/: domains/test-payment needs this id too, and a
+    # cross-domain import (or a re-export from a `config` layer) is a structural
+    # violation. The drift guard below is unchanged -- only the path moved.
+    identity_ts = (
+        repo_root / "back-end" / "src" / "providers" / "benchmarkPaymentIdentity.ts"
+    ).read_text()
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '([^']+)'", identity_ts
+    )
+    assert match, (
+        "providers/benchmarkPaymentIdentity.ts must export "
+        "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID, (
         "production payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID} vs {match.group(1)}"
@@ -2998,6 +3008,44 @@ def test_no_tool_failures_static_check_rejects_any_failed_tool_event():
     assert _run_declared_static_check(evaluator, unsuccessful)[0] is False
 
 
+def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
+    """Antibot staged recoveries may ERROR then continue to payment; do not fail closed.
+
+    Local repro: browser-1015-eventim-request-card agent
+    0a9eeef6-bd96-4dfc-b52b-007451fd059c reached a grounded payment_approval after
+    provider-exit-recovery ERROR, then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "browser_challenge_recovery",
+                    "toolCallId": "provider-exit-recovery-25b95b85-0e54-4e6f-80f6-d035da21428e",
+                    "title": "Browser challenge recovery failed",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_01FjeGZhyXsMihYSLNRkAyb9",
+                    "title": "Payment card requested ($25.05)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -3723,6 +3771,59 @@ async def test_amazon_beanie_poll_stops_at_write_lock_without_resolving_it():
     assert responses == []
 
 
+async def test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval():
+    """Place-order write locks are prerequisites when auto_approve waits for payment_approval.
+
+    agent-payment-production-purchase (and similar) prompts click Place order before
+    minting the Rose card. The purchase write_lock must be auto-cleared so the
+    harness can still observe the expected payment_approval — not fail closed on
+    the first write_lock.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("agent-payment-production-purchase")
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "payment_approval"
+
+    write_lock = {
+        "id": "purchase-write-lock",
+        "agentId": "agent-payment-prod",
+        "metadata": {
+            "requestUserApproval": {
+                "writePermission": True,
+                "writeLockNotification": {"trigger_type": "purchase"},
+            }
+        },
+    }
+    payment = {
+        "id": "payment-card-approval",
+        "agentId": "agent-payment-prod",
+        "metadata": {
+            "requestPaymentCard": {
+                "merchant": "Rose Labs Test Payment",
+                "amount_cents": 100,
+                "line_items": [{"title": "Agent Card Lifecycle Probe", "price_cents": 100}],
+            }
+        },
+    }
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [write_lock, payment],
+        attention_batches=[[write_lock], [payment]],
+    )
+
+    assert failure is None
+    assert (triggered, resolved) == (1, 2)
+    assert responses == [
+        ("purchase-write-lock", "approved"),
+        ("payment-card-approval", "approved"),
+    ]
+    assert data["_benchmark"]["write_lock_prerequisite_auto_approved"] is True
+    assert data["_benchmark"]["attention_request_kind_seen"] == "payment_approval"
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+
+
 async def test_doordash_poll_accepts_single_write_lock_as_checkout_approval():
     """DoorDash accepts either supported checkout gate without requiring a second request."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -3931,6 +4032,87 @@ async def test_live_paid_booking_poll_stops_without_approving_payment():
         assert failure == "Expected attention kind payment_approval, observed write_lock"
         assert (triggered, resolved) == (0, 0)
         assert responses == []
+
+
+def test_production_purchase_disables_purchase_reuse_gate_only_for_that_task():
+    """Purchase probe closes leftover HELD reuse; sibling prod Stripe tasks keep reuse."""
+    from benchmarks.benchmark_tasks import all_tasks, get_task_by_name
+
+    purchase = get_task_by_name("agent-payment-production-purchase")
+    assert purchase.disable_purchase_reuse is True
+    assert purchase.production_only is True
+
+    reuse_enabled = [
+        task.name
+        for task in all_tasks()
+        if task.name != purchase.name and getattr(task, "disable_purchase_reuse", False)
+    ]
+    assert reuse_enabled == [], f"unexpected disable_purchase_reuse tasks: {reuse_enabled}"
+
+    abandonment = get_task_by_name("agent-payment-production-abandonment")
+    assert abandonment.disable_purchase_reuse is False
+
+
+async def test_production_purchase_poll_auto_approves_follow_on_write_lock():
+    """After payment_approval, Place-order write_lock must not abort an auto_approve purchase."""
+    from dataclasses import replace
+
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    payment = {
+        "id": "payment-approval",
+        "agentId": "agent-prod-purchase",
+        "metadata": {
+            "requestUserApproval": {
+                "writePermission": True,
+                "requestPaymentCard": {
+                    "merchant": "Rose Labs Test Payment",
+                    "currency": "USD",
+                    "subtotalCents": 100,
+                    "totalCents": 100,
+                    "lineItems": [
+                        {
+                            "name": "Agent Card Lifecycle Probe",
+                            "imageUrl": "https://placehold.co/320x220/png?text=Agent+Card+Lifecycle+Probe",
+                            "unitPriceCents": 100,
+                            "quantity": 1,
+                            "lineTotalCents": 100,
+                        }
+                    ],
+                    "fees": [],
+                },
+            }
+        },
+    }
+    write_lock = {
+        "id": "place-order-write-lock",
+        "agentId": "agent-prod-purchase",
+        "metadata": {"requestUserApproval": {"writePermission": True}},
+    }
+    task = replace(
+        get_task_by_name("agent-payment-production-purchase"),
+        expected_tools=[],
+        expected_tool_counts=None,
+        enforce_declared_evaluators=False,
+        evaluators=[],
+        expected_payment_lifecycle=None,
+        timeout_seconds=5,
+    )
+    assert task.approval_handling == "auto_approve"
+    assert task.expected_attention_kind == "payment_approval"
+
+    (data, triggered, resolved, failure), responses = await _run_attention_poll(
+        task,
+        [payment, write_lock],
+    )
+    assert failure is None
+    assert triggered == 1
+    assert resolved == 2
+    assert data["_benchmark"]["expected_attention_kind_seen"] == "payment_approval"
+    assert responses == [
+        ("payment-approval", "approved"),
+        ("place-order-write-lock", "approved"),
+    ]
 
 
 async def test_toast_poll_stops_without_responding_to_payment_approval():
@@ -5516,6 +5698,9 @@ def test_local_benchmark_task_queue_uses_conductor_workspace_only_for_local_urls
 
         assert bench._local_benchmark_task_queue("http://localhost:55020") == "navi-agent-tasks-washington"
         assert bench._local_benchmark_task_queue("http://127.0.0.1:55020") == "navi-agent-tasks-washington"
+        assert bench._local_benchmark_task_queue("https://navi-j9a9.onrender.com") is None
+        os.environ["CONDUCTOR_WORKSPACE_NAME"] = "flt-agent-payment-production-purchase-1"
+        # --prod must not divert onto an isolated queue the shared API cannot feed.
         assert bench._local_benchmark_task_queue("https://navi-j9a9.onrender.com") is None
     finally:
         if previous_workspace is None:
@@ -11944,12 +12129,22 @@ def test_eventim_1015_request_card_benchmark_contract():
     assert "Eventim" in task.prompt
     assert "any upcoming" in task.prompt.lower() or "Artist and date may change" in task.prompt
     assert "Do not use AXS Marketplace" in task.prompt
-    assert "Do not submit payment" in task.prompt
+    assert "Do not click Buy Now" in task.prompt
+    assert "until payment credentials have been obtained and entered" in task.prompt
+    assert "request_payment_card" in task.prompt
     assert task.expected_attention_kind == "payment_approval"
     assert task.approval_handling == "ignore"
     assert task.success_on_payment_card_request is True
     assert task.price_limit_cents == 200
     assert task.anti_bot == "yes"
+    # Logical tool counting remaps spawn_agent(type=browser) → spawn_browser_agent,
+    # so the min-count key must use the remapped name (peer browser ecommerce tasks).
+    assert task.min_tool_counts == {"spawn_browser_agent": 1}
+    assert task.tool_count_scope == "root"
+    semantic = next(ev for ev in task.evaluators if ev["id"] == "eventim-1015-payment-boundary-semantics")
+    judge = semantic["judge_prompt"].lower()
+    assert "do not require a cheapest-tier comparison dump" in judge
+    assert "pending payment approval" in judge and "sufficient grounding" in judge
     assert {"browser", "antibot", "ecommerce", "ticketing"} <= set(task.tags)
     assert task.expected_payment_receipt["merchant"] == "1015 Folsom (Eventim - eventim.us)"
     assert "eventim.us" in task.environment["live_targets"][1] or any(
@@ -11960,6 +12155,110 @@ def test_eventim_1015_request_card_benchmark_contract():
         "prod-agent:ec03b6f2-744f-433a-87d0-e4cf7758818a",
         "coverage-gap:eventim-1015-antibot-payment-boundary",
     ]
+
+
+def _captured_eventim_payment_approval(
+    *,
+    merchant: str = "1015 Folsom (Eventim - eventim.us)",
+    approval_url: str = "https://checkout.eventim.us/?afflky=1015Folsom",
+    flattened_attention_api: bool = False,
+) -> tuple[dict, list[dict]]:
+    """Grounded Eventim payment boundary shaped like bench12/bench14 agents.
+
+    ``flattened_attention_api=True`` mirrors GET /api/attention-requests, which
+    puts ``url`` / ``writeLockNotification`` on metadata (not nested under
+    ``requestUserApproval``) — the shape that failed host grounding on abd4ae8a-….
+    """
+    receipt = {
+        "merchant": merchant,
+        "currency": "USD",
+        "lineItems": [
+            {
+                "name": "Rival Consoles Live A/V Tour - General Admission (Tier 1)",
+                "imageUrl": None,
+                "productUrl": "https://wl.eventim.us/event/rival-consoles-live-av-tour/686363?afflky=1015Folsom",
+                "rating": "0 stars",
+                "reviewCount": "0 reviews",
+                "unitPriceCents": 3113,
+                "quantity": 1,
+                "lineTotalCents": 3113,
+            }
+        ],
+        "fees": [{"label": "Print@Home Delivery", "amountCents": 0}],
+        "subtotalCents": 3113,
+        "totalCents": 3113,
+        "fingerprint": "b" * 64,
+        "userId": "user-123",
+        "agentId": "agent-123",
+    }
+    if flattened_attention_api:
+        request = {
+            "id": "eventim-payment-attention",
+            "agentId": "agent-123",
+            "metadata": {
+                "url": approval_url,
+                "toolApproval": True,
+                "writePermission": True,
+                "requestPaymentCard": receipt,
+                "writeLockNotification": {
+                    "service": {
+                        "url": approval_url,
+                        "name": "Eventim US",
+                        "domain": "checkout.eventim.us",
+                    }
+                },
+            },
+        }
+    else:
+        request = {
+            "id": "eventim-payment-attention",
+            "agentId": "agent-123",
+            "metadata": {
+                "requestPaymentCard": receipt,
+                "requestUserApproval": {
+                    "url": approval_url,
+                    "requestPaymentCard": receipt,
+                },
+                "writePermission": True,
+            },
+        }
+    messages: list[dict] = []
+    return request, messages
+
+
+def test_eventim_payment_merchant_identity_accepts_grounded_variants():
+    """Eventim bench accepts structured + connector merchant forms when host is grounded."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-1015-eventim-request-card")
+    for merchant in (
+        "1015 Folsom (Eventim - eventim.us)",
+        "1015 Folsom via Eventim",
+        "Eventim US (Eventim - eventim.us)",
+        "1015 Folsom (Eventim - checkout.eventim.us)",
+    ):
+        request, messages = _captured_eventim_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
+        flat_request, flat_messages = _captured_eventim_payment_approval(
+            merchant=merchant, flattened_attention_api=True
+        )
+        assert _validate_payment_receipt(task, flat_request, messages=flat_messages) is None, merchant
+
+
+def test_eventim_payment_merchant_identity_accepts_any_label_when_host_grounded():
+    """Merchant display wording must not fail once checkout host is grounded."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _validate_payment_receipt
+
+    task = get_task_by_name("browser-1015-eventim-request-card")
+    for merchant in (
+        "Eventim US (1015 Folsom)",
+        "1015 Folsom via Eventim",
+        "1015 Folsom (Eventim - checkout.eventim.us)",
+    ):
+        request, messages = _captured_eventim_payment_approval(merchant=merchant)
+        assert _validate_payment_receipt(task, request, messages=messages) is None, merchant
 
 
 def test_history_ledger_task_names_still_exist_in_catalog():
@@ -13624,6 +13923,14 @@ async def run_all_tests():
         "live_paid_booking_poll_stops_unapproved",
         test_live_paid_booking_poll_stops_without_approving_payment,
     )
+    r.record(
+        "production_purchase_disables_purchase_reuse_gate_only_for_that_task",
+        test_production_purchase_disables_purchase_reuse_gate_only_for_that_task,
+    )
+    await r.record_async(
+        "production_purchase_follow_on_write_lock",
+        test_production_purchase_poll_auto_approves_follow_on_write_lock,
+    )
     await r.record_async(
         "toast_poll_stops_unapproved",
         test_toast_poll_stops_without_responding_to_payment_approval,
@@ -13758,6 +14065,14 @@ async def run_all_tests():
     r.record("tag_slices_still_resolve", test_tag_slices_still_resolve)
     r.record("antibot_slice_daily_commerce", test_antibot_slice_includes_daily_toast_and_amazon_commerce)
     r.record("eventim_1015_request_card_contract", test_eventim_1015_request_card_benchmark_contract)
+    r.record(
+        "eventim_payment_merchant_grounded_variants",
+        test_eventim_payment_merchant_identity_accepts_grounded_variants,
+    )
+    r.record(
+        "eventim_payment_merchant_accepts_any_label_when_host_grounded",
+        test_eventim_payment_merchant_identity_accepts_any_label_when_host_grounded,
+    )
     r.record("history_ledger_no_orphaned_task_names", test_history_ledger_task_names_still_exist_in_catalog)
     r.record("retired_tasks_hidden", test_retired_tasks_hidden_from_suite_and_listing)
     r.record(

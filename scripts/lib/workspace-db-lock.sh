@@ -70,7 +70,13 @@ acquire_workspace_db_lock() {
     }
     lock_dir="${ROSE_WORKSPACE_DB_LOCK_DIR:-${TMPDIR:-/tmp}/rose-workspace-db-locks}"
     mkdir -p "$lock_dir" || return 1
-    lock_file="$lock_dir/${key}.lock"
+    # System-PG keys look like `system-pg:localhost:5432/victoria` — a raw `/`
+    # would nest the lock under a missing subdirectory and make every claim
+    # fail (shlock cannot create `…/5432/victoria.lock.tmp.*`), so concurrent
+    # setup-db waiters hang for the full budget. Keep the human key for logs;
+    # flatten path separators for the on-disk filename only.
+    local fs_key="${key//\//_}"
+    lock_file="$lock_dir/${fs_key}.lock"
 
     while :; do
         if _claim_workspace_db_lock "$lock_file"; then

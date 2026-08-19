@@ -278,6 +278,34 @@ def test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it():
     assert "do not keep searching" in action_src
 
 
+def test_payment_tool_accepts_flexible_merchant_labels():
+    """Merchant is a free-form label — no Eventim-shaped format gate at schema time."""
+    from browser_tools.schemas import RequestPaymentCardBrowserTool
+    from providers.rose.browser_use import BROWSER_USE_TOOLS
+
+    item = _sample_tool_call()["line_items"][0]
+    base = {
+        "tool": "request_payment_card",
+        "currency": "USD",
+        "line_items": [item],
+        "subtotal_cents": item["line_total_cents"],
+        "total_cents": item["line_total_cents"],
+    }
+    for merchant in (
+        "Blick Art Materials",
+        "1015 Folsom (Eventim - eventim.us)",
+        "1015 Folsom via Eventim",
+        "Eventim US (1015 Folsom)",
+    ):
+        parsed = RequestPaymentCardBrowserTool.model_validate({**base, "merchant": merchant})
+        assert parsed.merchant == merchant
+
+    merchant_desc = BROWSER_USE_TOOLS["request_payment_card"]["params"]["merchant"]["description"]
+    assert merchant_desc == "Merchant or site name for the purchase"
+    schema_desc = RequestPaymentCardBrowserTool.model_fields["merchant"].description or ""
+    assert schema_desc == "Merchant or site name for the purchase"
+
+
 def test_payment_tool_accepts_camel_case_transport_fields():
     from pydantic import ValidationError
 
@@ -770,6 +798,10 @@ async def run_all_tests():
     result.record(
         "reviewless_bookings_pass_with_zero",
         test_reviewless_bookings_pass_with_zero_and_the_contract_teaches_it,
+    )
+    result.record(
+        "flexible_merchant_labels",
+        test_payment_tool_accepts_flexible_merchant_labels,
     )
     result.record("camel_case_transport", test_payment_tool_accepts_camel_case_transport_fields)
     result.record("fingerprint_stability", test_fingerprint_is_stable_and_user_scoped)

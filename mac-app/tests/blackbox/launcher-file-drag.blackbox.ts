@@ -135,4 +135,54 @@ describe('extractDroppedFilesAsync', () => {
     expect(files[0]?.type).toBe('image/png');
     vi.unstubAllGlobals();
   });
+
+  // `decodeURIComponent` throws URIError on an invalid escape. Letting that
+  // propagate rejected the whole drop, losing every other dragged file.
+  it('keeps a malformed percent-escape from rejecting the whole drop', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => ({
+        ok: true,
+        blob: async () => new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      }))
+    );
+
+    const files = await extractDroppedFilesAsync(
+      dt({
+        types: ['text/uri-list'],
+        files: [],
+        getData: (type) =>
+          type === 'text/uri-list' ? 'file:///tmp/%ZZ\nfile:///tmp/Good%20One.png\n' : '',
+      })
+    );
+
+    // Both survive: the malformed name falls back to its raw segment.
+    expect(files.map((file) => file.name)).toEqual(['%ZZ', 'Good One.png']);
+    vi.unstubAllGlobals();
+  });
+
+  it.each(['file:///tmp/%', 'file:///tmp/%E0%A4%A'])(
+    'falls back to the raw segment for truncated escape %s',
+    async (uri) => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => ({
+          ok: true,
+          blob: async () => new Blob([new Uint8Array([1])], { type: 'text/plain' }),
+        }))
+      );
+
+      const files = await extractDroppedFilesAsync(
+        dt({
+          types: ['text/uri-list'],
+          files: [],
+          getData: (type) => (type === 'text/uri-list' ? `${uri}\n` : ''),
+        })
+      );
+
+      expect(files).toHaveLength(1);
+      expect(files[0]?.name).toBe(uri.split('/').pop());
+      vi.unstubAllGlobals();
+    }
+  );
 });

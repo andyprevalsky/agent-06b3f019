@@ -10,7 +10,7 @@ import Store from 'electron-store';
 import { AuthService } from '../../services/auth';
 import { IMessageSender } from '../../services/iMessageSender';
 import { config } from '../../base/config';
-import { sessionForLocalMachineData } from '../auth/impersonation';
+import { sessionForLocalMachineData } from '../../base/impersonation';
 import { DELIVERY_MARKER_STORE_NAME, QUEUE_POP_PATH, queueResultPath } from './config';
 import type { DeliveryResultOutcome, PopOutcome, PopResponse, Session } from './types';
 

@@ -915,11 +915,6 @@ _STRUCTURED_MERCHANT_IDENTITY = re.compile(
 _NAVIGATION_ACTION_TYPES = {"goto", "navigate", "navigation"}
 
 
-def _merchant_host_matches(expected_host: str, actual_host: str) -> bool:
-    expected = expected_host.casefold().rstrip(".")
-    actual = actual_host.casefold().rstrip(".")
-    return actual == expected or actual.endswith(f".{expected}")
-
 
 def _browser_action_scope(metadata: dict) -> Optional[tuple[str, str]]:
     candidates = [metadata]
@@ -1013,16 +1008,32 @@ def _grounded_payment_navigation_hosts(messages: Optional[List[dict]]) -> set[st
 
 
 def _payment_approval_hosts(req: dict) -> set[str]:
-    """Return checkout hosts carried by the pending payment approval itself."""
+    """Return checkout hosts carried by the pending payment approval itself.
+
+    Attention API payloads flatten write-lock fields onto ``metadata``
+    (``url``, ``writeLockNotification``, ``requestPaymentCard``) while chat
+    messages nest the same contract under ``requestUserApproval``. Read both
+    shapes — bench14 agent ``abd4ae8a-…`` had ``metadata.url=
+    https://checkout.eventim.us/…`` but no nested ``requestUserApproval``, so
+    host grounding reported ``observed none`` despite a valid payment card.
+    """
     metadata = req.get("metadata") if isinstance(req, dict) else None
     metadata = metadata if isinstance(metadata, dict) else {}
     approval = metadata.get("requestUserApproval")
-    if not isinstance(approval, dict):
-        return set()
+    approval = approval if isinstance(approval, dict) else {}
 
-    values: list[object] = [approval.get("url"), approval.get("approvalUrl")]
-    notification = approval.get("writeLockNotification")
-    if isinstance(notification, dict):
+    values: list[object] = [
+        approval.get("url"),
+        approval.get("approvalUrl"),
+        metadata.get("url"),
+        metadata.get("approvalUrl"),
+    ]
+    for notification in (
+        approval.get("writeLockNotification"),
+        metadata.get("writeLockNotification"),
+    ):
+        if not isinstance(notification, dict):
+            continue
         service = notification.get("service")
         if isinstance(service, dict):
             values.extend([service.get("url"), service.get("domain")])
@@ -1044,10 +1055,20 @@ def _validate_payment_merchant_identity(
     messages: Optional[List[dict]],
     business_aliases: object = None,
 ) -> Optional[str]:
+    """Validate business/platform/site for structured merchants without format pedantry.
+
+    Pass/fail is: checkout host grounded + business alias and platform tokens appear
+    somewhere in the merchant label. Do **not** require ``Business (Platform - host)``
+    formatting — e.g. ``Eventim US (1015 Folsom)`` is fine when aliases/platform match
+    and the approval is on eventim.us.
+    """
     if not isinstance(expected_merchant, str) or not isinstance(actual_merchant, str):
         if actual_merchant != expected_merchant:
             return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
         return None
+
+    if not actual_merchant.strip():
+        return f"merchant mismatch: expected {expected_merchant}, got {actual_merchant}"
 
     expected_match = _STRUCTURED_MERCHANT_IDENTITY.fullmatch(expected_merchant)
     if expected_match is None:
@@ -1696,6 +1717,32 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     )
 
 
+async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
+    """Close leftover HELD $1 lifecycle-probe cards so this run must request payment_approval.
+
+    Only `agent-payment-production-purchase` sets disable_purchase_reuse. Other prod Stripe
+    tasks keep the 24h cart-fingerprint reuse path.
+    """
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/close-held-reuse",
+            headers=headers,
+            json={"userId": AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to close held purchase reuse for {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}: "
+            f"{resp.status_code} {resp.text[:300]}"
+        )
+    payload = resp.json() if resp.content else {}
+    print(
+        "    💳 Closed held purchase reuse for production purchase probe: "
+        f"heldFound={payload.get('heldFound')} agentsCleaned={payload.get('agentsCleaned')} "
+        f"orphanHeldIgnored={payload.get('orphanHeldIgnored')}"
+    )
+
+
 def _benchmark_agent_source_override() -> str:
     source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "MAC_APP").strip().upper()
     if source not in {"WEB", "MAC_APP", "SMS"}:
@@ -1712,6 +1759,14 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
 
 
 def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
+    """Local benchmark agents are scheduled onto the queue the harness preflights.
+
+    Production ``--prod`` agents must stay on the shared production Temporal
+    queue (generation-scoped workers). Cloudbench starts local workers too, but
+    they do not reliably consume prod-API workflows on an isolated queue —
+    routing ``--prod`` there leaves agents STARTING_UP until the liveness
+    reconciler fails them (fleet 8bfe3691).
+    """
     if not _is_local_base_url(base_url):
         return None
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
@@ -1791,6 +1846,12 @@ async def create_agent(
     # that shortcut without touching the prompt or the pass criteria.
     if task.context_gates:
         body["context_gates"] = task.context_gates
+
+    # A task may pin its root agent to a specific Rose pool. Used when the
+    # default pool's primary declines the task's prompt outright, which is a
+    # model-policy outcome no retry can change.
+    if task.model:
+        body["model"] = task.model
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -3211,6 +3272,7 @@ async def poll_agent(
     seen_attention_kinds: List[str] = []
     validated_payment_receipt_request_id: Optional[str] = None
     expected_gate_evidence: Optional[dict] = None
+    write_lock_prerequisite_request_id: Optional[str] = None
     agentcard_setup_attention_seen = False
     agentcard_setup_attention_id: Optional[str] = None
     attention_requests_seen: list[dict] = []
@@ -3284,6 +3346,9 @@ async def poll_agent(
             data["_benchmark"]["expected_gate_seen"] = True
             data["_benchmark"]["expected_gate"] = expected_gate_evidence["gate"]
             data["_benchmark"]["expected_gate_request_id"] = expected_gate_evidence["request_id"]
+        if write_lock_prerequisite_request_id:
+            data["_benchmark"]["write_lock_prerequisite_auto_approved"] = True
+            data["_benchmark"]["write_lock_prerequisite_request_id"] = write_lock_prerequisite_request_id
 
         exact_count_error = _root_exact_tool_count_exceeded(task, messages)
         if exact_count_error:
@@ -3653,6 +3718,27 @@ async def poll_agent(
                                     await respond_to_attention_request(base_url, req_id, "approved")
                                     approvals_resolved += 1
                                     print(f"    ✅ Auto-approved payment-card prerequisite {req_id[:8]}")
+                                    continue
+                                # Place-order / purchase write locks can fire before the
+                                # payment-card mint (task prompts often say "click Place
+                                # order, then pay"). When the harness is waiting for
+                                # payment_approval under auto_approve, clear the write
+                                # lock and keep polling for the card request — do not
+                                # treat the write lock as the expected attention kind.
+                                if (
+                                    task.approval_handling == "auto_approve"
+                                    and observed_kind == "write_lock"
+                                    and expected_kind == "payment_approval"
+                                ):
+                                    await respond_to_attention_request(base_url, req_id, "approved")
+                                    approvals_resolved += 1
+                                    write_lock_prerequisite_request_id = req_id
+                                    data["_benchmark"] = {
+                                        **data.get("_benchmark", {}),
+                                        "write_lock_prerequisite_auto_approved": True,
+                                        "write_lock_prerequisite_request_id": req_id,
+                                    }
+                                    print(f"    ✅ Auto-approved write-lock prerequisite {req_id[:8]}")
                                     continue
                                 data["_benchmark"] = {
                                     **data.get("_benchmark", {}),
@@ -7737,6 +7823,8 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
+            if _is_intermediate_challenge_recovery_failure(candidate):
+                continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -7899,6 +7987,22 @@ def _validate_agent_class_min_steps(
     return None
 
 
+def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
+    """Staged antibot recoveries often ERROR then continue; those are not tool failures.
+
+    `recover_from_challenge` emits `action_type=browser_challenge_recovery` rows (often
+    under synthetic `provider-exit-recovery-*` toolCallIds). A later successful payment
+    boundary can follow after one or more of these ERRORs. Counting them in
+    `no_tool_failures` / `no_browser_agent_failures` makes antibot benches fail closed
+    on expected recovery noise.
+    """
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    if action_type == "browser_challenge_recovery":
+        return True
+    call_id = str(candidate.get("toolCallId") or candidate.get("tool_call_id") or "")
+    return call_id.startswith("provider-exit-recovery-")
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -7912,6 +8016,8 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         for candidate in candidates:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
+                continue
+            if _is_intermediate_challenge_recovery_failure(candidate):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8308,6 +8414,10 @@ async def run_single_task(
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
+    if getattr(task, "disable_purchase_reuse", False):
+        if _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} disable_purchase_reuse requires a remote/production backend")
+        await _preflight_close_purchase_reuse_gate(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
@@ -10115,11 +10225,14 @@ async def main_async(args):
         print(f"  📊 In-app Benchmark Hub: managed by parent run {parent_hub_run_id}")
     else:
         # Registration is a launch invariant: a benchmark agent must never be
-        # created unless the Mac app's persisted Hub can already resolve this
-        # run. Final save uses the same required contract below via results.py.
-        from benchmarks.hub_upload import DEFAULT_HUB_URL, require_run_visible
+        # created unless the Hub can already resolve this run. Local stacks
+        # register against the stack under test (not prod) so a production
+        # outage cannot deadlock /deploy of the outage fix. Final save uses
+        # the same required contract below via results.py.
+        from benchmarks.hub_upload import require_run_visible, resolve_hub_upload_url
 
-        os.environ.setdefault("BENCHMARK_HUB_UPLOAD_URL", DEFAULT_HUB_URL)
+        if not (os.environ.get("BENCHMARK_HUB_UPLOAD_URL") or "").strip():
+            os.environ["BENCHMARK_HUB_UPLOAD_URL"] = resolve_hub_upload_url(base_url)
         os.environ.setdefault("BENCHMARK_HUB_API_KEY", API_KEY)
         os.environ["BENCHMARK_HUB_REQUIRED"] = "1"
         require_run_visible(

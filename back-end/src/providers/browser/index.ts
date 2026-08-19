@@ -4,12 +4,11 @@ import { createLogger } from '../logger';
 import {
   closeSession as closeSteelSession,
   createSessionWithContext as createSteelSessionWithContext,
-  getSteelSessionHealth,
-  getSteelCaptchaTelemetry,
   resumeSession as resumeSteelSession,
   steelApiUrl,
   steelSessionFileUrl,
 } from '../steel/session';
+import { getSteelCaptchaTelemetry, getSteelSessionHealth } from '../steel/sessionInspect';
 import { rotateSession as rotateSteelSession } from '../steel/sessionResume';
 import { getFingerprintInjectionData, listSessionFiles, uploadFileToSession } from '../steel/files';
 import { injectUserData } from '../steel/injection';

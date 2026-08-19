@@ -65,6 +65,10 @@ class BenchmarkTask:
     success_on_payment_card_request: bool = False  # Treat a validated payment-card request as terminal success
     payment_card_request_action: Optional[str] = None  # Benchmark lifecycle action after card issuance (for example, abandon)
     production_only: bool = False  # Refuse to run against a local/sandbox backend
+    # When True, harness closes leftover HELD $1 lifecycle-probe cards for the
+    # prod lifecycle user before create_agent so lookup cannot skip payment_approval.
+    # Only agent-payment-production-purchase sets this; other Stripe reuse tests stay enabled.
+    disable_purchase_reuse: bool = False
     response_schema: Optional[dict] = None  # Explicit root verifier contract when prompt inference is ambiguous
     phone_persona: Optional[dict] = None  # Vapi callee persona (system_prompt, first_message, structured_data_schema)
     pinned_facts: Optional[dict] = None  # Ground-truth facts fixed before the run and cross-validated afterward
@@ -79,6 +83,7 @@ class BenchmarkTask:
     description: Optional[str] = None  # One-line summary served to the FE test-prompts picker (falls back to title)
     environment: Optional[dict] = None  # {mode, db_fixtures, base_images, services, secrets, live_targets, context_notes}
     context_gates: Optional[dict] = None  # Per-task user-context gates (helpers/get_user_context.py keys → bool), forwarded at agent creation
+    model: Optional[str] = None  # Pin the ROOT agent to one Rose pool (e.g. 'rose-labs/rose-1-oss'). Only for tasks whose prompt a default-pool primary declines; forwarded at agent creation.
     evaluators: List[dict] = field(default_factory=list)  # Declared evaluator contract (static_check | single_turn_llm_judge | agentic_llm_judge)
     enforce_declared_evaluators: bool = False  # Execute evaluators[] and require them to pass in run_benchmark.py
     source: List[str] = field(default_factory=list)  # Provenance pointers (origin task/test-prompt/smoke/agent_id)

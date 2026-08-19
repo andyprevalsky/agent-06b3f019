@@ -73,11 +73,13 @@ async function run(): Promise<void> {
 
   const originalFetch = globalThis.fetch;
   const oldFakeSurge = process.env.BLACKBOX_TEST_FAKE_SURGE;
+  const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
   const oldReplayOutbound = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
   const upstreamCalls: Array<{ url: string; bodyType: string }> = [];
   let mutableVersion = 0;
   let agentCardCalls = 0;
   process.env.BLACKBOX_TEST_FAKE_SURGE = '1';
+  process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
   delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
 
   globalThis.fetch = (async (
@@ -153,6 +155,66 @@ async function run(): Promise<void> {
     const surgeBody = (await surge.json()) as { id?: string };
     assert.strictEqual(surgeBody.id, 'blackbox-surge-message-5');
 
+    const whatsappSuccess = await fetch(
+      'https://graph.facebook.com/v21.0/blackbox-phone/messages',
+      {
+        method: 'POST',
+        body: JSON.stringify({ text: { body: 'hello' } }),
+      }
+    );
+    assert.strictEqual(whatsappSuccess.status, 200);
+    assert.deepStrictEqual(await whatsappSuccess.json(), {
+      messages: [{ id: 'blackbox-whatsapp-message-6' }],
+    });
+
+    const whatsappUnavailable = await fetch(
+      'https://graph.facebook.com/v21.0/blackbox-phone/messages',
+      {
+        method: 'POST',
+        body: JSON.stringify({ text: { body: '__BLACKBOX_WHATSAPP_503__' } }),
+      }
+    );
+    assert.strictEqual(whatsappUnavailable.status, 503);
+
+    const whatsappUnavailableFromRequest = await fetch(
+      new Request('https://graph.facebook.com/v21.0/blackbox-phone/messages', {
+        method: 'POST',
+        body: JSON.stringify({ text: { body: '__BLACKBOX_WHATSAPP_503__' } }),
+      })
+    );
+    assert.strictEqual(whatsappUnavailableFromRequest.status, 503);
+
+    // Request-only headers must survive when init.headers is absent; init then overrides.
+    const requestAuthOnly = await fetch(
+      new Request('https://api.example.com/request-headers', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer request-only-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ source: 'request' }),
+      })
+    );
+    assert.strictEqual(requestAuthOnly.status, 201);
+
+    const requestPartialOverride = await fetch(
+      new Request('https://api.example.com/request-headers-override', {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer request-base-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ source: 'override' }),
+      }),
+      {
+        headers: {
+          Authorization: 'Bearer init-override-secret',
+          'X-Trace': 'from-init',
+        },
+      }
+    );
+    assert.strictEqual(requestPartialOverride.status, 201);
+
     const agentCardBody = JSON.stringify({
       method: 'tools/call',
       params: { name: 'list_transfers' },
@@ -169,7 +231,7 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(agentCardResponses, [1, 2]);
 
     const all = await readCaptures(baseUrl);
-    assert.strictEqual(all.captures.length, 7);
+    assert.strictEqual(all.captures.length, 12);
     assert.strictEqual(all.captures[0].requestBody, '[non-string body]');
     assert.strictEqual(all.captures[0].responseStatus, 201);
     assert.strictEqual(all.captures[1].url, 'https://sandbox.e2b.app/health');
@@ -185,17 +247,53 @@ async function run(): Promise<void> {
     assert.strictEqual(all.captures[4].cached, false);
     assert.strictEqual(all.captures[5].cached, false);
     assert.strictEqual(all.captures[6].cached, false);
+    assert.strictEqual(all.captures[7].cached, false);
+    assert.strictEqual(all.captures[5].responseStatus, 200);
+    assert.strictEqual(all.captures[6].responseStatus, 503);
+    assert.strictEqual(all.captures[7].responseStatus, 503);
+    const requestHeaderCapture = all.captures[8];
+    assert.strictEqual(requestHeaderCapture.url, 'https://api.example.com/request-headers');
+    assert.match(
+      requestHeaderCapture.requestHeaders.authorization ??
+        requestHeaderCapture.requestHeaders.Authorization ??
+        '',
+      /Bearer request-o\.\.\.\[redacted\]|Bearer request-only-secret/
+    );
     assert.strictEqual(
-      all.captures[5].requestHeaders.Authorization,
+      requestHeaderCapture.requestHeaders['content-type'] ??
+        requestHeaderCapture.requestHeaders['Content-Type'],
+      'application/json'
+    );
+    const overrideCapture = all.captures[9];
+    assert.strictEqual(overrideCapture.url, 'https://api.example.com/request-headers-override');
+    assert.match(
+      overrideCapture.requestHeaders.authorization ??
+        overrideCapture.requestHeaders.Authorization ??
+        '',
+      /Bearer init-over\.\.\.\[redacted\]|Bearer init-override-secret/
+    );
+    assert.strictEqual(
+      overrideCapture.requestHeaders['content-type'] ??
+        overrideCapture.requestHeaders['Content-Type'],
+      'application/json'
+    );
+    assert.strictEqual(
+      overrideCapture.requestHeaders['x-trace'] ?? overrideCapture.requestHeaders['X-Trace'],
+      'from-init'
+    );
+    assert.strictEqual(all.captures[10].cached, false);
+    assert.strictEqual(all.captures[11].cached, false);
+    assert.strictEqual(
+      all.captures[10].requestHeaders.Authorization,
       'Bearer agentcard...[redacted]'
     );
     assert.deepStrictEqual(
       upstreamCalls.map((call) => call.bodyType),
-      ['FormData', 'none', 'none', 'none', 'String', 'String']
+      ['FormData', 'none', 'none', 'none', 'String', 'String', 'String', 'String']
     );
 
     const afterFirst = await readCaptures(baseUrl, '?after=1');
-    assert.strictEqual(afterFirst.captures.length, 6);
+    assert.strictEqual(afterFirst.captures.length, 11);
 
     const cleared = await fetch(`${baseUrl}/captures`, { method: 'DELETE' });
     assert.strictEqual(cleared.status, 200);
@@ -223,70 +321,6 @@ async function run(): Promise<void> {
     globalThis.fetch = originalFetch;
     if (oldFakeSurge === undefined) delete process.env.BLACKBOX_TEST_FAKE_SURGE;
     else process.env.BLACKBOX_TEST_FAKE_SURGE = oldFakeSurge;
-    if (oldReplayOutbound === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
-    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = oldReplayOutbound;
-  }
-}
-
-// Isolated coverage for the WhatsApp Cloud API fake (BLACKBOX_TEST_FAKE_WHATSAPP):
-// a graph.facebook.com /messages POST must be short-circuited to a fake success,
-// and the `__BLACKBOX_WA_UNREACHABLE__` sentinel to a 131026 deliverability error,
-// so onboarding/lifecycle mirrors never make a real Meta send during blackbox runs.
-async function runWhatsAppFakeTest(): Promise<void> {
-  const originalFetch = globalThis.fetch;
-  const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
-  const oldReplayOutbound = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
-  let realCalls = 0;
-  process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
-  delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
-
-  globalThis.fetch = (async (
-    input: string | URL | Request,
-    init?: RequestInit
-  ): Promise<Response> => {
-    const url = String(input);
-    if (url.includes('127.0.0.1') || url.includes('localhost')) {
-      return originalFetch(input, init);
-    }
-    realCalls += 1; // any graph.facebook.com hit here means the fake failed to short-circuit
-    return new Response('should-not-be-reached', { status: 500 });
-  }) as typeof fetch;
-
-  const app = express();
-  app.use('/captures', installFetchCapture());
-  const { server } = await listen(app);
-
-  try {
-    const ok = await fetch('https://graph.facebook.com/v21.0/111/messages', {
-      method: 'POST',
-      headers: { Authorization: 'Bearer wa-secret', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messaging_product: 'whatsapp', to: '15551234567', type: 'template' }),
-    });
-    assert.strictEqual(ok.status, 200, 'faked WhatsApp send returns 200');
-    const okBody = (await ok.json()) as { messages?: { id: string }[] };
-    assert.ok(
-      okBody.messages?.[0]?.id?.startsWith('blackbox-wa-message-'),
-      'fake returns a synthetic message id'
-    );
-
-    const unreachable = await fetch('https://graph.facebook.com/v21.0/111/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: '15551234567', text: { body: '__BLACKBOX_WA_UNREACHABLE__' } }),
-    });
-    assert.strictEqual(unreachable.status, 400, 'sentinel forces a 400');
-    const errBody = (await unreachable.json()) as { error?: { code?: number } };
-    assert.strictEqual(
-      errBody.error?.code,
-      131026,
-      'sentinel forces a 131026 deliverability error'
-    );
-
-    assert.strictEqual(realCalls, 0, 'never makes a real graph.facebook.com call');
-    writeLine('fetch-capture WhatsApp fake tests passed');
-  } finally {
-    await close(server);
-    globalThis.fetch = originalFetch;
     if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
     else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
     if (oldReplayOutbound === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
@@ -294,9 +328,7 @@ async function runWhatsAppFakeTest(): Promise<void> {
   }
 }
 
-run()
-  .then(runWhatsAppFakeTest)
-  .catch((error: unknown) => {
-    writeErrorLine(error instanceof Error ? error.stack || error.message : String(error));
-    process.exit(1);
-  });
+run().catch((error: unknown) => {
+  writeErrorLine(error instanceof Error ? error.stack || error.message : String(error));
+  process.exit(1);
+});

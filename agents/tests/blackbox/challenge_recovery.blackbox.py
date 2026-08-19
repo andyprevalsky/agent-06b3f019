@@ -11,11 +11,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _test_utils import BlackboxResult
 from domains.spawn_browser_agent_v3.challenge_recovery import (
+    blocked_resource_urls_for_verify,
     commit_cookie_removals,
     cookie_key,
     is_auth_cookie,
     page_looks_challenged,
     recover_from_challenge,
+    target_looks_like_payment_document,
+    verify_live_blocked_resources,
+    verify_live_page_cleared_challenge,
 )
 
 
@@ -129,7 +133,9 @@ async def test_explicit_provider_exit_rejection_skips_cookie_probes_but_not_solv
 
     assert solver_calls == 1, "provider-native CAPTCHA solving must remain first"
     assert [stage for stage, _ in events] == ["captcha_solver", "browser_config_search"]
-    assert config_inputs == [before], "auth, cookies, and origin storage must all survive"
+    assert config_inputs == [
+        _state(_cookie("authState"), _cookie("opaque_state"))
+    ], "auth/opaque survive; IP-bound cf_clearance must not be transplanted onto a new exit"
     assert source == before
     assert result.recovery == "config_selected"
     assert result.removed_cookie_keys == ()
@@ -213,6 +219,28 @@ async def test_cookie_independent_challenge_goes_directly_to_config_search():
     assert stages == ["captcha_solver", "all_target_cookies", "browser_config_search"]
 
 
+async def test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail():
+    """Fresh provider/IP probes must not inherit blocked-exit clearance cookies."""
+    source = _state(
+        _cookie("cf_clearance"),
+        _cookie("__cf_bm"),
+        _cookie("authState"),
+        _cookie("cart"),
+    )
+
+    async def probe(_candidate):
+        return False
+
+    result, events, committed, config_inputs = await _run(source, probe)
+    assert result.recovery == "config_selected"
+    assert committed == []
+    assert result.removed_cookie_keys == ()
+    assert config_inputs == [_state(_cookie("authState"), _cookie("cart"))]
+    assert "cf_clearance" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert "__cf_bm" not in {c["name"] for c in config_inputs[0]["cookies"]}
+    assert [event[1] for event in events][-1] == "browser_config_search"
+
+
 async def test_isolated_cookie_pass_must_still_pass_in_the_live_context():
     source = _state(_cookie("cf_clearance"), _cookie("authState"), _cookie("cart"))
     before = copy.deepcopy(source)
@@ -274,6 +302,203 @@ def test_challenge_page_classifier_rejects_blank_and_known_walls():
         title="Blue Bottle Coffee",
         body_text="Order drinks and pastries",
         html="<main>Menu</main>",
+    )
+    # Cleared Eventim ticket pages embed Turnstile/challenge-platform scripts
+    # next to real inventory copy — those HTML markers alone must not fail.
+    assert not page_looks_challenged(
+        status=200,
+        title="Buy tickets to LYNY in San Francisco on August 14, 2026",
+        body_text=(
+            "General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout."
+        ),
+        html=(
+            '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>'
+            '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>'
+            "<main>General Admission</main>"
+        ),
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Access Denied",
+        body_text="You have been blocked. Access Denied. Ray ID a2685f1cff22d940.",
+        html='<script src="/cdn-cgi/challenge-platform/x.js"></script>',
+    )
+    # Sparse interstitial body + challenge script still counts as a wall.
+    assert page_looks_challenged(
+        status=200,
+        title="Store",
+        body_text="Coffee",
+        html='<script src="/cdn-cgi/challenge-platform/x.js"></script>',
+    )
+    # "just a moment" / "access denied" in script/i18n bundles must not flag a
+    # cleared page with substantive rendered body (probe false-positive).
+    assert not page_looks_challenged(
+        status=200,
+        title="Buy tickets to LYNY in San Francisco on August 14, 2026",
+        body_text=(
+            "General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout."
+        ),
+        html=(
+            '<script>window.__i18n={"cf":"just a moment","deny":"access denied",'
+            '"rate":"too many requests"}</script><main>General Admission</main>'
+        ),
+    )
+
+
+async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
+    class FakeBody:
+        def __init__(self, page):
+            self.page = page
+
+        async def inner_text(self, timeout):
+            assert timeout == 2_000
+            return self.page.body_text
+
+    class FakePage:
+        def __init__(self, title, body_text, html, *, flip_to_denied_on_goto=False):
+            self._title = title
+            self.body_text = body_text
+            self._html = html
+            self.goto_count = 0
+            self.flip_to_denied_on_goto = flip_to_denied_on_goto
+
+        async def title(self):
+            return self._title
+
+        def locator(self, selector):
+            assert selector == "body"
+            return FakeBody(self)
+
+        async def content(self):
+            return self._html
+
+        async def goto(self, *_args, **_kwargs):
+            self.goto_count += 1
+            if self.flip_to_denied_on_goto:
+                self._title = "Access Denied"
+                self.body_text = "Access Denied"
+                self._html = "<h1>Access Denied</h1>"
+            return None
+
+        async def wait_for_timeout(self, _milliseconds):
+            return None
+
+    clean = FakePage("LYNY", "General Admission Tier 2", "<main>tickets</main>")
+    assert await verify_live_page_cleared_challenge(
+        clean, "https://wl.eventim.us/event/lyny/1", attempts=2, solver_timeout_seconds=0
+    )
+    # Must navigation-probe — static preloaded content is not enough.
+    assert clean.goto_count == 2
+
+    denied = FakePage("Access Denied", "Access Denied", "<h1>Access Denied</h1>")
+    assert not await verify_live_page_cleared_challenge(
+        denied, "https://wl.eventim.us/event/lyny/1", attempts=1, solver_timeout_seconds=0
+    )
+    assert denied.goto_count == 1
+
+    # Eventim false-stable: already-loaded probe page looks clean, fresh goto denies.
+    false_stable = FakePage(
+        "LYNY",
+        "General Admission Tier 2",
+        "<main>tickets</main>",
+        flip_to_denied_on_goto=True,
+    )
+    assert not await verify_live_page_cleared_challenge(
+        false_stable,
+        "https://wl.eventim.us/event/lyny/1",
+        attempts=1,
+        solver_timeout_seconds=0,
+    )
+    assert false_stable.goto_count == 1
+
+
+def test_payment_document_url_detection():
+    # Path allowlists removed — always False.
+    assert not target_looks_like_payment_document("https://checkout.eventim.us/?afflky=1015Folsom")
+    assert not target_looks_like_payment_document("https://shop.example/cart")
+    assert not target_looks_like_payment_document("https://wl.eventim.us/event/lyny/692405")
+
+
+def test_blocked_resource_requires_payment_cdn():
+    from domains.spawn_browser_agent_v3.recording import blocked_resource_requires_payment_cdn
+
+    # Any absolute http(s) URL latches — no vendor host allowlists.
+    assert blocked_resource_requires_payment_cdn("https://js.cdn.example/v3")
+    assert blocked_resource_requires_payment_cdn("https://cdn.example/widget.js")
+    assert blocked_resource_requires_payment_cdn("https://api.example.com/v1/tokens")
+    assert blocked_resource_requires_payment_cdn("https://wl.eventim.us/cdn-cgi/challenge")
+    assert not blocked_resource_requires_payment_cdn(None)
+    assert not blocked_resource_requires_payment_cdn("")
+    assert not blocked_resource_requires_payment_cdn("not-a-url")
+
+
+def test_blocked_resource_urls_for_verify_dedupes_and_strips_query():
+    assert blocked_resource_urls_for_verify(
+        [
+            "https://js.stripe.com/v3?foo=1",
+            "https://js.stripe.com/v3/",
+            "not-a-url",
+            "https://cdn.example/app.js#x",
+        ]
+    ) == (
+        "https://js.stripe.com/v3",
+        "https://js.stripe.com/v3/",
+        "https://cdn.example/app.js",
+    )
+
+
+async def test_live_blocked_resource_verify_is_failure_driven():
+    """Empty blocked list must not false-negative plain CF recovery."""
+
+    class FakePage:
+        def __init__(self, result: bool):
+            self.result = result
+            self.evaluate_calls = 0
+            self.last_args = None
+
+        async def evaluate(self, _script, args=None):
+            self.evaluate_calls += 1
+            self.last_args = args
+            return self.result
+
+    # No blocked URLs => vacuously OK, no page evaluate.
+    assert await verify_live_blocked_resources(FakePage(False), [])
+    ok = FakePage(True)
+    bad = FakePage(False)
+    assert await verify_live_blocked_resources(ok, ["https://js.stripe.com/v3"])
+    assert not await verify_live_blocked_resources(bad, ["https://js.stripe.com/v3"])
+    assert ok.evaluate_calls == 1
+    assert bad.evaluate_calls == 1
+    assert ok.last_args["targets"] == ["https://js.stripe.com/v3"]
+    assert ok.last_args["scriptFlags"] == [True]
+
+
+def test_challenge_page_classifier_detects_kernel_provider_blacklist():
+    """Kernel 502 provider_blacklisted must not read as a clean recovered page.
+
+    RCA cement for agent-payment-production-purchase (882509fd): checkout.stripe.com
+    returns HTTP 502 with x-kernel-proxy-error: provider_blacklisted. Challenge
+    recovery previously promoted another Kernel residential/ISP exit as "stable"
+    because the classifier ignored 502 + blacklist markers, then the agent burned
+    the $5 budget looping recoveries that could never clear a domain denylist.
+    """
+    assert page_looks_challenged(
+        status=502,
+        title="Bad Gateway",
+        body_text="Proxy error",
+        html="<html><body>Bad Gateway</body></html>",
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Error",
+        body_text="Upstream refused: provider_blacklisted for this destination",
+        html="",
+    )
+    assert page_looks_challenged(
+        status=200,
+        title="Proxy Error",
+        body_text="Blocked",
+        html="<html><body>x-kernel-proxy-error: provider_blacklisted</body></html>",
     )
 
 
@@ -486,12 +711,20 @@ async def run_all_tests():
         "cookie_independent_config_search", test_cookie_independent_challenge_goes_directly_to_config_search
     )
     await result.record_async(
+        "config_search_strips_challenge_cookies",
+        test_config_search_strips_challenge_cookies_even_when_cookie_probes_fail,
+    )
+    await result.record_async(
         "live_cookie_fix_stability",
         test_isolated_cookie_pass_must_still_pass_in_the_live_context,
     )
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
+    result.record(
+        "challenge_page_classifier_kernel_blacklist",
+        test_challenge_page_classifier_detects_kernel_provider_blacklist,
+    )
     result.record(
         "challenge_page_classifier_vendors",
         test_challenge_page_classifier_detects_non_cloudflare_vendors,
@@ -507,6 +740,23 @@ async def run_all_tests():
     result.record(
         "challenge_page_classifier_prose",
         test_challenge_page_classifier_ignores_incidental_captcha_prose,
+    )
+    await result.record_async(
+        "live_tab_verify_access_denied",
+        test_live_tab_verify_accepts_clean_and_rejects_access_denied,
+    )
+    result.record("payment_document_url_detection", test_payment_document_url_detection)
+    result.record(
+        "blocked_resource_requires_payment_cdn",
+        test_blocked_resource_requires_payment_cdn,
+    )
+    result.record(
+        "blocked_resource_url_normalize",
+        test_blocked_resource_urls_for_verify_dedupes_and_strips_query,
+    )
+    await result.record_async(
+        "live_blocked_resource_verify",
+        test_live_blocked_resource_verify_is_failure_driven,
     )
     await result.record_async(
         "live_cookie_commit_two_passes",

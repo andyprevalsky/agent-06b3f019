@@ -7,8 +7,9 @@ import {
   browserRecoveryCandidates,
   compatiblePreferredBrowserConfig,
   pageLooksChallenged,
-  probeCandidateBrowser,
+  recoveryConfigKeyForSession,
   runParallelBrowserConfigSearch,
+  shouldPreferSteelForChallengeTarget,
   type BrowserRecoveryConfig,
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
@@ -17,7 +18,7 @@ import {
   type BrowserSessionCreationDependencies,
 } from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
-import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/session';
+import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import { recoverChallengeSchema } from '../../domains/browser-session/types';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
@@ -98,16 +99,9 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
     /browserSession\.create\s*\(/,
     'Kernel recovery candidates must remain remote-only'
   );
-  const steelSource = readFileSync(
-    new URL('../../providers/steel/session.ts', import.meta.url),
+  const steelRecoveryFactory = readFileSync(
+    new URL('../../providers/steel/sessionRecovery.ts', import.meta.url),
     'utf8'
-  );
-  const steelRecoveryFactory = steelSource.slice(
-    steelSource.indexOf('export async function createSteelRecoverySession'),
-    steelSource.indexOf(
-      '/**\n * Close a browser session',
-      steelSource.indexOf('createSteelRecoverySession')
-    )
   );
   assert.doesNotMatch(
     steelRecoveryFactory,
@@ -137,12 +131,13 @@ async function testParallelSearchPromotesStableFastestAndReleasesLosers(): Promi
     probe: async (config) => {
       probed.push(config.key);
       if (config.key === 'kernel_mobile') {
-        return { stablePasses: 1, attempts: 2, latencyMs: 1 };
+        return { stablePasses: 1, attempts: 2, latencyMs: 1, paymentCdnOk: false };
       }
       return {
         stablePasses: 2,
         attempts: 2,
         latencyMs: config.key === 'steel_fixed' ? 10 : 100,
+        paymentCdnOk: false,
       };
     },
     promote: async (candidate) => {
@@ -177,8 +172,8 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
   await assert.rejects(
     runParallelBrowserConfigSearch(configs, {
       create: async (config) => fakeSession(config),
-      probe: async () => ({ stablePasses: 1, attempts: 2, latencyMs: 1 }),
-      promote: async () => assert.fail('unstable candidate must never be promoted'),
+      probe: async () => ({ stablePasses: 0, attempts: 2, latencyMs: 1, paymentCdnOk: false }),
+      promote: async () => assert.fail('zero-pass candidate must never be promoted'),
       release: async (config) => {
         released.push(config.key);
       },
@@ -186,6 +181,47 @@ async function testNoStableCandidateCleansEverything(): Promise<void> {
     /No stable browser configuration/
   );
   assert.strictEqual(released.length, configs.length);
+}
+
+async function testPartialStableCandidateIsPromotedWhenNoneFullyStable(): Promise<void> {
+  const configs = browserRecoveryCandidates({ country: 'US' });
+  const promoted: string[] = [];
+  const released: string[] = [];
+  const winner = await runParallelBrowserConfigSearch(configs, {
+    create: async (config) => fakeSession(config),
+    probe: async (config) => ({
+      stablePasses: config.key === 'kernel_mobile' ? 1 : 0,
+      attempts: 2,
+      latencyMs: config.key === 'kernel_mobile' ? 5 : 1,
+      paymentCdnOk: false,
+    }),
+    promote: async (candidate) => {
+      promoted.push(candidate.config.key);
+    },
+    release: async (config) => {
+      released.push(config.key);
+    },
+  });
+  assert.strictEqual(winner.config.key, 'kernel_mobile');
+  assert.deepStrictEqual(promoted, ['kernel_mobile']);
+  assert.strictEqual(released.length, configs.length - 1);
+  assert.ok(!released.includes('kernel_mobile'));
+}
+
+function testRecoveryConfigKeyForSession(): void {
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'isp_city'), 'kernel_isp');
+  assert.strictEqual(
+    recoveryConfigKeyForSession('kernel', 'residential_city'),
+    'kernel_residential_city'
+  );
+  assert.strictEqual(
+    recoveryConfigKeyForSession('kernel', 'residential_country'),
+    'kernel_residential_country'
+  );
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'none'), 'kernel_direct');
+  assert.strictEqual(recoveryConfigKeyForSession('steel', 'managed'), 'steel_managed');
+  assert.strictEqual(recoveryConfigKeyForSession('steel', 'fixed'), 'steel_fixed');
+  assert.strictEqual(recoveryConfigKeyForSession('kernel', 'mobile_city'), 'kernel_mobile');
 }
 
 function testChallengeDetection(): void {
@@ -198,6 +234,7 @@ function testChallengeDetection(): void {
       html: '',
     })
   );
+  // Sparse body + challenge-platform script still counts as a wall.
   assert.ok(
     pageLooksChallenged({
       status: 200,
@@ -222,120 +259,98 @@ function testChallengeDetection(): void {
       html: '<html><head></head><body></body></html>',
     })
   );
+  // Eventim cleared ticket HTML embeds Turnstile + challenge-platform beside
+  // real inventory — must not false-positive once body text is substantive.
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Buy tickets to LYNY in San Francisco on August 14, 2026',
+      bodyText:
+        'General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout.',
+      html:
+        '<script src="/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"></script>' +
+        '<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>' +
+        '<main>General Admission</main>',
+    })
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Access Denied',
+      bodyText: 'You have been blocked. Access Denied. Ray ID a2685f1cff22d940.',
+      html: '<script src="/cdn-cgi/challenge-platform/x.js"></script>',
+    })
+  );
+  // RCA: agent-payment-production-purchase (882509fd) — Kernel returns HTTP 502
+  // with x-kernel-proxy-error: provider_blacklisted for checkout.stripe.com.
+  // Without classifying that page as challenged, Kernel residential/ISP
+  // candidates "win" the config search and recovery falsely reports success.
+  assert.ok(
+    pageLooksChallenged({
+      status: 502,
+      title: 'Bad Gateway',
+      bodyText: 'Proxy error',
+      html: '<html><body>Bad Gateway</body></html>',
+    }),
+    'HTTP 502 must count as challenged so Kernel blacklist exits cannot win'
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Error',
+      bodyText: 'Upstream refused: provider_blacklisted for this destination',
+      html: '',
+    }),
+    'provider_blacklisted body text must count as challenged'
+  );
+  assert.ok(
+    pageLooksChallenged({
+      status: 200,
+      title: 'Proxy Error',
+      bodyText: 'Blocked',
+      html: '<html><body>x-kernel-proxy-error: provider_blacklisted</body></html>',
+    }),
+    'x-kernel-proxy-error HTML must count as challenged'
+  );
+  // Substantive merchant body + "just a moment" buried in a script/i18n bundle
+  // must NOT false-positive — that discarded Stripe-capable exits.
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Buy tickets to LYNY',
+      bodyText:
+        'General Admission Tier 1 $25.00 Add to cart Select quantity and continue to checkout now.',
+      html:
+        '<script>window.__i18n={"errors":{"rate":"too many requests","cf":"just a moment","deny":"access denied"}}</script>' +
+        '<main>General Admission</main>',
+    }),
+    'generic challenge prose in script bundles must not flag a cleared page'
+  );
 }
 
-async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> {
-  const cookies = [
-    {
-      name: 'authState',
-      value: 'opaque',
-      domain: '.order.online',
-      path: '/',
-    },
-  ];
-  let defaultPageVisits = 0;
-  let disposablePageVisits = 0;
-  let newContextCalls = 0;
-  let defaultContextCloseCalls = 0;
-  let browserCloseCalls = 0;
-  const addedCookies: unknown[] = [];
-  const initScripts: string[] = [];
-  let originStorageRestores = 0;
-  let originAuthVisible = false;
+function testSteelPreferredWhenCdnHardFilterActive(): void {
+  assert.ok(
+    !shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x')
+  );
+  assert.ok(
+    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
+      requirePaymentCdn: true,
+    })
+  );
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
+  assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
 
-  const fakePage = (onVisit: () => void) => ({
-    goto: async () => {
-      onVisit();
-      originAuthVisible = false;
-      return { status: () => 200 };
-    },
-    waitForTimeout: async () => undefined,
-    evaluate: async (pageFunction: () => Promise<void>) => {
-      assert.ok(initScripts.some((script) => script.includes('signedInCart')));
-      assert.strictEqual(
-        typeof pageFunction,
-        'function',
-        'storage restore must be invoked as a page function'
-      );
-      const recoveryGlobal = globalThis as typeof globalThis & {
-        __naviRestoreRecoveryStorage?: () => Promise<void>;
-      };
-      recoveryGlobal.__naviRestoreRecoveryStorage = async () => {
-        originStorageRestores += 1;
-        originAuthVisible = true;
-      };
-      try {
-        await pageFunction();
-      } finally {
-        delete recoveryGlobal.__naviRestoreRecoveryStorage;
-      }
-    },
-    title: async () => {
-      assert.ok(originAuthVisible, 'origin auth state must be restored before challenge probing');
-      return 'Blue Bottle Coffee';
-    },
-    locator: () => ({ innerText: async () => 'Order drinks and pastries' }),
-    content: async () => '<main>Order drinks and pastries</main>',
-  });
-  const defaultPage = fakePage(() => {
-    defaultPageVisits += 1;
-  });
-  const disposablePage = fakePage(() => {
-    disposablePageVisits += 1;
-  });
-  const defaultContext = {
-    pages: () => [defaultPage],
-    newPage: async () => defaultPage,
-    addCookies: async (value: unknown[]) => {
-      addedCookies.push(...value);
-    },
-    addInitScript: async (script: string) => {
-      initScripts.push(script);
-    },
-    close: async () => {
-      defaultContextCloseCalls += 1;
-    },
-  };
-  const disposableContext = {
-    newPage: async () => disposablePage,
-    close: async () => undefined,
-  };
-  const browser = {
-    contexts: () => [defaultContext],
-    newContext: async () => {
-      newContextCalls += 1;
-      return disposableContext;
-    },
-    close: async () => {
-      browserCloseCalls += 1;
-    },
-  } as unknown as Browser;
-  const session = {
-    ...fakeSession({ key: 'test', provider: 'kernel', proxyMode: 'isp' }),
-    validationBrowser: browser,
-  };
-
-  const result = await probeCandidateBrowser(session, 'https://order.online/store/blue-bottle', {
-    cookies,
-    origins: [
-      {
-        origin: 'https://order.online',
-        localStorage: [{ name: 'signedInCart', value: 'keep' }],
-        indexedDB: [],
-      },
-    ],
-  });
-
-  assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
-  assert.strictEqual(newContextCalls, 0, 'the disposable incognito context is not promoted');
-  assert.strictEqual(disposablePageVisits, 0);
-  assert.strictEqual(defaultPageVisits, 2, 'the exact promoted context must pass twice');
-  assert.strictEqual(initScripts.length, 1, 'origin state is installed on the promoted context');
-  assert.strictEqual(originStorageRestores, 2, 'origin auth is awaited before both clean probes');
-  assert.strictEqual(defaultContextCloseCalls, 0, 'the promoted context must remain alive');
-  assert.strictEqual(browserCloseCalls, 1, 'only the validation CDP connection is closed');
-  assert.deepStrictEqual(result, { stablePasses: 2, attempts: 2, latencyMs: result.latencyMs });
+  const preferred = browserRecoveryCandidates(
+    { country: 'US', state: 'CA', city: 'SAN FRANCISCO' },
+    { preferSteel: true }
+  );
+  assert.deepStrictEqual(
+    preferred.map((candidate) => candidate.key),
+    ['steel_managed', 'steel_fixed']
+  );
+  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
+
 
 function testPreferredConfigCompatibility(): void {
   const preferred = {
@@ -560,14 +575,20 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
   assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
 }
 
+
+
 function testRecoveryRequestSchema(): void {
   const parsed = recoverChallengeSchema.parse({
     task_id: '00000000-0000-4000-8000-000000000001',
     current_url: 'https://order.online/store/blue-bottle',
     storage_state: { cookies: [], origins: [] },
     user_agent: 'test-agent',
+    blocked_resource_url: 'https://js.stripe.com/v3',
+    require_payment_cdn: true,
   });
   assert.deepStrictEqual(parsed.storage_state, { cookies: [], origins: [] });
+  assert.strictEqual(parsed.blocked_resource_url, 'https://js.stripe.com/v3');
+  assert.strictEqual(parsed.require_payment_cdn, true);
   assert.strictEqual(
     recoverChallengeSchema.safeParse({
       task_id: '00000000-0000-4000-8000-000000000001',
@@ -583,8 +604,13 @@ async function main(): Promise<void> {
   testConfigSearchUsesHiddenRemoteSessionsOnly();
   await testParallelSearchPromotesStableFastestAndReleasesLosers();
   await testNoStableCandidateCleansEverything();
+  await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
+  // Payment-CDN / Stripe.js ranking + hard gates live in
+  // browser-challenge-recovery-payment.test.ts (max-lines split).
+  // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
+  testRecoveryConfigKeyForSession();
   testChallengeDetection();
-  await testCandidateProbeUsesThePromotedDefaultContext();
+  testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();

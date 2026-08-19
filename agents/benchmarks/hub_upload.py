@@ -35,10 +35,28 @@ def hub_upload_enabled() -> bool:
     return bool(os.getenv("BENCHMARK_HUB_UPLOAD_URL"))
 
 
+def resolve_hub_upload_url(base_url: str | None = None) -> str:
+    """Pick the Hub URL for fail-closed registration.
+
+    Explicit ``BENCHMARK_HUB_UPLOAD_URL`` always wins. For localhost /
+    127.0.0.1 stacks with no override, prefer the stack under test so a
+    production outage cannot deadlock local smoke ``/deploy`` of the outage
+    fix. Otherwise default to the always-on production Hub.
+    """
+    configured = (os.getenv("BENCHMARK_HUB_UPLOAD_URL") or "").rstrip("/")
+    if configured:
+        return configured
+    candidate = (base_url or "").rstrip("/")
+    if candidate.startswith("http://localhost") or candidate.startswith(
+        "http://127.0.0.1"
+    ):
+        return candidate
+    return DEFAULT_HUB_URL
+
+
 def _hub_url(*, required: bool) -> str:
     configured = (os.getenv("BENCHMARK_HUB_UPLOAD_URL") or "").rstrip("/")
     return configured or (DEFAULT_HUB_URL if required else "")
-
 
 def _auth_headers(*, required: bool) -> dict[str, str] | None:
     key = os.getenv("BENCHMARK_HUB_API_KEY") or os.getenv("BACKEND_API_KEY") or ""

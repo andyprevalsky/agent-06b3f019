@@ -60,8 +60,12 @@ from utils.prompts import build_verifier_prompt
 from .cdp_urls import steel_cdp_connection_url
 from .challenge_recovery import (
     commit_cookie_removals,
+    live_tab_looks_challenged,
+    page_looks_challenged,
     probe_storage_state,
     recover_from_challenge,
+    verify_live_blocked_resources,
+    verify_live_page_cleared_challenge,
 )
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
@@ -90,6 +94,8 @@ from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
     SimulatedBrowserRecorder,
+    blocked_resource_url_for_recovery,
+    blocked_resource_requires_payment_cdn,
     browser_recording_output_dir,
     normalize_simulated_browser_frame,
 )
@@ -133,9 +139,13 @@ from .service import (
     select_auth_assistance_current_url,
 )
 from .service_actions import (
+    SITE_WRITE_LOCK_APPROVAL_KEY,
+    _get_base_domain,
     execute_action,
     get_domain_from_url,
     get_element_description,
+    grant_site_write_lock_approvals,
+    resolve_site_write_lock_grant_url,
     wait_for_navigation_ready,
 )
 from .service_crypto import (
@@ -149,6 +159,7 @@ from .service_crypto import (
     extract_rate_limited_until,
     fetch_recent_otps,
     format_otp_user_message,
+    has_payment_card_secret_refs,
     is_usable_email_otp,
 )
 from .streaming import BrowserStreamingRoseClient, BrowserThinkingStream
@@ -1189,7 +1200,13 @@ async def _restore_rotation_storage_state(
     current_url: str,
     restore_cookies: bool = True,
 ) -> None:
-    """Restore captured auth/storage into a replacement provider session."""
+    """Restore captured auth/storage into a replacement provider session.
+
+    When ``restore_cookies`` is False (challenge-recovery preloaded winner), the
+    remote default context already holds probe/solver cookies. Skip a same-host
+    re-navigation that would re-trigger Cloudflare WAF on a clean candidate, and
+    use the probe's 45s navigation budget when a goto is still required.
+    """
     if page is None or not storage_state or getattr(page, "context", None) is None:
         return
 
@@ -1202,8 +1219,20 @@ async def _restore_rotation_storage_state(
     if origins:
         await context.add_init_script(script=_rotation_storage_restore_script(storage_state))
 
-    if current_url:
-        await page.goto(current_url, wait_until="domcontentloaded", timeout=15_000)
+    should_navigate = bool(current_url)
+    if should_navigate and not restore_cookies:
+        try:
+            from urllib.parse import urlparse
+
+            live_host = (urlparse(str(getattr(page, "url", "") or "")).hostname or "").lower()
+            target_host = (urlparse(current_url).hostname or "").lower()
+            if live_host and target_host and live_host == target_host:
+                should_navigate = False
+        except Exception:
+            should_navigate = True
+    if should_navigate:
+        navigation_timeout_ms = 45_000 if not restore_cookies else 15_000
+        await page.goto(current_url, wait_until="domcontentloaded", timeout=navigation_timeout_ms)
 
     if origins:
         await page.evaluate(
@@ -1514,29 +1543,73 @@ def _browser_action_tool_call_id(llm_result: Dict[str, Any]) -> str:
     return str(llm_result.get("tool_call_id") or uuid_module.uuid4())
 
 
-async def _wait_for_provider_captcha_solver(config: Any, task_id: str) -> None:
-    """Give provider-native auto-solving the first chance before recovery probes."""
+async def _wait_for_provider_captcha_solver(
+    config: Any,
+    task_id: str,
+    *,
+    page: Optional[Any] = None,
+) -> None:
+    """Give provider-native auto-solving the first chance before recovery probes.
+
+    Kernel telemetry sets ``isSolving`` to null (terminal outcomes only). When the
+    live tab still looks challenged, keep waiting up to the 45s ceiling instead of
+    treating three null polls as "solver done".
+    """
     deadline = asyncio.get_running_loop().time() + 45
     saw_active_solver = False
     inactive_polls = 0
     while asyncio.get_running_loop().time() < deadline:
         activity.heartbeat("Waiting for provider CAPTCHA auto-solver")
+        page_still_challenged = False
+        if page is not None:
+            try:
+                snapshot = await asyncio.wait_for(
+                    asyncio.gather(
+                        page.title(),
+                        page.locator("body").inner_text(timeout=2_000),
+                        page.content(),
+                        return_exceptions=True,
+                    ),
+                    timeout=15,
+                )
+                if asyncio.get_running_loop().time() >= deadline:
+                    return
+                title = snapshot[0] if isinstance(snapshot[0], str) else ""
+                body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+                html = snapshot[2] if isinstance(snapshot[2], str) else ""
+                page_still_challenged = page_looks_challenged(
+                    status=None,
+                    title=title[:1_000],
+                    body_text=body_text[:20_000],
+                    html=html[:100_000],
+                )
+            except Exception:
+                page_still_challenged = False
+                if asyncio.get_running_loop().time() >= deadline:
+                    return
         try:
             telemetry = await fetch_browser_captcha_telemetry(config, task_id)
         except Exception as exc:
             logger.warning("CAPTCHA telemetry unavailable during challenge recovery", error=str(exc))
+            if page_still_challenged:
+                await asyncio.sleep(2)
+                continue
             await asyncio.sleep(2)
             return
         is_solving = telemetry.get("isSolving")
         if is_solving is True:
             saw_active_solver = True
             inactive_polls = 0
-        elif saw_active_solver:
+        elif saw_active_solver and not page_still_challenged:
             return
+        elif page_still_challenged:
+            # Hard WAF / Kernel-null telemetry: wait out the solver window on the
+            # live challenged page instead of exiting after three idle polls.
+            inactive_polls = 0
         else:
             inactive_polls += 1
-            # Steel can take a moment to register a new task. Kernel only emits
-            # terminal outcomes, so three grace polls are its solver-first wait.
+            # Steel can take a moment to register a new task. When the page is not
+            # challenged, three grace polls are enough for the solver-first wait.
             if inactive_polls >= 3:
                 return
         await asyncio.sleep(2)
@@ -1652,6 +1725,7 @@ def _clear_browser_activity_memory_buffers(
             "_rejected_network_generations",
             "_ignored_request_ids",
             "_active_request_ids",
+            "_active_request_meta",
         ):
             value = getattr(browser_network_recorder, attr, None)
             if hasattr(value, "clear"):
@@ -2849,11 +2923,16 @@ async def _install_fast_mode_network_cache(
     read_enabled: bool = True,
     write_enabled: bool = True,
 ) -> None:
-    """Attach a CDP Fetch route that records/replays the browser's HTTPS responses.
+    """Record/replay browser HTTPS responses for Fast Mode.
 
-    HIT → fulfill from cache (no internet). MISS → continue live, capture the body
-    via a response listener. Browser session + actions stay live; only network
-    responses are cached. Failures degrade to live (never break the session).
+    Replay (read_enabled): install a Playwright route that fulfills cache hits.
+    Write-through / record-only: attach a response listener only — do NOT install
+    ``context.route("**/*")``. Routing every request (even with immediate
+    ``continue_()``) breaks Stripe Elements on Eventim checkout: Billing Address
+    and Payment Details stay empty shells while js.stripe.com still returns 200s
+    (bench agent ``baf33041-…``, steel_managed, write-through user).
+
+    Failures degrade to live (never break the session).
     """
     from providers.fast_cache.browser_http import BrowserHttpCache
 
@@ -2911,8 +2990,10 @@ async def _install_fast_mode_network_cache(
         except Exception:  # recording is best-effort, never break the page
             pass
 
-    await context.route("**/*", _route)
-    context.on("response", lambda r: asyncio.ensure_future(_record(r)))
+    if read_enabled:
+        await context.route("**/*", _route)
+    if write_enabled:
+        context.on("response", lambda r: asyncio.ensure_future(_record(r)))
 
 
 async def _finalize_kernel_replay_for_fe(
@@ -4847,6 +4928,28 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     write_lock_approvals: Dict[str, Dict] = {}
     auth_realm = auth_realm_from_url(start_url)
     verifier_checkpoints: List[Dict[str, Any]] = []
+    # Eventim checkaddtocart POST can keep returning 403 challenge HTML while the
+    # document GET looks clean — cookie-stage recovery then false-succeeds forever.
+    # After one cookies_sanitized result, escalate subsequent recoveries to config search.
+    cookie_recovery_successes = 0
+    # Sticky hard filter: once a critical third-party resource block triggered
+    # recovery on this task, later recoveries still re-verify that URL.
+    require_payment_cdn = False
+    payment_cdn_verify_url = ""
+    # After a successful challenge recovery, pin goto/navback to the recovered
+    # host so the model cannot leave the cleared page for network-log thrash.
+    navigation_pin_host: Optional[str] = None
+    navigation_pin_url: Optional[str] = None
+    handoff_payment_fill_attempts = 0
+    handoff_payment_fill_succeeded = False
+    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
+    # Session origin registrable domain — when the live page leaves this domain
+    # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
+    # without path or product-name allowlists.
+    _start_domain = get_domain_from_url(start_url) if start_url else ""
+    navigation_origin_base_domain: Optional[str] = (
+        _get_base_domain(_start_domain) if _start_domain else None
+    )
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
@@ -4857,7 +4960,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     if write_lock_resume_state:
         pending_write_lock_action = write_lock_resume_state.get("pending_action")
         pending_write_lock_target = write_lock_resume_state.get("pending_action_target")
-        write_lock_approvals = write_lock_resume_state.get("write_lock_approvals", {})
+        write_lock_approvals = dict(write_lock_resume_state.get("write_lock_approvals") or {})
         resume_step_count = write_lock_resume_state.get("step_count", 0)
         session_id = write_lock_resume_state.get("session_id") or session_id
         cdp_url = write_lock_resume_state.get("cdp_url") or cdp_url
@@ -4872,6 +4975,35 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             for checkpoint in (write_lock_resume_state.get("verifier_checkpoints") or [])
             if isinstance(checkpoint, dict) and checkpoint.get("dom_tree")
         ][-3:]
+        # H-06 heal: payment-card resume must unlock the merchant domain. Older
+        # grants keyed Kernel live-view hosts (*.kernel.sh / *.onkernel.com);
+        # re-resolve from start_url / visited merchant URLs when needed.
+        if write_lock_resume_state.get("approval_type") == "payment" and (
+            write_lock_resume_state.get("payment_card_refs") or payment_card_last4
+        ):
+            merchant_grant_url = resolve_site_write_lock_grant_url(
+                {
+                    "start_url": start_url,
+                    "visited_urls": visited_urls,
+                    "current_url": "",
+                }
+            )
+            merchant_domain = get_domain_from_url(merchant_grant_url)
+            site_entry = write_lock_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}
+            if merchant_domain and site_entry.get("domain") != merchant_domain:
+                write_lock_approvals = grant_site_write_lock_approvals(
+                    write_lock_approvals,
+                    merchant_grant_url,
+                    time.time(),
+                )
+                logger.info(
+                    "Browser payment site write-lock unlock healed on resume",
+                    agent_id=agent_id,
+                    task_id=task_id,
+                    grant_url=merchant_grant_url,
+                    unlock_domain=merchant_domain,
+                    prior_domain=site_entry.get("domain"),
+                )
         if write_lock_resume_state.get("approval_type") == "auth_assistance":
             resume_user_messages.append(
                 build_auth_assistance_resume_user_message(
@@ -5288,10 +5420,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 _pw_context = _pw_browser.contexts[0]
                 _pw_page = _pw_context.pages[0]
 
-                # Fast Mode: record/replay the page's HTTPS responses via a CDP Fetch route.
-                # On a hit we fulfill from cache (no internet); on a miss we let the request
-                # go live and capture the response body. Write-through mode records without
-                # fulfilling from cache. The browser session + actions stay live.
+                # Fast Mode: replay uses a Playwright route; write-through records via a
+                # response listener only (routing every request breaks Stripe Elements).
                 fast_mode_write_through = write_through_enabled_for_user(user_id)
                 if goal and (fast_mode_cache_enabled or fast_mode_write_through):
                     await _install_fast_mode_network_cache(
@@ -6049,6 +6179,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     browser_network_recorder=browser_network_recorder,
                     current_auth_realm=auth_realm,
                     prepare_credentials_for_url=_prepare_credentials_for_url,
+                    navigation_pin_host=navigation_pin_host,
+                    navigation_origin_base_domain=navigation_origin_base_domain,
                 )
 
                 if result.get("status") == "needs_write_approval":
@@ -6122,6 +6254,72 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
 
+            # Sticky cross-origin handoff pin: once the live page leaves the
+            # session origin registrable domain, remember that host/URL and
+            # bounce back if clicks/evaluate sneak off it.
+            from urllib.parse import urlparse as _urlparse_handoff
+
+            _handoff_host = (_urlparse_handoff(str(current_url or "")).hostname or "").lower()
+            if navigation_origin_base_domain and _handoff_host:
+                _handoff_base = _get_base_domain(_handoff_host)
+                if _handoff_base and _handoff_base != navigation_origin_base_domain:
+                    if not navigation_pin_host:
+                        navigation_pin_host = _handoff_host
+                    if _handoff_host == navigation_pin_host or _handoff_host.endswith(
+                        f".{navigation_pin_host}"
+                    ):
+                        navigation_pin_url = str(current_url)
+            if (
+                navigation_pin_host
+                and navigation_pin_url
+                and _handoff_host
+                and not (
+                    _handoff_host == navigation_pin_host
+                    or _handoff_host.endswith(f".{navigation_pin_host}")
+                )
+            ):
+                logger.warning(
+                    "Auto-returning to pinned handoff host after leaving it",
+                    pin_host=navigation_pin_host,
+                    left_url=current_url,
+                    pin_url=navigation_pin_url,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                )
+                bounce = await execute_action(
+                    dom_service,
+                    action_history,
+                    {"action": "goto", "params": {"url": navigation_pin_url}},
+                    available_file_paths=available_file_paths,
+                    session_id=session_id,
+                    config=config,
+                    humanizer=humanizer,
+                    secret_refs=secret_refs,
+                    password_origins=password_origins,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    user_id=user_id,
+                    current_url=current_url,
+                    trusted_page_urls=visited_urls,
+                    write_lock_enabled=write_lock_enabled,
+                    write_lock_approvals=write_lock_approvals,
+                    system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
+                    current_auth_realm=auth_realm,
+                    prepare_credentials_for_url=_prepare_credentials_for_url,
+                    navigation_pin_host=navigation_pin_host,
+                    navigation_origin_base_domain=navigation_origin_base_domain,
+                )
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                current_url = browser_state.get("url", navigation_pin_url)
+                if not (isinstance(bounce, dict) and bounce.get("success")):
+                    logger.warning(
+                        "Pinned handoff auto-return goto failed",
+                        pin_url=navigation_pin_url,
+                        bounce=bounce,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                    )
+
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the
             # model observes or interacts with it, then reload once so newly
@@ -6163,6 +6361,239 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
+                if (
+                    navigation_pin_host
+                    and navigation_pin_url
+                    and has_payment_card_secret_refs(secret_refs)
+                    and not handoff_payment_fill_succeeded
+                    and handoff_payment_fill_attempts < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
+                ):
+                    from urllib.parse import urlparse as _urlparse_nudge
+
+                    _nudge_host = (_urlparse_nudge(str(current_url or "")).hostname or "").lower()
+                    _on_pin = bool(_nudge_host) and (
+                        _nudge_host == navigation_pin_host
+                        or _nudge_host.endswith(f".{navigation_pin_host}")
+                    )
+                    if _on_pin:
+                        # Hosted payment widgets mount fields in child frames
+                        # after the document URL settles — poll for semantic
+                        # payment inputs across frames before spending an attempt.
+                        from domains.spawn_browser_agent_v3.service_actions import (
+                            wait_for_payment_ref_fields,
+                        )
+
+                        _autofill_page = input_page
+                        if _autofill_page is None and humanizer is not None:
+                            if "input_page" in getattr(humanizer, "__dict__", {}):
+                                _autofill_page = getattr(humanizer, "input_page", None)
+                        # Keep the wait short: long polls burned the 900s budget
+                        # before titled payment iframes mounted on the handoff page.
+                        fields_ready = await wait_for_payment_ref_fields(
+                            dom_service.session,
+                            ref_names=["card_number"],
+                            input_page=_autofill_page,
+                            timeout_seconds=4.0,
+                        )
+                        if not fields_ready:
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title="Waiting for payment fields on handoff page",
+                                task_id=task_id,
+                                message="Semantic payment inputs not visible yet in any frame",
+                                status=MessageStatus.FINISHED,
+                                browser_url=browser_url,
+                                action_type="input_text",
+                                tool_call_id=f"handoff-autofill-wait-{task_id}-{iteration}",
+                                steps_taken=iteration,
+                                total_steps=MAX_ITERATIONS,
+                            )
+                            logger.info(
+                                "Handoff payment fields not ready; deferring auto-fill attempt",
+                                pin_host=navigation_pin_host,
+                                agent_id=agent_id,
+                                task_id=task_id,
+                                iteration=iteration,
+                            )
+                            # Do not burn an attempt — keep pin and retry next loop.
+                        else:
+                            handoff_payment_fill_attempts += 1
+                            auto_fill_result: Dict[str, Any] = {}
+                            auto_fill_call_id = f"handoff-autofill-{task_id}-{iteration}"
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title="Auto-filling payment fields on handoff page",
+                                task_id=task_id,
+                                message="",
+                                status=MessageStatus.IN_PROGRESS,
+                                browser_url=browser_url,
+                                action_type="input_text",
+                                tool_call_id=auto_fill_call_id,
+                                steps_taken=iteration,
+                                total_steps=MAX_ITERATIONS,
+                            )
+                            try:
+                                auto_fill_result = await asyncio.wait_for(
+                                    execute_action(
+                                        dom_service,
+                                        action_history,
+                                        {
+                                            "action": "input_text",
+                                            "thinking": (
+                                                "Auto-fill approved payment card secret refs "
+                                                "on the pinned cross-origin handoff page."
+                                            ),
+                                            "params": {"text": "card_number"},
+                                        },
+                                        available_file_paths=available_file_paths,
+                                        session_id=session_id,
+                                        config=config,
+                                        humanizer=humanizer,
+                                        secret_refs=secret_refs,
+                                        password_origins=password_origins,
+                                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                                        user_id=user_id,
+                                        current_url=current_url,
+                                        trusted_page_urls=visited_urls,
+                                        write_lock_enabled=write_lock_enabled,
+                                        write_lock_approvals=write_lock_approvals,
+                                        system_name=system_name,
+                                        browser_network_recorder=browser_network_recorder,
+                                        current_auth_realm=auth_realm,
+                                        prepare_credentials_for_url=_prepare_credentials_for_url,
+                                        navigation_pin_host=navigation_pin_host,
+                                        navigation_origin_base_domain=navigation_origin_base_domain,
+                                    ),
+                                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                                )
+                            except Exception as auto_fill_error:
+                                auto_fill_result = {
+                                    "success": False,
+                                    "error": str(auto_fill_error)[:300],
+                                }
+                                logger.warning(
+                                    "Handoff payment auto-fill raised",
+                                    error=str(auto_fill_error)[:300],
+                                    pin_host=navigation_pin_host,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                    attempt=handoff_payment_fill_attempts,
+                                )
+                            filled_refs = auto_fill_result.get("payment_refs_filled") or []
+                            if auto_fill_result.get("success") and filled_refs:
+                                handoff_payment_fill_succeeded = True
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title=(
+                                        "Auto-filled payment fields "
+                                        f"({', '.join(str(r) for r in filled_refs)})"
+                                    ),
+                                    task_id=task_id,
+                                    message="",
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                browser_turn_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Cross-origin handoff page is pinned "
+                                            f"({navigation_pin_url}). Approved payment card "
+                                            f"secret refs were filled automatically "
+                                            f"({', '.join(str(r) for r in filled_refs)}). "
+                                            "Submit the payment form on THIS page now. "
+                                            "Do not navigate away, close tabs, or thrash "
+                                            "network/evaluate."
+                                        ),
+                                    }
+                                )
+                                logger.info(
+                                    "Auto-filled payment refs on pinned handoff page",
+                                    pin_host=navigation_pin_host,
+                                    filled_refs=filled_refs,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                    attempt=handoff_payment_fill_attempts,
+                                )
+                            elif (
+                                handoff_payment_fill_attempts
+                                < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
+                            ):
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title="Payment fields not ready yet — will retry auto-fill",
+                                    task_id=task_id,
+                                    message=str(
+                                        auto_fill_result.get("error") or "field_not_found"
+                                    )[:200],
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                logger.info(
+                                    "Handoff payment auto-fill miss; will retry",
+                                    pin_host=navigation_pin_host,
+                                    attempt=handoff_payment_fill_attempts,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                )
+                            else:
+                                # Keep the cross-origin pin. Releasing it let the model
+                                # abandon live handoff pages and restart Place order.
+                                # Stop auto-fill retries and nudge the model to fill/submit.
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title=(
+                                        "Payment auto-fill exhausted — pin held; fill manually"
+                                    ),
+                                    task_id=task_id,
+                                    message=(
+                                        f"Pinned handoff {navigation_pin_url} still has no "
+                                        "fillable payment fields after auto-fill retries. "
+                                        "Pin stays active — type card refs on this page."
+                                    ),
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                browser_turn_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Cross-origin handoff page is still pinned "
+                                            f"({navigation_pin_url}). Automatic payment-field "
+                                            f"fill did not succeed after "
+                                            f"{handoff_payment_fill_attempts} attempts. "
+                                            "Stay on THIS page. Use input_text with "
+                                            "card_number / card_name / card_expiry / card_cvv "
+                                            "into the visible payment fields (including fields "
+                                            "inside iframes), then submit. Do not navigate away, "
+                                            "close tabs, or restart the merchant checkout."
+                                        ),
+                                    }
+                                )
+                                logger.info(
+                                    "Handoff payment auto-fill exhausted; pin retained",
+                                    pin_host=navigation_pin_host,
+                                    pin_url=navigation_pin_url,
+                                    auto_fill_error=auto_fill_result.get("error"),
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                )
                 if browser_recorder:
                     await browser_recorder.record_observation(
                         iteration=iteration,
@@ -6366,12 +6797,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 await browser_stream.finish_tools(status="ERROR")
                 rejected_action = unified_action.get("action", "")
                 recovery_tool_call_id = f"provider-exit-recovery-{uuid_module.uuid4()}"
+                rejection_reason = str(
+                    (provider_exit_rejection or {}).get("reason")
+                    or "The current provider IP was explicitly rejected."
+                )
+                blocked_resource_url = blocked_resource_url_for_recovery(
+                    provider_exit_rejection
+                )
                 unified_action = {
                     "action": "recover_from_challenge",
                     "thinking": "",
                     "params": {
-                        "reason": "The current provider IP was explicitly rejected for fingerprint reuse.",
+                        "reason": rejection_reason,
                         "provider_exit_rejected": True,
+                        # Failure-driven re-verify for critical third-party blocks
+                        # only (not same-origin API-challenge URLs).
+                        **(
+                            {"blocked_resource_url": blocked_resource_url}
+                            if blocked_resource_url
+                            else {}
+                        ),
                     },
                 }
                 llm_result = {
@@ -6796,6 +7241,58 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 recovery_call_id = _browser_action_tool_call_id(llm_result)
                 logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
+                provider_exit_rejected = bool(
+                    unified_action.get("params", {}).get("provider_exit_rejected")
+                )
+                # If the live tab is already clean and this was not a hard
+                # provider-exit rejection, skip — avoids recovery loops the model
+                # invents from third-party network noise on an otherwise fine page.
+                if (
+                    not provider_exit_rejected
+                    and input_page is not None
+                    and not await live_tab_looks_challenged(input_page)
+                ):
+                    skip_message = (
+                        f"Current page does not look challenged"
+                        + (f" ({current_url})" if current_url else "")
+                        + ". Continue the task on this page — do not start "
+                        "challenge recovery unless the document itself is blocked."
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Page already clear — skip challenge recovery",
+                        task_id=task_id,
+                        message=skip_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={
+                            "recoveryStage": "skipped_clean_page",
+                            "resumeUrl": current_url,
+                        },
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": skip_message,
+                        "recovery_action": "skipped_clean_page",
+                        "current_url": current_url,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason=recovery_reason,
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state=browser_state,
+                        unified_action=unified_action,
+                        recovery_call_id=recovery_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
+
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
                     "captcha_solver": "Waiting for CAPTCHA auto-solver",
@@ -6805,6 +7302,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     "cookie_isolation": "Isolating poisoned cookie state",
                     "apply_cookie_fix": "Applying safe cookie recovery",
                     "browser_config_search": "Searching browser configurations",
+                    "live_verify": "Verifying live tab cleared challenge",
                 }
 
                 async def emit_recovery_progress(stage: str, message: str) -> None:
@@ -6821,15 +7319,30 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                 async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
+                    nonlocal require_payment_cdn, payment_cdn_verify_url
                     user_agent = ""
                     with contextlib.suppress(Exception):
-                        user_agent = str(await input_page.evaluate("() => navigator.userAgent"))
+                        user_agent = str(
+                            await asyncio.wait_for(
+                                input_page.evaluate("() => navigator.userAgent"),
+                                timeout=15,
+                            )
+                        )
+                    blocked_resource_url = str(
+                        unified_action.get("params", {}).get("blocked_resource_url") or ""
+                    ).strip()
+                    if blocked_resource_requires_payment_cdn(blocked_resource_url):
+                        require_payment_cdn = True
+                        payment_cdn_verify_url = blocked_resource_url or payment_cdn_verify_url
+                    verify_url = blocked_resource_url or payment_cdn_verify_url
                     result = await recover_browser_challenge(
                         config,
                         task_id,
                         current_url,
                         storage_state,
                         user_agent,
+                        blocked_resource_url=verify_url,
+                        require_payment_cdn=require_payment_cdn,
                     )
                     if result.get("rate_limited"):
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
@@ -6843,10 +7356,26 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         emit_recovery_progress,
                     )
 
+                    provider_exit_rejected = bool(
+                        unified_action.get("params", {}).get("provider_exit_rejected")
+                    )
+                    escalate_after_cookie_false_stable = (
+                        not provider_exit_rejected and cookie_recovery_successes >= 1
+                    )
+                    if escalate_after_cookie_false_stable:
+                        logger.warning(
+                            "Escalating repeated challenge recovery to browser config search",
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            cookie_recovery_successes=cookie_recovery_successes,
+                            reason=recovery_reason,
+                        )
                     recovery = await recover_from_challenge(
                         source_state=recovery_storage_state,
                         target_url=current_url,
-                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(config, task_id),
+                        wait_for_solver=lambda: _wait_for_provider_captcha_solver(
+                            config, task_id, page=input_page
+                        ),
                         probe=lambda candidate: probe_storage_state(
                             playwright_browser,
                             candidate,
@@ -6859,8 +7388,11 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         ),
                         search_configs=search_browser_configs,
                         progress=emit_recovery_progress,
-                        provider_exit_rejected=bool(unified_action.get("params", {}).get("provider_exit_rejected")),
+                        provider_exit_rejected=provider_exit_rejected
+                        or escalate_after_cookie_false_stable,
                     )
+                    if recovery.recovery == "cookies_sanitized":
+                        cookie_recovery_successes += 1
 
                     config_result = recovery.config_result
                     if config_result is not None:
@@ -6906,12 +7438,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             browser_session_metadata,
                             dict(config_result),
                         )
-                        await _restore_rotation_storage_state(
-                            input_page,
-                            recovery_storage_state,
-                            current_url=current_url,
-                            restore_cookies=not bool(config_result.get("storage_state_preloaded")),
-                        )
+                        # Preloaded winners already applied auth/origin state during
+                        # candidate probes. Re-running origin restore clears
+                        # localStorage and rewrites the challenged capture onto the
+                        # clean session (Eventim Cloudflare false-stable after promote).
+                        if not bool(config_result.get("storage_state_preloaded")):
+                            await _restore_rotation_storage_state(
+                                input_page,
+                                recovery_storage_state,
+                                current_url=current_url,
+                                restore_cookies=True,
+                            )
                         # The rotated target came up with a fresh, empty virtual
                         # authenticator. Re-seed the passkeys we already hold so
                         # passkey auth survives the reset exactly like the cookies
@@ -6948,13 +7485,73 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             humanizer_factory=BrowserHumanizer,
                         )
 
+                        await emit_recovery_progress(
+                            "live_verify",
+                            "Verifying the promoted browser cleared the challenge on the live tab.",
+                        )
+                        if not await verify_live_page_cleared_challenge(input_page, current_url):
+                            provider = config_result.get("provider")
+                            proxy_tier = config_result.get("proxy_tier")
+                            config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                            raise RuntimeError(
+                                f"Promoted {config_key} passed candidate probes but the live tab "
+                                "is still challenged"
+                            )
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
+                        if blocked_resource_url:
+                            await emit_recovery_progress(
+                                "live_verify",
+                                "Verifying the blocked third-party resource loads on the "
+                                "promoted tab.",
+                            )
+                            if not await verify_live_blocked_resources(
+                                input_page, [blocked_resource_url]
+                            ):
+                                provider = config_result.get("provider")
+                                proxy_tier = config_result.get("proxy_tier")
+                                config_key = (
+                                    config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                                )
+                                raise RuntimeError(
+                                    f"Promoted {config_key} cleared the challenge but blocked "
+                                    f"resource still fails: {blocked_resource_url}"
+                                )
+
                     browser_state = await dom_service.get_browser_state(include_screenshot=False)
                     current_url = browser_state.get("url", current_url)
-                    recovery_message = (
-                        "Recovered by selecting a stable browser configuration; signed-in state was preserved."
-                        if config_result is not None
-                        else "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
-                    )
+                    if config_result is not None:
+                        provider = config_result.get("provider")
+                        proxy_tier = config_result.get("proxy_tier")
+                        config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
+                        blocked_resource_url = str(
+                            unified_action.get("params", {}).get("blocked_resource_url") or ""
+                        ).strip()
+                        recovery_message = (
+                            f"Recovered by selecting {config_key}; live tab verified clean"
+                            + (
+                                f"; blocked resource cleared ({blocked_resource_url})"
+                                if blocked_resource_url
+                                else ""
+                            )
+                            + "; signed-in state was preserved."
+                        )
+                    else:
+                        recovery_message = (
+                            "Recovered by removing a proven non-auth cookie subset; signed-in state was preserved."
+                        )
+                    if current_url:
+                        recovery_message = (
+                            f"{recovery_message} Current page URL: {current_url}. "
+                            "Continue the task on this page."
+                        )
+                        from urllib.parse import urlparse as _urlparse_pin
+
+                        pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
+                        if pin_host:
+                            navigation_pin_host = pin_host
+                            navigation_pin_url = str(current_url)
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",
@@ -6964,7 +7561,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         browser_url=browser_url,
                         action_type="browser_challenge_recovery",
                         tool_call_id=recovery_call_id,
-                        extra_metadata={"recoveryStage": "complete"},
+                        extra_metadata={
+                            "recoveryStage": "complete",
+                            "provider": config_result.get("provider") if config_result else None,
+                            "proxyTier": config_result.get("proxy_tier") if config_result else None,
+                            "configKey": config_result.get("config_key") if config_result else None,
+                            "resumeUrl": current_url,
+                        },
                     )
                     action_result = {
                         "success": True,
@@ -6972,7 +7575,9 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         "recovery_action": recovery.recovery,
                         "provider": config_result.get("provider") if config_result else None,
                         "proxy_tier": config_result.get("proxy_tier") if config_result else None,
+                        "config_key": config_result.get("config_key") if config_result else None,
                         "removed_cookie_count": len(recovery.removed_cookie_keys),
+                        "current_url": current_url,
                     }
                 except Exception as exc:
                     error_message = extract_error_message(exc)
@@ -7439,6 +8044,8 @@ Based on this feedback, I need to continue working on the task and address the i
                         browser_network_recorder=browser_network_recorder,
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
+                        navigation_pin_host=navigation_pin_host,
+                        navigation_origin_base_domain=navigation_origin_base_domain,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )
@@ -8371,12 +8978,36 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         )
 
                         approval_type = result.get("approval_type", "unknown")
-                        current_approvals = result.get("write_lock_approvals", {})
-
+                        current_approvals = dict(result.get("write_lock_approvals") or {})
+                        approved_at = workflow.now().timestamp()
+                        # Prefer merchant checkout URL over Kernel live-view current_url
+                        # so a write-lock approval after payment does not re-key the
+                        # domain to *.kernel.sh / *.onkernel.com.
+                        grant_url = (
+                            resolve_site_write_lock_grant_url(
+                                {
+                                    **(result if isinstance(result, dict) else {}),
+                                    "start_url": current_start_url or start_url,
+                                }
+                            )
+                            or result.get("current_url", "")
+                        )
                         current_approvals[approval_type] = {
-                            "domain": get_domain_from_url(result.get("current_url", "")),
-                            "approved_at": workflow.now().timestamp(),
+                            "domain": get_domain_from_url(grant_url),
+                            "approved_at": approved_at,
                         }
+                        # Payment-card mint already unlocked the site for this
+                        # activity — keep that session-scoped site unlock alive
+                        # across later write-lock approvals on the same page.
+                        prior_resume = write_lock_resume_state or {}
+                        prior_payment_refs = prior_resume.get("payment_card_refs")
+                        prior_payment_last4 = prior_resume.get("payment_card_last4")
+                        if prior_payment_refs or current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY):
+                            current_approvals = grant_site_write_lock_approvals(
+                                current_approvals,
+                                grant_url,
+                                approved_at,
+                            )
 
                         write_lock_resume_state = {
                             "pending_action": result.get("pending_action"),
@@ -8390,6 +9021,12 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                             "auth_realm": result.get("auth_realm"),
                             "recorded_passkey_credential_ids": result.get("recorded_passkey_credential_ids", []),
                         }
+                        # Preserve minted card refs across write-lock resumes so
+                        # purchase bypass + site unlock stay available.
+                        if prior_payment_refs:
+                            write_lock_resume_state["payment_card_refs"] = prior_payment_refs
+                        if prior_payment_last4:
+                            write_lock_resume_state["payment_card_last4"] = prior_payment_last4
                         _copy_browser_resume_continuity_fields(result, write_lock_resume_state)
                         _copy_simulated_browser_resume_fields(result, write_lock_resume_state)
 
@@ -8487,26 +9124,35 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         reusable=lookup_result.get("reusable"),
                     )
 
-                    approval_response = {"attention_request_id": None}
-                    if not lookup_result.get("reusable"):
-                        approval_response = await request_user_approval_direct(
-                            workflow_instance,
-                            question=build_payment_question(payment_payload),
-                            metadata={
-                                "toolApproval": True,
-                                "writePermission": True,
-                                "url": result.get("current_url", ""),
-                                "requestPaymentCard": payment_payload,
-                                "writeLockNotification": result.get("write_lock_notification"),
-                                "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
-                            },
-                        )
-                        logger.info(
-                            "Browser payment approval granted",
-                            agent_id=workflow_instance.agent_id,
-                            task_id=result.get("task_id"),
-                            attention_request_id=approval_response.get("attention_request_id"),
-                        )
+                    # Always surface payment_approval attention — even when a held
+                    # purchase is reusable. Skipping it left fleets with
+                    # attentionRequestId=null, so Place-order write_lock became the
+                    # first observed attention ("Expected payment_approval, observed
+                    # write_lock") and H-06 site unlock was never gated on a real
+                    # approval. Reuse still applies at mint; this only restores the
+                    # approval UX / benchmark contract.
+                    approval_response = await request_user_approval_direct(
+                        workflow_instance,
+                        question=build_payment_question(payment_payload),
+                        metadata={
+                            "toolApproval": True,
+                            "writePermission": True,
+                            "url": result.get("current_url", "")
+                            or current_start_url
+                            or start_url,
+                            "requestPaymentCard": payment_payload,
+                            "writeLockNotification": result.get("write_lock_notification"),
+                            "writeLockNotificationUsage": result.get("write_lock_notification_usage"),
+                            "reusablePurchase": bool(lookup_result.get("reusable")),
+                        },
+                    )
+                    logger.info(
+                        "Browser payment approval granted",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        attention_request_id=approval_response.get("attention_request_id"),
+                        reusable=bool(lookup_result.get("reusable")),
+                    )
 
                     funding_retry_deadline = None
 
@@ -8842,11 +9488,33 @@ class SpawnBrowserAgentManagerV3(ToolManager):
                         "card_cvv": card_cvv,
                     }
 
-                    current_approvals = result.get("write_lock_approvals", {})
-                    current_approvals["payment"] = {
-                        "domain": get_domain_from_url(result.get("current_url", "")),
-                        "approved_at": workflow.now().timestamp(),
+                    # Payment-card approval unlocks write locks on the merchant
+                    # checkout domain for THIS browser activity only (resume state).
+                    # Prefer normalized payment_payload product URLs + spawn
+                    # start_url — Kernel live-view current_url is often a proxy
+                    # host (*.kernel.sh / *.onkernel.com) and must not become the
+                    # unlock domain. New spawns start empty.
+                    grant_source = {
+                        **(result if isinstance(result, dict) else {}),
+                        "payment_request": payment_payload,
+                        "start_url": current_start_url or start_url,
                     }
+                    grant_url = resolve_site_write_lock_grant_url(grant_source)
+                    current_approvals = grant_site_write_lock_approvals(
+                        result.get("write_lock_approvals", {}),
+                        grant_url,
+                        workflow.now().timestamp(),
+                    )
+                    logger.info(
+                        "Browser payment site write-lock unlock",
+                        agent_id=workflow_instance.agent_id,
+                        task_id=result.get("task_id"),
+                        grant_url=grant_url,
+                        unlock_domain=(current_approvals.get(SITE_WRITE_LOCK_APPROVAL_KEY) or {}).get(
+                            "domain"
+                        ),
+                        current_url=result.get("current_url"),
+                    )
 
                     write_lock_resume_state = {
                         "pending_action": None,

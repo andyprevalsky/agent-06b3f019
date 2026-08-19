@@ -759,6 +759,73 @@ async def test_browser_agent_recording_captures_visible_active_tab_url():
         else:
             os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = previous_interval
 
+
+async def test_browser_agent_recording_mark_survives_wiped_frames_dir():
+    """Prod purchase fleet died when /tmp recording scratch vanished mid-run.
+
+    Post-click ``mark()`` called ``capture()`` → ``write_bytes`` raised
+    FileNotFoundError and aborted the browser agent after Place order succeeded.
+    Recording must recreate the frames dir (or soft-fail) and never raise.
+    """
+    import shutil
+    import tempfile
+
+    from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
+
+    class FakePage:
+        url = "https://roselabs.ai/test_payment"
+        context = None
+
+        async def evaluate(self, script):
+            return False
+
+        async def screenshot(self, **kwargs):
+            return b"jpeg-bytes"
+
+    previous = {
+        "BROWSER_AGENT_RECORDINGS": os.environ.get("BROWSER_AGENT_RECORDINGS"),
+        "BROWSER_AGENT_RECORDINGS_DIR": os.environ.get("BROWSER_AGENT_RECORDINGS_DIR"),
+        "BROWSER_AGENT_RECORDING_INTERVAL_SECONDS": os.environ.get("BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"),
+        "BROWSER_AGENT_KERNEL_REPLAY": os.environ.get("BROWSER_AGENT_KERNEL_REPLAY"),
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["BROWSER_AGENT_RECORDINGS"] = "1"
+            os.environ["BROWSER_AGENT_RECORDINGS_DIR"] = tmp
+            os.environ["BROWSER_AGENT_RECORDING_INTERVAL_SECONDS"] = "60"
+            os.environ["BROWSER_AGENT_KERNEL_REPLAY"] = "0"
+            page = FakePage()
+            page.context = SimpleNamespace(pages=[page])
+
+            recorder = await BrowserAgentRecorder.create(
+                page=page,
+                agent_id="agent-purchase",
+                task_id="task-place-order",
+                session_id="session-steel",
+                browser_url="https://connect.steel.dev/v1/sessions/x/player",
+                session_metadata={"provider": "steel"},
+            )
+            assert recorder is not None
+            frames_before_wipe = len(recorder.frames)
+            assert frames_before_wipe >= 1
+
+            shutil.rmtree(recorder.output_dir)
+            assert not recorder.frames_dir.exists()
+
+            # Must not raise — this is the Place-order finish mark path.
+            await recorder.mark("Clicked <button \"Place order $1.00\">", action="click")
+
+            assert recorder.frames_dir.exists()
+            assert len(recorder.frames) == frames_before_wipe + 1
+            restored = recorder.output_dir / recorder.frames[-1]["src"]
+            assert restored.read_bytes() == b"jpeg-bytes"
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
 async def test_browser_agent_recording_respects_disabled_env():
     from domains.spawn_browser_agent_v3.recording import BrowserAgentRecorder
 
@@ -5372,6 +5439,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "https://example.com/current",
         storage_state,
         user_agent="test-agent",
+        blocked_resource_url="https://js.stripe.com/v3",
+        require_payment_cdn=True,
     )
     assert out["recovery_action"] == "config_selected"
     call = assert_captured_call(
@@ -5383,6 +5452,8 @@ async def test_recover_browser_challenge_posts_current_url_and_state():
         "current_url": "https://example.com/current",
         "storage_state": storage_state,
         "user_agent": "test-agent",
+        "blocked_resource_url": "https://js.stripe.com/v3",
+        "require_payment_cdn": True,
     }
 
 async def test_rotation_storage_state_survives_provider_switch():
@@ -5538,7 +5609,8 @@ async def test_recovery_storage_timeout_finishes_error_and_returns_control_to_mo
     assert browser_turn_messages[-1]["role"] == "tool"
     assert "timed out after 0.01s" in browser_turn_messages[-1]["content"]
 
-async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state():
+async def test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite():
+    """Helper still supports restore_cookies=False for non-recovery callers."""
     from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
 
     captured = {
@@ -5559,7 +5631,12 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
         ],
     }
     context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
-    page = SimpleNamespace(context=context, evaluate=AsyncMock(), goto=AsyncMock())
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="https://order.online/store/blue-bottle",
+    )
 
     await _restore_rotation_storage_state(
         page,
@@ -5570,11 +5647,58 @@ async def test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_st
 
     context.add_cookies.assert_not_awaited()
     context.add_init_script.assert_awaited_once()
-    page.goto.assert_awaited_once()
+    page.goto.assert_not_awaited()
     page.evaluate.assert_awaited_once()
 
+
+async def test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs():
+    from domains.spawn_browser_agent_v3.handler import _restore_rotation_storage_state
+
+    context = SimpleNamespace(add_cookies=AsyncMock(), add_init_script=AsyncMock())
+    page = SimpleNamespace(
+        context=context,
+        evaluate=AsyncMock(),
+        goto=AsyncMock(),
+        url="about:blank",
+    )
+    await _restore_rotation_storage_state(
+        page,
+        {"cookies": [], "origins": []},
+        current_url="https://order.online/store/blue-bottle",
+        restore_cookies=False,
+    )
+    page.goto.assert_awaited_once_with(
+        "https://order.online/store/blue-bottle",
+        wait_until="domcontentloaded",
+        timeout=45_000,
+    )
+
+
+def test_recovery_requires_live_tab_verify_before_success():
+    """Promoted configs must re-verify the live tab before claiming recovery success."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    preloaded_guard = recovery_block.index('storage_state_preloaded')
+    restore_offset = recovery_block.index("await _restore_rotation_storage_state(")
+    verify_offset = recovery_block.index("await verify_live_page_cleared_challenge(")
+    success_offset = recovery_block.index('title="Browser challenge recovered"')
+    assert preloaded_guard < restore_offset < verify_offset < success_offset
+    assert "passed candidate probes but the live tab" in recovery_block
+    assert "is still challenged" in recovery_block
+    assert "configKey" in recovery_block
+    # Preloaded winners must not rewrite challenged origin state onto the clean session.
+    assert "if not bool(config_result.get(\"storage_state_preloaded\")):" in recovery_block
+
+
 def test_recovery_restore_failure_is_not_suppressed():
-    """A replacement session without restored origin state must not run actions."""
+    """A non-preloaded replacement session must restore state without suppress()."""
     import inspect
 
     from domains.spawn_browser_agent_v3 import handler
@@ -5599,8 +5723,8 @@ def test_recovery_restore_failure_is_not_suppressed():
     restore_await = restore_awaits[0]
     restore_call = restore_await.value
     restore_keywords = {keyword.arg: keyword.value for keyword in restore_call.keywords}
-    assert "restore_cookies" in restore_keywords
-    assert "storage_state_preloaded" in ast.unparse(restore_keywords["restore_cookies"])
+    assert restore_keywords.get("restore_cookies") is not None
+    assert ast.unparse(restore_keywords["restore_cookies"]) in {"True", "true"}
 
     ancestor = parents.get(restore_await)
     while ancestor is not None:
@@ -5619,11 +5743,17 @@ def test_recovery_preflight_failures_resolve_the_in_progress_tool():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
-    try_offset = recovery_block.index("try:")
-    guard_offset = recovery_block.index("if playwright_browser is None or input_page is None:")
+    # Clean-page skip may finalize early; measure the full recovery try/except path
+    # after that optional short-circuit.
     capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
-    except_offset = recovery_block.index("except Exception as exc:")
-    finish_offset = recovery_block.index("await _finalize_browser_recovery_action_result(")
+    try_offset = recovery_block.rfind("try:", 0, capture_offset)
+    guard_offset = recovery_block.index(
+        "if playwright_browser is None or input_page is None:", try_offset
+    )
+    except_offset = recovery_block.index("except Exception as exc:", capture_offset)
+    finish_offset = recovery_block.index(
+        "await _finalize_browser_recovery_action_result(", except_offset
+    )
 
     assert try_offset < guard_offset < capture_offset < except_offset < finish_offset
     assert 'action_result = {"success": False, "error": error_message}' in recovery_block
@@ -7222,6 +7352,11 @@ def test_get_domain_from_url_variants():
     assert get_domain_from_url("https://www.amazon.com/cart") == "amazon.com"
     assert get_domain_from_url("https://auth.amazon.com/login") == "auth.amazon.com"
     assert get_domain_from_url("not-a-url") == ""
+    assert get_domain_from_url("roselabs.ai") == "roselabs.ai"
+    assert (
+        get_domain_from_url("https://proxy.jfk.onkernel.com:8443/browser/live/abc")
+        == "proxy.jfk.onkernel.com"
+    )
 
 def test_get_base_domain():
     from domains.spawn_browser_agent_v3.service_actions import _get_base_domain
@@ -7263,6 +7398,233 @@ def test_is_approval_valid_expired():
         }
     }
     assert is_approval_valid(approvals, "purchase", "https://amazon.com/x") is False
+
+
+def test_site_write_lock_unlock_covers_purchase_on_approved_domain():
+    """Payment-card site unlock disables Place-order write lock on that domain only."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time()
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        approved_at,
+    )
+    assert approvals["payment"]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY].get("persistent") is True
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "social_post", "https://roselabs.ai/test_payment") is True
+    # Other sites stay locked — and a newly spawned browser agent starts with {}.
+    assert is_approval_valid(approvals, "purchase", "https://amazon.com/checkout") is False
+    assert is_approval_valid({}, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_payment_site_unlock_covers_subdomains_and_ignores_path_query():
+    """Site unlock is registrable-domain wildcard — not a full URL / query match."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    # Synthetic merchant host — avoids CI secret-domain scanners.
+    merchant = "https://www.shop-example.com/cart?item=1&ref=bench"
+    approvals = grant_site_write_lock_approvals({}, merchant, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "shop-example.com"
+    # Apex, www, and checkout subdomain + arbitrary paths/queries all match.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.com/cart") is True
+    assert is_approval_valid(approvals, "purchase", "https://www.shop-example.com/other") is True
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://checkout.shop-example.com/pay?order=1",
+        )
+        is True
+    )
+    assert is_approval_valid(approvals, "email_send", "https://pay.shop-example.com/send") is True
+    # Sibling registrable domains stay locked.
+    assert is_approval_valid(approvals, "purchase", "https://shop-example.org/cart") is False
+    assert is_approval_valid(approvals, "purchase", "https://evil-shop-example.com/x") is False
+    # Browser-provider hosts never inherit a merchant site unlock.
+    assert is_approval_valid(approvals, "purchase", "https://foo.onkernel.com/view") is False
+    assert is_approval_valid(approvals, "purchase", "https://bar.kernel.sh/session") is False
+
+
+def test_payment_site_unlock_survives_write_lock_timeout():
+    """Payment-card site unlock must outlive the 120s one-off write-lock timeout.
+
+    Checkout (fill card → Place order → Stripe) routinely exceeds 120s; expiring
+    the site unlock mid-flow re-prompts purchase write_lock after payment_approval.
+    """
+    from domains.spawn_browser_agent_v3.config import WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    approved_at = time_module.time() - (WRITE_LOCK_APPROVAL_TIMEOUT_SECONDS + 60)
+    approvals = grant_site_write_lock_approvals(
+        {},
+        "https://www.roselabs.ai/test_payment",
+        approved_at,
+    )
+    assert is_approval_valid(approvals, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(approvals, "email_send", "https://roselabs.ai/test_payment") is True
+    # One-off typed purchase approval (no site unlock) still expires.
+    typed_only = {
+        "purchase": {
+            "domain": "roselabs.ai",
+            "approved_at": approved_at,
+        }
+    }
+    assert is_approval_valid(typed_only, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+def test_fresh_browser_session_does_not_inherit_site_write_lock_unlock():
+    """write_lock_approvals are resume-state only; a new browser activity starts empty."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+    )
+
+    prior = grant_site_write_lock_approvals(
+        {},
+        "https://roselabs.ai/test_payment",
+        time_module.time(),
+    )
+    # Simulate a newly spawned browser agent: no write_lock_resume_state.
+    fresh_session_approvals: dict = {}
+    assert prior is not fresh_session_approvals
+    assert is_approval_valid(prior, "purchase", "https://roselabs.ai/test_payment") is True
+    assert is_approval_valid(fresh_session_approvals, "purchase", "https://roselabs.ai/test_payment") is False
+
+
+@pytest.mark.asyncio
+async def test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present():
+    """H-06: minted card refs unlock Place order even if site approval bookkeeping missed."""
+    from domains.spawn_browser_agent_v3.service_actions import _click_write_lock_result
+    from domains.spawn_browser_agent_v3.service_crypto import PAYMENT_CARD_SECRET_REFS
+
+    session = MagicMock()
+    dom = MagicMock()
+    element = MagicMock()
+    element.text_content = "Place order\n$1.00"
+    element.tag_name = "button"
+    element.attributes = {}
+    secret_refs = {ref: f"val-{ref}" for ref in PAYMENT_CARD_SECRET_REFS}
+
+    with patch(
+        "domains.spawn_browser_agent_v3.service_actions._browser_click_write_lock_signal",
+        AsyncMock(return_value="Place order $1.00"),
+    ), patch(
+        "domains.spawn_browser_agent_v3.service_actions._element_write_lock_signal",
+        return_value="Place order $1.00",
+    ):
+        locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},  # empty site unlock — secret refs must still unlock
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs=secret_refs,
+        )
+        assert locked is None
+        still_locked = await _click_write_lock_result(
+            session=session,
+            dom_service=dom,
+            element=element,
+            index=1,
+            coords={"x": 10, "y": 10},
+            write_lock_approvals={},
+            current_url="https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+            system_name="Rose",
+            secret_refs={},
+        )
+        assert still_locked is not None
+        assert still_locked["status"] == "needs_write_approval"
+        assert still_locked["approval_type"] == "purchase"
+
+
+def test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url():
+    """H-06 outcome: Kernel live-view current_url must not become the unlock domain."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        SITE_WRITE_LOCK_APPROVAL_KEY,
+        grant_site_write_lock_approvals,
+        is_approval_valid,
+        resolve_site_write_lock_grant_url,
+    )
+
+    result = {
+        "current_url": "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        "payment_request": {
+            "line_items": [
+                {
+                    "name": "Agent Card Lifecycle Probe",
+                    "product_url": "https://www.roselabs.ai/p/agentcard-lifecycle-probe",
+                }
+            ]
+        },
+    }
+    grant_url = resolve_site_write_lock_grant_url(result)
+    assert "roselabs.ai" in grant_url
+    assert "onkernel.com" not in grant_url
+    approvals = grant_site_write_lock_approvals({}, grant_url, time_module.time())
+    assert approvals[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    # Proxy-only grant is refused (no merchant domain to unlock).
+    proxy_only = grant_site_write_lock_approvals(
+        {},
+        "https://proxy.jfk-awesome-mccarthy.onkernel.com:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in proxy_only
+
+    # Fleet 20260811-010703: live-view host is *.kernel.sh (not onkernel.com).
+    # When product URLs are absent, spawn start_url must still unlock merchant.
+    kernel_sh = {
+        "current_url": "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/5GgNkgp6OZ2g?readOnly=true",
+        "payment_request": {
+            "merchant": "Rose Labs Test Payment",
+            "lineItems": [{"name": "Agent Card Lifecycle Probe", "quantity": 1}],
+        },
+        "start_url": "https://roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+    }
+    grant_url_sh = resolve_site_write_lock_grant_url(kernel_sh)
+    assert "roselabs.ai" in grant_url_sh
+    assert "kernel.sh" not in grant_url_sh
+    approvals_sh = grant_site_write_lock_approvals({}, grant_url_sh, time_module.time())
+    assert approvals_sh[SITE_WRITE_LOCK_APPROVAL_KEY]["domain"] == "roselabs.ai"
+    assert (
+        is_approval_valid(
+            approvals_sh,
+            "purchase",
+            "https://www.roselabs.ai/test_payment?benchmark=agentcard-live-lifecycle",
+        )
+        is True
+    )
+    kernel_sh_only = grant_site_write_lock_approvals(
+        {},
+        "https://prod-yul-hypeman-5.kernel.sh:8443/browser/live/abc",
+        time_module.time(),
+    )
+    assert SITE_WRITE_LOCK_APPROVAL_KEY not in kernel_sh_only
 
 def test_get_element_description_none():
     from domains.spawn_browser_agent_v3.service_actions import get_element_description
@@ -7531,6 +7893,13 @@ def test_network_recorder_query_requests_filters_and_shapes():
         BrowserNetworkRecorder,
         _redact_url_query,
     )
+
+    # Guard against mid-class module-level inserts orphaning query_requests (and
+    # sibling methods) as dead nested defs — that AttributeError fails live Eventim
+    # runs under the runtime-contract evaluator even after payment_approval.
+    assert hasattr(BrowserNetworkRecorder, "query_requests")
+    assert hasattr(BrowserNetworkRecorder, "close")
+    assert hasattr(BrowserNetworkRecorder, "export_diagnostics_bundle_bytes")
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._max_entries = 300
@@ -8074,6 +8443,543 @@ async def test_network_recorder_does_not_reject_successful_fingerprint_warning()
         "url": "https://shop.test/provider-exit",
         "browser_generation": 1,
     }
+
+
+def test_api_challenge_html_large_cart_interstitial_without_classic_markers():
+    """Eventim custom 403 interstitial is large HTML without classic CF markers."""
+    from domains.spawn_browser_agent_v3.recording import _is_api_challenge_html_response
+
+    large_html = (
+        b"<!doctype html><html lang='en'><head><title>page title</title></head>"
+        + (b"x" * 25_000)
+        + b"<body>blocked</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://wl.eventim.us/checkout",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html; charset=utf-8",
+        body_bytes=large_html,
+        document_url="https://cdn.attacker.example/frame",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=b"<html><body>forbidden</body></html>",
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://cdn.example.com/assets/font.woff2",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=large_html,
+    )
+
+
+async def test_api_challenge_html_triggers_provider_exit_rejection():
+    """403 challenge HTML on checkaddtocart must rotate exit (cookie GET probes miss it)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _API_CHALLENGE_HTML_REASON,
+        _is_api_challenge_html_response,
+    )
+
+    challenge_html = (
+        b"<!DOCTYPE html><html><body>Access Denied. "
+        b"<script src='/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1'></script>"
+        b"</body></html>"
+    )
+    assert _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=200,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="xhr",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+    assert not _is_api_challenge_html_response(
+        status=403,
+        url="https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        resource_type="image",
+        mime_type="text/html",
+        body_bytes=challenge_html,
+    )
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._closed = False
+    recorder._network_generation = 1
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._api_challenge_provider_exits = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 1_000_000
+    recorder._max_total_body_bytes = 10_000_000
+    recorder._body_index = 0
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder.persists_network_log = False
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "1:r1": {
+            "browser_generation": 1,
+            "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+            "resource_type": "xhr",
+            "mime_type": "text/html",
+            "status": 403,
+        }
+    }
+
+    class _FakeCdp:
+        class send:
+            class Network:
+                @staticmethod
+                async def getResponseBody(params=None, session_id=None):
+                    return {"body": challenge_html.decode("utf-8"), "base64Encoded": False}
+
+    await recorder._fetch_response_body("1:r1", "r1", "cdp-1", _FakeCdp())
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": _API_CHALLENGE_HTML_REASON,
+        "url": "https://wl.eventim.us/event/_/692405/order/checkaddtocart",
+        "browser_generation": 1,
+        "status": 403,
+    }
+
+
+def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
+    """js.stripe.com ERR_TUNNEL / ORB must rotate the provider exit (Eventim card fields)."""
+    from domains.spawn_browser_agent_v3.recording import (
+        BrowserNetworkRecorder,
+        _document_warrants_payment_cdn_exit,
+        _is_critical_resource_block,
+        _is_payment_cdn_tunnel_failure,
+    )
+
+    assert _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+    )
+    assert _is_critical_resource_block(
+        "https://cdn.example/checkout-widget.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert not _is_critical_resource_block(
+        "https://checkout.eventim.us/static/app.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert _is_critical_resource_block(
+        "https://js.stripe.com/v3/",
+        "net::ERR_BLOCKED_BY_ORB",
+        resource_type="script",
+        document_url="https://checkout.eventim.us/pay",
+    )
+    assert not _is_critical_resource_block(
+        "https://www.google-analytics.com/analytics.js",
+        "net::ERR_BLOCKED_BY_CLIENT",
+        resource_type="script",
+    )
+    # Non-js.* hosts are not the sticky script-CDN tunnel class (generic script path).
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://wl.eventim.us/asset.js",
+        "net::ERR_TUNNEL_CONNECTION_FAILED",
+    )
+    assert not _is_payment_cdn_tunnel_failure(
+        "https://js.stripe.com/v3/",
+        "net::ERR_NAME_NOT_RESOLVED",
+    )
+    assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
+    # Inventory paths are no longer excluded — exit caps bound thrash instead.
+    assert _document_warrants_payment_cdn_exit(
+        "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
+    )
+    assert not _document_warrants_payment_cdn_exit("")
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {
+        "3:r1": {
+            "browser_generation": 3,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://wl.eventim.us/checkout/order-1",
+        }
+    }
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+        "document_url": "https://wl.eventim.us/checkout/order-1",
+    }
+    from domains.spawn_browser_agent_v3.recording import blocked_resource_url_for_recovery
+
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "critical third-party resource blocked",
+                "url": "https://js.stripe.com/v3/",
+            }
+        )
+        == "https://js.stripe.com/v3/"
+    )
+    # Same-origin API-challenge exits must not hard-fail promote re-verify.
+    assert (
+        blocked_resource_url_for_recovery(
+            {
+                "reason": "same-origin API returned Cloudflare challenge HTML",
+                "url": "https://wl.eventim.us/event/_/686363/order/checkaddtocart",
+            }
+        )
+        is None
+    )
+    # One signal per browser generation — no recovery loop on repeated stripe fails.
+    recorder._on_loading_failed(
+        {"requestId": "r1", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() is None
+
+    # api.stripe.com/healthcheck must NOT rotate exits: steel often fails it
+    # while Stripe.js loads (paymentCdnOk). Burning the slot stranded Eventim.
+    api_only = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    api_only._network_generation = 4
+    api_only._provider_exit_rejections = []
+    api_only._rejected_network_generations = set()
+    api_only._payment_cdn_provider_exits = 0
+    api_only._generic_script_provider_exits = 0
+    api_only._ignored_request_ids = set()
+    api_only._active_request_ids = set()
+    api_only.agent_id = "agent"
+    api_only.task_id = "task"
+    api_only.entries = {
+        "4:r-api": {
+            "browser_generation": 4,
+            "url": "https://api.stripe.com/healthcheck",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "xhr",
+        }
+    }
+    api_only._on_loading_failed(
+        {"requestId": "r-api", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-4",
+        generation=4,
+    )
+    assert api_only.pop_provider_exit_rejection() is None
+    assert api_only._payment_cdn_provider_exits == 0
+
+    # Cap=2: a second browser generation may still rotate on js.stripe.com after
+    # the first Kernel→Steel promote consumed exit #1.
+    second_gen = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    second_gen._network_generation = 5
+    second_gen._provider_exit_rejections = []
+    second_gen._rejected_network_generations = {3}
+    second_gen._payment_cdn_provider_exits = 1
+    second_gen._generic_script_provider_exits = 0
+    second_gen._ignored_request_ids = set()
+    second_gen._active_request_ids = set()
+    second_gen.agent_id = "agent"
+    second_gen.task_id = "task"
+    second_gen.entries = {
+        "5:r3": {
+            "browser_generation": 5,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+        }
+    }
+    second_gen._on_loading_failed(
+        {"requestId": "r3", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-5",
+        generation=5,
+    )
+    assert second_gen.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 5,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert second_gen._payment_cdn_provider_exits == 2
+
+    # Ticket/event browse pages may still rotate on critical script CDN blocks;
+    # exit caps (not path allowlists) bound thrash.
+    browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    browse._network_generation = 1
+    browse._provider_exit_rejections = []
+    browse._rejected_network_generations = set()
+    browse._payment_cdn_provider_exits = 0
+    browse._generic_script_provider_exits = 0
+    browse._ignored_request_ids = set()
+    browse._active_request_ids = set()
+    browse.agent_id = "agent"
+    browse.task_id = "task"
+    browse.entries = {
+        "1:r2": {
+            "browser_generation": 1,
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://shop.example.com/event/lyny/692405",
+        }
+    }
+    browse._on_loading_failed(
+        {"requestId": "r2", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-1",
+        generation=1,
+    )
+    assert browse.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.cdn.example/v3/",
+        "browser_generation": 1,
+        "document_url": "https://shop.example.com/event/lyny/692405",
+    }
+
+    # Consent/chat widget script blocks must not consume the payment-CDN budget.
+    widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    widget._network_generation = 7
+    widget._provider_exit_rejections = []
+    widget._rejected_network_generations = set()
+    widget._payment_cdn_provider_exits = 0
+    widget._generic_script_provider_exits = 0
+    widget._ignored_request_ids = set()
+    widget._active_request_ids = set()
+    widget.agent_id = "agent"
+    widget.task_id = "task"
+    widget.entries = {
+        "7:r-widget": {
+            "browser_generation": 7,
+            "url": "https://cdn.consentmanager.net/delivery/cmp.js",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_CLIENT"},
+        session_id="cdp-7",
+        generation=7,
+    )
+    assert widget.pop_provider_exit_rejection() is not None
+    assert widget._generic_script_provider_exits == 1
+    assert widget._payment_cdn_provider_exits == 0
+    # A later Stripe block on a new generation still has its reserved budget.
+    widget._network_generation = 8
+    widget.entries = {
+        "8:r-stripe": {
+            "browser_generation": 8,
+            "url": "https://js.stripe.com/v3/",
+            "document_url": "https://checkout.eventim.us/",
+            "resource_type": "script",
+        }
+    }
+    widget._on_loading_failed(
+        {"requestId": "r-stripe", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-8",
+        generation=8,
+    )
+    assert widget.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 8,
+        "document_url": "https://checkout.eventim.us/",
+    }
+    assert widget._payment_cdn_provider_exits == 1
+    assert widget._generic_script_provider_exits == 1
+
+    # Non-js.* cross-origin scripts charge the generic budget (no vendor hosts).
+    mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    mobile._network_generation = 9
+    mobile._provider_exit_rejections = []
+    mobile._rejected_network_generations = set()
+    mobile._payment_cdn_provider_exits = 0
+    mobile._generic_script_provider_exits = 0
+    mobile._ignored_request_ids = set()
+    mobile._active_request_ids = set()
+    mobile.agent_id = "agent"
+    mobile.task_id = "task"
+    mobile._network_generation += 1
+    generation = mobile._network_generation
+    mobile.entries = {
+        f"{generation}:r-widget": {
+            "browser_generation": generation,
+            "url": "https://cdn.widgets.example/inner-script.js",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
+        }
+    }
+    mobile._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id=f"cdp-{generation}",
+        generation=generation,
+    )
+    assert mobile.pop_provider_exit_rejection() is not None
+    assert mobile._payment_cdn_provider_exits == 0
+    assert mobile._generic_script_provider_exits == 1
+
+    # js.* hosts charge the script-CDN budget.
+    js_cdn = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    js_cdn._network_generation = 11
+    js_cdn._provider_exit_rejections = []
+    js_cdn._rejected_network_generations = set()
+    js_cdn._payment_cdn_provider_exits = 0
+    js_cdn._generic_script_provider_exits = 0
+    js_cdn._ignored_request_ids = set()
+    js_cdn._active_request_ids = set()
+    js_cdn.agent_id = "agent"
+    js_cdn.task_id = "task"
+    js_cdn.entries = {
+        "11:r-js": {
+            "browser_generation": 11,
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
+        }
+    }
+    js_cdn._on_loading_failed(
+        {"requestId": "r-js", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-11",
+        generation=11,
+    )
+    assert js_cdn.pop_provider_exit_rejection() is not None
+    assert js_cdn._payment_cdn_provider_exits == 1
+    assert js_cdn._generic_script_provider_exits == 0
+
+
+def test_evicted_critical_request_meta_still_rejects_network_generation():
+    """Entry eviction must not drop provider-exit classification for in-flight critical scripts.
+
+    With a 1-entry capture buffer, a later request evicts js.stripe.com from
+    ``entries`` before loadingFailed arrives. The active meta map must retain
+    enough fields for the failure event to reject the network generation.
+    """
+    from domains.spawn_browser_agent_v3.recording import BrowserNetworkRecorder
+
+    recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    recorder._network_generation = 3
+    recorder._max_entries = 1
+    recorder._max_active_request_meta = 256
+    recorder._provider_exit_rejections = []
+    recorder._rejected_network_generations = set()
+    recorder._payment_cdn_provider_exits = 0
+    recorder._generic_script_provider_exits = 0
+    recorder._ignored_request_ids = set()
+    recorder._active_request_ids = set()
+    recorder._active_request_meta = {}
+    recorder._patterns = []
+    recorder._bodies = {}
+    recorder._body_byte_sizes = {}
+    recorder._body_bytes = 0
+    recorder._started_at = 0.0
+    recorder._max_body_bytes = 262144
+    recorder.agent_id = "agent"
+    recorder.task_id = "task"
+    recorder.entries = {}
+
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "stripe",
+            "type": "Script",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://js.stripe.com/v3/", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    stripe_key = "3:stripe"
+    assert stripe_key in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+
+    # Later request fills the 1-entry buffer and evicts the Stripe capture row.
+    recorder._on_request_will_be_sent(
+        {
+            "requestId": "other",
+            "type": "XHR",
+            "documentURL": "https://checkout.eventim.us/pay",
+            "request": {"url": "https://checkout.eventim.us/api/ping", "method": "GET"},
+        },
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" in recorder.entries
+    assert stripe_key not in recorder.entries
+    assert stripe_key in recorder._active_request_meta
+    assert recorder._active_request_meta[stripe_key]["url"] == "https://js.stripe.com/v3/"
+
+    recorder._on_loading_failed(
+        {"requestId": "stripe", "errorText": "net::ERR_TUNNEL_CONNECTION_FAILED"},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert recorder.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.stripe.com/v3/",
+        "browser_generation": 3,
+        "document_url": "https://checkout.eventim.us/pay",
+    }
+    assert 3 in recorder._rejected_network_generations
+    assert stripe_key not in recorder._active_request_meta
+    assert stripe_key not in recorder._active_request_ids
+
+    # Successful finish for the surviving request also clears its meta.
+    # Point at a binary URL so the finish path skips body fetch (no CDP client).
+    recorder._cdp_client = None
+    recorder._tasks = set()
+    recorder._closed = False
+    recorder.entries["3:other"]["url"] = "https://checkout.eventim.us/static/pixel.png"
+    recorder._on_loading_finished(
+        {"requestId": "other", "encodedDataLength": 12},
+        session_id="cdp-3",
+        generation=3,
+    )
+    assert "3:other" not in recorder._active_request_meta
+    assert "3:other" not in recorder._active_request_ids
+    assert recorder.entries["3:other"].get("terminal") is True
+
 
 async def test_provider_exit_monitor_runs_without_production_body_log_persistence():
     """Disabling local recordings must not disable the lightweight prod signal."""
@@ -9685,6 +10591,66 @@ def test_write_lock_purchase_button_detects_order_controls():
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
 
+
+def test_write_lock_purchase_button_excludes_terms_consent_prose():
+    """Terms copy that quotes Buy Now must not trip the purchase write lock.
+
+    Eventim checkout (2026-08-10 agent e20e5a4e): clicking the legal line
+    'By clicking "Buy Now," you agree to our Terms of Purchase…' was classified
+    as a purchase button, forced generate_write_lock_notification, and blocked
+    request_payment_card. Real Buy Now / Place Order controls stay locked.
+    """
+    from browser_tools.write_lock import is_purchase_button
+
+    terms = (
+        'By clicking "Buy Now," you agree to our\n'
+        "Terms of Purchase\n"
+        "and acknowledge our privacy practices as described in our\n"
+        "Privacy Policy."
+    )
+    assert not is_purchase_button(terms)
+    assert not is_purchase_button(
+        "By clicking Place Order you agree to the Terms of Service"
+    )
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("Place Order")
+    assert is_purchase_button("Pay Now")
+    # Independent signals joined with newlines: consent in one must not veto
+    # a real purchase phrase in another.
+    assert is_purchase_button("Terms of Service\nBuy Now")
+    assert is_purchase_button("Buy Now\nPrivacy Policy")
+
+
+def test_write_lock_email_send_excludes_marketing_opt_in_controls():
+    """Marketing opt-in checkboxes never trigger the outbound-send write lock.
+
+    Eventim checkout (2026-08-10 agent 317bd635): clicking the label
+    "Send me info about other shows by this organizer" was classified as
+    email_send, parked the agent on write_lock approval, and blocked
+    request_payment_card. Opting into merchant emails is not composing an
+    outbound message.
+    """
+    from browser_tools.write_lock import is_email_send_button
+
+    assert not is_email_send_button("Send me info about other shows by this organizer")
+    assert not is_email_send_button("Send me updates about upcoming events")
+    assert not is_email_send_button("Email me about other shows")
+    assert not is_email_send_button("Subscribe to the organizer newsletter")
+    assert not is_email_send_button("Sign me up for promotional emails")
+
+    # Ordinary outbound sends stay locked.
+    assert is_email_send_button("Send")
+    assert is_email_send_button("Send email")
+    assert is_email_send_button("Send message")
+
+    # An opt-in label must not unlock a neighbouring real send control.
+    assert is_email_send_button("Send me info about other shows\nSend message")
+
+    # Composite: marketing opt-in must not suppress a co-located send-email phrase.
+    assert is_email_send_button("Send me info and send email")
+    assert is_email_send_button("Send me updates and send message")
+
+
 def test_write_lock_email_send_excludes_resend_controls():
     """Code requests and resends never trigger the outbound-send write lock.
 
@@ -10200,8 +11166,12 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_valu
     assert out["typed_text"] == "[encrypted_data]"
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
-    assert page.evaluate.await_count == 4
-    payloads = [call.args[1] for call in page.evaluate.await_args_list]
+    # wait_for_payment_ref_fields may locate first; assert the four fill payloads.
+    payloads = [
+        call.args[1]
+        for call in page.evaluate.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict) and "refName" in call.args[1]
+    ]
     assert payloads == [
         {"refName": "card_number", "value": "4111111111111111"},
         {"refName": "card_name", "value": "Rose Labs"},
@@ -10263,6 +11233,11 @@ async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before
             "wait_for_navigation_ready",
             AsyncMock(return_value={"ready": True, "reason": "content_present"}),
         ) as wait_ready,
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=True),
+        ),
     ):
         out = await service_actions._execute_input_text(
             session=session,
@@ -10360,22 +11335,154 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["success"] is True
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
-    assert session.get_or_create_cdp_session.await_count == 4
+    assert session.get_or_create_cdp_session.await_count >= 4
     for cdp_call in session.get_or_create_cdp_session.await_args_list:
         assert cdp_call.kwargs == {"focus": True}
-    assert cdp_client.send.Runtime.evaluate.await_count == 4
-    evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
-    assert evaluate_kwargs["session_id"] == "cdp-1"
-    assert '"refName": "card_name"' in evaluate_kwargs["params"]["expression"]
-    assert '"value": "Rose Labs"' in evaluate_kwargs["params"]["expression"]
-    expressions = [call.kwargs["params"]["expression"] for call in cdp_client.send.Runtime.evaluate.await_args_list]
-    assert any('"refName": "card_number"' in expression for expression in expressions)
-    assert any('"refName": "card_expiry"' in expression for expression in expressions)
-    assert any('"refName": "card_cvv"' in expression for expression in expressions)
+    assert cdp_client.send.Runtime.evaluate.await_count >= 4
+    fill_expressions = [
+        call.kwargs["params"]["expression"]
+        for call in cdp_client.send.Runtime.evaluate.await_args_list
+        if '"value":' in call.kwargs["params"]["expression"]
+    ]
+    assert any('"refName": "card_name"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_number"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_expiry"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_cvv"' in expression for expression in fill_expressions)
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     recorded = ah.record_action.await_args.kwargs
     assert recorded["coordinates"] == {"x": 444, "y": 555}
+
+
+async def test_fill_payment_ref_directly_searches_playwright_frames():
+    """Hosted payment widgets live in child frames — search every frame, not just main."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    main = MagicMock()
+    main.evaluate = AsyncMock(return_value={"filled": False, "reason": "field_not_found"})
+    iframe = MagicMock()
+    iframe.evaluate = AsyncMock(
+        return_value={
+            "filled": True,
+            "x": 40,
+            "y": 80,
+            "selector": 'input[autocomplete="cc-number"]',
+            "valueLength": 16,
+            "score": 100,
+        }
+    )
+    input_page = MagicMock()
+    input_page.frames = [main, iframe]
+    session = _fake_session_with_event_bus()
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_number",
+        "4111111111111111",
+        input_page=input_page,
+    )
+
+    assert result is not None
+    assert result["filled"] is True
+    assert result["target"] == "playwright:1"
+    assert result["method"] == "js"
+    assert main.evaluate.await_count == 1
+    assert iframe.evaluate.await_count == 1
+
+
+async def test_fill_payment_ref_directly_uses_keyboard_when_js_value_rejected():
+    """Controlled inputs that keep an empty value after JS set must fall back to typing."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    frame = MagicMock()
+    frame.evaluate = AsyncMock(
+        side_effect=[
+            {
+                "filled": True,
+                "x": 10,
+                "y": 20,
+                "selector": 'input[autocomplete="cc-number"]',
+                "valueLength": 0,
+                "score": 100,
+            },
+            {
+                "focused": True,
+                "x": 10,
+                "y": 20,
+                "selector": 'input[autocomplete="cc-number"]',
+                "score": 100,
+            },
+        ]
+    )
+    input_page = MagicMock()
+    input_page.frames = [frame]
+    humanizer = MagicMock()
+    humanizer.input_page = input_page
+    humanizer.press_key = AsyncMock()
+    humanizer.type_text = AsyncMock()
+    session = _fake_session_with_event_bus()
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_number",
+        "4111111111111111",
+        input_page=input_page,
+        humanizer=humanizer,
+    )
+
+    assert result is not None
+    assert result["method"] == "keyboard"
+    humanizer.type_text.assert_awaited_once_with("4111111111111111")
+    assert humanizer.press_key.await_count >= 2
+
+
+async def test_fill_payment_ref_directly_uses_cdp_iframe_targets():
+    """OOPIF payment documents are reachable via session.get_all_frames targets."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "filled": True,
+                    "x": 12,
+                    "y": 34,
+                    "selector": 'input[autocomplete="cc-csc"]',
+                    "valueLength": 3,
+                    "score": 100,
+                }
+            }
+        }
+    )
+    iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
+    session = _fake_session_with_event_bus()
+    session.get_all_frames = AsyncMock(
+        return_value=(
+            {
+                "frame-1": {
+                    "id": "frame-1",
+                    "frameTargetId": "target-iframe-pay",
+                    "url": "https://pay.example/elements",
+                }
+            },
+            {"target-iframe-pay": "sess-1"},
+        )
+    )
+    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_cvv",
+        "123",
+    )
+
+    assert result is not None
+    assert result["filled"] is True
+    assert result["target"].startswith("cdp:")
+    session.get_or_create_cdp_session.assert_awaited()
+    cdp_client.send.Runtime.evaluate.assert_awaited()
+
 
 async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -10404,7 +11511,19 @@ async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_
     hu.press_key = AsyncMock()
     hu.type_text = AsyncMock()
 
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            service_actions,
+            "wait_for_navigation_ready",
+            AsyncMock(return_value={"ready": True, "reason": "content_present"}),
+        ),
+    ):
         out = await service_actions._execute_input_text(
             session=session,
             dom_service=dom,
@@ -10433,6 +11552,338 @@ async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_
     assert page.evaluate.await_count == 3
     hu.click_at_coords.assert_awaited_once_with(222, 333)
     hu.type_text.assert_awaited_once_with("4111111111111111")
+
+
+async def test_fill_payment_ref_directly_real_child_frame_fixture():
+    """Cement real multi-frame fill: payment inputs live in a child frame document."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <h1>Merchant shell</h1>
+                  <iframe id="pay" srcdoc='
+                    <html><body>
+                      <input autocomplete="cc-number" name="number" />
+                      <input autocomplete="cc-name" name="name" />
+                      <input autocomplete="cc-exp" name="exp-date" />
+                      <input autocomplete="cc-csc" name="cvc" />
+                    </body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            frame = page.frame_locator("#pay")
+            await frame.locator('input[autocomplete="cc-number"]').wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            value = await frame.locator('input[autocomplete="cc-number"]').input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs():
+    """Hosted widgets may mount autocomplete inputs with 0×0 until focused."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <input autocomplete="cc-number" name="number"
+                         style="width:0;height:0;opacity:0;position:absolute" />
+                </body></html>
+                """
+            )
+            session = _fake_session_with_event_bus()
+            coords = await service_actions._resolve_payment_ref_coordinates(
+                session,
+                "card_number",
+                input_page=page,
+            )
+            assert coords is not None
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs():
+    """Hosted Elements mark fields with data-elements-stable-field-name (may be 0×0)."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <iframe id="pay" srcdoc='
+                    <html><body>
+                      <input data-elements-stable-field-name="cardNumber"
+                             style="width:0;height:0;opacity:0;position:absolute" />
+                    </body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            frame = page.frame_locator("#pay")
+            await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            value = await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_via_playwright_label_when_no_autocomplete():
+    """Labeled inputs without autocomplete/name must still fill via get_by_label."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <label for="pan">Card number</label>
+                  <input id="pan" type="text" />
+                </body></html>
+                """
+            )
+            session = _fake_session_with_event_bus()
+            result = await service_actions._fill_payment_ref_via_playwright_locator(
+                input_page=page,
+                ref_name="card_number",
+                value="4111111111111111",
+                humanizer=None,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert "get_by_label" in str(result.get("selector") or "")
+            value = await page.locator("#pan").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_via_titled_payment_iframe():
+    """Hosted widgets isolate fields in titled iframes — fill by semantic title."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <h1>Hosted checkout shell</h1>
+                  <iframe title="Secure card number input frame" srcdoc='
+                    <html><body><input name="number" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure expiration date input frame" srcdoc='
+                    <html><body><input name="expiry" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure CVC input frame" srcdoc='
+                    <html><body><input name="cvc" /></body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert result.get("method") == "playwright_iframe_title"
+            value = await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
+    """Payment secret refs without element/coords must not fake-success via focused typing."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.type_text = AsyncMock()
+    hu.press_key = AsyncMock()
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            service_actions,
+            "wait_for_navigation_ready",
+            AsyncMock(return_value={"ready": False}),
+        ),
+        patch.object(
+            service_actions,
+            "_fill_payment_ref_directly",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=None,
+            index=None,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is False
+    assert out["error"] == "field_not_found"
+    assert out.get("payment_refs_filled") == []
+    hu.type_text.assert_not_called()
+
+
+async def test_fill_payment_ref_via_keyboard_types_after_cdp_focus():
+    """CDP-only payment documents must still receive keyboard events after focus."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "focused": True,
+                    "x": 10,
+                    "y": 20,
+                    "selector": 'input[autocomplete="cc-number"]',
+                    "score": 100,
+                }
+            }
+        }
+    )
+    iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
+    session = _fake_session_with_event_bus()
+    session.get_all_frames = AsyncMock(
+        return_value=(
+            {
+                "frame-1": {
+                    "id": "frame-1",
+                    "frameTargetId": "target-iframe-pay",
+                    "url": "https://pay.example/elements",
+                }
+            },
+            {"target-iframe-pay": "sess-1"},
+        )
+    )
+    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+    input_page = MagicMock()
+    input_page.frames = []
+    humanizer = MagicMock()
+    humanizer.input_page = input_page
+    humanizer.press_key = AsyncMock()
+    humanizer.type_text = AsyncMock()
+
+    result = await service_actions._fill_payment_ref_via_keyboard(
+        session=session,
+        ref_name="card_number",
+        value="4111111111111111",
+        input_page=input_page,
+        humanizer=humanizer,
+    )
+
+    assert result is not None
+    assert result["method"] == "keyboard"
+    assert result["target"].startswith("cdp:")
+    humanizer.type_text.assert_awaited_once_with("4111111111111111")
+
 
 async def test_execute_input_text_secret_redacts():
     """Text matching a secret ref is redacted in display and payment field origin mismatches abort."""
@@ -10656,6 +12107,482 @@ async def test_execute_goto_auto_adds_https():
         config=None,
     )
     assert out["success"] is True
+
+
+
+async def test_live_tab_looks_challenged_helpers():
+    """Clean live tabs must skip recovery; challenged tabs must still recover."""
+    from domains.spawn_browser_agent_v3.challenge_recovery import (
+        live_tab_looks_challenged,
+        page_looks_challenged,
+    )
+
+    class _CleanPage:
+        async def title(self):
+            return "Buy tickets"
+
+        def locator(self, _sel):
+            class _Body:
+                async def inner_text(self, timeout=0):
+                    return (
+                        "General Admission Tier 1 $25.00 Add to cart Select "
+                        "quantity and continue to checkout now."
+                    )
+
+            return _Body()
+
+        async def content(self):
+            return "<main>General Admission</main>"
+
+    class _ChallengedPage:
+        async def title(self):
+            return "Access denied"
+
+        def locator(self, _sel):
+            class _Body:
+                async def inner_text(self, timeout=0):
+                    return "Attention Required! | Cloudflare"
+
+            return _Body()
+
+        async def content(self):
+            return "<html><body>Attention Required! | Cloudflare</body></html>"
+
+    assert page_looks_challenged(
+        status=200,
+        title="Access denied",
+        body_text="Attention Required! | Cloudflare",
+        html="",
+    )
+    assert await live_tab_looks_challenged(_CleanPage()) is False
+    assert await live_tab_looks_challenged(_ChallengedPage()) is True
+
+
+def test_url_looks_like_api_surface_and_navigation_pin():
+    """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
+    from domains.spawn_browser_agent_v3.service_actions import (
+        effective_navigation_pin_host,
+        navigation_leaves_pinned_host,
+        url_looks_like_api_surface,
+        _navigation_guard_error,
+        _ActionContext,
+    )
+
+    assert url_looks_like_api_surface("https://api.example.com/") is True
+    assert url_looks_like_api_surface("https://api.example.com/v1/payment_pages") is True
+    assert url_looks_like_api_surface("https://example.com/healthcheck") is True
+    assert url_looks_like_api_surface("https://checkout.example.com/c/pay/cs_live_x") is False
+    assert url_looks_like_api_surface("https://www.example.com/cart") is False
+    # Single-letter / vendor CDN labels are not special-cased.
+    assert url_looks_like_api_surface("https://r.example.com/") is False
+
+    pin = "checkout.example.com"
+    current = "https://checkout.example.com/c/pay/cs_live_x"
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="navback",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://api.example.com/",
+            pin_host=pin,
+            action="goto",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://www.merchant.com/cart",
+            pin_host=pin,
+            action="goto",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url="https://checkout.example.com/c/pay/other",
+            pin_host=pin,
+            action="goto",
+        )
+        is False
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="close_tab",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="switch_tab",
+        )
+        is True
+    )
+    # Off the pin already — do not trap.
+    assert (
+        navigation_leaves_pinned_host(
+            current_url="https://www.merchant.com/cart",
+            target_url="https://elsewhere.com/",
+            pin_host=pin,
+            action="goto",
+        )
+        is False
+    )
+
+    # Cross-origin handoff: live host ≠ session origin → pin to live host.
+    assert (
+        effective_navigation_pin_host(
+            current_url=current,
+            recovery_pin_host=None,
+            origin_base_domain="merchant.com",
+        )
+        == "checkout.example.com"
+    )
+    assert (
+        effective_navigation_pin_host(
+            current_url="https://www.merchant.com/cart",
+            recovery_pin_host=None,
+            origin_base_domain="merchant.com",
+        )
+        is None
+    )
+    assert (
+        effective_navigation_pin_host(
+            current_url="https://www.merchant.com/cart",
+            recovery_pin_host="www.merchant.com",
+            origin_base_domain="merchant.com",
+        )
+        == "www.merchant.com"
+    )
+
+    ctx = _ActionContext(
+        dom_service=None,  # type: ignore[arg-type]
+        action_history=None,  # type: ignore[arg-type]
+        session=None,
+        action_name="navback",
+        index=None,
+        params={},
+        thinking=None,
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id=None,
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        trusted_page_urls=None,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+        navigation_pin_host=None,
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert "leave pinned page host" in (_navigation_guard_error(ctx, action="navback") or "")
+    ctx.action_name = "goto"
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://www.merchant.com/about"
+        )
+        is not None
+    )
+    # Same handoff host stays allowed.
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
+        )
+        is None
+    )
+    # Still on origin domain — no handoff pin; free to navigate.
+    ctx.current_url = "https://www.merchant.com/cart"
+    assert _navigation_guard_error(ctx, action="navback") is None
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://www.merchant.com/other"
+        )
+        is None
+    )
+
+
+async def test_execute_goto_refuses_api_surface_urls():
+    """RCA cement: fleet 7c0cce61 navigated to an API host after Checkout recovery."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "goto", "params": {"url": "https://api.example.com/"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+    )
+    assert out["success"] is False
+    assert "API/non-document" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+    ah.record_action.assert_awaited_once()
+
+
+async def test_execute_navback_refuses_when_host_pinned():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "navback", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_pin_host="checkout.example.com",
+    )
+    assert out["success"] is False
+    assert "leave pinned page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+    ah.record_action.assert_awaited_once()
+
+
+async def test_execute_navback_refuses_on_cross_origin_handoff():
+    """Place-order handoff sticks without recovery pin or path allowlists (ea340c81)."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "navback", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "leave pinned page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+    out_goto = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "goto",
+            "params": {"url": "https://www.merchant.com/test_payment"},
+        },
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_goto["success"] is False
+    assert "leave pinned page host" in out_goto["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_close_tab_refuses_on_cross_origin_handoff():
+    """Fleet 1bffacc0: close_tab on handoff host crashed the browser session."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "close_tab", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "leave pinned page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+    out_switch = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "switch_tab", "params": {"tab_id": "ab12"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_switch["success"] is False
+    assert "leave pinned page host" in out_switch["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_evaluate_refuses_navigation_while_pinned():
+    """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    assert service_actions.evaluate_code_looks_like_navigation(
+        "window.location.href = 'https://www.merchant.com/'"
+    )
+    assert service_actions.evaluate_code_looks_like_navigation("history.back()")
+    assert not service_actions.evaluate_code_looks_like_navigation(
+        "document.querySelector('#card-number')?.value"
+    )
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "evaluate",
+            "params": {"code": "window.location.href = 'https://www.merchant.com/cart'"},
+        },
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "evaluate that would navigate" in out["error"]
+
+
+async def test_execute_press_key_and_click_refuse_leave_while_pinned():
+    """Fleet d2a9805f: Ctrl+Shift+W and Return-to-merchant href escaped the pin."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    assert service_actions.press_key_looks_like_leave_page("Control+Shift+W")
+    assert service_actions.press_key_looks_like_leave_page("Alt+Left")
+    assert not service_actions.press_key_looks_like_leave_page("Enter")
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "key chord" in out["error"]
+
+    leave_el = MagicMock()
+    leave_el.attributes = {"href": "https://www.merchant.com/cart"}
+    same_el = MagicMock()
+    same_el.attributes = {"href": "https://pay.example.com/confirm"}
+    assert (
+        service_actions.click_href_leaves_pinned_base(leave_el, "checkout.example.com")
+        == "https://www.merchant.com/cart"
+    )
+    assert (
+        service_actions.click_href_leaves_pinned_base(same_el, "checkout.example.com")
+        is None
+    )
+
+    dom.selector_map = {3: leave_el}
+    out_click = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "click", "index": 3, "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_click["success"] is False
+    assert "click that navigates off pinned host" in out_click["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+
+def test_handoff_pin_is_sticky_in_handler():
+    """Once handoff is observed, pin host is persisted (not cleared on return to origin)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert "navigation_pin_url" in source
+    assert "Auto-returning to pinned handoff host" in source
+    assert "navigation_origin_base_domain" in source
+    assert "Auto-filled payment refs on pinned handoff page" in source
+    assert "Handoff payment auto-fill exhausted; pin retained" in source
+    assert "handoff_payment_fill_attempts" in source
+    assert '"text": "card_number"' in source
+    assert "wait_for_payment_ref_fields" in source
+    assert "Waiting for payment fields on handoff page" in source
+    assert "timeout_seconds=4.0" in source
+    # Prefer the live Playwright page (titled payment iframes) over humanizer-only.
+    assert "_autofill_page = input_page" in source
+    # Attempt counter must only advance after fields are ready (else burns retries).
+    wait_offset = source.index("wait_for_payment_ref_fields")
+    attempt_offset = source.index("handoff_payment_fill_attempts += 1")
+    assert wait_offset < attempt_offset
+    # Auto-fill gate must stay host/path agnostic.
+    auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
+    auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
+    auto_fill_block = source[auto_fill_start:auto_fill_end]
+    assert "checkout.stripe" not in auto_fill_block
+    assert "test_payment" not in auto_fill_block
+    assert "api.stripe" not in auto_fill_block
+    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
+    assert "Released handoff pin — no payment fields found" not in auto_fill_block
+    assert "navigation_pin_host = None" not in auto_fill_block
+
+
+def test_recovery_skips_when_live_tab_already_clear():
+    """LLM-invented recovery on a clean page must no-op (no host special-cases)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "recover_from_challenge":')
+    end = source.index('if action_name == "send_message_to_user":', start)
+    recovery_block = source[start:end]
+
+    assert "live_tab_looks_challenged" in recovery_block
+    assert "skipped_clean_page" in recovery_block
+    assert "provider_exit_rejected" in recovery_block
+    assert "is_hosted_stripe_checkout_url" not in recovery_block
+    assert "healthcheck_noise" not in recovery_block
+    assert "api.stripe.com" not in recovery_block
+    assert "target_looks_like_payment_document" not in recovery_block
+    # Skip must run before capturing storage / rotating providers.
+    skip_offset = recovery_block.index("skipped_clean_page")
+    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
+    assert skip_offset < capture_offset
+
+
+def test_navigation_guard_has_no_endpoint_path_allowlists():
+    """Nav guards must not special-case payment/checkout path markers."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    source = inspect.getsource(service_actions._navigation_guard_error)
+    assert "target_looks_like_payment_document" not in source
+    assert "payment page" not in source
+    assert "effective_navigation_pin_host" in source
+    assert "url_looks_like_api_surface" in source
+
 
 async def test_execute_goto_injects_local_storage():
     from domains.spawn_browser_agent_v3 import service_actions
@@ -13525,9 +15452,18 @@ async def test_manager_payment_card_approval_uses_registered_activity_names_and_
     assert resume_state["approval_type"] == "payment"
     assert resume_state["auth_realm"] == "dickblick.com"
     assert resume_state["step_count"] == 12
+    checkout_domain = get_domain_from_url("https://www.dickblick.com/checkout/")
     assert resume_state["write_lock_approvals"]["payment"] == {
-        "domain": get_domain_from_url("https://www.dickblick.com/checkout/"),
+        "domain": checkout_domain,
         "approved_at": current_time.timestamp(),
+        "persistent": True,
+    }
+    # Site-wide unlock so Place order does not re-prompt on this domain
+    # (ephemeral to this browser activity's resume state only).
+    assert resume_state["write_lock_approvals"]["site"] == {
+        "domain": checkout_domain,
+        "approved_at": current_time.timestamp(),
+        "persistent": True,
     }
     assert resume_state["payment_card_refs"] == {
         "card_number": "4242424242424242",
@@ -13906,11 +15842,13 @@ def test_challenge_recovery_reuses_one_tool_call_id_for_every_stage():
     assert "tool_call_id=recovery_call_id" in recovery_branch
     assert "recovery_call_id = str(uuid_module.uuid4())" not in recovery_branch
     assert "status=MessageStatus.IN_PROGRESS" in recovery_branch
-    assert 'restore_cookies=not bool(config_result.get("storage_state_preloaded"))' in recovery_branch
+    assert 'if not bool(config_result.get("storage_state_preloaded")):' in recovery_branch
+    assert "await _restore_rotation_storage_state(" in recovery_branch
     activity_source = inspect.getsource(_spawn_browser_agent_activity_v3_real)
     assert "pop_provider_exit_rejection()" in activity_source
     assert '"provider_exit_rejected": True' in activity_source
-    assert "provider_exit_rejected=bool(" in recovery_branch
+    # Assignment form (main): provider_exit_rejected = bool(unified_action...)
+    assert "provider_exit_rejected = bool(" in recovery_branch
     assert 'await browser_stream.finish_tools(status="ERROR")' in activity_source
 
 async def test_playwright_page_tracks_browser_use_tab_focus():
@@ -14530,7 +16468,15 @@ async def run_all_tests():
     )
     await r.record_async(
         "recovery_preloaded_solver_cookies",
-        test_preloaded_recovery_keeps_solver_cookies_while_restoring_origin_state,
+        test_preloaded_restore_helper_skips_same_host_goto_and_cookie_rewrite,
+    )
+    await r.record_async(
+        "recovery_preloaded_navigates_when_host_differs",
+        test_preloaded_restore_helper_navigates_with_probe_timeout_when_host_differs,
+    )
+    r.record(
+        "recovery_requires_live_tab_verify_before_success",
+        test_recovery_requires_live_tab_verify_before_success,
     )
     r.record(
         "recovery_restore_failure_is_not_suppressed",
@@ -14715,6 +16661,30 @@ async def run_all_tests():
     r.record("is_approval_valid_domain_mismatch", test_is_approval_valid_domain_mismatch)
     r.record("is_approval_valid_fresh", test_is_approval_valid_still_fresh)
     r.record("is_approval_valid_expired", test_is_approval_valid_expired)
+    r.record(
+        "site_write_lock_unlock_covers_purchase",
+        test_site_write_lock_unlock_covers_purchase_on_approved_domain,
+    )
+    r.record(
+        "payment_site_unlock_covers_subdomains_and_ignores_path_query",
+        test_payment_site_unlock_covers_subdomains_and_ignores_path_query,
+    )
+    r.record(
+        "payment_site_unlock_survives_write_lock_timeout",
+        test_payment_site_unlock_survives_write_lock_timeout,
+    )
+    r.record(
+        "fresh_browser_session_no_site_unlock_inherit",
+        test_fresh_browser_session_does_not_inherit_site_write_lock_unlock,
+    )
+    r.record(
+        "site_write_lock_grant_prefers_merchant_over_kernel_proxy",
+        test_site_write_lock_grant_prefers_merchant_url_over_kernel_proxy_current_url,
+    )
+    await r.record_async(
+        "purchase_write_lock_bypassed_when_payment_card_secret_refs_present",
+        test_purchase_write_lock_bypassed_when_payment_card_secret_refs_present,
+    )
     r.record("get_element_description_none", test_get_element_description_none)
     r.record("get_element_description_text", test_get_element_description_with_text)
     r.record(
@@ -14768,6 +16738,22 @@ async def run_all_tests():
     await r.record_async(
         "network_recorder_accepted_fingerprint_warning",
         test_network_recorder_does_not_reject_successful_fingerprint_warning,
+    )
+    r.record(
+        "api_challenge_html_large_cart_interstitial",
+        test_api_challenge_html_large_cart_interstitial_without_classic_markers,
+    )
+    await r.record_async(
+        "api_challenge_html_provider_exit",
+        test_api_challenge_html_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "payment_cdn_tunnel_failure_provider_exit",
+        test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection,
+    )
+    r.record(
+        "evicted_critical_request_meta_provider_exit",
+        test_evicted_critical_request_meta_still_rejects_network_generation,
     )
     await r.record_async(
         "provider_exit_monitor_without_recording",
@@ -14919,6 +16905,14 @@ async def run_all_tests():
         test_write_lock_purchase_button_detects_order_controls,
     )
     r.record(
+        "write_lock_purchase_button_excludes_terms_consent_prose",
+        test_write_lock_purchase_button_excludes_terms_consent_prose,
+    )
+    r.record(
+        "write_lock_email_send_excludes_marketing_opt_in_controls",
+        test_write_lock_email_send_excludes_marketing_opt_in_controls,
+    )
+    r.record(
         "write_lock_email_send_excludes_resend_controls",
         test_write_lock_email_send_excludes_resend_controls,
     )
@@ -14989,6 +16983,46 @@ async def run_all_tests():
         test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page,
     )
     await r.record_async(
+        "fill_payment_ref_directly_searches_playwright_frames",
+        test_fill_payment_ref_directly_searches_playwright_frames,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_uses_keyboard_when_js_value_rejected",
+        test_fill_payment_ref_directly_uses_keyboard_when_js_value_rejected,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_uses_cdp_iframe_targets",
+        test_fill_payment_ref_directly_uses_cdp_iframe_targets,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_real_child_frame_fixture",
+        test_fill_payment_ref_directly_real_child_frame_fixture,
+    )
+    await r.record_async(
+        "fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs",
+        test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs",
+        test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_playwright_label_when_no_autocomplete",
+        test_fill_payment_ref_via_playwright_label_when_no_autocomplete,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_titled_payment_iframe",
+        test_fill_payment_ref_via_titled_payment_iframe,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_fail_closed_without_target",
+        test_execute_input_text_payment_secret_ref_fail_closed_without_target,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_keyboard_types_after_cdp_focus",
+        test_fill_payment_ref_via_keyboard_types_after_cdp_focus,
+    )
+    await r.record_async(
         "execute_input_text_payment_secret_ref_selector_recovery",
         test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
     )
@@ -15012,6 +17046,35 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
+    await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
+    await r.record_async(
+        "navback_refuses_cross_origin_handoff",
+        test_execute_navback_refuses_on_cross_origin_handoff,
+    )
+    await r.record_async(
+        "close_tab_refuses_cross_origin_handoff",
+        test_execute_close_tab_refuses_on_cross_origin_handoff,
+    )
+    await r.record_async(
+        "evaluate_refuses_nav_while_pinned",
+        test_execute_evaluate_refuses_navigation_while_pinned,
+    )
+    await r.record_async(
+        "press_key_click_refuse_leave_while_pinned",
+        test_execute_press_key_and_click_refuse_leave_while_pinned,
+    )
+    r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
+    r.record(
+        "nav_guard_no_endpoint_path_allowlists",
+        test_navigation_guard_has_no_endpoint_path_allowlists,
+    )
+    r.record(
+        "recovery_skips_clean_live_tab",
+        test_recovery_skips_when_live_tab_already_clear,
+    )
     await r.record_async("execute_goto_injects_ls", test_execute_goto_injects_local_storage)
     await r.record_async(
         "execute_goto_injects_ls_error",

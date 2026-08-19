@@ -279,6 +279,55 @@ async function main(): Promise<void> {
     assert(calls.cancels.length === 1, 'the Stripe hold should be canceled');
   });
 
+  // Live RCA (agent 500c444d): Org MCP "card_creation_failed" is a terminal idempotency-key
+  // outcome — fail closed, do not rewrite into funding-in-progress.
+  const cardCreationFailedUserId = await createSubscribedUser();
+  const cardCreationFailedFingerprint = `card-creation-failed-${randomUUID()}`;
+  const cardCreationFailedProvider: CardProvider = {
+    async mintCard(): Promise<never> {
+      throw new AgentCardProviderError(
+        'create_card failed: card_creation_failed',
+        409,
+        undefined,
+        'agentcard_card_creation_failed',
+        { agentcardStatus: 'card_creation_failed' }
+      );
+    },
+    async getDetails(): Promise<never> {
+      throw new Error('details must not run when create_card failed');
+    },
+    async closeCard(): Promise<void> {
+      throw new Error('an unknown card must not be closed without its id');
+    },
+  };
+  await withFakeStripe(async (calls) => {
+    const error = await expectPurchaseError(() =>
+      mintPurchaseCard(
+        mintInput(cardCreationFailedUserId, cardCreationFailedFingerprint),
+        cardCreationFailedProvider,
+        new FakeWalletFundingProvider()
+      )
+    );
+    assert(
+      error.code === 'agentcard_card_creation_failed',
+      `card_creation_failed must keep typed code, got ${error.code}`
+    );
+    assert(
+      !/funding outcome is not confirmed/i.test(error.message),
+      'card_creation_failed must not be rewritten as ambiguous funding'
+    );
+    const purchase = await prisma.purchaseSpend.findFirstOrThrow({
+      where: { userId: cardCreationFailedUserId, fingerprint: cardCreationFailedFingerprint },
+      include: { walletFunding: true },
+    });
+    assert(
+      purchase.status === PurchaseSpendStatus.FAILED,
+      `card_creation_failed should fail the purchase, got ${purchase.status}`
+    );
+    assert(purchase.walletFunding === null, 'pending wallet marker should be discarded');
+    assert(calls.cancels.length === 1, 'the Stripe hold should be canceled');
+  });
+
   const closedReplayUserId = await createSubscribedUser();
   const closedReplayFingerprint = `closed-replay-${randomUUID()}`;
   const closedReplayCardId = `card-closed-${randomUUID()}`;

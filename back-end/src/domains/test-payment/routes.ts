@@ -14,6 +14,7 @@ import {
   resolvePublicBaseUrl,
 } from './service';
 import { checkoutRouter } from './routes.checkout';
+import { closeHeldReuseRouter } from './routes.closeHeldReuse';
 import { rejectWhenDisabled, respondTestPaymentError } from './routes.guards';
 import type { TestPaymentConfirmInput } from './types';
 
@@ -22,6 +23,7 @@ const router = Router();
 // Real-merchant (hosted Stripe Checkout) endpoints live in their own module to keep this file
 // inside the max-lines budget.
 router.use(checkoutRouter);
+router.use(closeHeldReuseRouter);
 
 /**
  * Caller authorization scope for the benchmark lifecycle routes.

@@ -208,13 +208,36 @@ export function installFetchCapture(): Router {
       return originalFetch(input, init);
     }
 
+    const resolveMethod = (): string => {
+      const raw =
+        init?.method ??
+        (typeof globalThis.Request === 'function' && input instanceof globalThis.Request
+          ? input.method
+          : 'GET');
+      const trimmed = String(raw || 'GET').trim();
+      const upper = trimmed.toUpperCase();
+      // Fetch canonicalizes the standard method tokens; preserve custom methods.
+      const standard = new Set([
+        'GET',
+        'HEAD',
+        'POST',
+        'PUT',
+        'DELETE',
+        'CONNECT',
+        'OPTIONS',
+        'TRACE',
+        'PATCH',
+      ]);
+      return standard.has(upper) ? upper : trimmed || 'GET';
+    };
+
     // Mutable control-plane calls bypass replay. E2B also uses Request objects
     // with streaming bodies that cannot round-trip through the string cache.
     // Captures are still recorded for outbound boundary assertions.
     if (shouldBypassOutboundReplay(url)) {
       const captureId = nextId++;
       const captureStart = Date.now();
-      const captureMethod = init?.method ?? 'GET';
+      const captureMethod = resolveMethod();
       try {
         const response = await originalFetch(input, init);
         const entry: CapturedCall = {
@@ -255,9 +278,9 @@ export function installFetchCapture(): Router {
 
     const id = nextId++;
     const start = Date.now();
-    const method = init?.method ?? 'GET';
+    const method = resolveMethod();
 
-    // Serialize request body
+    // Serialize request body (init.body, else Request body for fake markers).
     let requestBody: string | null = null;
     let bodySerializable = true;
     if (init?.body !== undefined && init?.body !== null) {
@@ -267,6 +290,18 @@ export function installFetchCapture(): Router {
         requestBody = init.body.toString();
       } else {
         requestBody = '[non-string body]';
+        bodySerializable = false;
+      }
+    } else if (
+      typeof globalThis.Request === 'function' &&
+      input instanceof globalThis.Request &&
+      method.toUpperCase() !== 'GET' &&
+      method.toUpperCase() !== 'HEAD'
+    ) {
+      try {
+        requestBody = await input.clone().text();
+      } catch {
+        requestBody = null;
         bodySerializable = false;
       }
     }
@@ -305,24 +340,14 @@ export function installFetchCapture(): Router {
       }
     }
 
-    // Collect full headers for the real call
+    // Collect full headers for the real call. Request headers come first so
+    // absent/partial init.headers still preserve Authorization/Content-Type on
+    // replay; init then overrides on conflict.
     const fullHeaders: Record<string, string> = {};
-    const rawHeaders = init?.headers;
-    if (rawHeaders) {
-      if (rawHeaders instanceof Headers) {
-        rawHeaders.forEach((v, k) => {
-          fullHeaders[k] = v;
-        });
-      } else if (Array.isArray(rawHeaders)) {
-        for (const [k, v] of rawHeaders) {
-          fullHeaders[k] = v;
-        }
-      } else {
-        for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
-          fullHeaders[k] = v;
-        }
-      }
+    if (typeof globalThis.Request === 'function' && input instanceof globalThis.Request) {
+      assignHeadersInto(fullHeaders, input.headers);
     }
+    assignHeadersInto(fullHeaders, init?.headers);
 
     // Redacted headers for the capture log (visible to tests)
     const redactedHeaders: Record<string, string> = {};
@@ -379,39 +404,25 @@ export function installFetchCapture(): Router {
       });
     }
 
-    // WhatsApp Cloud API (Meta) — faked like Surge so onboarding/lifecycle
-    // mirrors never make a real graph.facebook.com send during blackbox runs.
-    // `__BLACKBOX_WA_UNREACHABLE__` in the body forces a 131026 deliverability
-    // error so reachability-learning paths can be exercised deterministically.
     if (
       process.env.BLACKBOX_TEST_FAKE_WHATSAPP === '1' &&
-      url.includes('graph.facebook.com') &&
-      url.includes('/messages')
+      new URL(url).hostname === 'graph.facebook.com' &&
+      new URL(url).pathname.endsWith('/messages') &&
+      method.toUpperCase() === 'POST'
     ) {
-      if (requestBody?.includes('__BLACKBOX_WA_UNREACHABLE__')) {
-        const body = JSON.stringify({
-          error: { message: 'blackbox fake WhatsApp unreachable', code: 131026 },
-        });
-        entry.durationMs = Date.now() - start;
-        entry.responseStatus = 400;
-        entry.responseBody = body;
-        captures.push(entry);
-
-        return new globalThis.Response(body, {
-          status: 400,
-          statusText: 'Bad Request',
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-      const body = JSON.stringify({ messages: [{ id: `blackbox-wa-message-${id}` }] });
+      const unavailable = requestBody?.includes('__BLACKBOX_WHATSAPP_503__') === true;
+      const status = unavailable ? 503 : 200;
+      const body = unavailable
+        ? JSON.stringify({ error: { message: 'blackbox fake WhatsApp unavailable' } })
+        : JSON.stringify({ messages: [{ id: `blackbox-whatsapp-message-${String(id)}` }] });
       entry.durationMs = Date.now() - start;
-      entry.responseStatus = 200;
+      entry.responseStatus = status;
       entry.responseBody = body;
       captures.push(entry);
 
       return new globalThis.Response(body, {
-        status: 200,
-        statusText: 'OK',
+        status,
+        statusText: unavailable ? 'Service Unavailable' : 'OK',
         headers: { 'content-type': 'application/json' },
       });
     }
@@ -540,6 +551,33 @@ export function installFetchCapture(): Router {
   });
 
   return router;
+}
+
+function assignHeadersInto(target: Record<string, string>, rawHeaders: unknown): void {
+  if (!rawHeaders) return;
+  const apply = (key: string, value: string): void => {
+    const lower = key.toLowerCase();
+    for (const existing of Object.keys(target)) {
+      if (existing.toLowerCase() === lower) {
+        delete target[existing];
+      }
+    }
+    target[key] = value;
+  };
+  if (typeof Headers !== 'undefined' && rawHeaders instanceof Headers) {
+    rawHeaders.forEach((v, k) => {
+      apply(k, v);
+    });
+  } else if (Array.isArray(rawHeaders)) {
+    for (const entry of rawHeaders) {
+      if (!Array.isArray(entry) || entry.length < 2) continue;
+      apply(String(entry[0]), String(entry[1]));
+    }
+  } else if (typeof rawHeaders === 'object') {
+    for (const [k, v] of Object.entries(rawHeaders as Record<string, string>)) {
+      apply(k, v);
+    }
+  }
 }
 
 function redactHeader(key: string, value: string): string {

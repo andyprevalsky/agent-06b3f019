@@ -53,11 +53,15 @@ _CHALLENGE_COOKIE_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
-_CHALLENGE_TEXT_MARKERS = (
+# Match only against rendered title/body — never raw HTML. Generic phrases like
+# "just a moment" / "access denied" appear in script/i18n bundles on clean
+# commerce pages and false-positive the probe (stablePasses=0).
+_CHALLENGE_RENDERED_TEXT_MARKERS = (
     "access denied",
     "attention required! | cloudflare",
     "checking your browser",
     "enable javascript and cookies to continue",
+    "just a moment",
     "performing security verification",
     "please verify you are a human",
     "sorry, you have been blocked",
@@ -66,6 +70,15 @@ _CHALLENGE_TEXT_MARKERS = (
     "unusual traffic from your computer network",
     "verify you are human",
 )
+# Kernel proxy hard-blocks are safe in raw HTML: they never appear in merchant
+# page bundles (checkout.stripe.com → provider_blacklisted).
+_PROXY_ERROR_TEXT_MARKERS = (
+    "provider_blacklisted",
+    "x-kernel-proxy-error",
+    "kernel-proxy-error",
+)
+# Backward-compatible alias for call sites / tests that still import the old name.
+_CHALLENGE_TEXT_MARKERS = _CHALLENGE_RENDERED_TEXT_MARKERS + _PROXY_ERROR_TEXT_MARKERS
 # Vendor fingerprints for interstitials that return HTTP 200 with benign text, so
 # neither the status nor the text markers above can catch them. This list is kept
 # at parity with `_CHALLENGE_COOKIE_RE`: that regex already recognises DataDome,
@@ -87,7 +100,10 @@ _CHALLENGE_TEXT_MARKERS = (
 # here was paid for real; the false-positive one is theoretical. Incidental
 # captcha PROSE is handled separately by the classifier's prose guard.
 # A recovered page renders real content; interstitials are near-empty.
-_CLEAN_PAGE_MIN_VISIBLE_CHARS = 600
+# Keep at parity with back-end SUBSTANTIVE_BODY_CHARS (80). Cleared Eventim
+# ticket pages embed Turnstile next to short inventory copy (~80 chars) — a
+# 600-char bar false-positived those as still challenged.
+_CLEAN_PAGE_MIN_VISIBLE_CHARS = 80
 
 _CHALLENGE_HTML_MARKERS = (
     # Cloudflare
@@ -165,12 +181,19 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
 
 
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
-    if status in {403, 429}:
+    # 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
+    # as challenged keeps a blacklisted Kernel exit from looking "recovered".
+    if status in {403, 429, 502}:
         return True
     content = f"{title}\n{body_text}".lower()
-    if any(marker in content for marker in _CHALLENGE_TEXT_MARKERS):
+    if any(marker in content for marker in _CHALLENGE_RENDERED_TEXT_MARKERS):
+        return True
+    if any(marker in content for marker in _PROXY_ERROR_TEXT_MARKERS):
         return True
     normalized_html = html.lower()
+    # Proxy-error tokens only — generic challenge prose must not scan raw HTML.
+    if any(marker in normalized_html for marker in _PROXY_ERROR_TEXT_MARKERS):
+        return True
     # Drop script/style/noscript CONTENT before stripping tags. Tag-only
     # stripping leaves their text nodes in `visible_markup`, and a challenge
     # interstitial is precisely the page that ships a large inline script with
@@ -283,6 +306,175 @@ async def probe_storage_state(
         )
     finally:
         await context.close()
+
+
+
+async def verify_live_page_cleared_challenge(
+    page: Any,
+    target_url: str,
+    *,
+    attempts: int = 2,
+    solver_timeout_seconds: float = 45.0,
+) -> bool:
+    """Require the canonical live tab to clear challenge markers after promote/restore.
+
+    Candidate probes can false-stable: a remote session's already-loaded probe
+    content looks clean, then a fresh same-host navigation lands on Access Denied
+    (Eventim Cloudflare). Never accept a static snapshot of preloaded content —
+    always navigation-probe the target URL on the live tab.
+    """
+    return await _probe_page(
+        page,
+        target_url,
+        attempts=attempts,
+        solver_timeout_seconds=solver_timeout_seconds,
+    )
+
+
+async def live_tab_looks_challenged(page: Any) -> bool:
+    """True when the live tab's current document still looks challenged.
+
+    Used to no-op LLM-requested ``recover_from_challenge`` when the page is
+    already clean — avoids burning the step budget on recovery loops that the
+    model invents from network noise. Does NOT replace provider-exit recovery:
+    callers must still run full recovery when ``provider_exit_rejected`` is set
+    (page shell can look clean while a critical third-party resource is blocked).
+    """
+    try:
+        snapshot = await asyncio.wait_for(
+            asyncio.gather(
+                page.title(),
+                page.locator("body").inner_text(timeout=2_000),
+                page.content(),
+                return_exceptions=True,
+            ),
+            timeout=15,
+        )
+    except Exception:
+        # Unknown page state — do not claim "clean" and skip recovery.
+        return True
+    title = snapshot[0] if isinstance(snapshot[0], str) else ""
+    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+    html = snapshot[2] if isinstance(snapshot[2], str) else ""
+    return page_looks_challenged(
+        status=None,
+        title=title[:1_000],
+        body_text=body_text[:20_000],
+        html=html[:100_000],
+    )
+
+
+def target_looks_like_payment_document(_url: str) -> bool:
+    """Deprecated: path allowlists are forbidden. Always False."""
+    return False
+
+
+def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
+    """Deduped absolute http(s) URLs from the failures that triggered recovery."""
+    cleaned: List[str] = []
+    seen: set[str] = set()
+    for raw in urls or ():
+        value = str(raw or "").strip()
+        if not value.startswith(("http://", "https://")):
+            continue
+        parsed = urlparse(value)
+        if not parsed.hostname:
+            continue
+        # Drop query/fragment noise; keep path so script probes stay accurate.
+        normalized = f"{parsed.scheme}://{parsed.hostname.lower()}{parsed.path or '/'}"
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    return tuple(cleaned)
+
+
+def _url_looks_like_script(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    host = (urlparse(url).hostname or "").lower()
+    if path.endswith(".js") or "/js/" in path or path.endswith("/v3") or path.endswith("/v3/"):
+        return True
+    # js.* CDN hosts almost always serve executable scripts (js.stripe.com, …).
+    return host.startswith("js.")
+
+
+async def verify_live_blocked_resources(
+    page: Any,
+    urls: Sequence[str],
+    *,
+    timeout_ms: int = 12_000,
+) -> bool:
+    """Re-verify that the resources which triggered recovery now load.
+
+    Failure-driven and page-agnostic: only the blocked URLs from the provider-exit
+    rejection are checked. Script-like URLs require a real <script> onload (fetch
+    can succeed while ORB blocks script execution). Other URLs need no-cors fetch
+    success. Empty list => vacuously true so plain CF recovery never false-negatives.
+    """
+    targets = blocked_resource_urls_for_verify(urls)
+    if not targets:
+        return True
+    script_flags = [_url_looks_like_script(url) for url in targets]
+    try:
+        return bool(
+            await page.evaluate(
+                """async ({ targets, scriptFlags, timeoutMs }) => {
+                  const probe = async (url, scriptLike) => {
+                    try {
+                      const controller = new AbortController();
+                      const timer = setTimeout(() => controller.abort(), timeoutMs);
+                      await fetch(url, {
+                        method: 'GET',
+                        mode: 'no-cors',
+                        signal: controller.signal,
+                        credentials: 'omit',
+                      });
+                      clearTimeout(timer);
+                    } catch {
+                      return false;
+                    }
+                    if (!scriptLike) return true;
+                    // Fetch can succeed while <script> is ORB-blocked.
+                    return await new Promise((resolve) => {
+                      const script = document.createElement('script');
+                      script.src = url;
+                      script.async = true;
+                      const timer = setTimeout(() => {
+                        script.remove();
+                        resolve(false);
+                      }, timeoutMs);
+                      script.onload = () => {
+                        clearTimeout(timer);
+                        script.remove();
+                        resolve(true);
+                      };
+                      script.onerror = () => {
+                        clearTimeout(timer);
+                        script.remove();
+                        resolve(false);
+                      };
+                      document.head.appendChild(script);
+                    });
+                  };
+                  for (let i = 0; i < targets.length; i += 1) {
+                    if (!(await probe(targets[i], scriptFlags[i]))) return false;
+                  }
+                  return true;
+                }""",
+                {
+                    "targets": list(targets),
+                    "scriptFlags": script_flags,
+                    "timeoutMs": timeout_ms,
+                },
+            )
+        )
+    except Exception:
+        return False
+
+
+async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
+    """Deprecated — prefer verify_live_blocked_resources with the blocked URL."""
+    return await verify_live_blocked_resources(page, (), timeout_ms=timeout_ms)
 
 
 async def commit_cookie_removals(
@@ -402,7 +594,18 @@ async def recover_from_challenge(
             "browser_config_search",
             "Searching permission-compatible Kernel and Steel browser/IP configurations in parallel.",
         )
-        config_state = storage_without_cookies(source_state, proven_safe_removals)
+        # Never transplant IP-bound clearance cookies onto a new provider/proxy.
+        # Keep auth + opaque cookies; strip every known challenge cookie even when
+        # cookie-stage probes did not prove a live commit.
+        challenge_keys = tuple(
+            key
+            for key, cookie in cookies_by_key.items()
+            if is_known_challenge_cookie(cookie) and not is_auth_cookie(cookie)
+        )
+        config_state = storage_without_cookies(
+            source_state,
+            tuple(dict.fromkeys((*proven_safe_removals, *challenge_keys))),
+        )
         config_result = await search_configs(config_state)
         return ChallengeRecoveryResult(
             "config_selected",

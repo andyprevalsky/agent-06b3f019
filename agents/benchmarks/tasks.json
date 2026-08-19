@@ -3292,7 +3292,8 @@
       "cache_storage_origin_count": 0
     },
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "model": "rose-labs/rose-1-oss"
   },
   {
     "name": "cache-coverage",
@@ -4424,6 +4425,7 @@
     "expected_attention_kind": "payment_approval",
     "start_phase": "execute",
     "production_only": true,
+    "disable_purchase_reuse": true,
     "response_schema": {
       "fields": [
         {
@@ -4502,7 +4504,7 @@
     "name": "browser-1015-eventim-request-card",
     "title": "1015 Folsom Eventim Antibot to Payment Card Request",
     "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show — payment boundary only, no purchase.",
-    "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, proceed through checkout, and stop when Rose requests a payment card. Do not submit payment, place the order, or complete the purchase. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets.",
+    "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, and proceed through checkout. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets. Do not click Buy Now, Place Order, Pay, or any equivalent purchase-submit control until payment credentials have been obtained and entered into the Payment Details fields (via request_payment_card / the one-time card refs after approval). Empty Stripe / Payment Details shells are not a reason to click Buy Now.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,
     "expected_tools": [
@@ -4561,7 +4563,7 @@
     },
     "success_on_payment_card_request": true,
     "min_tool_counts": {
-      "spawn_agent": 1
+      "spawn_browser_agent": 1
     },
     "min_steps": {
       "browser": 1
@@ -4637,13 +4639,13 @@
         "id": "eventim-1015-payment-boundary-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The pending payment approval is for exactly one ticket to an upcoming 1015 Folsom show purchased through official Eventim US primary checkout",
-          "Artist/date may be any upcoming purchasable Eventim-ticketed 1015 Folsom show; sold-out or waitlist-only listings are not success",
+          "The pending payment approval is for exactly one ticket through official Eventim US primary checkout for a 1015 Folsom show (merchant/receipt or checkout host grounds venue/platform)",
+          "Artist/date/tier may vary across upcoming purchasable Eventim-ticketed 1015 Folsom shows; sold-out or waitlist-only listings without a payment-card request are not success",
           "No AXS/StubHub/SeatGeek/Ticketmaster-resale or other secondary marketplace path is used for checkout",
           "No tables, bottle service, VIP packages, add-ons, insurance, donations, or multi-ticket cart is purchased",
           "The trajectory ends at exactly one unresolved payment-card approval grounded to eventim.us; the harness does not approve it, and a completed purchase or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the browser transcript and pending payment evidence. Pass only if the agent used the official 1015 Folsom Eventim US primary ticketing flow for any upcoming show with live inventory, selected a single cheapest available ticket, defeated or recovered past antibot walls as needed, and stopped at exactly one unresolved payment-card request grounded to eventim.us / wl.eventim.us. Fail for secondary/resale marketplaces, waitlist-only/sold-out dead ends without a payment-card request, fabricated checkout facts, payment submission, or a completed purchase."
+        "judge_prompt": "Review the browser transcript and pending payment evidence for this payment-boundary bench. Pass when: (1) checkout used official Eventim US primary hosts (eventim.us / wl.eventim.us / checkout.eventim.us), (2) there is exactly one unresolved payment-card approval with quantity 1, (3) merchant/receipt is consistent with 1015 Folsom via Eventim (not a secondary/resale marketplace), and (4) there is no VIP/table/bottle/add-on/multi-ticket purchase and no payment submission/completed order. Treat the pending payment approval + Eventim checkout URL + receipt/merchant fields as sufficient grounding for venue/platform and single-ticket selection -- do NOT fail because venue, show date, inventory, or GA/tier labels were not separately dumped from DOM/page-inspection tool output or screenshot pixels in the transcript. Artist, date, and which available GA tier was chosen may vary; do not require a cheapest-tier comparison dump. Fail only for secondary/resale marketplaces, waitlist-only/sold-out dead ends without a payment-card request, clear VIP/table/multi-ticket carts, fabricated checkout hosts, payment submission, or a completed purchase."
       }
     ],
     "enforce_declared_evaluators": true,

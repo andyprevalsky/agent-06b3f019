@@ -220,7 +220,11 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Never ask the user to enter a card and never type stored card details."
         ),
         "params": {
-            "merchant": {"type": "string", "description": "Merchant or site name for the purchase", "required": True},
+            "merchant": {
+                "type": "string",
+                "description": "Merchant or site name for the purchase",
+                "required": True,
+            },
             "currency": {"type": "string", "description": "Purchase currency (currently only USD)"},
             "line_items": {
                 "type": "array",
