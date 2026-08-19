@@ -8616,6 +8616,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "net::ERR_BLOCKED_BY_CLIENT",
         resource_type="script",
     )
+    # Non-js.* hosts are not the sticky script-CDN tunnel class (generic script path).
     assert not _is_payment_cdn_tunnel_failure(
         "https://wl.eventim.us/asset.js",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
@@ -8625,9 +8626,11 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "net::ERR_NAME_NOT_RESOLVED",
     )
     assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
-    assert not _document_warrants_payment_cdn_exit(
+    # Inventory paths are no longer excluded — exit caps bound thrash instead.
+    assert _document_warrants_payment_cdn_exit(
         "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
     )
+    assert not _document_warrants_payment_cdn_exit("")
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._network_generation = 3
@@ -8746,7 +8749,8 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     }
     assert second_gen._payment_cdn_provider_exits == 2
 
-    # Ticket/event browse pages preload Stripe; do not rotate there.
+    # Ticket/event browse pages may still rotate on critical script CDN blocks;
+    # exit caps (not path allowlists) bound thrash.
     browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     browse._network_generation = 1
     browse._provider_exit_rejections = []
@@ -8760,8 +8764,8 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     browse.entries = {
         "1:r2": {
             "browser_generation": 1,
-            "url": "https://js.stripe.com/v3/",
-            "document_url": "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom",
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://shop.example.com/event/lyny/692405",
         }
     }
     browse._on_loading_failed(
@@ -8769,7 +8773,12 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         session_id="cdp-1",
         generation=1,
     )
-    assert browse.pop_provider_exit_rejection() is None
+    assert browse.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.cdn.example/v3/",
+        "browser_generation": 1,
+        "document_url": "https://shop.example.com/event/lyny/692405",
+    }
 
     # Consent/chat widget script blocks must not consume the payment-CDN budget.
     widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
@@ -8822,7 +8831,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     assert widget._payment_cdn_provider_exits == 1
     assert widget._generic_script_provider_exits == 1
 
-    # Non-js Stripe script hosts must charge the payment budget (not generic).
+    # Non-js.* cross-origin scripts charge the generic budget (no vendor hosts).
     mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     mobile._network_generation = 9
     mobile._provider_exit_rejections = []
@@ -8833,25 +8842,52 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     mobile._active_request_ids = set()
     mobile.agent_id = "agent"
     mobile.task_id = "task"
-    for host in ("m.stripe.network", "checkout.stripe.com"):
-        mobile._network_generation += 1
-        generation = mobile._network_generation
-        mobile.entries = {
-            f"{generation}:r-{host}": {
-                "browser_generation": generation,
-                "url": f"https://{host}/inner-script.js",
-                "document_url": "https://checkout.eventim.us/",
-                "resource_type": "script",
-            }
+    mobile._network_generation += 1
+    generation = mobile._network_generation
+    mobile.entries = {
+        f"{generation}:r-widget": {
+            "browser_generation": generation,
+            "url": "https://cdn.widgets.example/inner-script.js",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
         }
-        mobile._on_loading_failed(
-            {"requestId": f"r-{host}", "errorText": "net::ERR_BLOCKED_BY_ORB"},
-            session_id=f"cdp-{generation}",
-            generation=generation,
-        )
-        assert mobile.pop_provider_exit_rejection() is not None
-    assert mobile._payment_cdn_provider_exits == 2
-    assert mobile._generic_script_provider_exits == 0
+    }
+    mobile._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id=f"cdp-{generation}",
+        generation=generation,
+    )
+    assert mobile.pop_provider_exit_rejection() is not None
+    assert mobile._payment_cdn_provider_exits == 0
+    assert mobile._generic_script_provider_exits == 1
+
+    # js.* hosts charge the script-CDN budget.
+    js_cdn = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    js_cdn._network_generation = 11
+    js_cdn._provider_exit_rejections = []
+    js_cdn._rejected_network_generations = set()
+    js_cdn._payment_cdn_provider_exits = 0
+    js_cdn._generic_script_provider_exits = 0
+    js_cdn._ignored_request_ids = set()
+    js_cdn._active_request_ids = set()
+    js_cdn.agent_id = "agent"
+    js_cdn.task_id = "task"
+    js_cdn.entries = {
+        "11:r-js": {
+            "browser_generation": 11,
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
+        }
+    }
+    js_cdn._on_loading_failed(
+        {"requestId": "r-js", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-11",
+        generation=11,
+    )
+    assert js_cdn.pop_provider_exit_rejection() is not None
+    assert js_cdn._payment_cdn_provider_exits == 1
+    assert js_cdn._generic_script_provider_exits == 0
 
 
 def test_evicted_critical_request_meta_still_rejects_network_generation():
@@ -12133,7 +12169,7 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "Auto-returning to pinned handoff host" in source
     assert "navigation_origin_base_domain" in source
     assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Released handoff pin after payment auto-fill exhausted" in source
+    assert "Handoff payment auto-fill exhausted; pin retained" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
     # Auto-fill gate must stay host/path agnostic.
@@ -12143,7 +12179,9 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
-    assert "Released handoff pin — no payment fields found" in auto_fill_block
+    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
+    assert "Released handoff pin — no payment fields found" not in auto_fill_block
+    assert "navigation_pin_host = None" not in auto_fill_block
 
 
 def test_recovery_skips_when_live_tab_already_clear():

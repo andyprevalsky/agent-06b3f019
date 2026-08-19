@@ -364,20 +364,9 @@ async def live_tab_looks_challenged(page: Any) -> bool:
     )
 
 
-_PAYMENT_DOCUMENT_URL_MARKERS = (
-    "checkout",
-    "payment",
-    "billing",
-    "/pay",
-    "purchase",
-    "/cart",
-)
-
-
-def target_looks_like_payment_document(url: str) -> bool:
-    """URL heuristic for payment/checkout documents (network-exit scoping)."""
-    lowered = (url or "").lower()
-    return any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS)
+def target_looks_like_payment_document(_url: str) -> bool:
+    """Deprecated: path allowlists are forbidden. Always False."""
+    return False
 
 
 def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
@@ -484,10 +473,8 @@ async def verify_live_blocked_resources(
 
 
 async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
-    """Deprecated Stripe helper — prefer verify_live_blocked_resources."""
-    return await verify_live_blocked_resources(
-        page, ("https://js.stripe.com/v3",), timeout_ms=timeout_ms
-    )
+    """Deprecated — prefer verify_live_blocked_resources with the blocked URL."""
+    return await verify_live_blocked_resources(page, (), timeout_ms=timeout_ms)
 
 
 async def commit_cookie_removals(

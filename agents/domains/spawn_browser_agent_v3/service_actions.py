@@ -1403,6 +1403,7 @@ def _normalize_js_evaluate_result(result: Any) -> Optional[Dict[str, Any]]:
 
 # Shared semantic payment-field finder used by coordinate lookup + direct fill.
 # Intentionally host/path agnostic: autocomplete / name / aria / placeholder only.
+# Pierces open shadow roots (hosted payment widgets nest inputs there).
 _PAYMENT_FIELD_FINDER_JS = """
 (() => {
     const selectorsByRef = {
@@ -1412,8 +1413,12 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input#card-number',
             'input[name="card-number"]',
             'input[name="card_number"]',
+            'input[name="number"]',
+            'input[name="cardnumber"]',
             'input[id*="card"][id*="number"]',
-            'input[name*="card"][name*="number"]'
+            'input[name*="card"][name*="number"]',
+            'input[placeholder*="Card number" i]',
+            'input[aria-label*="Card number" i]'
         ],
         card_name: [
             'input[autocomplete="cc-name"]',
@@ -1421,8 +1426,11 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input#card-name',
             'input[name="card-name"]',
             'input[name="card_name"]',
+            'input[name="name"]',
             'input[id*="card"][id*="name"]',
-            'input[name*="card"][name*="name"]'
+            'input[name*="card"][name*="name"]',
+            'input[placeholder*="Name on card" i]',
+            'input[aria-label*="Name on card" i]'
         ],
         card_expiry: [
             'input[autocomplete="cc-exp"]',
@@ -1430,10 +1438,13 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input#card-expiry',
             'input[name="card-expiry"]',
             'input[name="card_expiry"]',
+            'input[name="exp-date"]',
+            'input[name="expiry"]',
             'input[id*="expir"]',
             'input[name*="expir"]',
             'input[placeholder*="MM/YY"]',
-            'input[placeholder*="MM / YY"]'
+            'input[placeholder*="MM / YY"]',
+            'input[aria-label*="Expir" i]'
         ],
         card_cvv: [
             'input[autocomplete="cc-csc"]',
@@ -1447,7 +1458,10 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input[id*="cvv"]',
             'input[id*="cvc"]',
             'input[id*="security"]',
-            'input[name*="security"]'
+            'input[name*="security"]',
+            'input[aria-label*="CVC" i]',
+            'input[aria-label*="CVV" i]',
+            'input[aria-label*="Security code" i]'
         ],
     };
     const patternsByRef = {
@@ -1463,6 +1477,22 @@ _PAYMENT_FIELD_FINDER_JS = """
         return rect.width > 0 && rect.height > 0
             && style.visibility !== 'hidden'
             && style.display !== 'none';
+    };
+    const queryDeep = (root, selector) => {
+        const out = [];
+        const visit = (node) => {
+            if (!node || !node.querySelectorAll) return;
+            try {
+                node.querySelectorAll(selector).forEach((el) => out.push(el));
+            } catch (_) {}
+            try {
+                node.querySelectorAll('*').forEach((el) => {
+                    if (el.shadowRoot) visit(el.shadowRoot);
+                });
+            } catch (_) {}
+        };
+        visit(root);
+        return out;
     };
     const addText = (parts, value) => {
         if (typeof value !== 'string') return;
@@ -1485,12 +1515,12 @@ _PAYMENT_FIELD_FINDER_JS = """
     };
     const findField = (refName) => {
         for (const selector of selectorsByRef[refName] || []) {
-            for (const el of document.querySelectorAll(selector)) {
+            for (const el of queryDeep(document, selector)) {
                 if (isVisible(el)) return { el, selector, score: 100 };
             }
         }
         let best = null;
-        for (const el of document.querySelectorAll('input, textarea')) {
+        for (const el of queryDeep(document, 'input, textarea')) {
             if (!isVisible(el)) continue;
             const signal = signalFor(el);
             let score = 0;
@@ -1508,6 +1538,51 @@ _PAYMENT_FIELD_FINDER_JS = """
     return { findField, isVisible };
 })()
 """
+
+# Playwright locator selectors — pierces open shadow DOM in frames.
+_PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
+    "card_number": (
+        'input[autocomplete="cc-number"]',
+        'input[autocomplete~="cc-number"]',
+        'input[name="number"]',
+        'input[name="cardnumber"]',
+        'input[name="card-number"]',
+        'input[name="card_number"]',
+        "#card-number",
+        'input[placeholder*="Card number" i]',
+        'input[aria-label*="Card number" i]',
+    ),
+    "card_name": (
+        'input[autocomplete="cc-name"]',
+        'input[autocomplete~="cc-name"]',
+        'input[name="name"]',
+        'input[name="card-name"]',
+        'input[name="card_name"]',
+        "#card-name",
+        'input[placeholder*="Name on card" i]',
+        'input[aria-label*="Name on card" i]',
+    ),
+    "card_expiry": (
+        'input[autocomplete="cc-exp"]',
+        'input[autocomplete~="cc-exp"]',
+        'input[name="exp-date"]',
+        'input[name="expiry"]',
+        'input[name="card-expiry"]',
+        'input[placeholder*="MM" i]',
+        'input[aria-label*="Expir" i]',
+    ),
+    "card_cvv": (
+        'input[autocomplete="cc-csc"]',
+        'input[autocomplete~="cc-csc"]',
+        'input[name="cvc"]',
+        'input[name="cvv"]',
+        "#card-cvc",
+        "#card-cvv",
+        'input[aria-label*="CVC" i]',
+        'input[aria-label*="CVV" i]',
+        'input[aria-label*="Security code" i]',
+    ),
+}
 
 _PAYMENT_REF_LOCATE_JS = f"""
 (refName) => {{
@@ -1741,6 +1816,79 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+async def _fill_payment_ref_via_playwright_locator(
+    *,
+    input_page: Any,
+    ref_name: str,
+    value: str,
+    humanizer: Optional[BrowserHumanizer],
+) -> Optional[Dict[str, Any]]:
+    """Fill via Playwright locators (pierces open shadow DOM across frames)."""
+    if not value or input_page is None or ref_name not in _PAYMENT_REF_PLAYWRIGHT_SELECTORS:
+        return None
+    roots: List[Any] = list(_playwright_frames(input_page))
+    if not roots and hasattr(input_page, "locator"):
+        roots = [input_page]
+    for root_index, root in enumerate(roots):
+        if not hasattr(root, "locator"):
+            continue
+        for selector in _PAYMENT_REF_PLAYWRIGHT_SELECTORS[ref_name]:
+            try:
+                locator = root.locator(selector).first
+                count = await _maybe_await(locator.count())
+                # MagicMock.__int__ returns 1 — require a real int from Playwright.
+                if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                    continue
+                await _maybe_await(locator.scroll_into_view_if_needed())
+                await _maybe_await(locator.click(timeout=2500))
+                # Clear then type with real key events when possible.
+                if humanizer is not None:
+                    await humanizer.press_key("Control+a")
+                    await humanizer.press_key("Backspace")
+                    await humanizer.type_text(value)
+                else:
+                    fill = getattr(locator, "fill", None)
+                    if callable(fill):
+                        await _maybe_await(fill(""))
+                        press_seq = getattr(locator, "press_sequentially", None)
+                        if callable(press_seq):
+                            await _maybe_await(press_seq(value, delay=35))
+                        else:
+                            await _maybe_await(fill(value))
+                    else:
+                        continue
+                box = None
+                with suppress(Exception):
+                    box = await _maybe_await(locator.bounding_box())
+                logger.info(
+                    "Filled payment card secret ref via Playwright locator",
+                    ref_name=ref_name,
+                    selector=selector,
+                    root=f"playwright:{root_index}",
+                )
+                result: Dict[str, Any] = {
+                    "filled": True,
+                    "selector": selector,
+                    "score": 100,
+                    "method": "playwright_locator",
+                    "target": f"playwright:{root_index}",
+                    "valueLength": len(value),
+                }
+                if isinstance(box, dict) and box.get("x") is not None:
+                    result["x"] = int(box["x"] + (box.get("width") or 0) / 2)
+                    result["y"] = int(box["y"] + (box.get("height") or 0) / 2)
+                return result
+            except Exception as exc:
+                logger.debug(
+                    "Payment ref Playwright locator miss",
+                    ref_name=ref_name,
+                    selector=selector,
+                    error=str(exc)[:160],
+                )
+                continue
+    return None
+
+
 async def _fill_payment_ref_via_keyboard(
     *,
     session: Any,
@@ -1817,8 +1965,8 @@ async def _fill_payment_ref_directly(
     """Fill an approved one-time payment-card ref into its semantic field.
 
     Searches every reachable frame/document (Playwright frames + CDP iframe
-    targets). Tries programmatic value-set first, then focus+keyboard — no
-    merchant/CDN host or path allowlists.
+    targets). Order: Playwright locator (shadow-DOM capable) → JS value-set →
+    focus+keyboard. No merchant/CDN host or path allowlists.
     """
     if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
         return None
@@ -1827,9 +1975,20 @@ async def _fill_payment_ref_directly(
     if input_page is None:
         input_page = _humanizer_input_page(humanizer)
 
+    locator_result = await _fill_payment_ref_via_playwright_locator(
+        input_page=input_page,
+        ref_name=ref_name,
+        value=value,
+        humanizer=humanizer,
+    )
+    if locator_result:
+        return locator_result
+
     expected_len = len(str(value or ""))
     saw_empty_js_value = False
+    saw_any_target = False
     for label, target in await _iter_payment_fill_targets(session, input_page):
+        saw_any_target = True
         result = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_FILL_JS, payload)
         if not result or result.get("filled") is not True:
             continue
@@ -1857,8 +2016,8 @@ async def _fill_payment_ref_directly(
         return result
 
     # Prefer keyboard when JS left an empty controlled input, or when Playwright
-    # frames are available (hosted payment widgets often reject value-set).
-    if saw_empty_js_value or _playwright_frames(input_page):
+    # frames / documents are available (hosted widgets often reject value-set).
+    if saw_empty_js_value or _playwright_frames(input_page) or (input_page is not None and saw_any_target):
         keyboard_result = await _fill_payment_ref_via_keyboard(
             session=session,
             ref_name=ref_name,

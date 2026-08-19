@@ -68,12 +68,11 @@ export interface CandidateProbeResult {
   attempts: number;
   latencyMs: number;
   /**
-   * True when the candidate can fetch js.stripe.com AND load Stripe.js
-   * (window.Stripe). api.stripe.com is ranked via paymentCdnHosts but not
-   * required — live steel_managed loads Stripe.js while api.stripe.com fails.
+   * True when the candidate can reach the blocked third-party resource that
+   * triggered recovery (fetch + script-load when script-shaped).
    */
   paymentCdnOk: boolean;
-  /** Per-host tunnel + stripe.js script-load results (for ranking + logs). */
+  /** Per-host / probe-step reachability results (for ranking + logs). */
   paymentCdnHosts?: Record<string, boolean>;
 }
 
@@ -239,8 +238,8 @@ export async function runParallelBrowserConfigSearch(
     );
     if (requirePaymentCdn && stableWithoutStripe.length > 0) {
       throw new Error(
-        'No browser configuration cleared the challenge with Stripe.js loaded ' +
-          `(${stableWithoutStripe.length} CF-stable candidate(s) failed payment CDN / Stripe.js)`
+        'No browser configuration cleared the challenge with blocked resource reachable ' +
+          `(${stableWithoutStripe.length} CF-stable candidate(s) failed blocked-resource CDN verify)`
       );
     }
     throw new Error('No stable browser configuration cleared the challenge');
@@ -283,8 +282,10 @@ export async function probeCandidateBrowser(
     configKey?: string;
     provider?: string;
     proxyMode?: string;
-    /** When false/omitted, skip Stripe re-nav + payment CDN probe (CF-only recovery). */
+    /** When false/omitted, skip blocked-resource re-nav + probe (CF-only recovery). */
     requirePaymentCdn?: boolean;
+    /** Absolute URL of the blocked third-party resource to re-verify. */
+    blockedResourceUrl?: string;
   } = {}
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
@@ -293,6 +294,7 @@ export async function probeCandidateBrowser(
   let paymentCdnHosts: Record<string, boolean> = {};
   const attempts = 2;
   const requirePaymentCdn = Boolean(logContext.requirePaymentCdn);
+  const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
   try {
     const context = session.validationBrowser.contexts()[0];
     if (context === undefined) {
@@ -343,11 +345,11 @@ export async function probeCandidateBrowser(
       });
       stablePasses += 1;
     }
-    // Payment-CDN re-nav + Stripe.js probe only when recovery requires it —
-    // CF-only recoveries must not pay the Stripe probe cost or latch on ORB.
+    // Blocked-resource re-nav + probe only when recovery requires it —
+    // CF-only recoveries must not pay the CDN probe cost or latch on ORB.
     if (requirePaymentCdn && stablePasses > 0) {
       // A clean first attempt + challenged second leaves stablePasses > 0 while
-      // `page` is still the challenge document — Stripe.js then fails CSP/ORB
+      // `page` is still the challenge document — script CDNs then fail CSP/ORB
       // and paymentCdnOk falsely rejects. Re-nav to a clean doc before probing.
       let paymentPageClean = lastAttemptClean;
       if (!paymentPageClean) {
@@ -364,11 +366,12 @@ export async function probeCandidateBrowser(
         });
       }
       if (paymentPageClean) {
-        const paymentProbe = await probePaymentCdnReachable(page);
+        const paymentProbe = await probePaymentCdnReachable(page, blockedResourceUrl || null);
         paymentCdnOk = paymentProbe.paymentCdnOk;
         paymentCdnHosts = paymentProbe.paymentCdnHosts;
         log.info('Challenge recovery candidate payment CDN probe', {
           ...logContext,
+          blockedResourceUrl: blockedResourceUrl || null,
           paymentCdnOk,
           paymentCdnHosts,
         });
@@ -467,26 +470,20 @@ export async function searchAndPromoteBrowserConfig(
         ...(agent.proxyCity ? { city: agent.proxyCity } : {}),
       }
     : DEFAULT_GEOLOCATION;
-  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl);
-  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
   const sessionAvoidConfigKey = recoveryConfigKeyForSession(current.provider, current.proxyTier);
   // Hard filter from the failure that triggered recovery (or sticky agent flag).
-  // Never from target URL heuristics — that false-negatives non-Stripe /cart.
+  // Never from target URL path heuristics — verify the blocked resource itself.
   const requirePaymentCdn =
     Boolean(input.requirePaymentCdn) || blockedResourceRequiresPaymentCdn(input.blockedResourceUrl);
+  const preferSteel = shouldPreferSteelForChallengeTarget(input.targetUrl, { requirePaymentCdn });
+  const configs = browserRecoveryCandidates(proxyLocation, { preferSteel });
   if (requirePaymentCdn) {
-    log.info('Challenge recovery requiring payment CDN / Stripe.js hard filter', {
+    log.info('Challenge recovery requiring blocked-resource CDN hard filter', {
       taskId: input.taskId,
       blockedResourceUrl: input.blockedResourceUrl ?? null,
       stickyRequirePaymentCdn: Boolean(input.requirePaymentCdn),
       sessionAvoidConfigKey: sessionAvoidConfigKey ?? null,
       preferSteel,
-    });
-  } else if (preferSteel) {
-    log.info('Challenge recovery preferring Steel for Kernel-blacklisted target host', {
-      taskId: input.taskId,
-      targetUrl: input.targetUrl,
-      sessionAvoidConfigKey: sessionAvoidConfigKey ?? null,
     });
   } else if (sessionAvoidConfigKey) {
     log.info('Challenge recovery will deprioritize current failing exit', {
@@ -523,6 +520,7 @@ export async function searchAndPromoteBrowserConfig(
         provider: config.provider,
         proxyMode: config.proxyMode,
         requirePaymentCdn,
+        blockedResourceUrl: input.blockedResourceUrl,
       }),
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {
