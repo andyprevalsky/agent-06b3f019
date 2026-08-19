@@ -31,7 +31,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Literal, Tuple
 
-PoolName = Literal["rose-1-mini", "rose-1-lite", "rose-1-ultra", "rose-1-browser-use"]
+PoolName = Literal[
+    "rose-1-mini",
+    "rose-1-lite",
+    "rose-1-ultra",
+    "rose-1-browser-use",
+    "rose-1-oss",
+]
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,15 @@ class PoolSpec:
     """Provider-prefixed model IDs tried in order if claudeAuth fails (or
     is unavailable). Format matches OpenRouter's `provider/model` convention,
     which the transport layer maps to the right endpoint."""
+
+    direct_auth_enabled: bool = True
+    """When False, the OAuth direct-token routes (claudeAuth / gptAuth) are
+    skipped entirely and only `waterfall` serves this pool.
+
+    A pool that exists to guarantee a specific model must own that guarantee
+    itself rather than depending on the caller also setting an env flag --
+    otherwise the pool silently routes to a direct-token provider and the
+    guarantee is void."""
 
 
 POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
@@ -105,6 +120,22 @@ POOL_REGISTRY: Dict[PoolName, PoolSpec] = {
             "openai/gpt-5.6-sol",
             "moonshotai/kimi-k3",
         ),
+    ),
+    # Open-weights only. Exists so one task can be pinned to a non-frontier,
+    # open-source model -- currently the behavioral-biometrics benchmark, whose
+    # prompt the Anthropic-family primaries decline.
+    #
+    # `direct_auth_enabled=False` is what makes the guarantee real: without it a
+    # user's Claude OAuth token would route to claude_auth_model and the pinned
+    # open-weights model would never be reached. The direct-token fields below
+    # are therefore inert; PoolSpec requires them, and they mirror rose-1-lite so
+    # any future code path reading them degrades to a normal tier.
+    "rose-1-oss": PoolSpec(
+        name="rose-1-oss",
+        claude_auth_model="claude-sonnet-5",
+        gpt_auth_model="gpt-5.6-terra",
+        waterfall=("moonshotai/kimi-k3",),
+        direct_auth_enabled=False,
     ),
 }
 

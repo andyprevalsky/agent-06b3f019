@@ -215,6 +215,21 @@ const tests: Array<[string, () => Promise<void>]> = [
     },
   ],
   [
+    'close-held-reuse rejects non-lifecycle prod users',
+    async () => {
+      const response = await request('/api/test-payment/lifecycle/close-held-reuse', {
+        method: 'POST',
+        body: JSON.stringify({ userId: 'not-the-lifecycle-prod-user' }),
+      });
+      assertStatus(response.status, 403, response.data);
+      const body = assertSchema(ErrorResponse, response.data, 'close-held-reuse wrong user');
+      assert(
+        typeof body.error === 'string' && body.error.includes('lifecycle probe user'),
+        `unexpected error: ${body.error}`
+      );
+    },
+  ],
+  [
     'lifecycle cross-verifies purchase, hold, card, transfer, and resolved setup',
     async () => {
       let transferReads = 0;

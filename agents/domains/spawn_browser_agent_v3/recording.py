@@ -1196,7 +1196,10 @@ class BrowserAgentRecorder:
         if self._cursor and "cursor" not in next_metadata:
             next_metadata["cursor"] = dict(self._cursor)
         self._last_metadata = next_metadata
-        await self.capture(label, action=action, metadata=next_metadata, force=force)
+        # capture() already swallows screenshot/write failures; suppress any
+        # unexpected escape so a recording glitch cannot abort Place order.
+        with contextlib.suppress(Exception):
+            await self.capture(label, action=action, metadata=next_metadata, force=force)
 
     async def _screenshot_bytes(self, *, allow_slow_fallback: bool) -> tuple[bytes, str]:
         # Forced (action) frames get the full budget; best-effort idle frames use
@@ -1224,6 +1227,9 @@ class BrowserAgentRecorder:
         metadata: Optional[Dict[str, Any]] = None,
         force: bool = False,
     ) -> None:
+        # Recording is best-effort diagnostics. A missing /tmp scratch dir,
+        # mid-run cleanup, or write failure must NEVER abort the browser agent
+        # (prod purchase fleet died on FileNotFoundError during post-click mark).
         if self.uses_kernel_replay or self._closed or len(self.frames) >= self.max_frames:
             return
         async with self._capture_lock:
@@ -1247,7 +1253,19 @@ class BrowserAgentRecorder:
             self._frame_index += 1
             filename = f"frame_{self._frame_index:05d}.jpg"
             frame_path = self.frames_dir / filename
-            frame_path.write_bytes(image_bytes)
+            try:
+                self.frames_dir.mkdir(parents=True, exist_ok=True)
+                frame_path.write_bytes(image_bytes)
+            except OSError as exc:
+                self._consecutive_failures += 1
+                logger.warning(
+                    "Browser agent recording frame write failed",
+                    agent_id=self.agent_id,
+                    task_id=self.task_id,
+                    frame=filename,
+                    error=str(exc),
+                )
+                return
             self.frames.append(
                 {
                     "src": f"frames/{filename}",
@@ -2017,27 +2035,8 @@ _FINGERPRINT_POISON_REASON = "ip has used many different fingerprints"
 _PAYMENT_TUNNEL_FAILURE_REASON = "payment CDN blocked by proxy tunnel"
 _CRITICAL_RESOURCE_BLOCK_REASON = "critical third-party resource blocked"
 _API_CHALLENGE_HTML_REASON = "same-origin API returned Cloudflare challenge HTML"
-_PAYMENT_TUNNEL_HOST_MARKERS = (
-    "js.stripe.com",
-    "api.stripe.com",
-    "checkout.stripe.com",
-    "m.stripe.com",
-    "m.stripe.network",
-)
-# Hosts whose tunnel failure should rotate the provider exit and charge the
-# payment-CDN budget (not the generic-script budget). Includes Stripe.js plus
-# checkout/mobile Stripe script hosts that also pin sticky require_payment_cdn.
-# api.stripe.com is intentionally omitted: live steel_managed often fails
-# /healthcheck while js.stripe.com loads — treating api-only failures as exits
-# burns the recovery slot and strands checkout (eventim k=4 attempt7 run2).
-_PAYMENT_CDN_EXIT_HOST_MARKERS = (
-    "js.stripe.com",
-    "checkout.stripe.com",
-    "m.stripe.com",
-    "m.stripe.network",
-)
 # Network failures that mean "this exit cannot fetch the resource" — includes
-# ORB (Eventim Stripe.js) and classic proxy tunnel deaths.
+# ORB and classic proxy tunnel deaths.
 _RESOURCE_BLOCK_MARKERS = (
     "err_tunnel_connection_failed",
     "err_proxy_connection_failed",
@@ -2078,35 +2077,20 @@ _API_CHALLENGE_RESOURCE_TYPES = {"xhr", "fetch", "document"}
 # Cap automatic API-challenge exits so cookie-stage loops cannot be replaced by
 # an unbounded config-search thrash on a permanently blocked endpoint.
 _MAX_API_CHALLENGE_PROVIDER_EXITS = 2
-# Ticket/event inventory pages (Eventim `/event/...`) preload Stripe apple-pay
-# extensions. Tunnel failures there must not force IP rotation or recovery
-# loops before the agent reaches a real checkout/payment document.
-_PAYMENT_DOCUMENT_URL_MARKERS = (
-    "checkout",
-    "payment",
-    "billing",
-    "/pay",
-    "purchase",
-    "/cart",
-)
-_EVENT_BROWSE_DOCUMENT_MARKERS = ("/event/", "/events/")
-# Cap automatic payment-CDN exit rotations per recorder so a bad proxy cannot
-# thrash recover_from_challenge forever when every candidate still fails Stripe.
-# 2 (not 1): after hard-filter promotes steel, a second js.stripe.com flake on
-# the new generation must still be allowed to recover — task-lifetime 1 stranded
-# checkout once the first Kernel→Steel promote consumed the sole slot.
-_MAX_PAYMENT_CDN_PROVIDER_EXITS = 2
-# Generic blocked scripts (consent/A-B/chat widgets) get their own small budget
-# so they cannot exhaust the reserved Stripe.js recovery slots.
+# Cap automatic critical-resource exit rotations per recorder so a bad proxy
+# cannot thrash recover_from_challenge forever.
+_MAX_CRITICAL_RESOURCE_PROVIDER_EXITS = 2
+# Backward-compat alias (tests + older call sites).
+_MAX_PAYMENT_CDN_PROVIDER_EXITS = _MAX_CRITICAL_RESOURCE_PROVIDER_EXITS
 _MAX_GENERIC_SCRIPT_PROVIDER_EXITS = 1
 
 
-def _host_matches_markers(url: str, markers: tuple[str, ...]) -> bool:
-    """True when the URL hostname equals or is a subdomain of any marker."""
+def _host_looks_like_script_cdn(url: str) -> bool:
+    """Shape heuristic: ``js.*`` hosts (no vendor allowlists, no path markers)."""
     host = (urlparse(url).hostname or "").lower()
-    if not host:
-        return False
-    return any(host == marker or host.endswith(f".{marker}") for marker in markers)
+    if host and host.split(".", 1)[0] == "js":
+        return True
+    return False
 
 
 def _same_origin(a: str, b: str) -> bool:
@@ -2128,11 +2112,11 @@ def _same_origin(a: str, b: str) -> bool:
 
 
 def _is_payment_cdn_tunnel_failure(url: str, error_text: str) -> bool:
-    """Backward-compatible Stripe-host check (tests + older call sites)."""
+    """Backward-compatible critical script-CDN tunnel check (no vendor hosts)."""
     err = (error_text or "").lower()
     if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
         return False
-    return _host_matches_markers(url or "", _PAYMENT_TUNNEL_HOST_MARKERS)
+    return _host_looks_like_script_cdn(url or "")
 
 
 def _is_critical_resource_block(
@@ -2144,11 +2128,9 @@ def _is_critical_resource_block(
 ) -> bool:
     """True when a page-critical third-party request is blocked on this exit.
 
-    Generalizes Stripe-only tunnel detection: any payment-CDN host OR any
-    non-analytics script that dies with tunnel/ORB/client-block errors can
-    trigger recovery. Soft third-parties (analytics/ads) never rotate.
-    When ``document_url`` is provided, generic (non-payment-CDN) script blocks
-    must be cross-origin — first-party script failures stay on the page.
+    Shape-based only: js.*/script-like hosts OR cross-origin ``script`` resources
+    that die with tunnel/ORB/client-block errors. Soft third-parties (analytics)
+    never rotate. No vendor host allowlists.
     """
     err = (error_text or "").lower()
     if not any(marker in err for marker in _RESOURCE_BLOCK_MARKERS):
@@ -2156,7 +2138,10 @@ def _is_critical_resource_block(
     host = (urlparse(url).hostname or "").lower()
     if any(fragment in host for fragment in _OPTIONAL_THIRD_PARTY_HOST_FRAGMENTS):
         return False
-    if _host_matches_markers(url or "", _PAYMENT_CDN_EXIT_HOST_MARKERS):
+    if _host_looks_like_script_cdn(url or ""):
+        # First-party script failures stay on the page; only third-party CDNs rotate.
+        if document_url and _same_origin(url or "", document_url):
+            return False
         return True
     if (resource_type or "").lower() != "script":
         return False
@@ -2165,15 +2150,30 @@ def _is_critical_resource_block(
     return True
 
 
-_API_CHALLENGE_CART_URL_MARKERS = (
-    "checkaddtocart",
-    "/order/",
-    "/cart",
-    "/checkout",
-)
-# Eventim returns a ~667KB custom interstitial (embedded fonts, no classic CF
-# markers) on cart POSTs. Size + cart URL + HTML 403 is enough to rotate exit.
 _API_CHALLENGE_LARGE_HTML_BYTES = 20_000
+_STATIC_ASSET_SUFFIXES = (
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".css",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".webp",
+    ".mp4",
+    ".webm",
+    ".map",
+)
+
+
+def _url_looks_like_static_asset(url: str) -> bool:
+    path = (urlparse(url).path or "").lower()
+    return any(path.endswith(suffix) for suffix in _STATIC_ASSET_SUFFIXES)
 
 
 def _is_api_challenge_html_response(
@@ -2185,13 +2185,16 @@ def _is_api_challenge_html_response(
     body_bytes: bytes,
     document_url: str | None = None,
 ) -> bool:
-    """True when a same-tab XHR/fetch/document returns CF challenge HTML (Eventim cart).
+    """True when a same-tab XHR/fetch/document returns CF challenge HTML.
 
-    Document GET can look clean while ``checkaddtocart`` POSTs 403 with a ~667KB
+    Document GET can look clean while same-origin POSTs 403 with a large
     challenge page. Cookie-stage recovery only GET-probes the document URL and
     false-succeeds; treat the API challenge as a provider-exit signal instead.
     When ``document_url`` is provided, require same-origin with ``url`` so a
     third-party 403 HTML body cannot rotate the exit.
+
+    No cart/checkout path allowlists. Large HTML 403s count unless the URL is a
+    static asset (fonts/css/images) — those are not API challenge pages.
     """
     try:
         code = int(status)
@@ -2213,24 +2216,18 @@ def _is_api_challenge_html_response(
         return False
     if any(marker in sample for marker in _API_CHALLENGE_HTML_MARKERS):
         return True
-    lowered_url = (url or "").lower()
-    if (
-        len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
-        and any(marker in lowered_url for marker in _API_CHALLENGE_CART_URL_MARKERS)
-    ):
-        return True
-    return False
+    if _url_looks_like_static_asset(url):
+        return False
+    return len(body_bytes) >= _API_CHALLENGE_LARGE_HTML_BYTES
 
 
 def _document_warrants_payment_cdn_exit(document_url: str) -> bool:
-    """Only rotate for Stripe tunnel failures on checkout/payment documents."""
-    lowered = (document_url or "").lower()
-    if any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS):
-        return True
-    if any(marker in lowered for marker in _EVENT_BROWSE_DOCUMENT_MARKERS):
-        return False
-    # Unknown SPA paths: keep the signal so opaque checkout URLs still rotate.
-    return bool(lowered)
+    """Rotate on critical third-party blocks for any real document URL.
+
+    No payment/checkout path allowlists and no inventory-path exclusions —
+    exit caps bound thrash instead.
+    """
+    return bool((document_url or "").strip())
 
 
 def _contains_actionable_fingerprint_poison_detection(value: Any) -> bool:
@@ -3133,12 +3130,8 @@ class BrowserNetworkRecorder:
         source = entry if entry is not None else meta
         if not request_id or source is None:
             return
-        # Eventim/checkout: js.stripe.com dies with ERR_TUNNEL_CONNECTION_FAILED
-        # inside Steel/Kernel proxies, so Payment Details never render. Treat that
-        # as a deterministic provider-exit rejection (same path as fingerprint
-        # poison) so recovery searches a fresh IP before the agent loops.
-        # Skip ticket/event browse documents that only preload Stripe widgets —
-        # those failures were rotating forever before cart/checkout.
+        # Critical third-party script/CDN died with tunnel/ORB — rotate the
+        # provider exit so recovery searches a fresh IP before the agent loops.
         entry_generation = int(source.get("browser_generation") or generation or 0)
         current_generation = int(getattr(self, "_network_generation", entry_generation))
         rejected_generations = getattr(self, "_rejected_network_generations", set())
@@ -3155,7 +3148,7 @@ class BrowserNetworkRecorder:
         ):
             if not _document_warrants_payment_cdn_exit(document_url):
                 logger.info(
-                    "Ignoring critical resource block on non-checkout document",
+                    "Ignoring critical resource block on empty document URL",
                     agent_id=self.agent_id,
                     task_id=self.task_id,
                     browser_generation=entry_generation,
@@ -3164,12 +3157,10 @@ class BrowserNetworkRecorder:
                 )
             else:
                 blocked_url = str(source.get("url") or "")
-                blocked_url_is_payment_cdn = _host_matches_markers(
-                    blocked_url, _PAYMENT_CDN_EXIT_HOST_MARKERS
-                )
+                blocked_url_is_script_cdn = _host_looks_like_script_cdn(blocked_url)
                 payment_exits = int(getattr(self, "_payment_cdn_provider_exits", 0))
                 generic_exits = int(getattr(self, "_generic_script_provider_exits", 0))
-                if blocked_url_is_payment_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
+                if blocked_url_is_script_cdn and payment_exits >= _MAX_PAYMENT_CDN_PROVIDER_EXITS:
                     logger.warning(
                         "Critical resource block ignored: provider-exit cap reached",
                         agent_id=self.agent_id,
@@ -3180,7 +3171,7 @@ class BrowserNetworkRecorder:
                         cap=_MAX_PAYMENT_CDN_PROVIDER_EXITS,
                     )
                 elif (
-                    not blocked_url_is_payment_cdn
+                    not blocked_url_is_script_cdn
                     and generic_exits >= _MAX_GENERIC_SCRIPT_PROVIDER_EXITS
                 ):
                     logger.warning(
@@ -3195,7 +3186,7 @@ class BrowserNetworkRecorder:
                 else:
                     rejected_generations.add(entry_generation)
                     self._rejected_network_generations = rejected_generations
-                    if blocked_url_is_payment_cdn:
+                    if blocked_url_is_script_cdn:
                         self._payment_cdn_provider_exits = payment_exits + 1
                     else:
                         self._generic_script_provider_exits = generic_exits + 1
@@ -3629,13 +3620,13 @@ class BrowserNetworkRecorder:
 def blocked_resource_requires_payment_cdn(url: str | None) -> bool:
     """True when the blocked resource should latch sticky require_payment_cdn.
 
-    Uses ``_PAYMENT_CDN_EXIT_HOST_MARKERS`` (not ``_PAYMENT_TUNNEL_HOST_MARKERS``)
-    so api.stripe.com failures do not pin sticky payment-CDN recovery — live
-    steel_managed often fails api while Stripe.js still loads.
+    Any absolute http(s) critical-resource URL qualifies — no vendor host
+    allowlists. The URL that failed is the URL recovery re-verifies.
     """
     if not url:
         return False
-    return _host_matches_markers(str(url).strip(), _PAYMENT_CDN_EXIT_HOST_MARKERS)
+    trimmed = str(url).strip()
+    return trimmed.startswith("http://") or trimmed.startswith("https://")
 
 
 def blocked_resource_url_for_recovery(rejection: Mapping[str, Any] | None) -> str | None:

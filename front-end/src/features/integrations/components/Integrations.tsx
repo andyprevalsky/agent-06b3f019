@@ -63,6 +63,7 @@ export default function Integrations() {
     handleClaudeCodeSync: compute.handleClaudeCodeSync,
     handleGptCodeSync: compute.handleGptCodeSync,
     handleIMessageSync: messages.handleIMessageSync,
+    handleWhatsAppConnect: messages.handleWhatsAppConnect,
     handleLinkedInSync: messages.handleLinkedInSync,
     handleEmailConnect: gmail.handleEmailConnect,
     handleEmailDisconnect: gmail.handleEmailDisconnect,
@@ -101,6 +102,7 @@ export default function Integrations() {
               isBrowserCookiesAvailable={!!handlers.browserCookies?.isAvailable}
               isPasskeysAvailable={!!handlers.passkeys?.isAvailable}
               isIMessageAvailable={!!handlers.iMessage?.isAvailable}
+              isWhatsAppAvailable={!!handlers.whatsApp?.isAvailable}
               isClaudeCodeAvailable={!!handlers.claudeCode?.isAvailable}
               isGptCodeAvailable={!!handlers.gptCode?.isAvailable}
               isFullySignedIn={isFullySignedIn}

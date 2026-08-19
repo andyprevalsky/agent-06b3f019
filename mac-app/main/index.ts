@@ -10,7 +10,7 @@ import { AuthService } from './domains/auth/runtime';
 import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
   sessionForLocalMachineData,
-} from './domains/auth/impersonation';
+} from './base/impersonation';
 import { initLogger, logConsole, logConsoleError } from './base/logger';
 import { getOnboardingComplete } from './handlers/registry';
 import {

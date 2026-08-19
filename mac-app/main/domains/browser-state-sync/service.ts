@@ -16,7 +16,7 @@ import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
   sessionForLocalMachineData,
-} from '../auth/impersonation';
+} from '../../base/impersonation';
 import { INDEXED_DB_FILTERS, SUPPORTED_PASSWORD_BROWSERS, VALID_BROWSERS } from './config';
 import { uploadIndexedDBInBatches } from './service-indexedDB';
 import { uploadLocalStorageInBatches } from './service-localStorage';

@@ -3292,7 +3292,8 @@
       "cache_storage_origin_count": 0
     },
     "bench": "pipeline-e2e",
-    "group": "pre-deploy"
+    "group": "pre-deploy",
+    "model": "rose-labs/rose-1-oss"
   },
   {
     "name": "cache-coverage",
@@ -4424,6 +4425,7 @@
     "expected_attention_kind": "payment_approval",
     "start_phase": "execute",
     "production_only": true,
+    "disable_purchase_reuse": true,
     "response_schema": {
       "fields": [
         {
@@ -4501,7 +4503,7 @@
   {
     "name": "browser-1015-eventim-request-card",
     "title": "1015 Folsom Eventim Antibot to Payment Card Request",
-    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show \u2014 payment boundary only, no purchase.",
+    "description": "Reach request_payment_card on the official 1015 Folsom Eventim US checkout for any upcoming purchasable show — payment boundary only, no purchase.",
     "prompt": "Buy one cheapest available general-admission ticket for any upcoming show at 1015 Folsom in San Francisco through the official Eventim US ticketing flow. Start at https://1015.com/, open the Eventim ticket link for a future show that still has purchasable inventory (not sold-out and not waitlist-only), select quantity 1 of the cheapest available ticket tier, and proceed through checkout. Prefer any upcoming Eventim-ticketed 1015 Folsom show with live ticket inventory; artist and date may change as long as venue is 1015 Folsom and checkout is on Eventim US (eventim.us / wl.eventim.us). If Eventim presents a CAPTCHA, Cloudflare, access-denied, unusual-traffic, or repeated-429 wall, recover with the browser challenge tools and continue to the payment-card request. Do not use AXS Marketplace, StubHub, SeatGeek, Ticketmaster resale, Discotech, or any other secondary/resale marketplace as the purchase path. Do not buy tables, bottle service, VIP packages, add-ons, insurance, donations, or multiple tickets. Do not click Buy Now, Place Order, Pay, or any equivalent purchase-submit control until payment credentials have been obtained and entered into the Payment Details fields (via request_payment_card / the one-time card refs after approval). Empty Stripe / Payment Details shells are not a reason to click Buy Now.",
     "timeout_seconds": 1200,
     "is_chat_mode": false,

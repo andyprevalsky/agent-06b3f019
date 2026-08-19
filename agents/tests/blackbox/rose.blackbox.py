@@ -120,9 +120,47 @@ def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/something-ultra-new") == "rose-1-ultra"
     assert pool_for_model("rose-labs/something-mini") == "rose-1-mini"
     assert pool_for_model("rose-labs/new-browser-use") == "rose-1-browser-use"
+    assert pool_for_model("rose-labs/rose-1-oss") == "rose-1-oss"
+    assert pool_for_model("rose-labs/something-oss") == "rose-1-oss"
     assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
+
+
+def test_oss_pool_is_open_weights_only():
+    """rose-1-oss must serve ONLY its open-weights waterfall.
+
+    The pool exists so a task whose prompt the frontier primaries decline can be
+    pinned to an open-source model. If a direct-token (claudeAuth / gptAuth)
+    route could serve it, that pin would silently resolve back to the very model
+    that declined, and the pool would be decorative.
+    """
+    oss = POOL_REGISTRY["rose-1-oss"]
+    assert oss.direct_auth_enabled is False
+    assert oss.waterfall == ("moonshotai/kimi-k3",)
+    assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
+    # Every other pool keeps direct-token routing.
+    for name, spec in POOL_REGISTRY.items():
+        if name != "rose-1-oss":
+            assert spec.direct_auth_enabled is True, f"{name} lost direct auth"
+
+    # EVERY proprietary route must consult the flag -- not just the OAuth ones.
+    # Gating only OAuth left the funded ANTHROPIC_API_KEY / OPENAI_API_KEY
+    # routes reachable, so a pinned run could still be served by a proprietary
+    # model while the pool claimed otherwise.
+    client_src = (
+        Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py"
+    ).read_text()
+    for marker in (
+        "openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else \"\"",
+        "pool_spec.direct_auth_enabled",
+    ):
+        assert marker in client_src, f"missing direct_auth_enabled gate: {marker}"
+    # The Anthropic funded-key branch must be gated too.
+    anthropic_branch = client_src.split("anthropic_api_key = (load_config()")[1][:400]
+    assert "pool_spec.direct_auth_enabled" in anthropic_branch, (
+        "ANTHROPIC_API_KEY route is not gated by direct_auth_enabled"
+    )
 
 
 def test_claude_auth_from_token_returns_none_when_falsy():
@@ -5827,6 +5865,7 @@ async def run_all_tests():
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
+    r.record("oss_pool_is_open_weights_only", test_oss_pool_is_open_weights_only)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)
     r.record("claude_auth_from_token_builds", test_claude_auth_from_token_builds_context)
     r.record("gpt_auth_from_token_builds", test_gpt_auth_from_token_builds_context)

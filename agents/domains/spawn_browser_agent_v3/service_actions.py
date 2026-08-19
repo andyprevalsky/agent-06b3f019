@@ -9,6 +9,7 @@ import asyncio
 import base64
 import inspect
 import json
+import re
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -42,6 +43,165 @@ STEEL_VIEWPORT_CROP_X = 4
 STEEL_VIEWPORT_CROP_Y = 87
 STEEL_VIEWPORT_CROP_WIDTH = 1283
 STEEL_VIEWPORT_CROP_HEIGHT = 800
+
+# Host labels that almost always serve machine/API surfaces, not HTML documents
+# the agent should browse. Shape-only (no vendor/product host names).
+_API_SURFACE_HOST_LABELS = frozenset(
+    {
+        "api",
+        "js",
+        "graphql",
+        "ws",
+        "wss",
+    }
+)
+_API_SURFACE_PATHS = frozenset(
+    {
+        "/health",
+        "/healthz",
+        "/healthcheck",
+        "/ready",
+        "/readyz",
+        "/livez",
+        "/status",
+        "/ping",
+    }
+)
+
+
+def url_looks_like_api_surface(url: str) -> bool:
+    """True when a URL is a machine/API surface, not a browsable document.
+
+    Network-log hosts (api.*, /v1/*, /healthcheck) are not pages — navigating
+    there after reading traffic strands the agent. Shape-only heuristic.
+    """
+    parsed = urlparse(url or "")
+    host = (parsed.hostname or "").lower()
+    path = (parsed.path or "/").lower().rstrip("/") or "/"
+    if host:
+        label = host.split(".", 1)[0]
+        if label in _API_SURFACE_HOST_LABELS:
+            return True
+    if path in _API_SURFACE_PATHS:
+        return True
+    if path.startswith(("/v1/", "/v2/", "/v3/", "/v4/")):
+        return True
+    if path in {"/v1", "/v2", "/v3", "/v4"}:
+        return True
+    return False
+
+
+def effective_navigation_pin_host(
+    *,
+    current_url: str,
+    recovery_pin_host: Optional[str],
+    origin_base_domain: Optional[str],
+) -> Optional[str]:
+    """Resolve the host the agent must stay on.
+
+    Cross-origin handoff (live registrable domain ≠ session origin): pin to the
+    live host so Place-order / OAuth / 3DS redirects stick without path or
+    product-name allowlists. Otherwise keep an explicit post-recovery pin.
+    """
+    current_host = (urlparse(current_url or "").hostname or "").lower()
+    origin = (origin_base_domain or "").lower().strip(".")
+    if current_host and origin:
+        current_base = _get_base_domain(current_host)
+        if current_base and current_base != origin:
+            return current_host
+    pin = (recovery_pin_host or "").lower().strip(".")
+    return pin or None
+
+
+def evaluate_code_looks_like_navigation(code: str) -> bool:
+    """True when JS evaluate would navigate / open windows (bypass for goto guards)."""
+    lowered = (code or "").lower()
+    markers = (
+        "location.href",
+        "location.assign",
+        "location.replace",
+        "location.reload",
+        "document.location",
+        "window.location",
+        "history.pushstate",
+        "history.replacestate",
+        "history.back",
+        "history.go",
+        "window.open",
+        "window.navigate",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def press_key_looks_like_leave_page(key: str) -> bool:
+    """True for history-back / close-tab chords that abandon a pinned page."""
+    normalized = (key or "").replace(" ", "").lower().replace("ctrl+", "control+")
+    leave_chords = {
+        "alt+left",
+        "alt+arrowleft",
+        "alt+right",
+        "alt+arrowright",
+        "meta+left",
+        "meta+[",
+        "control+[",
+        "control+w",
+        "control+shift+w",
+        "meta+w",
+        "meta+shift+w",
+        "browserback",
+        "browserforward",
+    }
+    return normalized in leave_chords
+
+
+def click_href_leaves_pinned_base(element: Any, pin_host: Optional[str]) -> Optional[str]:
+    """Return absolute href when a click target leaves the pinned registrable domain."""
+    pin = (pin_host or "").lower().strip(".")
+    if not pin or element is None:
+        return None
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        return None
+    href = str(attrs.get("href") or attrs.get("xlink:href") or "").strip()
+    if not href.startswith(("http://", "https://")):
+        return None
+    target_host = (urlparse(href).hostname or "").lower()
+    if not target_host:
+        return None
+    if _get_base_domain(target_host) != _get_base_domain(pin):
+        return href
+    return None
+
+
+def navigation_leaves_pinned_host(
+    *,
+    current_url: str,
+    target_url: Optional[str],
+    pin_host: Optional[str],
+    action: str,
+) -> bool:
+    """True when a nav action would leave the pinned browse host."""
+    pin = (pin_host or "").lower().strip(".")
+    if not pin:
+        return False
+    current_host = (urlparse(current_url or "").hostname or "").lower()
+    if not current_host:
+        return False
+    on_pin = current_host == pin or current_host.endswith(f".{pin}")
+    if not on_pin:
+        # Clicks may have already moved us off the pin — do not trap elsewhere.
+        return False
+    # Closing/switching tabs abandons the handoff surface the same way navback does.
+    if action in {"navback", "close_tab", "switch_tab"}:
+        return True
+    if action in {"goto", "open_new_tab"}:
+        target_host = (urlparse(target_url or "").hostname or "").lower()
+        if not target_host:
+            return True
+        if target_host == pin or target_host.endswith(f".{pin}"):
+            return False
+        return True
+    return False
 
 
 # ========================================
@@ -480,6 +640,98 @@ class _ActionContext:
     browser_network_recorder: Optional[Any]
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
+    navigation_pin_host: Optional[str] = None
+    navigation_origin_base_domain: Optional[str] = None
+
+
+async def _refuse_navigation(
+    context: _ActionContext,
+    *,
+    action: str,
+    error: str,
+    params: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = {"success": False, "error": error, "current_url": context.current_url}
+    await context.action_history.record_action(
+        dom_service=context.dom_service,
+        action=action,
+        thinking=context.thinking,
+        params=params,
+        result=result,
+    )
+    return result
+
+
+def _navigation_guard_error(
+    context: _ActionContext,
+    *,
+    action: str,
+    target_url: Optional[str] = None,
+) -> Optional[str]:
+    if target_url and url_looks_like_api_surface(target_url):
+        return (
+            f"Refusing navigation to API/non-document URL {target_url!r}. "
+            "Network request hosts are not pages — stay on the current document "
+            f"({context.current_url or 'current page'}) and continue the task there."
+        )
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
+    if navigation_leaves_pinned_host(
+        current_url=context.current_url,
+        target_url=target_url,
+        pin_host=pin_host,
+        action=action,
+    ):
+        return (
+            f"Refusing to leave pinned page host {pin_host!r}. "
+            f"Current page URL: {context.current_url}. Continue the task on this page "
+            "(do not go back, close/switch tabs, or navigate to another host until "
+            "this page is done)."
+        )
+    return None
+
+
+def _pinned_evaluate_guard_error(context: _ActionContext, code: str) -> Optional[str]:
+    """Refuse navigation-shaped evaluate while a host pin is active."""
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
+    if not pin_host:
+        return None
+    current_host = (urlparse(context.current_url or "").hostname or "").lower()
+    on_pin = bool(current_host) and (
+        current_host == pin_host or current_host.endswith(f".{pin_host}")
+    )
+    if not on_pin:
+        return None
+    if evaluate_code_looks_like_navigation(code):
+        return (
+            f"Refusing evaluate that would navigate away from pinned host {pin_host!r}. "
+            f"Current page URL: {context.current_url}. Use input_text/click on this page "
+            "instead of location/history/window.open scripts."
+        )
+    return None
+
+
+def _active_pin_host(context: _ActionContext) -> Optional[str]:
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
+    if not pin_host:
+        return None
+    current_host = (urlparse(context.current_url or "").hostname or "").lower()
+    if not current_host:
+        return None
+    if current_host == pin_host or current_host.endswith(f".{pin_host}"):
+        return pin_host
+    return None
 
 
 _INTERACTION_ACTIONS = {
@@ -604,6 +856,19 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
     )
 
     if context.action_name == "click":
+        pin_host = _active_pin_host(context)
+        leave_href = click_href_leaves_pinned_base(context.element, pin_host)
+        if leave_href:
+            return await _refuse_navigation(
+                context,
+                action="click",
+                error=(
+                    f"Refusing click that navigates off pinned host {pin_host!r} "
+                    f"via {leave_href!r}. Current page URL: {context.current_url}. "
+                    "Fill and submit the fields on this page instead."
+                ),
+                params={"index": context.index, "href": leave_href},
+            )
         return await _execute_click(
             session=context.session,
             dom_service=context.dom_service,
@@ -640,6 +905,18 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
+        pin_host = _active_pin_host(context)
+        if pin_host and press_key_looks_like_leave_page(str(key)):
+            return await _refuse_navigation(
+                context,
+                action="press_key",
+                error=(
+                    f"Refusing key chord {key!r} that would leave pinned host {pin_host!r}. "
+                    f"Current page URL: {context.current_url}. Continue on this page with "
+                    "input_text/click instead of back/close-tab shortcuts."
+                ),
+                params={"key": key},
+            )
         if context.humanizer:
             await context.humanizer.press_key(key)
         else:
@@ -723,6 +1000,18 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
     from browser_use.browser.events import GoBackEvent, NavigateToUrlEvent, WaitEvent
 
     if context.action_name == "goto":
+        guard = _navigation_guard_error(
+            context,
+            action="goto",
+            target_url=context.params.get("url") or "",
+        )
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="goto",
+                error=guard,
+                params={"url": context.params.get("url")},
+            )
         return await _execute_goto(
             session=context.session,
             dom_service=context.dom_service,
@@ -735,6 +1024,9 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             prepare_credentials_for_url=context.prepare_credentials_for_url,
         )
     if context.action_name == "navback":
+        guard = _navigation_guard_error(context, action="navback")
+        if guard:
+            return await _refuse_navigation(context, action="navback", error=guard)
         event = context.session.event_bus.dispatch(GoBackEvent())
         await event
         await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -762,6 +1054,14 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "switch_tab":
+        guard = _navigation_guard_error(context, action="switch_tab")
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="switch_tab",
+                error=guard,
+                params={"tab_id": context.params.get("tab_id")},
+            )
         return await _execute_switch_tab(
             session=context.session,
             dom_service=context.dom_service,
@@ -770,6 +1070,14 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             thinking=context.thinking,
         )
     if context.action_name == "close_tab":
+        guard = _navigation_guard_error(context, action="close_tab")
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="close_tab",
+                error=guard,
+                params={"tab_id": context.params.get("tab_id")},
+            )
         return await _execute_close_tab(
             session=context.session,
             dom_service=context.dom_service,
@@ -779,6 +1087,15 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
 
     url = context.params.get("url") or "about:blank"
+    if context.action_name == "open_new_tab":
+        guard = _navigation_guard_error(context, action="open_new_tab", target_url=url)
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="open_new_tab",
+                error=guard,
+                params={"url": url},
+            )
     event = context.session.event_bus.dispatch(NavigateToUrlEvent(url=url, new_tab=True))
     await event
     await event.event_result(raise_if_any=True, raise_if_none=False)
@@ -800,6 +1117,14 @@ async def _execute_inspection_action(context: _ActionContext) -> Dict[str, Any]:
         return await _execute_read_network_requests_action(context)
     if context.action_name == "evaluate":
         code = context.params.get("code", "")
+        guard = _pinned_evaluate_guard_error(context, code)
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="evaluate",
+                error=guard,
+                params={"code": code[:500]},
+            )
         cdp_session = await context.session.get_or_create_cdp_session(focus=True)
         result = await cdp_session.cdp_client.send.Runtime.evaluate(
             params={"expression": code, "returnByValue": True},
@@ -892,6 +1217,8 @@ async def execute_action(
     prepare_credentials_for_url: Optional[
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
+    navigation_pin_host: Optional[str] = None,
+    navigation_origin_base_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -941,6 +1268,8 @@ async def execute_action(
             browser_network_recorder=browser_network_recorder,
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
+            navigation_pin_host=navigation_pin_host,
+            navigation_origin_base_domain=navigation_origin_base_domain,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)
@@ -1057,336 +1386,867 @@ async def _refresh_element_coordinates(
     return await _maybe_await(coords(index))
 
 
-async def _resolve_payment_ref_coordinates(session: Any, ref_name: str) -> Optional[tuple[int, int]]:
+def _normalize_js_evaluate_result(result: Any) -> Optional[Dict[str, Any]]:
+    """Normalize page/frame/CDP evaluate payloads to a dict (or None)."""
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, str):
+        text = result.strip()
+        if not text:
+            return None
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+# Shared semantic payment-field finder used by coordinate lookup + direct fill.
+# Intentionally host/path agnostic: autocomplete / name / aria / placeholder only.
+# Pierces open shadow roots (hosted payment widgets nest inputs there).
+_PAYMENT_FIELD_FINDER_JS = """
+(() => {
+    const selectorsByRef = {
+        card_number: [
+            'input[data-elements-stable-field-name="cardNumber"]',
+            'input[data-elements-stable-field-name="number"]',
+            'input[autocomplete="cc-number"]',
+            'input[autocomplete~="cc-number"]',
+            'input#card-number',
+            'input[name="card-number"]',
+            'input[name="card_number"]',
+            'input[name="number"]',
+            'input[name="cardnumber"]',
+            'input[id*="card"][id*="number"]',
+            'input[name*="card"][name*="number"]',
+            'input[placeholder*="Card number" i]',
+            'input[aria-label*="Card number" i]'
+        ],
+        card_name: [
+            'input[data-elements-stable-field-name="cardName"]',
+            'input[data-elements-stable-field-name="name"]',
+            'input[autocomplete="cc-name"]',
+            'input[autocomplete~="cc-name"]',
+            'input#card-name',
+            'input[name="card-name"]',
+            'input[name="card_name"]',
+            'input[name="name"]',
+            'input[id*="card"][id*="name"]',
+            'input[name*="card"][name*="name"]',
+            'input[placeholder*="Name on card" i]',
+            'input[aria-label*="Name on card" i]'
+        ],
+        card_expiry: [
+            'input[data-elements-stable-field-name="cardExpiry"]',
+            'input[data-elements-stable-field-name="expiry"]',
+            'input[autocomplete="cc-exp"]',
+            'input[autocomplete~="cc-exp"]',
+            'input#card-expiry',
+            'input[name="card-expiry"]',
+            'input[name="card_expiry"]',
+            'input[name="exp-date"]',
+            'input[name="expiry"]',
+            'input[id*="expir"]',
+            'input[name*="expir"]',
+            'input[placeholder*="MM/YY"]',
+            'input[placeholder*="MM / YY"]',
+            'input[aria-label*="Expir" i]'
+        ],
+        card_cvv: [
+            'input[data-elements-stable-field-name="cardCvc"]',
+            'input[data-elements-stable-field-name="cvc"]',
+            'input[autocomplete="cc-csc"]',
+            'input[autocomplete~="cc-csc"]',
+            'input#card-cvv',
+            'input#card-cvc',
+            'input[name="card-cvv"]',
+            'input[name="card_cvv"]',
+            'input[name="cvc"]',
+            'input[name="cvv"]',
+            'input[id*="cvv"]',
+            'input[id*="cvc"]',
+            'input[id*="security"]',
+            'input[name*="security"]',
+            'input[aria-label*="CVC" i]',
+            'input[aria-label*="CVV" i]',
+            'input[aria-label*="Security code" i]'
+        ],
+    };
+    const patternsByRef = {
+        card_number: ['cc-number', 'card number', 'card-number', 'card_number', 'cardnumber'],
+        card_name: ['cc-name', 'cardholder', 'card holder', 'name on card', 'card name', 'card-name', 'card_name'],
+        card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
+        card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
+    };
+    // High-confidence selectors may mount readOnly / zero-size until focused
+    // (hosted payment widgets). Still reject disabled + display:none.
+    const isHighConfidenceSelector = (selector) =>
+        typeof selector === 'string' && (
+            selector.includes('autocomplete')
+            || selector.includes('data-elements-stable-field-name')
+        );
+    const isVisible = (el, { allowCollapsed = false } = {}) => {
+        if (!el || el.disabled) return false;
+        if (el.readOnly && !allowCollapsed) return false;
+        const style = window.getComputedStyle(el);
+        if (style.visibility === 'hidden' || style.display === 'none') return false;
+        const rect = el.getBoundingClientRect();
+        if (allowCollapsed) return true;
+        return rect.width > 0 && rect.height > 0;
+    };
+    const queryDeep = (root, selector) => {
+        const out = [];
+        const visit = (node) => {
+            if (!node || !node.querySelectorAll) return;
+            try {
+                node.querySelectorAll(selector).forEach((el) => out.push(el));
+            } catch (_) {}
+            try {
+                node.querySelectorAll('*').forEach((el) => {
+                    if (el.shadowRoot) visit(el.shadowRoot);
+                });
+            } catch (_) {}
+        };
+        visit(root);
+        return out;
+    };
+    const addText = (parts, value) => {
+        if (typeof value !== 'string') return;
+        const trimmed = value.trim();
+        if (trimmed) parts.push(trimmed);
+    };
+    const signalFor = (el) => {
+        const parts = [];
+        for (const attr of ['autocomplete', 'name', 'id', 'placeholder', 'aria-label', 'title']) {
+            addText(parts, el.getAttribute(attr));
+        }
+        const id = el.getAttribute('id');
+        if (id) {
+            const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
+            if (label) addText(parts, label.innerText || label.textContent);
+        }
+        const wrappingLabel = el.closest('label');
+        if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
+        return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+    };
+    const findField = (refName) => {
+        for (const selector of selectorsByRef[refName] || []) {
+            const allowCollapsed = isHighConfidenceSelector(selector);
+            for (const el of queryDeep(document, selector)) {
+                if (isVisible(el, { allowCollapsed })) {
+                    return { el, selector, score: 100 };
+                }
+            }
+        }
+        let best = null;
+        for (const el of queryDeep(document, 'input, textarea')) {
+            if (!isVisible(el)) continue;
+            const signal = signalFor(el);
+            let score = 0;
+            for (const pattern of patternsByRef[refName] || []) {
+                if (signal.includes(pattern)) score += pattern.length;
+            }
+            if (refName === 'card_name' && signal.includes('name') && signal.includes('card')) score += 12;
+            if (refName === 'card_number' && signal.includes('card') && signal.includes('number')) score += 12;
+            if (refName === 'card_expiry' && signal.includes('exp')) score += 8;
+            if (refName === 'card_cvv' && (signal.includes('security') || signal.includes('cvv') || signal.includes('cvc'))) score += 8;
+            if (!best || score > best.score) best = { el, selector: 'semantic-payment-field', score, signal };
+        }
+        return best && best.score > 0 ? best : null;
+    };
+    return { findField, isVisible };
+})()
+"""
+
+# Playwright locator selectors — pierces open shadow DOM in frames.
+_PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
+    "card_number": (
+        'input[data-elements-stable-field-name="cardNumber"]',
+        'input[data-elements-stable-field-name="number"]',
+        'input[autocomplete="cc-number"]',
+        'input[autocomplete~="cc-number"]',
+        'input[name="number"]',
+        'input[name="cardnumber"]',
+        'input[name="card-number"]',
+        'input[name="card_number"]',
+        "#card-number",
+        'input[placeholder*="Card number" i]',
+        'input[aria-label*="Card number" i]',
+    ),
+    "card_name": (
+        'input[data-elements-stable-field-name="cardName"]',
+        'input[data-elements-stable-field-name="name"]',
+        'input[autocomplete="cc-name"]',
+        'input[autocomplete~="cc-name"]',
+        'input[name="name"]',
+        'input[name="card-name"]',
+        'input[name="card_name"]',
+        "#card-name",
+        'input[placeholder*="Name on card" i]',
+        'input[aria-label*="Name on card" i]',
+    ),
+    "card_expiry": (
+        'input[data-elements-stable-field-name="cardExpiry"]',
+        'input[data-elements-stable-field-name="expiry"]',
+        'input[autocomplete="cc-exp"]',
+        'input[autocomplete~="cc-exp"]',
+        'input[name="exp-date"]',
+        'input[name="expiry"]',
+        'input[name="card-expiry"]',
+        'input[placeholder*="MM" i]',
+        'input[aria-label*="Expir" i]',
+    ),
+    "card_cvv": (
+        'input[data-elements-stable-field-name="cardCvc"]',
+        'input[data-elements-stable-field-name="cvc"]',
+        'input[autocomplete="cc-csc"]',
+        'input[autocomplete~="cc-csc"]',
+        'input[name="cvc"]',
+        'input[name="cvv"]',
+        "#card-cvc",
+        "#card-cvv",
+        'input[aria-label*="CVC" i]',
+        'input[aria-label*="CVV" i]',
+        'input[aria-label*="Security code" i]',
+    ),
+}
+
+# Accessible-name / placeholder patterns for Playwright get_by_* (host-agnostic).
+_PAYMENT_REF_PLAYWRIGHT_LABELS: Dict[str, tuple[str, ...]] = {
+    "card_number": (r"card number", r"card num", r"nummer", r"número"),
+    "card_name": (r"name on card", r"cardholder", r"card holder", r"nombre"),
+    "card_expiry": (r"expir", r"mm\s*/?\s*yy", r"mm\s*/?\s*aaaa"),
+    "card_cvv": (r"cvc", r"cvv", r"security code", r"código"),
+}
+
+# Hosted checkout widgets often isolate each field in a titled iframe
+# ("Secure card number input frame"). Title text is semantic — not a host allowlist.
+_PAYMENT_REF_IFRAME_TITLE_PATTERNS: Dict[str, tuple[str, ...]] = {
+    "card_number": ("card number", "cardnumber", "cc-number"),
+    "card_name": ("name on card", "cardholder", "card name", "name input"),
+    "card_expiry": ("expir", "exp date", "mm / yy", "mm/yy"),
+    "card_cvv": ("cvc", "cvv", "security code", "securitycode"),
+}
+
+_PAYMENT_REF_LOCATE_JS = f"""
+(refName) => {{
+    const {{ findField }} = {_PAYMENT_FIELD_FINDER_JS};
+    const match = findField(refName);
+    if (!match) return null;
+    match.el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+    const rect = match.el.getBoundingClientRect();
+    return {{
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        selector: match.selector,
+        score: match.score,
+        signal: (match.signal || '').slice(0, 120),
+    }};
+}}
+"""
+
+_PAYMENT_REF_FOCUS_JS = f"""
+(refName) => {{
+    const {{ findField }} = {_PAYMENT_FIELD_FINDER_JS};
+    const match = findField(refName);
+    if (!match) return {{ focused: false, reason: 'field_not_found' }};
+    const el = match.el;
+    el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+    el.focus();
+    const rect = el.getBoundingClientRect();
+    return {{
+        focused: true,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        selector: match.selector,
+        score: match.score,
+    }};
+}}
+"""
+
+_PAYMENT_REF_FILL_JS = f"""
+({{ refName, value }}) => {{
+    const {{ findField }} = {_PAYMENT_FIELD_FINDER_JS};
+    const match = findField(refName);
+    if (!match) return {{ filled: false, reason: 'field_not_found' }};
+    const el = match.el;
+    el.scrollIntoView({{ block: 'center', inline: 'nearest' }});
+    el.focus();
+    const prototype = el instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
+    if (descriptor && descriptor.set) {{
+        descriptor.set.call(el, value);
+    }} else {{
+        el.value = value;
+    }}
+    el.dispatchEvent(new InputEvent('input', {{
+        bubbles: true,
+        inputType: 'insertReplacementText',
+        data: value,
+    }}));
+    el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+    const rect = el.getBoundingClientRect();
+    return {{
+        filled: true,
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        selector: match.selector,
+        score: match.score,
+        valueLength: String(el.value || '').length,
+    }};
+}}
+"""
+
+
+
+def _explicit_session_callable(session: Any, *names: str) -> Optional[Callable[..., Any]]:
+    """Return a callable explicitly present on the session (skip MagicMock auto-attrs)."""
+    if session is None:
+        return None
+    instance_dict = getattr(session, "__dict__", {}) or {}
+    for name in names:
+        if name in instance_dict and callable(instance_dict[name]):
+            return instance_dict[name]
+    session_type = type(session)
+    for name in names:
+        if name in getattr(session_type, "__dict__", {}):
+            attr = getattr(session, name, None)
+            if callable(attr):
+                return attr
+    return None
+
+
+def _playwright_frames(input_page: Any) -> List[Any]:
+    if input_page is None:
+        return []
+    frames = getattr(input_page, "frames", None)
+    if callable(frames):
+        try:
+            frames = frames()
+        except Exception:
+            frames = None
+    # Playwright exposes .frames as a list. MagicMock.frames is another MagicMock —
+    # never treat that as a document root or we steal evaluate calls from real pages.
+    if isinstance(frames, list):
+        return list(frames)
+    return []
+
+
+def _humanizer_input_page(humanizer: Optional[BrowserHumanizer]) -> Any:
+    if humanizer is None:
+        return None
+    if "input_page" not in getattr(humanizer, "__dict__", {}):
+        return None
+    return getattr(humanizer, "input_page", None)
+
+
+async def _iter_payment_fill_targets(
+    session: Any,
+    input_page: Any = None,
+) -> List[tuple[str, Any]]:
+    """Yield (label, target) pairs for every reachable document (main + iframes).
+
+    Prefer Playwright frames (trusted keyboard focus path), then the browser-use
+    page, then CDP iframe/page targets. No host/path filters.
+    """
+    targets: List[tuple[str, Any]] = []
+    seen_cdp_targets: set[str] = set()
+
+    for index, frame in enumerate(_playwright_frames(input_page)):
+        targets.append((f"playwright:{index}", frame))
+
+    get_page = _explicit_session_callable(session, "get_page", "get_current_page")
+    if get_page is not None:
+        try:
+            page = await _maybe_await(get_page())
+        except Exception:
+            page = None
+        if page is not None and hasattr(page, "evaluate"):
+            targets.append(("browser_use:page", page))
+
+    get_all_frames = _explicit_session_callable(session, "get_all_frames")
+    get_cdp = _explicit_session_callable(session, "get_or_create_cdp_session")
+    if get_all_frames is not None and get_cdp is not None:
+        all_frames: Dict[str, Any] = {}
+        try:
+            frames_result = await _maybe_await(get_all_frames())
+            if isinstance(frames_result, tuple) and frames_result and isinstance(frames_result[0], dict):
+                all_frames = frames_result[0]
+            elif isinstance(frames_result, dict):
+                all_frames = frames_result
+        except Exception as exc:
+            logger.debug("Payment fill get_all_frames failed", error=str(exc))
+            all_frames = {}
+        for _frame_id, info in all_frames.items():
+            if not isinstance(info, dict):
+                continue
+            target_id = info.get("frameTargetId")
+            if not target_id or str(target_id) in seen_cdp_targets:
+                continue
+            seen_cdp_targets.add(str(target_id))
+            try:
+                cdp_session = await _maybe_await(get_cdp(target_id, focus=False))
+            except TypeError:
+                try:
+                    cdp_session = await _maybe_await(get_cdp(target_id))
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if cdp_session is not None and hasattr(cdp_session, "cdp_client"):
+                targets.append((f"cdp:{str(target_id)[:12]}", ("cdp", cdp_session)))
+
+    if get_cdp is not None and not targets:
+        try:
+            cdp_session = await _maybe_await(get_cdp(focus=True))
+        except Exception:
+            cdp_session = None
+        if cdp_session is not None and hasattr(cdp_session, "cdp_client"):
+            targets.append(("cdp:focus", ("cdp", cdp_session)))
+
+    return targets
+
+
+async def _evaluate_on_payment_fill_target(
+    target: Any,
+    script: str,
+    arg: Any,
+) -> Optional[Dict[str, Any]]:
+    """Run JS against a Playwright frame/page or a CDP session target."""
+    try:
+        if isinstance(target, tuple) and len(target) == 2 and target[0] == "cdp":
+            cdp_session = target[1]
+            expression = f"({script})({json.dumps(arg)})"
+            cdp_result = await cdp_session.cdp_client.send.Runtime.evaluate(
+                params={"expression": expression, "returnByValue": True, "awaitPromise": True},
+                session_id=cdp_session.session_id,
+            )
+            return _normalize_js_evaluate_result((cdp_result or {}).get("result", {}).get("value"))
+
+        evaluate = getattr(target, "evaluate", None)
+        if not callable(evaluate):
+            return None
+        raw = await _maybe_await(evaluate(script, arg))
+        return _normalize_js_evaluate_result(raw)
+    except Exception as exc:
+        logger.debug("Payment fill target evaluate failed", error=str(exc)[:200])
+        return None
+
+
+async def _payment_ref_iframe_title_present(input_page: Any, ref_name: str) -> bool:
+    """True when a semantically titled payment iframe has an attached input."""
+    if input_page is None or ref_name not in _PAYMENT_REF_IFRAME_TITLE_PATTERNS:
+        return False
+    if not hasattr(input_page, "frame_locator"):
+        return False
+    for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS[ref_name]:
+        try:
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            locator = frame.locator("input, textarea").first
+            count = await _maybe_await(locator.count())
+            if isinstance(count, int) and not isinstance(count, bool) and count >= 1:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _resolve_payment_ref_via_iframe_title(
+    input_page: Any,
+    ref_name: str,
+) -> Optional[tuple[int, int]]:
+    """Locate a payment input inside a semantically titled iframe (host-agnostic)."""
+    if input_page is None or ref_name not in _PAYMENT_REF_IFRAME_TITLE_PATTERNS:
+        return None
+    if not hasattr(input_page, "frame_locator"):
+        return None
+    for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS[ref_name]:
+        try:
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            locator = frame.locator("input, textarea").first
+            count = await _maybe_await(locator.count())
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                continue
+            box = await _maybe_await(locator.bounding_box())
+            if not isinstance(box, dict) or box.get("x") is None:
+                continue
+            return (
+                int(box["x"] + (box.get("width") or 0) / 2),
+                int(box["y"] + (box.get("height") or 0) / 2),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Payment ref iframe-title locate miss",
+                ref_name=ref_name,
+                pattern=pattern,
+                error=str(exc)[:160],
+            )
+    return None
+
+
+async def _resolve_payment_ref_coordinates(
+    session: Any,
+    ref_name: str,
+    *,
+    input_page: Any = None,
+) -> Optional[tuple[int, int]]:
     """Resolve coordinates for a visible payment input by semantic card ref."""
     if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
         return None
 
-    get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
-    if not callable(get_page):
-        return None
-
-    try:
-        page = await _maybe_await(get_page())
-    except Exception:
-        return None
-    if not page or not hasattr(page, "evaluate"):
-        return None
-
-    try:
-        result = await _maybe_await(
-            page.evaluate(
-                """
-                (refName) => {
-                    const selectorsByRef = {
-                        card_number: [
-                            'input[autocomplete="cc-number"]',
-                            'input#card-number',
-                            'input[name="card-number"]',
-                            'input[name="card_number"]',
-                            'input[id*="card"][id*="number"]',
-                            'input[name*="card"][name*="number"]'
-                        ],
-                        card_name: [
-                            'input[autocomplete="cc-name"]',
-                            'input#card-name',
-                            'input[name="card-name"]',
-                            'input[name="card_name"]',
-                            'input[id*="card"][id*="name"]',
-                            'input[name*="card"][name*="name"]'
-                        ],
-                        card_expiry: [
-                            'input[autocomplete="cc-exp"]',
-                            'input#card-expiry',
-                            'input[name="card-expiry"]',
-                            'input[name="card_expiry"]',
-                            'input[id*="expir"]',
-                            'input[name*="expir"]',
-                            'input[placeholder*="MM/YY"]'
-                        ],
-                        card_cvv: [
-                            'input[autocomplete="cc-csc"]',
-                            'input#card-cvv',
-                            'input#card-cvc',
-                            'input[name="card-cvv"]',
-                            'input[name="card_cvv"]',
-                            'input[name="cvc"]',
-                            'input[name="cvv"]',
-                            'input[id*="cvv"]',
-                            'input[id*="cvc"]',
-                            'input[id*="security"]',
-                            'input[name*="security"]'
-                        ],
-                    };
-                    const selectors = selectorsByRef[refName] || [];
-                    const isVisible = (el) => {
-                        if (!el || el.disabled || el.readOnly) return false;
-                        const rect = el.getBoundingClientRect();
-                        const style = window.getComputedStyle(el);
-                        return rect.width > 0 && rect.height > 0
-                            && style.visibility !== 'hidden'
-                            && style.display !== 'none';
-                    };
-                    for (const selector of selectors) {
-                        for (const el of document.querySelectorAll(selector)) {
-                            if (!isVisible(el)) continue;
-                            el.scrollIntoView({ block: 'center', inline: 'nearest' });
-                            const rect = el.getBoundingClientRect();
-                            return {
-                                x: Math.round(rect.left + rect.width / 2),
-                                y: Math.round(rect.top + rect.height / 2),
-                                selector,
-                            };
-                        }
-                    }
-                    const patternsByRef = {
-                        card_number: ['cc-number', 'card number', 'card-number', 'card_number', 'cardnumber'],
-                        card_name: ['cc-name', 'cardholder', 'card holder', 'name on card', 'card name', 'card-name', 'card_name'],
-                        card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
-                        card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
-                    };
-                    const addText = (parts, value) => {
-                        if (typeof value !== 'string') return;
-                        const trimmed = value.trim();
-                        if (trimmed) parts.push(trimmed);
-                    };
-                    const textSignalFor = (el) => {
-                        const parts = [];
-                        for (const attr of ['autocomplete', 'name', 'id', 'placeholder', 'aria-label', 'title']) {
-                            addText(parts, el.getAttribute(attr));
-                        }
-                        const id = el.getAttribute('id');
-                        if (id) {
-                            const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-                            if (label) addText(parts, label.innerText || label.textContent);
-                        }
-                        const wrappingLabel = el.closest('label');
-                        if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
-                        // Deliberately excludes sibling/ancestor text: shared form
-                        // text makes every card input score identically, so ties
-                        // collapse all refs onto the first field.
-                        return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
-                    };
-                    const patterns = patternsByRef[refName] || [];
-                    let best = null;
-                    for (const el of document.querySelectorAll('input, textarea')) {
-                        if (!isVisible(el)) continue;
-                        const signal = textSignalFor(el);
-                        let score = 0;
-                        for (const pattern of patterns) {
-                            if (signal.includes(pattern)) score += pattern.length;
-                        }
-                        if (refName === 'card_name' && signal.includes('name') && signal.includes('card')) {
-                            score += 12;
-                        }
-                        if (refName === 'card_number' && signal.includes('card') && signal.includes('number')) {
-                            score += 12;
-                        }
-                        if (refName === 'card_expiry' && signal.includes('exp')) {
-                            score += 8;
-                        }
-                        if (refName === 'card_cvv' && (signal.includes('security') || signal.includes('cvv') || signal.includes('cvc'))) {
-                            score += 8;
-                        }
-                        if (!best || score > best.score) {
-                            best = { el, score, signal };
-                        }
-                    }
-                    if (best && best.score > 0) {
-                        best.el.scrollIntoView({ block: 'center', inline: 'nearest' });
-                        const rect = best.el.getBoundingClientRect();
-                        return {
-                            x: Math.round(rect.left + rect.width / 2),
-                            y: Math.round(rect.top + rect.height / 2),
-                            selector: 'semantic-payment-field',
-                            score: best.score,
-                            signal: best.signal.slice(0, 120),
-                        };
-                    }
-                    return null;
-                }
-                """,
-                ref_name,
-            )
+    iframe_coords = await _resolve_payment_ref_via_iframe_title(input_page, ref_name)
+    if iframe_coords is not None:
+        logger.debug(
+            "Resolved payment ref coordinates via iframe title",
+            ref_name=ref_name,
+            coords=iframe_coords,
         )
-    except Exception as exc:
-        logger.debug("Payment ref selector coordinate lookup failed", ref_name=ref_name, error=str(exc))
+        return iframe_coords
+
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_LOCATE_JS, ref_name)
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved payment ref coordinates",
+                ref_name=ref_name,
+                target=label,
+                selector=result.get("selector"),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
+_PAYMENT_METHOD_EXPAND_JS = """
+(_unused) => {
+    const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
+    const candidates = Array.from(document.querySelectorAll(
+        'button, [role="button"], [role="radio"], [role="tab"], label, a, [role="option"]'
+    ));
+    for (const el of candidates) {
+        const signal = [
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('title') || '',
+            el.innerText || '',
+            el.textContent || '',
+        ].join(' ').replace(/\\s+/g, ' ').trim();
+        if (!pattern.test(signal)) continue;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') continue;
+        el.click();
+        return { clicked: true, signal: signal.slice(0, 120) };
+    }
+    return { clicked: false };
+}
+"""
+
+
+async def _nudge_payment_method_expand(
+    session: Any,
+    *,
+    input_page: Any = None,
+) -> bool:
+    """Click a generic Card/Credit/Debit control if payment inputs are hidden behind it."""
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(target, _PAYMENT_METHOD_EXPAND_JS, None)
+        if result and result.get("clicked") is True:
+            logger.info(
+                "Expanded payment method control before fill",
+                target=label,
+                signal=result.get("signal"),
+            )
+            return True
+    return False
+
+
+async def wait_for_payment_ref_fields(
+    session: Any,
+    *,
+    ref_names: Optional[List[str]] = None,
+    input_page: Any = None,
+    timeout_seconds: float = 15.0,
+    poll_interval_seconds: float = 0.5,
+) -> bool:
+    """Poll every reachable frame until semantic payment inputs appear.
+
+    Main-document navigation readiness is not enough — hosted payment widgets
+    mount card inputs in child frames several seconds later.
+    """
+    names = list(ref_names or ["card_number"])
+    targets = await _iter_payment_fill_targets(session, input_page)
+    # Titled payment iframes may exist even when evaluate targets are empty.
+    if not targets and input_page is None:
+        return False
+    deadline = time_module.monotonic() + max(0.5, float(timeout_seconds))
+    nudged = False
+    while True:
+        for name in names:
+            if await _payment_ref_iframe_title_present(input_page, name):
+                return True
+            if await _resolve_payment_ref_coordinates(session, name, input_page=input_page):
+                return True
+        if not nudged and time_module.monotonic() + 2.0 < deadline:
+            nudged = True
+            await _nudge_payment_method_expand(session, input_page=input_page)
+        if time_module.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(poll_interval_seconds)
+
+
+async def _fill_payment_ref_via_playwright_locator(
+    *,
+    input_page: Any,
+    ref_name: str,
+    value: str,
+    humanizer: Optional[BrowserHumanizer],
+) -> Optional[Dict[str, Any]]:
+    """Fill via Playwright locators (pierces open shadow DOM across frames)."""
+    if not value or input_page is None or ref_name not in _PAYMENT_REF_PLAYWRIGHT_SELECTORS:
+        return None
+    roots: List[Any] = list(_playwright_frames(input_page))
+    if not roots and hasattr(input_page, "locator"):
+        roots = [input_page]
+
+    async def _try_locator(root: Any, root_index: int, locator: Any, selector: str) -> Optional[Dict[str, Any]]:
+        try:
+            count = await _maybe_await(locator.count())
+            # MagicMock.__int__ returns 1 — require a real int from Playwright.
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                return None
+            first = locator.first if hasattr(locator, "first") else locator
+            await _maybe_await(first.scroll_into_view_if_needed())
+            await _maybe_await(first.click(timeout=2500))
+            if humanizer is not None:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
+                await humanizer.type_text(value)
+            else:
+                fill = getattr(first, "fill", None)
+                if not callable(fill):
+                    return None
+                await _maybe_await(fill(""))
+                press_seq = getattr(first, "press_sequentially", None)
+                if callable(press_seq):
+                    await _maybe_await(press_seq(value, delay=35))
+                else:
+                    await _maybe_await(fill(value))
+            box = None
+            with suppress(Exception):
+                box = await _maybe_await(first.bounding_box())
+            logger.info(
+                "Filled payment card secret ref via Playwright locator",
+                ref_name=ref_name,
+                selector=selector,
+                root=f"playwright:{root_index}",
+            )
+            result: Dict[str, Any] = {
+                "filled": True,
+                "selector": selector,
+                "score": 100,
+                "method": "playwright_locator",
+                "target": f"playwright:{root_index}",
+                "valueLength": len(value),
+            }
+            if isinstance(box, dict) and box.get("x") is not None:
+                result["x"] = int(box["x"] + (box.get("width") or 0) / 2)
+                result["y"] = int(box["y"] + (box.get("height") or 0) / 2)
+            return result
+        except Exception as exc:
+            logger.debug(
+                "Payment ref Playwright locator miss",
+                ref_name=ref_name,
+                selector=selector,
+                error=str(exc)[:160],
+            )
+            return None
+
+    # Prefer semantically titled payment iframes (hosted field isolation).
+    if hasattr(input_page, "frame_locator"):
+        for pattern in _PAYMENT_REF_IFRAME_TITLE_PATTERNS.get(ref_name, ()):
+            frame = input_page.frame_locator(f'iframe[title*="{pattern}" i]')
+            hit = await _try_locator(
+                input_page,
+                0,
+                frame.locator("input, textarea"),
+                f'iframe[title*="{pattern}" i] >> input',
+            )
+            if hit:
+                hit["method"] = "playwright_iframe_title"
+                return hit
+
+    for root_index, root in enumerate(roots):
+        if not hasattr(root, "locator"):
+            continue
+        for selector in _PAYMENT_REF_PLAYWRIGHT_SELECTORS[ref_name]:
+            hit = await _try_locator(root, root_index, root.locator(selector), selector)
+            if hit:
+                return hit
+        # Accessible name / placeholder — hosted widgets often omit autocomplete
+        # until the user focuses a labeled control.
+        for pattern in _PAYMENT_REF_PLAYWRIGHT_LABELS.get(ref_name, ()):
+            for getter_name in ("get_by_label", "get_by_placeholder"):
+                getter = getattr(root, getter_name, None)
+                if not callable(getter):
+                    continue
+                try:
+                    locator = getter(re.compile(pattern, re.I))
+                except Exception:
+                    continue
+                hit = await _try_locator(
+                    root,
+                    root_index,
+                    locator,
+                    f"{getter_name}(/{pattern}/i)",
+                )
+                if hit:
+                    return hit
+    return None
+
+
+async def _fill_payment_ref_via_keyboard(
+    *,
+    session: Any,
+    ref_name: str,
+    value: str,
+    input_page: Any,
+    humanizer: Optional[BrowserHumanizer],
+) -> Optional[Dict[str, Any]]:
+    """Focus a semantic payment field (any frame) and type with real key events.
+
+    Hosted payment widgets often ignore programmatic value-sets; keyboard events
+    after focus work across same- and cross-origin frames without vendor logic.
+    """
+    if not value or (humanizer is None and input_page is None):
         return None
 
-    if not isinstance(result, dict) or not isinstance(result.get("x"), (int, float)):
-        return None
-    return int(result["x"]), int(result["y"])
+    # Focus may land in a CDP-only OOPIF; type through page keyboard/humanizer
+    # so controlled inputs that reject JS value-set still receive real key events.
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        located = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_FOCUS_JS, ref_name)
+        if not located or located.get("focused") is not True:
+            continue
+        try:
+            if humanizer is not None:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
+                await humanizer.type_text(value)
+            else:
+                keyboard = getattr(input_page, "keyboard", None)
+                if keyboard is None:
+                    continue
+                await _maybe_await(keyboard.press("Control+a"))
+                await _maybe_await(keyboard.press("Backspace"))
+                type_fn = getattr(keyboard, "type", None)
+                if not callable(type_fn):
+                    continue
+                await _maybe_await(type_fn(value, delay=40))
+        except Exception as exc:
+            logger.debug(
+                "Payment ref keyboard fill failed",
+                ref_name=ref_name,
+                target=label,
+                error=str(exc)[:200],
+            )
+            continue
+        logger.info(
+            "Filled payment card secret ref via keyboard",
+            ref_name=ref_name,
+            target=label,
+            selector=located.get("selector"),
+        )
+        return {
+            "filled": True,
+            "x": located.get("x"),
+            "y": located.get("y"),
+            "selector": located.get("selector"),
+            "score": located.get("score"),
+            "method": "keyboard",
+            "target": label,
+            "valueLength": len(value),
+        }
+    return None
 
 
-async def _fill_payment_ref_directly(session: Any, ref_name: str, value: str) -> Optional[Dict[str, Any]]:
-    """Fill an approved one-time payment-card ref into its semantic field atomically."""
+async def _fill_payment_ref_directly(
+    session: Any,
+    ref_name: str,
+    value: str,
+    *,
+    input_page: Any = None,
+    humanizer: Optional[BrowserHumanizer] = None,
+) -> Optional[Dict[str, Any]]:
+    """Fill an approved one-time payment-card ref into its semantic field.
+
+    Searches every reachable frame/document (Playwright frames + CDP iframe
+    targets). Order: Playwright locator (shadow-DOM capable) → JS value-set →
+    focus+keyboard. No merchant/CDN host or path allowlists.
+    """
     if not session or ref_name not in PAYMENT_CARD_SECRET_REFS:
         return None
 
     payload = {"refName": ref_name, "value": value}
-    fill_script = """
-        ({ refName, value }) => {
-            const selectorsByRef = {
-                card_number: [
-                    'input[autocomplete="cc-number"]',
-                    'input#card-number',
-                    'input[name="card-number"]',
-                    'input[name="card_number"]',
-                    'input[id*="card"][id*="number"]',
-                    'input[name*="card"][name*="number"]'
-                ],
-                card_name: [
-                    'input[autocomplete="cc-name"]',
-                    'input#card-name',
-                    'input[name="card-name"]',
-                    'input[name="card_name"]',
-                    'input[id*="card"][id*="name"]',
-                    'input[name*="card"][name*="name"]'
-                ],
-                card_expiry: [
-                    'input[autocomplete="cc-exp"]',
-                    'input#card-expiry',
-                    'input[name="card-expiry"]',
-                    'input[name="card_expiry"]',
-                    'input[id*="expir"]',
-                    'input[name*="expir"]',
-                    'input[placeholder*="MM/YY"]'
-                ],
-                card_cvv: [
-                    'input[autocomplete="cc-csc"]',
-                    'input#card-cvv',
-                    'input#card-cvc',
-                    'input[name="card-cvv"]',
-                    'input[name="card_cvv"]',
-                    'input[name="cvc"]',
-                    'input[name="cvv"]',
-                    'input[id*="cvv"]',
-                    'input[id*="cvc"]',
-                    'input[id*="security"]',
-                    'input[name*="security"]'
-                ],
-            };
-            const isVisible = (el) => {
-                if (!el || el.disabled || el.readOnly) return false;
-                const rect = el.getBoundingClientRect();
-                const style = window.getComputedStyle(el);
-                return rect.width > 0 && rect.height > 0
-                    && style.visibility !== 'hidden'
-                    && style.display !== 'none';
-            };
-            const addText = (parts, text) => {
-                if (typeof text !== 'string') return;
-                const trimmed = text.trim();
-                if (trimmed) parts.push(trimmed);
-            };
-            const signalFor = (el) => {
-                const parts = [];
-                for (const attr of ['autocomplete', 'name', 'id', 'placeholder', 'aria-label', 'title']) {
-                    addText(parts, el.getAttribute(attr));
-                }
-                const id = el.getAttribute('id');
-                if (id) {
-                    const label = document.querySelector(`label[for="${CSS.escape(id)}"]`);
-                    if (label) addText(parts, label.innerText || label.textContent);
-                }
-                const wrappingLabel = el.closest('label');
-                if (wrappingLabel) addText(parts, wrappingLabel.innerText || wrappingLabel.textContent);
-                // Deliberately excludes sibling/ancestor text: shared form text
-                // makes every card input score identically, so ties collapse all
-                // refs onto the first field.
-                return parts.join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
-            };
-            const findField = () => {
-                for (const selector of selectorsByRef[refName] || []) {
-                    for (const el of document.querySelectorAll(selector)) {
-                        if (isVisible(el)) return { el, selector, score: 100 };
-                    }
-                }
+    if input_page is None:
+        input_page = _humanizer_input_page(humanizer)
 
-                const patternsByRef = {
-                    card_number: ['cc-number', 'card number', 'card-number', 'card_number', 'cardnumber'],
-                    card_name: ['cc-name', 'cardholder', 'card holder', 'name on card', 'card name', 'card-name', 'card_name'],
-                    card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
-                    card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
-                };
-                let best = null;
-                for (const el of document.querySelectorAll('input, textarea')) {
-                    if (!isVisible(el)) continue;
-                    const signal = signalFor(el);
-                    let score = 0;
-                    for (const pattern of patternsByRef[refName] || []) {
-                        if (signal.includes(pattern)) score += pattern.length;
-                    }
-                    if (refName === 'card_name' && signal.includes('name') && signal.includes('card')) score += 12;
-                    if (refName === 'card_number' && signal.includes('card') && signal.includes('number')) score += 12;
-                    if (refName === 'card_expiry' && signal.includes('exp')) score += 8;
-                    if (refName === 'card_cvv' && (signal.includes('security') || signal.includes('cvv') || signal.includes('cvc'))) score += 8;
-                    if (!best || score > best.score) best = { el, selector: 'semantic-payment-field', score, signal };
-                }
-                return best && best.score > 0 ? best : null;
-            };
+    locator_result = await _fill_payment_ref_via_playwright_locator(
+        input_page=input_page,
+        ref_name=ref_name,
+        value=value,
+        humanizer=humanizer,
+    )
+    if locator_result:
+        return locator_result
 
-            const match = findField();
-            if (!match) return { filled: false, reason: 'field_not_found' };
+    expected_len = len(str(value or ""))
+    saw_empty_js_value = False
+    saw_any_target = False
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        saw_any_target = True
+        result = await _evaluate_on_payment_fill_target(target, _PAYMENT_REF_FILL_JS, payload)
+        if not result or result.get("filled") is not True:
+            continue
+        # Controlled/secure inputs often report empty value after a fake set —
+        # only then fall through to keyboard (do not keyboard-probe after plain
+        # field_not_found; that steals later evaluate side-effects in tests and
+        # burns focus on documents without payment fields).
+        if "valueLength" in result and expected_len > 0 and int(result.get("valueLength") or 0) == 0:
+            saw_empty_js_value = True
+            logger.debug(
+                "Payment ref JS fill left empty value; trying keyboard",
+                ref_name=ref_name,
+                target=label,
+            )
+            continue
+        result = dict(result)
+        result["method"] = "js"
+        result["target"] = label
+        logger.info(
+            "Filled payment card secret ref via JS",
+            ref_name=ref_name,
+            target=label,
+            selector=result.get("selector"),
+        )
+        return result
 
-            const el = match.el;
-            el.scrollIntoView({ block: 'center', inline: 'nearest' });
-            el.focus();
-            const prototype = el instanceof HTMLTextAreaElement
-                ? HTMLTextAreaElement.prototype
-                : HTMLInputElement.prototype;
-            const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
-            if (descriptor && descriptor.set) {
-                descriptor.set.call(el, value);
-            } else {
-                el.value = value;
-            }
-            el.dispatchEvent(new InputEvent('input', {
-                bubbles: true,
-                inputType: 'insertReplacementText',
-                data: value,
-            }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            const rect = el.getBoundingClientRect();
-            return {
-                filled: true,
-                x: Math.round(rect.left + rect.width / 2),
-                y: Math.round(rect.top + rect.height / 2),
-                selector: match.selector,
-                score: match.score,
-                valueLength: String(value || '').length,
-            };
-        }
-    """
+    # Prefer keyboard when JS left an empty controlled input, or when Playwright
+    # frames / documents are available (hosted widgets often reject value-set).
+    if saw_empty_js_value or _playwright_frames(input_page) or (input_page is not None and saw_any_target):
+        keyboard_result = await _fill_payment_ref_via_keyboard(
+            session=session,
+            ref_name=ref_name,
+            value=value,
+            input_page=input_page,
+            humanizer=humanizer,
+        )
+        if keyboard_result:
+            return keyboard_result
 
-    result: Any = None
-    try:
-        get_page = getattr(session, "get_page", None) or getattr(session, "get_current_page", None)
-        if callable(get_page):
-            page = await _maybe_await(get_page())
-            if page and hasattr(page, "evaluate"):
-                result = await _maybe_await(page.evaluate(fill_script, payload))
-    except Exception as exc:
-        logger.debug("Payment ref direct fill via page failed", ref_name=ref_name, error=str(exc))
-
-    if not isinstance(result, dict):
-        try:
-            get_cdp = getattr(session, "get_or_create_cdp_session", None)
-            if callable(get_cdp):
-                cdp_session = await _maybe_await(get_cdp(focus=True))
-                expression = f"({fill_script})({json.dumps(payload)})"
-                cdp_result = await cdp_session.cdp_client.send.Runtime.evaluate(
-                    params={"expression": expression, "returnByValue": True},
-                    session_id=cdp_session.session_id,
-                )
-                result = cdp_result.get("result", {}).get("value")
-        except Exception as exc:
-            logger.debug("Payment ref direct fill via CDP failed", ref_name=ref_name, error=str(exc))
-
-    if not isinstance(result, dict) or result.get("filled") is not True:
-        logger.debug("Payment ref direct fill did not find a target", ref_name=ref_name, result=result)
-        return None
-    return result
+    logger.debug("Payment ref direct fill did not find a target", ref_name=ref_name)
+    return None
 
 
 async def _browser_click_write_lock_signal(session: Any, coords: Optional[Dict[str, Any]]) -> str:
@@ -1777,8 +2637,24 @@ async def _try_direct_payment_ref_fill(
     display_text: str,
     credential_ref: Optional[Dict[str, str]],
     current_url: str,
+    humanizer: Optional[BrowserHumanizer] = None,
 ) -> Optional[Dict[str, Any]]:
-    fill_result = await _fill_payment_ref_directly(session, secret_ref_name, text)
+    input_page = _humanizer_input_page(humanizer)
+    # Hosted widgets mount payment inputs in child frames after the document URL
+    # settles — wait for a semantic field before the first fill attempt.
+    await wait_for_payment_ref_fields(
+        session,
+        ref_names=["card_number", secret_ref_name],
+        input_page=input_page,
+        timeout_seconds=12.0,
+    )
+    fill_result = await _fill_payment_ref_directly(
+        session,
+        secret_ref_name,
+        text,
+        input_page=input_page,
+        humanizer=humanizer,
+    )
     if not fill_result:
         readiness = await wait_for_navigation_ready(
             dom_service,
@@ -1791,7 +2667,19 @@ async def _try_direct_payment_ref_fill(
             ref_name=secret_ref_name,
             readiness=readiness,
         )
-        fill_result = await _fill_payment_ref_directly(session, secret_ref_name, text)
+        await wait_for_payment_ref_fields(
+            session,
+            ref_names=["card_number", secret_ref_name],
+            input_page=input_page,
+            timeout_seconds=8.0,
+        )
+        fill_result = await _fill_payment_ref_directly(
+            session,
+            secret_ref_name,
+            text,
+            input_page=input_page,
+            humanizer=humanizer,
+        )
     if not fill_result:
         return None
 
@@ -1800,7 +2688,13 @@ async def _try_direct_payment_ref_fill(
         other_value = secret_refs.get(other_ref)
         if other_ref == secret_ref_name or not other_value:
             continue
-        if await _fill_payment_ref_directly(session, other_ref, other_value):
+        if await _fill_payment_ref_directly(
+            session,
+            other_ref,
+            other_value,
+            input_page=input_page,
+            humanizer=humanizer,
+        ):
             filled_refs.append(other_ref)
 
     element_coords = None
@@ -1862,7 +2756,11 @@ async def _execute_indexed_input_text(
     if humanizer and not coord_tuple:
         coord_tuple = await _refresh_element_coordinates(dom_service, index)
     if humanizer and not coord_tuple and is_payment_card_secret_ref:
-        coord_tuple = await _resolve_payment_ref_coordinates(session, secret_ref_name or "")
+        coord_tuple = await _resolve_payment_ref_coordinates(
+            session,
+            secret_ref_name or "",
+            input_page=_humanizer_input_page(humanizer),
+        )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))
 
@@ -2058,9 +2956,19 @@ async def _execute_input_text(
             display_text=display_text,
             credential_ref=credential_ref,
             current_url=current_url,
+            humanizer=humanizer,
         )
         if direct_fill_result:
             return direct_fill_result
+        # Auto-fill / secret-ref typing without an element index must not fall
+        # through to "type into whatever is focused" — that reports success
+        # without payment_refs_filled and hides the real field_not_found miss.
+        if not element and not coords:
+            return {
+                "success": False,
+                "error": "field_not_found",
+                "payment_refs_filled": [],
+            }
 
     if element:
         return await _execute_indexed_input_text(
@@ -2165,7 +3073,7 @@ async def _execute_goto(
     navigation_waiter = wait_for_navigation or wait_for_navigation_ready
     await navigation_waiter(dom_service, url=url)
 
-    result: Dict[str, Any] = {"success": True, "message": "", "current_url": url}
+    result = {"success": True, "message": "", "current_url": url}
     if credential_summary is not None:
         # The preparation callback consumes encrypted credential material
         # internally. Only its deliberately non-sensitive summary may enter

@@ -111,19 +111,29 @@ async function resolveHeldPurchaseForCheckout(
   }
 
   if (cardLast4 !== undefined) {
+    // Parallel last4 proofs: sequential AgentCard getDetails across leftover HELDs hung Place
+    // order for minutes (fleet: many $1 HELD rows → checkout-session never returned). Fail-closed
+    // still requires every readable candidate so duplicate last4s cannot bind the wrong hold.
+    const carded = candidates.filter(
+      (candidate): candidate is HeldPurchase & { cardId: string } => candidate.cardId !== null
+    );
+    const proofs = await Promise.all(
+      carded.map(async (candidate) => {
+        try {
+          const last4 = (await getCardLast4(candidate.userId, candidate.agentId, candidate.cardId))
+            .replace(/\D/g, '')
+            .slice(-4);
+          return { candidate, last4 } as const;
+        } catch {
+          // Unreadable card is not evidence of a match — skip and keep scanning.
+          return null;
+        }
+      })
+    );
     const matched: HeldPurchase[] = [];
-    for (const candidate of candidates) {
-      if (candidate.cardId === null) continue;
-      let last4: string;
-      try {
-        last4 = (await getCardLast4(candidate.userId, candidate.agentId, candidate.cardId))
-          .replace(/\D/g, '')
-          .slice(-4);
-      } catch {
-        // Unreadable card is not evidence of a match — skip and keep scanning.
-        continue;
-      }
-      if (last4 === cardLast4) matched.push(candidate);
+    for (const proof of proofs) {
+      if (proof === null) continue;
+      if (proof.last4 === cardLast4) matched.push(proof.candidate);
     }
     if (matched.length === 1) {
       const purchase = matched[0];
