@@ -11693,6 +11693,24 @@ def test_url_looks_like_api_surface_and_navigation_pin():
         )
         is False
     )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="close_tab",
+        )
+        is True
+    )
+    assert (
+        navigation_leaves_pinned_host(
+            current_url=current,
+            target_url=None,
+            pin_host=pin,
+            action="switch_tab",
+        )
+        is True
+    )
     # Off the pin already — do not trap.
     assert (
         navigation_leaves_pinned_host(
@@ -11858,6 +11876,38 @@ async def test_execute_navback_refuses_on_cross_origin_handoff():
     )
     assert out_goto["success"] is False
     assert "leave pinned page host" in out_goto["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+
+async def test_execute_close_tab_refuses_on_cross_origin_handoff():
+    """Fleet 1bffacc0: close_tab on handoff host crashed the browser session."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "close_tab", "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "leave pinned page host" in out["error"]
+    session.event_bus.dispatch.assert_not_called()
+
+    out_switch = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "switch_tab", "params": {"tab_id": "ab12"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_switch["success"] is False
+    assert "leave pinned page host" in out_switch["error"]
     session.event_bus.dispatch.assert_not_called()
 
 
@@ -16327,6 +16377,10 @@ async def run_all_tests():
     await r.record_async(
         "navback_refuses_cross_origin_handoff",
         test_execute_navback_refuses_on_cross_origin_handoff,
+    )
+    await r.record_async(
+        "close_tab_refuses_cross_origin_handoff",
+        test_execute_close_tab_refuses_on_cross_origin_handoff,
     )
     await r.record(
         "nav_guard_no_endpoint_path_allowlists",
