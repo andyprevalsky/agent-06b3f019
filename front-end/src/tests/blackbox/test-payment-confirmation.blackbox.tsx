@@ -126,6 +126,21 @@ describe('test-payment Confirmation receipt', () => {
     expect(startTestPaymentCheckout).toHaveBeenCalledWith(['agentcard-lifecycle-probe'], undefined);
   });
 
+  it('keeps Place order submitting and exposes a Stripe continue link after handoff', async () => {
+    // RCA: finally { setSubmitting(false) } after location handoff re-enabled Place order while
+    // Steel stayed on /test_payment — agents re-clicked and never completed Stripe pay.
+    window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
+    render(<TestPaymentPage />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Place order $1.00' }));
+    await waitFor(() => expect(startTestPaymentCheckout).toHaveBeenCalledTimes(1));
+
+    const continueLink = await screen.findByTestId('test-payment-hosted-checkout-link');
+    expect(continueLink).toHaveAttribute('href', 'https://checkout.stripe.com/c/pay/cs_test');
+    expect(continueLink).toHaveTextContent('Continue to Stripe Checkout');
+    expect(screen.getByRole('button', { name: 'Place order $1.00' })).toBeDisabled();
+  });
+
   it('sends optional last4 on live Place order when the card number is filled', async () => {
     window.history.replaceState({}, '', '/test_payment?benchmark=agentcard-live-lifecycle');
     render(<TestPaymentPage />);
