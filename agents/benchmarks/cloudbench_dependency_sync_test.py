@@ -9381,6 +9381,11 @@ def test_cloud_agentcard_payment_tasks_provide_onboarding_callback_env() -> None
     assert "AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL=" in driver
     assert 'STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")' in driver
     assert "export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=0" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in driver
+    assert "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30" in driver
+    assert "scripts/setup-benchmark-payment.ts --user-id" in driver
 
 
 def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:

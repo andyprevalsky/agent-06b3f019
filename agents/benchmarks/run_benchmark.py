@@ -172,8 +172,9 @@ AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 }
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -199,15 +200,13 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
-# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
-# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
-# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
-# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
-# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
-# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
-# back-end/scripts/setup-benchmark-payment.ts. Must equal
-# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
-AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox AgentCard lifecycle benches run as the default admin account so the
+# credit gate uses unlimited admin credits. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+# (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+# resolveAndIssuePurchaseCard onto chargeAndIssueCard so stripeHold remains
+# reachable. Must equal BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in
+# back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
@@ -1552,8 +1551,9 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
         if base_url is not None and not _is_local_base_url(base_url):
             return None
-        # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
-        # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
+        # Sandbox lifecycle benches run as the default admin account. The backend
+        # keeps admin credits (unlimited) and BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+        # forces the charged Stripe-hold mint path.
         return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
@@ -1570,15 +1570,17 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
 
     Single source of truth for the run-user override so the mapping can be asserted directly
     instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
-    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
-    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    sandbox payment-lifecycle tasks assert a Stripe hold. They run as the admin
+    account with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH so credits stay
+    unlimited while minting still authorizes a hold. Production tasks stay on
+    the dedicated non-admin live identity.
     """
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
-        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_LIFECYCLE_USER_ID
     if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     return None
