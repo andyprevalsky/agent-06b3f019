@@ -4938,6 +4938,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # After a successful challenge recovery, pin goto/navback to the recovered
     # host so the model cannot leave the cleared page for network-log thrash.
     navigation_pin_host: Optional[str] = None
+    navigation_pin_url: Optional[str] = None
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -6249,6 +6250,72 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
             current_url = browser_state.get("url", "")
             await record_passkey_usage_once()
 
+            # Sticky cross-origin handoff pin: once the live page leaves the
+            # session origin registrable domain, remember that host/URL and
+            # bounce back if clicks/evaluate sneak off it.
+            from urllib.parse import urlparse as _urlparse_handoff
+
+            _handoff_host = (_urlparse_handoff(str(current_url or "")).hostname or "").lower()
+            if navigation_origin_base_domain and _handoff_host:
+                _handoff_base = _get_base_domain(_handoff_host)
+                if _handoff_base and _handoff_base != navigation_origin_base_domain:
+                    if not navigation_pin_host:
+                        navigation_pin_host = _handoff_host
+                    if _handoff_host == navigation_pin_host or _handoff_host.endswith(
+                        f".{navigation_pin_host}"
+                    ):
+                        navigation_pin_url = str(current_url)
+            if (
+                navigation_pin_host
+                and navigation_pin_url
+                and _handoff_host
+                and not (
+                    _handoff_host == navigation_pin_host
+                    or _handoff_host.endswith(f".{navigation_pin_host}")
+                )
+            ):
+                logger.warning(
+                    "Auto-returning to pinned handoff host after leaving it",
+                    pin_host=navigation_pin_host,
+                    left_url=current_url,
+                    pin_url=navigation_pin_url,
+                    agent_id=agent_id,
+                    task_id=task_id,
+                )
+                bounce = await execute_action(
+                    dom_service,
+                    action_history,
+                    {"action": "goto", "params": {"url": navigation_pin_url}},
+                    available_file_paths=available_file_paths,
+                    session_id=session_id,
+                    config=config,
+                    humanizer=humanizer,
+                    secret_refs=secret_refs,
+                    password_origins=password_origins,
+                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                    user_id=user_id,
+                    current_url=current_url,
+                    trusted_page_urls=visited_urls,
+                    write_lock_enabled=write_lock_enabled,
+                    write_lock_approvals=write_lock_approvals,
+                    system_name=system_name,
+                    browser_network_recorder=browser_network_recorder,
+                    current_auth_realm=auth_realm,
+                    prepare_credentials_for_url=_prepare_credentials_for_url,
+                    navigation_pin_host=navigation_pin_host,
+                    navigation_origin_base_domain=navigation_origin_base_domain,
+                )
+                browser_state = await dom_service.get_browser_state(include_screenshot=False)
+                current_url = browser_state.get("url", navigation_pin_url)
+                if not (isinstance(bounce, dict) and bounce.get("success")):
+                    logger.warning(
+                        "Pinned handoff auto-return goto failed",
+                        pin_url=navigation_pin_url,
+                        bounce=bounce,
+                        agent_id=agent_id,
+                        task_id=task_id,
+                    )
+
             # Clicks, form submissions, and server redirects can cross an auth
             # realm without a goto tool call. Prepare that realm before the
             # model observes or interacts with it, then reload once so newly
@@ -7245,6 +7312,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
                         if pin_host:
                             navigation_pin_host = pin_host
+                            navigation_pin_url = str(current_url)
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Browser challenge recovered",

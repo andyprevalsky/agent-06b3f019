@@ -11911,6 +11911,50 @@ async def test_execute_close_tab_refuses_on_cross_origin_handoff():
     session.event_bus.dispatch.assert_not_called()
 
 
+async def test_execute_evaluate_refuses_navigation_while_pinned():
+    """Fleet 0b3b582b: evaluate location/href escapes the handoff pin."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    assert service_actions.evaluate_code_looks_like_navigation(
+        "window.location.href = 'https://www.merchant.com/'"
+    )
+    assert service_actions.evaluate_code_looks_like_navigation("history.back()")
+    assert not service_actions.evaluate_code_looks_like_navigation(
+        "document.querySelector('#card-number')?.value"
+    )
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={
+            "action": "evaluate",
+            "params": {"code": "window.location.href = 'https://www.merchant.com/cart'"},
+        },
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "evaluate that would navigate" in out["error"]
+    session.get_or_create_cdp_session = AsyncMock()  # type: ignore[attr-defined]
+
+
+def test_handoff_pin_is_sticky_in_handler():
+    """Once handoff is observed, pin host is persisted (not cleared on return to origin)."""
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    assert "navigation_pin_url" in source
+    assert "Auto-returning to pinned handoff host" in source
+    assert "navigation_origin_base_domain" in source
+
+
 def test_recovery_skips_when_live_tab_already_clear():
     """LLM-invented recovery on a clean page must no-op (no host special-cases)."""
     import inspect
@@ -16382,6 +16426,11 @@ async def run_all_tests():
         "close_tab_refuses_cross_origin_handoff",
         test_execute_close_tab_refuses_on_cross_origin_handoff,
     )
+    await r.record_async(
+        "evaluate_refuses_nav_while_pinned",
+        test_execute_evaluate_refuses_navigation_while_pinned,
+    )
+    await r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
     await r.record(
         "nav_guard_no_endpoint_path_allowlists",
         test_navigation_guard_has_no_endpoint_path_allowlists,
