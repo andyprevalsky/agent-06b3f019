@@ -83,8 +83,12 @@ _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
     # (Unlike sol/terra/luna, 5.4's direct and OpenRouter rates coincide.)
     "gpt-5.4-openai":       {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},
     "gpt-5.5-openai":       {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
-    "gpt-5.6-luna-openai":  {"input_cents_per_1k": 0.1,   "output_cents_per_1k": 0.6},
-    "gpt-5.6-terra-openai": {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},
+    # Luna $0.20/$1.20 and Terra $2/$12 per M. Like 5.4, the repo's previous
+    # $1.00/$6.00 and $2.50/$15 were stale for the direct route.
+    "gpt-5.6-luna-openai":  {"input_cents_per_1k": 0.02,  "output_cents_per_1k": 0.12},
+    "gpt-5.6-terra-openai": {"input_cents_per_1k": 0.2,   "output_cents_per_1k": 1.2},
+    # Sol is the ONLY model in this set whose direct rate differs from
+    # OpenRouter's: $5/$30 direct vs $2.50/$15 via OpenRouter.
     "gpt-5.6-sol-openai":   {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
 }
 

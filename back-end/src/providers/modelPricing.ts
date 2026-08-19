@@ -40,8 +40,7 @@ const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }
 // above 272k input tokens, which this flat table does not model.
 const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
   // $2.50/$15 per M. The long-standing $1.75/$14 was stale for the direct
-  // route too, under-reporting funded API usage by ~30%. Unlike sol/terra/luna,
-  // 5.4's direct and OpenRouter rates coincide.
+  // route too, under-reporting funded API usage by ~30%.
   'gpt-5.4-openai': {
     prompt: (2.5 / 1_000_000).toString(),
     completion: (15.0 / 1_000_000).toString(),
@@ -50,13 +49,17 @@ const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
     prompt: (5.0 / 1_000_000).toString(),
     completion: (30.0 / 1_000_000).toString(),
   },
+  // Luna and Terra were stale for the direct route too (previously $1/$6 and
+  // $2.50/$15). Sol below is the ONLY model in this set whose direct rate
+  // genuinely differs from OpenRouter's ($5/$30 vs $2.50/$15); 5.4, 5.5, terra
+  // and luna happen to price the same on both routes.
   'gpt-5.6-luna-openai': {
-    prompt: (1.0 / 1_000_000).toString(),
-    completion: (6.0 / 1_000_000).toString(),
+    prompt: (0.2 / 1_000_000).toString(),
+    completion: (1.2 / 1_000_000).toString(),
   },
   'gpt-5.6-terra-openai': {
-    prompt: (2.5 / 1_000_000).toString(),
-    completion: (15.0 / 1_000_000).toString(),
+    prompt: (2.0 / 1_000_000).toString(),
+    completion: (12.0 / 1_000_000).toString(),
   },
   'gpt-5.6-sol-openai': {
     prompt: (5.0 / 1_000_000).toString(),

@@ -76,15 +76,16 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'claude-haiku-4-5': anthropic(1, 5),
   // Bare / `-openai` ids are the DIRECT OpenAI API route (our funded
   // GPT_API_KEY), so these carry OpenAI's own list prices. The OpenRouter
-  // route for the same models is a separate, cheaper contract and is keyed
-  // under `openai/*` below — normalizeModel deliberately keeps that prefix so
-  // the two cannot collapse onto one rate.
+  // route is keyed separately under `openai/*` below — normalizeModel keeps
+  // that prefix so the two cannot collapse onto one rate. Only `sol` actually
+  // differs between the routes today ($5/$30 direct vs $2.50/$15 OpenRouter),
+  // but the split is kept for all of them so a future divergence is expressible
+  // rather than silently mis-billed.
   'gpt-5.6-sol': openAi(5, 30, 1.25),
-  'gpt-5.6-terra': openAi(2.5, 15, 1.25),
-  'gpt-5.6-luna': openAi(1, 6, 1.25),
+  'gpt-5.6-terra': openAi(2, 12, 1.25),
+  'gpt-5.6-luna': openAi(0.2, 1.2, 1.25),
   'gpt-5.5': openAi(5, 30),
-  // 5.4 is the one model whose direct and OpenRouter rates coincide; the
-  // long-standing $1.75/$14 was stale for both.
+  // The long-standing $1.75/$14 was stale for both routes.
   'gpt-5.4': openAi(2.5, 15),
   // OpenRouter-routed OpenAI models (waterfall). Same cache semantics as the
   // direct route (inclusive prompt totals, 0.1x read, 1.25x write) but

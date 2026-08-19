@@ -5218,16 +5218,19 @@ def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization
     """Replay the complete LLM usage from failed parallel-tool-calls agent 58a04e8d.
 
     Three native-tool explore leaves completed successfully, but legacy
-    accounting reported 113.57c and paused the root before synthesis. OpenAI's
-    prompt counter already contained both cache buckets; normalizing it restores
-    the actual 62.65c trace cost without weakening the benchmark's 100c product
-    limit.
+    accounting double-counted the cache buckets and paused the root before
+    synthesis. OpenAI's prompt counter already contains both buckets, so adding
+    them again inflates the trace ~2.04x; normalizing it restores the real cost.
 
-    These figures survive the 2026-08-19 pricing reconciliation unchanged. Every
-    call in this trace carries the `-openai` suffix, i.e. the DIRECT OpenAI API
-    route, and only the OpenRouter `openai/*` rates were stale — the direct
-    rates were correct. So the 113.57c pause was a genuine cache-accounting
-    failure, not a mispricing artifact.
+    Figures updated 2026-08-19. Every call here carries the `-openai` suffix
+    (the DIRECT OpenAI API route), and the direct terra/luna rates were stale on
+    the high side -- $2.50/$15 and $1.00/$6.00 against actual $2/$12 and
+    $0.20/$1.20. Under corrected rates the same trace costs 87.89c legacy, i.e.
+    it would NOT have crossed the 100c product limit; the historical 113.57c
+    pause was therefore part real cache double-counting and part over-pricing.
+    The double-counting is still real and still worth guarding, which is why the
+    2.04x inflation ratio is asserted alongside the absolute figures -- the
+    ratio is rate-table independent and keeps testing the defect itself.
     """
     # model suffix, inclusive prompt, completion, cache read, cache write
     captured_usage = [
@@ -5285,14 +5288,15 @@ def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization
     legacy_trace_cost = legacy_llm_cost + service_cost_cents
     normalized_trace_cost = normalized_llm_cost + service_cost_cents
 
-    assert abs(legacy_trace_cost - 113.567325) < 0.000001
-    assert legacy_trace_cost > 100
-    assert abs(normalized_trace_cost - 62.648575) < 0.000001
+    assert abs(legacy_trace_cost - 87.890300) < 0.000001
+    assert abs(normalized_trace_cost - 48.911800) < 0.000001
     assert normalized_trace_cost < 100
-    # Also pin the inflation ratio the bug produces. The absolute figures above
-    # depend on the rate table; this ratio does not, so it keeps testing the
-    # actual double-counting defect if the rates are ever revised again.
-    assert abs(legacy_llm_cost / normalized_llm_cost - 1.996) < 0.001
+    # The defect itself: double-counted cache buckets inflate the LLM spend.
+    # Asserted as a ratio because it is rate-table independent -- the absolute
+    # figures above move whenever provider pricing is corrected, and an
+    # absolute-limit assertion silently stops testing anything when they do.
+    assert normalized_llm_cost < legacy_llm_cost
+    assert abs(legacy_llm_cost / normalized_llm_cost - 2.0426) < 0.001
 
 
 async def test_claude_auth_stream_reports_cache_hit_rate():
