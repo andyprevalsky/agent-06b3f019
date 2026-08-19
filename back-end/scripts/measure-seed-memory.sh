@@ -172,9 +172,27 @@ else
         SRC_RESTORE_UNEXPECTED="$(grep -vE \
             'warning:|WARNING:|role "[^"]*" does not exist|extension "[^"]*" already exists|schema "[^"]*" already exists|must be owner of|no privileges (could be revoked|were granted)|^[[:space:]]*$|^pg_restore: while PROCESSING|^pg_restore: from TOC entry|^[[:space:]]*Command was:' \
             "$SRC_RESTORE_ERR" 2>/dev/null || true)"
-        if [ -n "$SRC_RESTORE_UNEXPECTED" ]; then
+        # A non-zero exit with NO diagnostic at all cannot be classified as
+        # benign — there is nothing to recognize, so the source db state is
+        # simply unknown (killed container, OOM, docker exec failure). Only a
+        # failure that actually explained itself as role/extension noise may
+        # continue; silence is fatal.
+        # NOTE: `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so
+        # `$(grep -c ... || echo 0)` yields "0\n0" — a non-integer that makes
+        # the comparison below error out and silently take the tolerant branch,
+        # recreating exactly the hole this check closes. Assign, then correct.
+        SRC_RESTORE_DIAGNOSTIC_LINES=$(grep -cvE '^[[:space:]]*$' "$SRC_RESTORE_ERR" 2>/dev/null) ||
+            SRC_RESTORE_DIAGNOSTIC_LINES=0
+        case "$SRC_RESTORE_DIAGNOSTIC_LINES" in
+            ''|*[!0-9]*) SRC_RESTORE_DIAGNOSTIC_LINES=0 ;;
+        esac
+        if [ -n "$SRC_RESTORE_UNEXPECTED" ] || [ "$SRC_RESTORE_DIAGNOSTIC_LINES" -eq 0 ]; then
             echo "❌ pg_restore failed on $DUMP (exit $SRC_RESTORE_STATUS):" | tee -a "$SUMMARY"
-            printf '%s\n' "$SRC_RESTORE_UNEXPECTED" | head -5 | tee -a "$SUMMARY"
+            if [ "$SRC_RESTORE_DIAGNOSTIC_LINES" -eq 0 ]; then
+                echo "   (pg_restore produced no diagnostic output — source state unknown)" | tee -a "$SUMMARY"
+            else
+                printf '%s\n' "$SRC_RESTORE_UNEXPECTED" | head -5 | tee -a "$SUMMARY"
+            fi
             echo "   Full log: $SRC_RESTORE_ERR" | tee -a "$SUMMARY"
             echo "   A version refusal means the dump was published by a newer" | tee -a "$SUMMARY"
             echo "   pg_dump than this reader — republish it, or extend the image map above." | tee -a "$SUMMARY"
