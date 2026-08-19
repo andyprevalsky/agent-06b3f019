@@ -536,6 +536,29 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   printf '%s' "$base"
 }
 
+# Prefer the credential this workspace can actually use for GitHub HTTPS.
+# Injected/invalid $GITHUB_TOKEN wins inside `gh auth token` and .env lookups,
+# which made warm-box fetch-ref 401 (`could not read Username for
+# 'https://github.com'`) even after the helper was uploaded. `env -u GITHUB_TOKEN
+# gh auth token` reads gh's hosts.yml account — the same ghs_ token git
+# url.insteadOf already uses to push from this controller.
+cloudbench_controller_github_token() {
+  local token=""
+  token="$(env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  token="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null \
+    | sed -n 's#.*https://x-access-token:\([^[:space:]@][^[:space:]@]*\)@github.com/.*#\1#p' \
+    | head -1)"
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  return 1
+}
+
 cloudbench_retry_command() {
   local max_attempts="$1" retry_delay_seconds="$2"
   shift 2
