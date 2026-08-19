@@ -14,7 +14,7 @@ import { AuthService } from '../../services/auth';
 import { BatchUploader } from '../../services/batchUploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
-import { sessionForLocalMachineData } from '../auth/impersonation';
+import { sessionForLocalMachineData } from '../../base/impersonation';
 import { FLUSH_INTERVAL_MS, INTEGRATION_KEY, MAX_BUFFER_SIZE } from './config';
 import { TelegramAuth } from './repo';
 import { TelegramClient } from './service';

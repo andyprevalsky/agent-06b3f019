@@ -27,8 +27,14 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type RefObject,
 } from 'react';
-import { onQuickQueryToggle, onFocusInput, submitQuickQuery, hideQuickQuery } from './api';
-import { LAUNCHER_FOCUS_DELAY_MS } from './config';
+import {
+  onQuickQueryToggle,
+  onFocusInput,
+  submitQuickQuery,
+  hideQuickQuery,
+  resizeQuickQuery,
+} from './api';
+import { LAUNCHER_FOCUS_DELAY_MS, launcherWindowHeightFromPill } from './config';
 import type { QuickQueryToggleState } from '../../../shared/types/ipc';
 import { useLauncherAttachments, type LauncherAttachmentsHandle } from './useLauncherAttachments';
 import type { LauncherLocalAttachment } from './types';
@@ -160,4 +166,16 @@ export const useLauncher = (): LauncherHandle => {
     handleSubmit,
     handleKeyDown,
   };
+};
+
+/**
+ * Keeps the frameless launcher window sized to the rendered pill.
+ *
+ * Lives in the hooks layer because resizing is an IPC call: components render,
+ * hooks orchestrate ./api.
+ */
+export const useLauncherWindowHeight = (pillHeight: number): void => {
+  useEffect(() => {
+    void resizeQuickQuery({ height: launcherWindowHeightFromPill(pillHeight) });
+  }, [pillHeight]);
 };

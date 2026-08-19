@@ -26,7 +26,7 @@ import { AuthService } from '../../services/auth';
 import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
   sessionForLocalMachineData,
-} from '../auth/impersonation';
+} from '../../base/impersonation';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { CODEX_NPM_PACKAGE, GPT_CREDENTIAL_UPLOAD_PATH, RSA_PUBLIC_KEY_PEM } from './config';
 import {

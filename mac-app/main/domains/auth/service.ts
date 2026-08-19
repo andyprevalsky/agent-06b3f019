@@ -16,7 +16,7 @@
 
 import { config } from '../../base/config';
 import { MILLISECOND_THRESHOLD, REFRESH_BUFFER_MS } from './config';
-import { accessTokenIsImpersonated } from './impersonation';
+import { accessTokenIsImpersonated } from '../../base/impersonation';
 import { deleteSession, readSession, writeSession } from './repo';
 import type { AuthSession, SupabaseTokenResponse } from './types';
 

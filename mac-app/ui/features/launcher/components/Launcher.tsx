@@ -20,16 +20,11 @@
  *   only drag-region for moving the frameless window.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import QueryForm from './QueryForm';
 import LauncherShell from './LauncherShell';
-import { useLauncher } from '../hooks';
-import { resizeQuickQuery } from '../api';
-import {
-  LAUNCHER_PILL_HEIGHT,
-  launcherPillHeightFromContent,
-  launcherWindowHeightFromPill,
-} from '../config';
+import { useLauncher, useLauncherWindowHeight } from '../hooks';
+import { LAUNCHER_PILL_HEIGHT, launcherPillHeightFromContent } from '../config';
 
 const Launcher = (): React.JSX.Element => {
   const {
@@ -55,9 +50,7 @@ const Launcher = (): React.JSX.Element => {
     setContentHeight(height);
   }, []);
 
-  useEffect(() => {
-    void resizeQuickQuery({ height: launcherWindowHeightFromPill(pillHeight) });
-  }, [pillHeight]);
+  useLauncherWindowHeight(pillHeight);
 
   return (
     <div

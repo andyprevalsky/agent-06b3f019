@@ -12,6 +12,8 @@
  * or a `text/uri-list` / `public.file-url` entry.
  */
 
+import { readDroppedFileUrl } from './api';
+
 const FILE_DRAG_TYPES = new Set([
   'Files',
   'files',
@@ -76,15 +78,10 @@ export async function extractDroppedFilesAsync(
   const files: File[] = [];
   for (const uri of uriList) {
     if (!uri.startsWith('file:')) continue;
-    try {
-      const response = await fetch(uri);
-      if (!response.ok) continue;
-      const blob = await response.blob();
-      const name = decodeURIComponent(uri.split('/').pop() ?? 'file');
-      files.push(new File([blob], name, { type: blob.type || 'application/octet-stream' }));
-    } catch {
-      // Packaged/dev security policy may block file:// fetch; items path covers most cases.
-    }
+    const blob = await readDroppedFileUrl(uri);
+    if (blob === null) continue;
+    const name = decodeURIComponent(uri.split('/').pop() ?? 'file');
+    files.push(new File([blob], name, { type: blob.type || 'application/octet-stream' }));
   }
   return files;
 }
