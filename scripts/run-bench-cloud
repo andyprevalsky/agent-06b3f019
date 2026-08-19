@@ -860,9 +860,19 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
         return 1
     }
     token_b64="$(printf '%s' "$token" | base64 | tr -d '\n')"
-    ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh" >/dev/null || true
-    if ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
-        "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh; then
+    _sftp_put_fetch_ref() {
+        # flyctl sftp will not overwrite; each attempt must start from a clean dest.
+        ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh" >/dev/null || true
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
+            "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh
+    }
+    # Guest driver staging already retries sftp (CLOUDBENCH_STAGE_ATTEMPTS). A
+    # single Fly API "tunnel unavailable / context deadline exceeded" here used
+    # to abort the whole fleet before any task machine started.
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" \
+        _sftp_put_fetch_ref; then
         echo "❌ failed to upload cloudbench-fetch-ref.sh to $mid" >&2
         return 1
     fi
