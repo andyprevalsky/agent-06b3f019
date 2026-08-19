@@ -69,11 +69,11 @@ handoff detection cleared once live URL returned to the origin domain, so the
 agent looped merchant `#card-number` + Place order until max steps; purchase
 stayed HELD.
 
-Fleet `d2a9805f` after sticky pin (#994): goto/navback/close_tab/evaluate-nav /
-api-surface refuses held, but the model still left via `press_key`
-(Control+Shift+W, Alt+Left) and click on `Return to merchant` href, then never
-`input_text` on Checkout fields (0 inputs after checkout). Verifier reported
-100% while purchase stayed HELD.
+Fleet `d2a9805f` / `a6df3704` after sticky pin + key/click refuses: all leave
+paths ERROR'd, but **0 `input_text` after Checkout** — model waited / reloaded /
+read network until timeout. Payment card secret refs were already minted;
+harness now injects one handoff fill nudge (`input_text` with `card_number`…)
+when pinned with payment refs ready.
 
 ## Diagnosis
 

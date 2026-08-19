@@ -12001,6 +12001,8 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "navigation_pin_url" in source
     assert "Auto-returning to pinned handoff host" in source
     assert "navigation_origin_base_domain" in source
+    assert "Injected handoff payment-fill nudge" in source
+    assert "text=card_number" in source
 
 
 def test_recovery_skips_when_live_tab_already_clear():

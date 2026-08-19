@@ -4939,6 +4939,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # host so the model cannot leave the cleared page for network-log thrash.
     navigation_pin_host: Optional[str] = None
     navigation_pin_url: Optional[str] = None
+    handoff_payment_fill_nudge_sent = False
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -6357,6 +6358,42 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                 activity.heartbeat(f"Step {iteration} - calling Rose API")
+                if (
+                    navigation_pin_host
+                    and navigation_pin_url
+                    and has_payment_card_secret_refs(secret_refs)
+                    and not handoff_payment_fill_nudge_sent
+                ):
+                    from urllib.parse import urlparse as _urlparse_nudge
+
+                    _nudge_host = (_urlparse_nudge(str(current_url or "")).hostname or "").lower()
+                    _on_pin = bool(_nudge_host) and (
+                        _nudge_host == navigation_pin_host
+                        or _nudge_host.endswith(f".{navigation_pin_host}")
+                    )
+                    if _on_pin:
+                        handoff_payment_fill_nudge_sent = True
+                        browser_turn_messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "Cross-origin handoff page is pinned "
+                                    f"({navigation_pin_url}). Payment card secret refs "
+                                    "are ready. Call input_text with text=card_number "
+                                    "(then card_name, card_expiry, card_cvv) to fill the "
+                                    "visible payment fields on THIS page, then submit. "
+                                    "Do not navigate away, close tabs, or thrash "
+                                    "network/evaluate — stay and complete the form."
+                                ),
+                            }
+                        )
+                        logger.info(
+                            "Injected handoff payment-fill nudge",
+                            pin_host=navigation_pin_host,
+                            agent_id=agent_id,
+                            task_id=task_id,
+                            iteration=iteration,
+                        )
                 if browser_recorder:
                     await browser_recorder.record_observation(
                         iteration=iteration,
