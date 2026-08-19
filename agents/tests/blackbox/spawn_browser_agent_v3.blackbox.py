@@ -11642,6 +11642,8 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     from domains.spawn_browser_agent_v3.service_actions import (
         navigation_leaves_pinned_host,
         url_looks_like_api_surface,
+        _navigation_guard_error,
+        _ActionContext,
     )
 
     assert url_looks_like_api_surface("https://api.example.com/") is True
@@ -11697,6 +11699,56 @@ def test_url_looks_like_api_surface_and_navigation_pin():
             action="goto",
         )
         is False
+    )
+
+    # Payment-document stay: navback refused; merchant→checkout allowed.
+    ctx = _ActionContext(
+        dom_service=None,  # type: ignore[arg-type]
+        action_history=None,  # type: ignore[arg-type]
+        session=None,
+        action_name="navback",
+        index=None,
+        params={},
+        thinking=None,
+        coords=None,
+        element=None,
+        available_file_paths=None,
+        session_id=None,
+        config=None,
+        humanizer=None,
+        secret_refs=None,
+        password_origins=None,
+        credential_refs_by_secret_ref=None,
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        trusted_page_urls=None,
+        write_lock_enabled=False,
+        write_lock_approvals=None,
+        system_name="Rose",
+        browser_network_recorder=None,
+        current_auth_realm="",
+        prepare_credentials_for_url=None,
+        navigation_pin_host=None,
+    )
+    assert "navback away from payment page" in (_navigation_guard_error(ctx, action="navback") or "")
+    ctx.action_name = "goto"
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://www.merchant.com/about"
+        )
+        is not None
+    )
+    # Hosted checkout → another checkout/pay document stays allowed.
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://checkout.example.com/c/pay/other"
+        )
+        is None
+    )
+    assert (
+        _navigation_guard_error(
+            ctx, action="goto", target_url="https://www.shop.com/checkout/confirm"
+        )
+        is None
     )
 
 

@@ -6945,12 +6945,6 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         + ". Continue the task on this page — do not start "
                         "challenge recovery unless the document itself is blocked."
                     )
-                    if current_url:
-                        from urllib.parse import urlparse as _urlparse_pin
-
-                        pin_host = (_urlparse_pin(str(current_url)).hostname or "").lower()
-                        if pin_host:
-                            navigation_pin_host = pin_host
                     await save_browser_action_message(
                         agent_id=agent_id,
                         title="Page already clear — skip challenge recovery",

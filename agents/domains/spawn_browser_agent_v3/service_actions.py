@@ -589,6 +589,8 @@ def _navigation_guard_error(
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
+    from .challenge_recovery import target_looks_like_payment_document
+
     if target_url and url_looks_like_api_surface(target_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
@@ -606,6 +608,26 @@ def _navigation_guard_error(
             f"Current page URL: {context.current_url}. Continue the task on this page "
             "(do not go back or navigate to another host until this page is done)."
         )
+    # Payment/checkout documents: do not leave via navback, and do not jump to
+    # non-document URLs. Merchant→hosted-checkout (both payment docs) stays allowed.
+    if target_looks_like_payment_document(context.current_url):
+        if action == "navback":
+            return (
+                f"Refusing navback away from payment page ({context.current_url}). "
+                "Fill the payment fields and submit on this page."
+            )
+        if action in {"goto", "open_new_tab"} and target_url:
+            if url_looks_like_api_surface(target_url):
+                return (
+                    f"Refusing navigation to API/non-document URL {target_url!r}. "
+                    f"Stay on the payment page ({context.current_url}) and continue there."
+                )
+            if not target_looks_like_payment_document(target_url):
+                return (
+                    f"Refusing navigation from payment page to {target_url!r}. "
+                    f"Current page URL: {context.current_url}. "
+                    "Fill the payment fields and submit on this page."
+                )
     return None
 
 
