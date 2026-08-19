@@ -132,6 +132,46 @@ def evaluate_code_looks_like_navigation(code: str) -> bool:
     return any(marker in lowered for marker in markers)
 
 
+def press_key_looks_like_leave_page(key: str) -> bool:
+    """True for history-back / close-tab chords that abandon a pinned page."""
+    normalized = (key or "").replace(" ", "").lower().replace("ctrl+", "control+")
+    leave_chords = {
+        "alt+left",
+        "alt+arrowleft",
+        "alt+right",
+        "alt+arrowright",
+        "meta+left",
+        "meta+[",
+        "control+[",
+        "control+w",
+        "control+shift+w",
+        "meta+w",
+        "meta+shift+w",
+        "browserback",
+        "browserforward",
+    }
+    return normalized in leave_chords
+
+
+def click_href_leaves_pinned_base(element: Any, pin_host: Optional[str]) -> Optional[str]:
+    """Return absolute href when a click target leaves the pinned registrable domain."""
+    pin = (pin_host or "").lower().strip(".")
+    if not pin or element is None:
+        return None
+    attrs = getattr(element, "attributes", None) or {}
+    if not isinstance(attrs, dict):
+        return None
+    href = str(attrs.get("href") or attrs.get("xlink:href") or "").strip()
+    if not href.startswith(("http://", "https://")):
+        return None
+    target_host = (urlparse(href).hostname or "").lower()
+    if not target_host:
+        return None
+    if _get_base_domain(target_host) != _get_base_domain(pin):
+        return href
+    return None
+
+
 def navigation_leaves_pinned_host(
     *,
     current_url: str,
@@ -677,6 +717,22 @@ def _pinned_evaluate_guard_error(context: _ActionContext, code: str) -> Optional
     return None
 
 
+def _active_pin_host(context: _ActionContext) -> Optional[str]:
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
+    if not pin_host:
+        return None
+    current_host = (urlparse(context.current_url or "").hostname or "").lower()
+    if not current_host:
+        return None
+    if current_host == pin_host or current_host.endswith(f".{pin_host}"):
+        return pin_host
+    return None
+
+
 _INTERACTION_ACTIONS = {
     "click",
     "input_text",
@@ -799,6 +855,19 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
     )
 
     if context.action_name == "click":
+        pin_host = _active_pin_host(context)
+        leave_href = click_href_leaves_pinned_base(context.element, pin_host)
+        if leave_href:
+            return await _refuse_navigation(
+                context,
+                action="click",
+                error=(
+                    f"Refusing click that navigates off pinned host {pin_host!r} "
+                    f"via {leave_href!r}. Current page URL: {context.current_url}. "
+                    "Fill and submit the fields on this page instead."
+                ),
+                params={"index": context.index, "href": leave_href},
+            )
         return await _execute_click(
             session=context.session,
             dom_service=context.dom_service,
@@ -835,6 +904,18 @@ async def _execute_interaction_action(context: _ActionContext) -> Dict[str, Any]
         )
     if context.action_name == "press_key":
         key = context.params.get("key", "")
+        pin_host = _active_pin_host(context)
+        if pin_host and press_key_looks_like_leave_page(str(key)):
+            return await _refuse_navigation(
+                context,
+                action="press_key",
+                error=(
+                    f"Refusing key chord {key!r} that would leave pinned host {pin_host!r}. "
+                    f"Current page URL: {context.current_url}. Continue on this page with "
+                    "input_text/click instead of back/close-tab shortcuts."
+                ),
+                params={"key": key},
+            )
         if context.humanizer:
             await context.humanizer.press_key(key)
         else:

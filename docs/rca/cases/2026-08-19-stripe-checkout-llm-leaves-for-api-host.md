@@ -23,10 +23,12 @@ sources:
   - agent ea340c81-b65b-43c3-b3ae-89736f7f7279
   - agent 1bffacc0-a587-48f9-8282-3f39fe584ddb
   - agent 0b3b582b-19d6-4aea-ad4f-df81248b27c3
+  - agent d2a9805f-5b00-4874-9ed4-e8cd9cde0c65
   - fleet run 20260819-002102-843616 ref e277cf645
   - fleet run 20260819-004041-887409 ref a239a2b36
   - fleet run 20260819-033204-1139373 ref be4c560af
   - fleet run 20260819-040130-1177499 ref d143e0b47
+  - fleet run 20260819-043024-1215179 ref 06fc101b6
 repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (test_live_tab_looks_challenged_helpers, test_recovery_skips_when_live_tab_already_clear, test_url_looks_like_api_surface_and_navigation_pin, test_execute_goto_refuses_api_surface_urls, test_execute_navback_refuses_when_host_pinned, test_execute_navback_refuses_on_cross_origin_handoff, test_execute_close_tab_refuses_on_cross_origin_handoff, test_navigation_guard_has_no_endpoint_path_allowlists)
 status: open
 ---
@@ -67,6 +69,12 @@ handoff detection cleared once live URL returned to the origin domain, so the
 agent looped merchant `#card-number` + Place order until max steps; purchase
 stayed HELD.
 
+Fleet `d2a9805f` after sticky pin (#994): goto/navback/close_tab/evaluate-nav /
+api-surface refuses held, but the model still left via `press_key`
+(Control+Shift+W, Alt+Left) and click on `Return to merchant` href, then never
+`input_text` on Checkout fields (0 inputs after checkout). Verifier reported
+100% while purchase stayed HELD.
+
 ## Diagnosis
 
 1. Place order redirects to a Kernel-blacklisted challenge target → provider
@@ -91,8 +99,10 @@ checkout host labels. General harness rules only:
    compute ephemerally — returning to the origin must not clear it). Refuse
    `goto`/`navback`/`open_new_tab`/`close_tab`/`switch_tab` while on the pin,
    refuse navigation-shaped `evaluate` (`location`/`history`/`window.open`),
+   refuse leave-page `press_key` chords (Alt+Left, Ctrl+W / Ctrl+Shift+W, …),
+   refuse clicks whose absolute `href` leaves the pinned registrable domain,
    and auto-`goto` back to the pinned URL if the live tab leaves the pin host
-   via click/redirect. No `checkout`/`payment` path allowlists.
+   via redirect. No `checkout`/`payment` path allowlists.
 4. Refuse navigation to API/non-document URL *shapes* (`api.*`, `/v1/`,
    `/healthcheck`, …) — no vendor host names in the label list.
 5. Keep existing provider-level preferSteel for Kernel-blacklisted *challenge

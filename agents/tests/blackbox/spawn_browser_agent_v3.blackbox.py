@@ -11940,7 +11940,55 @@ async def test_execute_evaluate_refuses_navigation_while_pinned():
     )
     assert out["success"] is False
     assert "evaluate that would navigate" in out["error"]
-    session.get_or_create_cdp_session = AsyncMock()  # type: ignore[attr-defined]
+
+
+async def test_execute_press_key_and_click_refuse_leave_while_pinned():
+    """Fleet d2a9805f: Ctrl+Shift+W and Return-to-merchant href escaped the pin."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    assert service_actions.press_key_looks_like_leave_page("Control+Shift+W")
+    assert service_actions.press_key_looks_like_leave_page("Alt+Left")
+    assert not service_actions.press_key_looks_like_leave_page("Enter")
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    dom.session = session
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    out = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "press_key", "params": {"key": "Control+Shift+W"}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out["success"] is False
+    assert "key chord" in out["error"]
+
+    leave_el = MagicMock()
+    leave_el.attributes = {"href": "https://www.merchant.com/cart"}
+    same_el = MagicMock()
+    same_el.attributes = {"href": "https://pay.example.com/confirm"}
+    assert (
+        service_actions.click_href_leaves_pinned_base(leave_el, "checkout.example.com")
+        == "https://www.merchant.com/cart"
+    )
+    assert (
+        service_actions.click_href_leaves_pinned_base(same_el, "checkout.example.com")
+        is None
+    )
+
+    dom.selector_map = {3: leave_el}
+    out_click = await service_actions.execute_action(
+        dom_service=dom,
+        action_history=ah,
+        action={"action": "click", "index": 3, "params": {}},
+        current_url="https://checkout.example.com/c/pay/cs_live_x",
+        navigation_origin_base_domain="merchant.com",
+    )
+    assert out_click["success"] is False
+    assert "click that navigates off pinned host" in out_click["error"]
+    session.event_bus.dispatch.assert_not_called()
 
 
 def test_handoff_pin_is_sticky_in_handler():
@@ -16429,6 +16477,10 @@ async def run_all_tests():
     await r.record_async(
         "evaluate_refuses_nav_while_pinned",
         test_execute_evaluate_refuses_navigation_while_pinned,
+    )
+    await r.record_async(
+        "press_key_click_refuse_leave_while_pinned",
+        test_execute_press_key_and_click_refuse_leave_while_pinned,
     )
     await r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
     await r.record(
