@@ -11718,6 +11718,60 @@ async def test_fill_payment_ref_via_playwright_label_when_no_autocomplete():
             await browser.close()
 
 
+async def test_fill_payment_ref_via_titled_payment_iframe():
+    """Hosted widgets isolate fields in titled iframes — fill by semantic title."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <h1>Hosted checkout shell</h1>
+                  <iframe title="Secure card number input frame" srcdoc='
+                    <html><body><input name="number" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure expiration date input frame" srcdoc='
+                    <html><body><input name="expiry" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure CVC input frame" srcdoc='
+                    <html><body><input name="cvc" /></body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert result.get("method") == "playwright_iframe_title"
+            value = await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
 async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
     """Payment secret refs without element/coords must not fake-success via focused typing."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12474,6 +12528,9 @@ def test_handoff_pin_is_sticky_in_handler():
     assert '"text": "card_number"' in source
     assert "wait_for_payment_ref_fields" in source
     assert "Waiting for payment fields on handoff page" in source
+    assert "timeout_seconds=4.0" in source
+    # Prefer the live Playwright page (titled payment iframes) over humanizer-only.
+    assert "_autofill_page = input_page" in source
     # Attempt counter must only advance after fields are ready (else burns retries).
     wait_offset = source.index("wait_for_payment_ref_fields")
     attempt_offset = source.index("handoff_payment_fill_attempts += 1")
@@ -16952,6 +17009,10 @@ async def run_all_tests():
     await r.record_async(
         "fill_payment_ref_via_playwright_label_when_no_autocomplete",
         test_fill_payment_ref_via_playwright_label_when_no_autocomplete,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_titled_payment_iframe",
+        test_fill_payment_ref_via_titled_payment_iframe,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_fail_closed_without_target",
