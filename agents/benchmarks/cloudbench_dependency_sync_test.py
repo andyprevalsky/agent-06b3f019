@@ -9206,6 +9206,29 @@ def test_production_only_cloud_route_clears_local_frontend_override() -> None:
     assert ("if [ '$BENCH_TARGET_MODE' = 'prod' ]; then\n  unset BENCHMARK_FRONTEND_URL") in driver
 
 
+def test_production_only_real_mode_skips_public_tunnel() -> None:
+    """Prod-only fleets must not fail stack bring-up on trycloudflare NXDOMAIN.
+
+    agent-payment-production-purchase runs with --prod against roselabs.ai, so a
+    local public tunnel is unused as {frontend_url}. Without SKIP_PUBLIC_TUNNEL,
+    cloudflare NXDOMAIN + missing ngrok on clones kills the stack before the
+    synchronized start barrier (fleet run 20260819-183825-1437870).
+    """
+    driver = DRIVER_SCRIPT.read_text()
+
+    assert 'BENCH_TARGET_MODE_FOR_STACK="$(printf' in driver
+    assert 'elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then' in driver
+    prod_idx = driver.index('elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then')
+    else_idx = driver.index("\nelse\n", prod_idx)
+    fi_idx = driver.index("\nfi\n", else_idx)
+    prod_branch = driver[prod_idx:else_idx]
+    else_branch = driver[else_idx:fi_idx]
+    assert "BENCHMARK_SKIP_PUBLIC_TUNNEL=1" in prod_branch
+    assert "BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1" not in prod_branch
+    assert "BENCHMARK_EPHEMERAL_PUBLIC_TUNNEL=1" in else_branch
+    assert "BENCHMARK_SKIP_PUBLIC_TUNNEL=1" not in else_branch
+
+
 def test_cloud_dashboard_mirror_does_not_override_benchmark_frontend_url() -> None:
     """Dashboard links may use the localhost mirror, but task prompts must not.
 
