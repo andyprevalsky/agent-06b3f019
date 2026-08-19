@@ -130,7 +130,8 @@ def navigation_leaves_pinned_host(
     if not on_pin:
         # Clicks may have already moved us off the pin — do not trap elsewhere.
         return False
-    if action == "navback":
+    # Closing/switching tabs abandons the handoff surface the same way navback does.
+    if action in {"navback", "close_tab", "switch_tab"}:
         return True
     if action in {"goto", "open_new_tab"}:
         target_host = (urlparse(target_url or "").hostname or "").lower()
@@ -626,7 +627,8 @@ def _navigation_guard_error(
         return (
             f"Refusing to leave pinned page host {pin_host!r}. "
             f"Current page URL: {context.current_url}. Continue the task on this page "
-            "(do not go back or navigate to another host until this page is done)."
+            "(do not go back, close/switch tabs, or navigate to another host until "
+            "this page is done)."
         )
     return None
 
@@ -926,6 +928,14 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
         )
         return {"success": True, "message": ""}
     if context.action_name == "switch_tab":
+        guard = _navigation_guard_error(context, action="switch_tab")
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="switch_tab",
+                error=guard,
+                params={"tab_id": context.params.get("tab_id")},
+            )
         return await _execute_switch_tab(
             session=context.session,
             dom_service=context.dom_service,
@@ -934,6 +944,14 @@ async def _execute_navigation_action(context: _ActionContext) -> Dict[str, Any]:
             thinking=context.thinking,
         )
     if context.action_name == "close_tab":
+        guard = _navigation_guard_error(context, action="close_tab")
+        if guard:
+            return await _refuse_navigation(
+                context,
+                action="close_tab",
+                error=guard,
+                params={"tab_id": context.params.get("tab_id")},
+            )
         return await _execute_close_tab(
             session=context.session,
             dom_service=context.dom_service,

@@ -20,9 +20,12 @@ tags:
 sources:
   - agent cd0c2060-47fb-4ab4-aff2-17892b336427
   - agent 641444dc-7bf3-4eee-b57c-c58e364467c1
+  - agent ea340c81-b65b-43c3-b3ae-89736f7f7279
+  - agent 1bffacc0-a587-48f9-8282-3f39fe584ddb
   - fleet run 20260819-002102-843616 ref e277cf645
   - fleet run 20260819-004041-887409 ref a239a2b36
-repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (test_live_tab_looks_challenged_helpers, test_recovery_skips_when_live_tab_already_clear, test_url_looks_like_api_surface_and_navigation_pin, test_execute_goto_refuses_api_surface_urls, test_execute_navback_refuses_when_host_pinned, test_execute_navback_refuses_on_cross_origin_handoff, test_navigation_guard_has_no_endpoint_path_allowlists)
+  - fleet run 20260819-033204-1139373 ref be4c560af
+repro: agents/tests/blackbox/spawn_browser_agent_v3.blackbox.py (test_live_tab_looks_challenged_helpers, test_recovery_skips_when_live_tab_already_clear, test_url_looks_like_api_surface_and_navigation_pin, test_execute_goto_refuses_api_surface_urls, test_execute_navback_refuses_when_host_pinned, test_execute_navback_refuses_on_cross_origin_handoff, test_execute_close_tab_refuses_on_cross_origin_handoff, test_navigation_guard_has_no_endpoint_path_allowlists)
 status: open
 ---
 
@@ -49,6 +52,13 @@ merchant `/test_payment` and hosted Checkout both matched loose payment-path
 markers, so `goto` merchant←→checkout stayed allowed and the agent kept
 restarting Place order.
 
+Fleet `1bffacc0` after cross-origin handoff pin (#992): `goto` merchant /
+`navback` / `open_new_tab` correctly ERROR'd on Checkout, but `close_tab` was
+still allowed — closing the handoff tab triggered supervisor recovery →
+browser automation failed → parent respawned a new browser on the merchant
+and Place-ordered again. Timed out with purchase HELD; almost no Checkout
+field `input_text`.
+
 ## Diagnosis
 
 1. Place order redirects to a Kernel-blacklisted challenge target → provider
@@ -72,7 +82,9 @@ checkout host labels. General harness rules only:
    from the session `start_url` origin, pin navigation to the live host. This
    covers Place-order / OAuth / 3DS redirects without `checkout`/`payment` path
    allowlists (those wrongly treated merchant `/test_payment` and hosted
-   Checkout as interchangeable).
+   Checkout as interchangeable). Refuse `goto`/`navback`/`open_new_tab` **and**
+   `close_tab`/`switch_tab` while pinned — closing the handoff tab abandons the
+   surface and has crashed the session (fleet `1bffacc0`).
 4. Refuse navigation to API/non-document URL *shapes* (`api.*`, `/v1/`,
    `/healthcheck`, …) — no vendor host names in the label list.
 5. Keep existing provider-level preferSteel for Kernel-blacklisted *challenge
