@@ -30,26 +30,29 @@ interface OpenRouterModel {
 // per spawn during sub-agent fan-outs.
 const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }>();
 
+// Reconciled against the live OpenRouter catalog on 2026-08-18; sol, terra,
+// luna and 5.4 had all drifted. Keep in sync with `_PROVIDER_PRICING` in
+// agents/providers/rose/pricing.py and MODEL_RATES in admin-health/costs.ts.
 const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
   'gpt-5.4-openai': {
-    prompt: (1.75 / 1_000_000).toString(),
-    completion: (14.0 / 1_000_000).toString(),
+    prompt: (2.5 / 1_000_000).toString(),
+    completion: (15.0 / 1_000_000).toString(),
   },
   'gpt-5.5-openai': {
     prompt: (5.0 / 1_000_000).toString(),
     completion: (30.0 / 1_000_000).toString(),
   },
   'gpt-5.6-luna-openai': {
-    prompt: (1.0 / 1_000_000).toString(),
-    completion: (6.0 / 1_000_000).toString(),
+    prompt: (0.2 / 1_000_000).toString(),
+    completion: (1.2 / 1_000_000).toString(),
   },
   'gpt-5.6-terra-openai': {
-    prompt: (2.5 / 1_000_000).toString(),
-    completion: (15.0 / 1_000_000).toString(),
+    prompt: (2.0 / 1_000_000).toString(),
+    completion: (12.0 / 1_000_000).toString(),
   },
   'gpt-5.6-sol-openai': {
-    prompt: (5.0 / 1_000_000).toString(),
-    completion: (30.0 / 1_000_000).toString(),
+    prompt: (2.5 / 1_000_000).toString(),
+    completion: (15.0 / 1_000_000).toString(),
   },
 };
 

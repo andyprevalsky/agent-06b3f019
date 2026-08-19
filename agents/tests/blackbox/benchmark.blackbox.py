@@ -13754,6 +13754,14 @@ async def run_all_tests():
         test_no_tool_failures_static_check_rejects_any_failed_tool_event,
     )
     r.record(
+        "declared_static_no_tool_failures_ignores_challenge_recovery",
+        test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
+    )
+    await r.record_async(
+        "auto_approve_payment_clears_write_lock_then_awaits_approval",
+        test_auto_approve_payment_task_clears_write_lock_then_awaits_payment_approval,
+    )
+    r.record(
         "declared_static_completion_summary_and_sms",
         test_completion_summary_and_sms_static_checks_are_fail_closed,
     )

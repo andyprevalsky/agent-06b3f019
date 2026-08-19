@@ -16,13 +16,21 @@ from typing import Dict, Optional
 from providers.rose.pools import POOL_REGISTRY
 
 # Per-token USD pricing for every provider model that appears in any pool's
-# waterfall. Values come from the providers' published per-million-token prices.
+# waterfall. Values are the models' published per-million-token OpenRouter
+# prices.
+#
+# Reconciled against the live OpenRouter /api/v1/models catalog on 2026-08-18.
+# Six entries had drifted — gpt-5.6-sol and gemini-3.6-flash were both billing
+# at 2x actual and gpt-5.6-luna at 5x, while kimi-k2.5 and gpt-5.4 were
+# UNDER-billing. Because `_average_pool_pricing` derives every pool's rate from
+# this table, each stale row silently mispriced whole pools rather than one
+# model. Re-check against the live catalog when adding a waterfall layer.
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
-    "google/gemini-3.6-flash":        {"prompt": 1.50 / 1_000_000, "completion": 7.50 / 1_000_000},
-    "moonshotai/kimi-k2.5":           {"prompt": 0.38 / 1_000_000, "completion": 1.72 / 1_000_000},
-    "moonshotai/kimi-k2.7-code":      {"prompt": 0.74 / 1_000_000, "completion": 3.50 / 1_000_000},
+    "google/gemini-3.6-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "moonshotai/kimi-k2.5":           {"prompt": 0.57 / 1_000_000, "completion": 2.85 / 1_000_000},
+    "moonshotai/kimi-k2.7-code":      {"prompt": 0.71 / 1_000_000, "completion": 3.50 / 1_000_000},
     "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
     "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
@@ -31,11 +39,11 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     # KeyError instead of returning a number.
     "anthropic/claude-haiku-4.5":     {"prompt": 1.00 / 1_000_000, "completion": 5.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
-    "openai/gpt-5.4":                 {"prompt": 1.75 / 1_000_000, "completion": 14.00 / 1_000_000},
+    "openai/gpt-5.4":                 {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
     "openai/gpt-5.5":                 {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
-    "openai/gpt-5.6-luna":            {"prompt": 1.00 / 1_000_000, "completion": 6.00 / 1_000_000},
-    "openai/gpt-5.6-terra":           {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
-    "openai/gpt-5.6-sol":             {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
+    "openai/gpt-5.6-luna":            {"prompt": 0.20 / 1_000_000, "completion": 1.20 / 1_000_000},
+    "openai/gpt-5.6-terra":           {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
+    "openai/gpt-5.6-sol":             {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
 }
 
 

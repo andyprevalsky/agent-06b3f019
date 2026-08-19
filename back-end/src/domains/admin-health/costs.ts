@@ -74,24 +74,32 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'claude-sonnet-4-6': anthropic(3, 15),
   'claude-haiku-4.5': anthropic(1, 5),
   'claude-haiku-4-5': anthropic(1, 5),
-  'gpt-5.6-sol': openAi(5, 30, 1.25),
-  'gpt-5.6-terra': openAi(2.5, 15, 1.25),
-  'gpt-5.6-luna': openAi(1, 6, 1.25),
+  'gpt-5.6-sol': openAi(2.5, 15, 1.25),
+  'gpt-5.6-terra': openAi(2, 12, 1.25),
+  'gpt-5.6-luna': openAi(0.2, 1.2, 1.25),
   'gpt-5.5': openAi(5, 30),
-  'gpt-5.4': openAi(1.75, 14),
+  'gpt-5.4': openAi(2.5, 15),
   'google/gemini-3-flash-preview': openRouter(0.5, 3),
   'google/gemini-3.5-flash': openRouter(1.5, 9),
-  'google/gemini-3.6-flash': openRouter(1.5, 7.5),
+  'google/gemini-3.6-flash': openRouter(0.75, 3.75),
   'google/gemini-3.1-pro-preview': openRouter(2, 12),
-  'moonshotai/kimi-k2.5': openRouter(0.38, 1.72),
-  'moonshotai/kimi-k2.7-code': openRouter(0.74, 3.5),
+  'moonshotai/kimi-k2.5': openRouter(0.57, 2.85),
+  'moonshotai/kimi-k2.7-code': openRouter(0.71, 3.5),
   'moonshotai/kimi-k3': openRouter(3, 15),
   'zai-glm-4.7': uncached(2.25, 2.75),
+  // The chat/SMS primary path. Both were absent from this table, so the
+  // highest-volume route in the product reported $0 cost. `z-ai/glm-4.7` is
+  // provider-variable on OpenRouter ($0.40-$0.60 per M depending on which
+  // endpoint serves it); this uses the default/headline rate.
+  'z-ai/glm-4.7': openRouter(0.4, 1.75),
+  'google/gemini-2.5-flash-lite': openRouter(0.1, 0.4),
   // Pool identifiers appear in some older usage rows before actual-model
-  // provenance was recorded. Use the mean of their waterfall provider rates.
-  'rose-labs/rose-1-lite': openRouter(1.12, 6.25),
-  'rose-labs/rose-1-ultra': openRouter(3.5, 18.5),
-  'rose-labs/rose-1-browser-use': openRouter(5, 27.5),
+  // provenance was recorded. Use the mean of their waterfall provider rates
+  // (kept in sync with POOL_REGISTRY + agents/providers/rose/pricing.py).
+  'rose-labs/rose-1-mini': openRouter(0.75, 4),
+  'rose-labs/rose-1-lite': openRouter(1.875, 9.375),
+  'rose-labs/rose-1-ultra': openRouter(2.75, 15),
+  'rose-labs/rose-1-browser-use': openRouter(2.75, 15),
 };
 
 function currentModelRates(model: string, now = Date.now()): ModelRates | undefined {
