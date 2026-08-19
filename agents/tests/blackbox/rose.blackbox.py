@@ -144,6 +144,24 @@ def test_oss_pool_is_open_weights_only():
         if name != "rose-1-oss":
             assert spec.direct_auth_enabled is True, f"{name} lost direct auth"
 
+    # EVERY proprietary route must consult the flag -- not just the OAuth ones.
+    # Gating only OAuth left the funded ANTHROPIC_API_KEY / OPENAI_API_KEY
+    # routes reachable, so a pinned run could still be served by a proprietary
+    # model while the pool claimed otherwise.
+    client_src = (
+        Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py"
+    ).read_text()
+    for marker in (
+        "openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else \"\"",
+        "pool_spec.direct_auth_enabled",
+    ):
+        assert marker in client_src, f"missing direct_auth_enabled gate: {marker}"
+    # The Anthropic funded-key branch must be gated too.
+    anthropic_branch = client_src.split("anthropic_api_key = (load_config()")[1][:400]
+    assert "pool_spec.direct_auth_enabled" in anthropic_branch, (
+        "ANTHROPIC_API_KEY route is not gated by direct_auth_enabled"
+    )
+
 
 def test_claude_auth_from_token_returns_none_when_falsy():
     assert claude_auth_from_token(None) is None
