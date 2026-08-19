@@ -1069,8 +1069,10 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     )
     assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in fixture
     assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in import_block
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID" in import_block
+    assert "benchmarkPaymentIdentity" in import_block
     assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in fixture
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
