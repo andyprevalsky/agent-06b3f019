@@ -144,29 +144,40 @@ function extractWhatsAppErrorCode(errorText: string): number | null {
   }
 }
 
-/**
- * Send a WhatsApp text message via the Meta Cloud API.
- *
- * Returns the same `{ success, messageSid?, error?, definitiveFailure? }` shape
- * as `sendSms` so it is a drop-in delivery function for the SMS supervisor.
- *
- * NOTE: WhatsApp only allows free-form (session) messages within 24h of the
- * user's last inbound message. Replying to an inbound message always falls
- * inside that window, so the conversational supervisor path never needs an
- * approved template.
- */
-export async function sendWhatsAppMessage(
-  phoneNumber: string,
-  message: string,
-  options: WhatsAppArchiveOptions = {}
-): Promise<{
+export interface WhatsAppSendResult {
   success: boolean;
   messageSid?: string;
   error?: string;
   definitiveFailure?: boolean;
   /** Meta reports this number can't receive a proactive message — stop mirroring. */
   recipientUnreachable?: boolean;
-}> {
+}
+
+/**
+ * The approved template used to mirror the onboarding welcome to WhatsApp.
+ *
+ * A brand-new user who signed up over SMS/web has never opened a WhatsApp 24h
+ * session window, so the welcome CANNOT be a free-form message — only an
+ * approved template can be delivered business-initiated. Body variable {{1}} is
+ * the recipient's first name. Submitted on the prod WABA as UTILITY.
+ */
+export const WHATSAPP_ONBOARDING_TEMPLATE = {
+  name: 'onboarding_welcome',
+  language: 'en_US',
+} as const;
+
+/**
+ * POST a fully-formed message body to the Cloud API `/messages` endpoint and
+ * normalize the response into the `{ success, messageSid?, error?,
+ * definitiveFailure?, recipientUnreachable? }` shape that both the SMS
+ * supervisor's delivery loop and the onboarding mirror depend on. Shared by the
+ * free-form text send and the template send — they differ only in `requestBody`.
+ */
+async function postWhatsAppMessage(
+  requestBody: Record<string, unknown>,
+  phoneNumber: string,
+  options: WhatsAppArchiveOptions
+): Promise<WhatsAppSendResult> {
   const { phoneNumberId, accessToken, graphApiVersion } = getWhatsAppConfig();
 
   if (
@@ -178,16 +189,6 @@ export async function sendWhatsAppMessage(
     log.error('WhatsApp credentials not configured');
     return { success: false, error: 'WhatsApp not configured', definitiveFailure: true };
   }
-
-  // Meta expects the recipient in international format without a leading '+'.
-  const to = phoneNumber.replace(/^\+/, '');
-  const requestBody = {
-    messaging_product: 'whatsapp',
-    recipient_type: 'individual',
-    to,
-    type: 'text',
-    text: { preview_url: false, body: message },
-  };
 
   try {
     const response = await fetch(
@@ -265,4 +266,68 @@ export async function sendWhatsAppMessage(
     });
     return { success: false, error: String(error) };
   }
+}
+
+/**
+ * Send a WhatsApp text message via the Meta Cloud API.
+ *
+ * Returns the same `{ success, messageSid?, error?, definitiveFailure? }` shape
+ * as `sendSms` so it is a drop-in delivery function for the SMS supervisor.
+ *
+ * NOTE: WhatsApp only allows free-form (session) messages within 24h of the
+ * user's last inbound message. Replying to an inbound message always falls
+ * inside that window, so the conversational supervisor path never needs an
+ * approved template.
+ */
+export async function sendWhatsAppMessage(
+  phoneNumber: string,
+  message: string,
+  options: WhatsAppArchiveOptions = {}
+): Promise<WhatsAppSendResult> {
+  // Meta expects the recipient in international format without a leading '+'.
+  const to = phoneNumber.replace(/^\+/, '');
+  const requestBody = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'text',
+    text: { preview_url: false, body: message },
+  };
+  return postWhatsAppMessage(requestBody, phoneNumber, options);
+}
+
+/**
+ * Send an approved WhatsApp message TEMPLATE via the Meta Cloud API.
+ *
+ * Unlike `sendWhatsAppMessage`, a template can be delivered business-initiated
+ * (outside the 24h session window) — the only way to reach a user who has never
+ * texted our WhatsApp number. `bodyParams` fills the template's positional
+ * `{{n}}` body variables in order. Same result contract as the text send, so a
+ * recipient-unreachable Meta code still marks the number for mirroring skip.
+ */
+export async function sendWhatsAppTemplate(
+  phoneNumber: string,
+  templateName: string,
+  languageCode: string,
+  bodyParams: string[] = [],
+  options: WhatsAppArchiveOptions = {}
+): Promise<WhatsAppSendResult> {
+  const to = phoneNumber.replace(/^\+/, '');
+  const template: Record<string, unknown> = {
+    name: templateName,
+    language: { code: languageCode },
+  };
+  if (bodyParams.length > 0) {
+    template.components = [
+      { type: 'body', parameters: bodyParams.map((text) => ({ type: 'text', text })) },
+    ];
+  }
+  const requestBody = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to,
+    type: 'template',
+    template,
+  };
+  return postWhatsAppMessage(requestBody, phoneNumber, options);
 }

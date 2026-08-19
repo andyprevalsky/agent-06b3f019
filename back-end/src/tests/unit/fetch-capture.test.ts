@@ -228,7 +228,75 @@ async function run(): Promise<void> {
   }
 }
 
-run().catch((error: unknown) => {
-  writeErrorLine(error instanceof Error ? error.stack || error.message : String(error));
-  process.exit(1);
-});
+// Isolated coverage for the WhatsApp Cloud API fake (BLACKBOX_TEST_FAKE_WHATSAPP):
+// a graph.facebook.com /messages POST must be short-circuited to a fake success,
+// and the `__BLACKBOX_WA_UNREACHABLE__` sentinel to a 131026 deliverability error,
+// so onboarding/lifecycle mirrors never make a real Meta send during blackbox runs.
+async function runWhatsAppFakeTest(): Promise<void> {
+  const originalFetch = globalThis.fetch;
+  const oldFakeWhatsApp = process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
+  const oldReplayOutbound = process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+  let realCalls = 0;
+  process.env.BLACKBOX_TEST_FAKE_WHATSAPP = '1';
+  delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+
+  globalThis.fetch = (async (
+    input: string | URL | Request,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const url = String(input);
+    if (url.includes('127.0.0.1') || url.includes('localhost')) {
+      return originalFetch(input, init);
+    }
+    realCalls += 1; // any graph.facebook.com hit here means the fake failed to short-circuit
+    return new Response('should-not-be-reached', { status: 500 });
+  }) as typeof fetch;
+
+  const app = express();
+  app.use('/captures', installFetchCapture());
+  const { server } = await listen(app);
+
+  try {
+    const ok = await fetch('https://graph.facebook.com/v21.0/111/messages', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer wa-secret', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messaging_product: 'whatsapp', to: '15551234567', type: 'template' }),
+    });
+    assert.strictEqual(ok.status, 200, 'faked WhatsApp send returns 200');
+    const okBody = (await ok.json()) as { messages?: { id: string }[] };
+    assert.ok(
+      okBody.messages?.[0]?.id?.startsWith('blackbox-wa-message-'),
+      'fake returns a synthetic message id'
+    );
+
+    const unreachable = await fetch('https://graph.facebook.com/v21.0/111/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: '15551234567', text: { body: '__BLACKBOX_WA_UNREACHABLE__' } }),
+    });
+    assert.strictEqual(unreachable.status, 400, 'sentinel forces a 400');
+    const errBody = (await unreachable.json()) as { error?: { code?: number } };
+    assert.strictEqual(
+      errBody.error?.code,
+      131026,
+      'sentinel forces a 131026 deliverability error'
+    );
+
+    assert.strictEqual(realCalls, 0, 'never makes a real graph.facebook.com call');
+    writeLine('fetch-capture WhatsApp fake tests passed');
+  } finally {
+    await close(server);
+    globalThis.fetch = originalFetch;
+    if (oldFakeWhatsApp === undefined) delete process.env.BLACKBOX_TEST_FAKE_WHATSAPP;
+    else process.env.BLACKBOX_TEST_FAKE_WHATSAPP = oldFakeWhatsApp;
+    if (oldReplayOutbound === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
+    else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = oldReplayOutbound;
+  }
+}
+
+run()
+  .then(runWhatsAppFakeTest)
+  .catch((error: unknown) => {
+    writeErrorLine(error instanceof Error ? error.stack || error.message : String(error));
+    process.exit(1);
+  });

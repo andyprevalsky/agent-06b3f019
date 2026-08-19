@@ -379,6 +379,43 @@ export function installFetchCapture(): Router {
       });
     }
 
+    // WhatsApp Cloud API (Meta) — faked like Surge so onboarding/lifecycle
+    // mirrors never make a real graph.facebook.com send during blackbox runs.
+    // `__BLACKBOX_WA_UNREACHABLE__` in the body forces a 131026 deliverability
+    // error so reachability-learning paths can be exercised deterministically.
+    if (
+      process.env.BLACKBOX_TEST_FAKE_WHATSAPP === '1' &&
+      url.includes('graph.facebook.com') &&
+      url.includes('/messages')
+    ) {
+      if (requestBody?.includes('__BLACKBOX_WA_UNREACHABLE__')) {
+        const body = JSON.stringify({
+          error: { message: 'blackbox fake WhatsApp unreachable', code: 131026 },
+        });
+        entry.durationMs = Date.now() - start;
+        entry.responseStatus = 400;
+        entry.responseBody = body;
+        captures.push(entry);
+
+        return new globalThis.Response(body, {
+          status: 400,
+          statusText: 'Bad Request',
+          headers: { 'content-type': 'application/json' },
+        });
+      }
+      const body = JSON.stringify({ messages: [{ id: `blackbox-wa-message-${id}` }] });
+      entry.durationMs = Date.now() - start;
+      entry.responseStatus = 200;
+      entry.responseBody = body;
+      captures.push(entry);
+
+      return new globalThis.Response(body, {
+        status: 200,
+        statusText: 'OK',
+        headers: { 'content-type': 'application/json' },
+      });
+    }
+
     // AgentCard MCP is a stateful payment boundary. Replaying tools/call responses
     // (especially list_transfers) can hide a card issued seconds earlier and make
     // the benchmark exercise stale financial state. Preserve capture metadata but
