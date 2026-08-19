@@ -11,7 +11,7 @@ symptoms:
   - "fatal: could not read Username for 'https://github.com': No such device or address"
   - "exact remote checkout failed"
   - "central dep refresh failed; refusing to provision task machines"
-  - "git-syncing /data/repo →"
+  - "remote file /data/cloudbench-fetch-ref.sh already exists"
   - "healing warm snapshot (dep trees)"
 tags:
   - cloudbench
@@ -61,7 +61,8 @@ path. Novel relative of the 2026-07-15 dubious-ownership refresh-deps abort.
 ## Solution
 
 `--refresh-deps` and `--refresh-wmh` now call `warm_source_fetch_ref`, which
-uploads `cloudbench-fetch-ref.sh`, injects the controller GitHub token, and
+removes any existing `/data/cloudbench-fetch-ref.sh` (flyctl sftp will not
+overwrite), uploads the helper, injects the controller GitHub token, and
 fails closed when the token is missing. `cloudbench_fetchable_ref` only treats
 `origin/main` ancestors as guest-fetchable; feature-only SHAs fall back to the
 `origin/main` ancestor plus the workspace patch.
