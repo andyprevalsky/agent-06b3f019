@@ -6,7 +6,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import { closeHeldPurchaseReuseForLifecycleProbe } from '../../domains/test-payment/closeHeldReuse';
 import { TestPaymentError } from '../../domains/test-payment/errors';
 
@@ -40,10 +40,10 @@ async function main(): Promise<void> {
   assert.equal(result.orphanHeldIgnored, 1);
   assert.deepEqual(cleanedAgentIds.sort(), ['agent-a', 'agent-b']);
 
-  console.log('close-held-reuse unit OK');
+  process.stdout.write('PASS close-held-reuse\n');
 }
 
-main().catch((error) => {
-  console.error(error);
+main().catch((error: unknown) => {
+  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
   process.exit(1);
 });
