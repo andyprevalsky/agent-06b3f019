@@ -6979,6 +6979,71 @@ def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
         assert "checkout -f FETCH_HEAD" not in mode
 
 
+def test_warm_source_fetch_ref_retries_transient_sftp_tunnel_timeout(
+    tmp_path: Path,
+) -> None:
+    """Epoch 3: Fly `ssh sftp put` of cloudbench-fetch-ref.sh failed once with
+    `tunnel unavailable: ... timed out (context deadline exceeded)` and
+    warm_source_fetch_ref aborted the fleet before any task started. Guest
+    driver staging already retries sftp; maintenance git-sync must too."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(cloud, "warm_source_fetch_ref() {")
+    retry = _extract_fleet_function(
+        ENV_HELPER_SCRIPT.read_text(), "cloudbench_retry_command() {"
+    )
+    sha = "f9ad6715cc0d572a5ad54c3dbedae73bf5c5ee00"
+    calls = tmp_path / "sftp-calls.txt"
+    script = f"""
+set -uo pipefail
+APP=bench-app
+ROOT_DIR={shlex.quote(str(ROOT))}
+REMOTE_REPO=/data/repo
+CALLS={shlex.quote(str(calls))}
+SFTP_ATTEMPTS=0
+CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS=5
+CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
+gh() {{ echo 'test-token'; }}
+resolve_github_token() {{ echo 'test-token'; }}
+ssh_exec() {{
+  echo checkout {sha[:8]}
+  echo "::CLOUDBENCH-REF::{sha}"
+  return 0
+}}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "ssh sftp put" ]; then
+    SFTP_ATTEMPTS=$((SFTP_ATTEMPTS + 1))
+    if [ "$SFTP_ATTEMPTS" -eq 1 ]; then
+      echo 'Error: tunnel unavailable: Error contacting Fly.io API when probing "app": timed out (context deadline exceeded)' >&2
+      return 1
+    fi
+  fi
+  return 0
+}}
+sleep() {{ :; }}
+{retry}
+{helper}
+if ! warm_source_fetch_ref mid123 {sha}; then
+  echo "FETCH_REF_ABORTED attempts=$SFTP_ATTEMPTS"
+  exit 14
+fi
+echo "FETCH_REF_OK attempts=$SFTP_ATTEMPTS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "FETCH_REF_OK attempts=2" in result.stdout
+    assert "ssh sftp put" in calls.read_text()
+    assert helper.count("ssh sftp put") >= 1
+    assert "cloudbench_retry_command" in helper
+    assert "CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS" in helper
+
+
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the
