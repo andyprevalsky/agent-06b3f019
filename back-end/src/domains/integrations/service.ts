@@ -135,9 +135,19 @@ function withDerivedConnectedEmails<
         ? (integration.config as Record<string, unknown>)
         : {};
 
+    // Keep the previously-recorded primary when that account is still
+    // connected, so the address the user has been seeing does not change
+    // underneath them; otherwise fall back to the oldest credential (the
+    // include is ordered, so this is stable across requests).
+    const configuredPrimary = typeof base.connectedEmail === 'string' ? base.connectedEmail : null;
+    const primary =
+      configuredPrimary !== null && derived.includes(configuredPrimary)
+        ? configuredPrimary
+        : (derived[0] ?? null);
+
     return {
       ...integration,
-      config: { ...base, connectedEmail: derived[0] ?? null, connectedEmails: derived },
+      config: { ...base, connectedEmail: primary, connectedEmails: derived },
     };
   });
 }

@@ -23,8 +23,12 @@ export async function findIntegrationsByUser(userId: string) {
       // connected-address list from the source of truth in this one query
       // (no per-integration follow-up). An abandoned OAuth flow leaves a
       // null-email, tokenless row, which must never surface as an account.
+      // Ordered so the derived primary is stable: without it Postgres may
+      // return a different first row per query and the displayed primary
+      // address would flicker between the user's accounts.
       emailCredentials: {
         where: { email: { not: null }, accessToken: { not: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         select: { email: true },
       },
     },
@@ -217,42 +221,44 @@ export async function upsertIntegrationForUpload(params: {
  * Nothing is known about the new grant yet, so this must be purely additive:
  * merge the flow marker over existing config, and never downgrade a healthy
  * integration's status — no credential has changed at this point.
+ *
+ * The merge happens INSIDE the database (`jsonb ||`) via a single
+ * INSERT ... ON CONFLICT, not as a read-modify-write in Node. A RMW would
+ * reintroduce the same data loss under concurrency: two OAuth starts racing
+ * each other both read the pre-write config, and the loser's write erases keys
+ * the winner (or an interleaved callback) just persisted. It would also race
+ * the `@@unique([userId, name])` constraint and fail one request outright.
+ * Being a single atomic statement, this is safe to run concurrently and on
+ * retry.
  */
 export async function upsertIntegrationForOAuthStart(params: {
   userId: string;
   name: string;
   config: Record<string, unknown>;
 }) {
-  const existing = await prisma.integration.findUnique({
-    where: { userId_name: { userId: params.userId, name: params.name } },
-    select: { id: true, config: true, status: true },
-  });
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    INSERT INTO "Integration" ("id", "userId", "name", "type", "status", "config", "createdAt", "updatedAt")
+    VALUES (
+      gen_random_uuid(),
+      ${params.userId},
+      ${params.name},
+      ${IntegrationType.DATA_SOURCE}::"IntegrationType",
+      ${IntegrationStatus.SYNCING}::"IntegrationStatus",
+      ${JSON.stringify(params.config)}::jsonb,
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT ("userId", "name") DO UPDATE
+      SET "config" = COALESCE("Integration"."config", '{}'::jsonb) || EXCLUDED."config",
+          "updatedAt" = NOW()
+    RETURNING "id"
+  `;
 
-  if (existing === null) {
-    return prisma.integration.create({
-      data: {
-        userId: params.userId,
-        name: params.name,
-        type: IntegrationType.DATA_SOURCE,
-        status: IntegrationStatus.SYNCING,
-        config: params.config as Prisma.InputJsonValue,
-      },
-    });
+  const id = rows[0]?.id;
+  if (id === undefined) {
+    throw new Error(`Failed to reserve integration row for OAuth start: ${params.name}`);
   }
-
-  const existingConfig =
-    typeof existing.config === 'object' &&
-    existing.config !== null &&
-    !Array.isArray(existing.config)
-      ? (existing.config as Record<string, unknown>)
-      : {};
-
-  return prisma.integration.update({
-    where: { id: existing.id },
-    data: {
-      config: { ...existingConfig, ...params.config } as Prisma.InputJsonValue,
-    },
-  });
+  return { id };
 }
 
 export async function updateIntegrationStatus(
