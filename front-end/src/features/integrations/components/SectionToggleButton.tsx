@@ -9,6 +9,8 @@
 
 import { Plus } from 'lucide-react';
 
+import ConnectedLabel from './ConnectedLabel';
+
 interface SectionToggleButtonProps {
   isConnected: boolean;
   onClick: () => void;
@@ -23,11 +25,7 @@ export default function SectionToggleButton({
 }: SectionToggleButtonProps) {
   return (
     <div className="flex items-center gap-2">
-      {isConnected && (
-        <span className="bg-gradient-to-bl from-[#FE7503] via-[#FD5776] to-[#7A6BEC] bg-clip-text text-xs font-medium text-transparent">
-          Connected
-        </span>
-      )}
+      {isConnected && <ConnectedLabel />}
       <button
         onClick={onClick}
         aria-label={`Manage ${sectionLabel} connections`}

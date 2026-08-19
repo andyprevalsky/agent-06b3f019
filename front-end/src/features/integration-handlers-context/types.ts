@@ -64,8 +64,20 @@ export interface PasskeysHandler {
   enroll: (params: { url: string; rpMatch?: string }) => Promise<PasskeyEnrollResult>;
 }
 
+/**
+ * WhatsApp pairing is desktop-only: linking a device needs a QR scan driven by the
+ * native bridge. The desktop shell owns the whole flow (QR display included) and
+ * resolves `connect()` once pairing settles, so the shared UI needs no QR knowledge
+ * -- only whether a desktop bridge exists.
+ */
+export interface WhatsAppHandler {
+  isAvailable: boolean;
+  connect: () => Promise<{ success: boolean; error?: string }>;
+}
+
 export interface IntegrationHandlers {
   iMessage?: IntegrationHandler;
+  whatsApp?: WhatsAppHandler;
   chromeCookies?: IntegrationHandler;
   browserCookies?: BrowserCookiesHandler;
   claudeCode?: ClaudeCodeHandler;

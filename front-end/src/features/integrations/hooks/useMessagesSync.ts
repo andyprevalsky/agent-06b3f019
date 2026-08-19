@@ -29,6 +29,22 @@ export function useMessagesSync(
     }
   }, [handlers.iMessage, fetchIntegrations]);
 
+  // Pairing (QR display included) is owned by the desktop shell; this only drives
+  // the row's loading state and refreshes once pairing settles.
+  const handleWhatsAppConnect = useCallback(async () => {
+    if (!handlers.whatsApp?.isAvailable) return;
+    setMessageSyncLoading('whatsapp');
+    try {
+      const result = await handlers.whatsApp.connect();
+      if (!result.success) {
+        throw new Error(result.error ?? 'WhatsApp connection failed. Please try again.');
+      }
+      await fetchIntegrations();
+    } finally {
+      setMessageSyncLoading(null);
+    }
+  }, [handlers.whatsApp, fetchIntegrations]);
+
   const handleLinkedInSync = useCallback(async () => {
     // Only ever spawn one export agent -- re-exporting would duplicate the work.
     if (linkedinSyncInFlight.current || linkedinSyncStarted) return;
@@ -57,6 +73,7 @@ export function useMessagesSync(
     linkedinSyncLoading,
     linkedinSyncStarted,
     handleIMessageSync,
+    handleWhatsAppConnect,
     handleLinkedInSync,
   } as const;
 }
