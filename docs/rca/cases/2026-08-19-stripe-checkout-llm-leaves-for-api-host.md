@@ -78,11 +78,14 @@ when pinned with payment refs ready.
 Fleet `fb84d4d2` after nudge (#996): pin held, still **0 fills after Checkout**
 (HELD / ~901s). Nudge alone was insufficient — hosted payment fields live in
 child frames/OOPIFs and often reject programmatic value-set; main-document
-`page.evaluate` never saw them. Fix: frame-aware payment-ref fill (Playwright
-frames + CDP `get_all_frames` targets) with focus+keyboard fallback, plus
-**auto-attempt** `input_text card_number` on the pinned handoff page when refs
-are ready (nudge only if auto-fill misses). Still no Stripe/checkout path
-special-cases.
+`page.evaluate` never saw them.
+
+Fleet `dc2bfa2c` after frame-aware auto-fill (#997): pin held on an
+**incomplete/expired** Checkout document (“This link is incomplete”); auto-fill
+could not find fields; pin refused “Return to merchant”, so the agent could not
+re-enter handoff. Fix: retry auto-fill a few times while waiting for frames, then
+**release the pin and return to session origin** when semantic payment fields
+never appear — still no vendor/path special-cases.
 
 ## Diagnosis
 
@@ -120,6 +123,9 @@ checkout host labels. General harness rules only:
 7. `agent-payment-production-purchase` is `--prod` / production workers — harness
    fixes must be deployed to Fly before fleet can prove them. Do not divert
    `--prod` onto an isolated queue (fleet 8bfe3691 STARTING_UP → FAILED).
+8. When pinned with payment secret refs ready, **auto-fill** semantic card fields
+   across all reachable frames (JS value-set, then focus+keyboard). Nudge the
+   model only if auto-fill cannot locate fields.
 
 ## Human feedback
 
