@@ -140,6 +140,7 @@ from .service import (
 )
 from .service_actions import (
     SITE_WRITE_LOCK_APPROVAL_KEY,
+    _get_base_domain,
     execute_action,
     get_domain_from_url,
     get_element_description,
@@ -4937,6 +4938,13 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # After a successful challenge recovery, pin goto/navback to the recovered
     # host so the model cannot leave the cleared page for network-log thrash.
     navigation_pin_host: Optional[str] = None
+    # Session origin registrable domain — when the live page leaves this domain
+    # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
+    # without path or product-name allowlists.
+    _start_domain = get_domain_from_url(start_url) if start_url else ""
+    navigation_origin_base_domain: Optional[str] = (
+        _get_base_domain(_start_domain) if _start_domain else None
+    )
 
     pending_write_lock_action: Optional[Dict[str, Any]] = None
     pending_write_lock_target: Optional[Dict[str, Any]] = None
@@ -6167,6 +6175,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     current_auth_realm=auth_realm,
                     prepare_credentials_for_url=_prepare_credentials_for_url,
                     navigation_pin_host=navigation_pin_host,
+                    navigation_origin_base_domain=navigation_origin_base_domain,
                 )
 
                 if result.get("status") == "needs_write_approval":
@@ -7729,6 +7738,7 @@ Based on this feedback, I need to continue working on the task and address the i
                         current_auth_realm=auth_realm,
                         prepare_credentials_for_url=_prepare_credentials_for_url,
                         navigation_pin_host=navigation_pin_host,
+                        navigation_origin_base_domain=navigation_origin_base_domain,
                     ),
                     timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
                 )

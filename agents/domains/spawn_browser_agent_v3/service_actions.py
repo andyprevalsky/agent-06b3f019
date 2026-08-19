@@ -44,17 +44,11 @@ STEEL_VIEWPORT_CROP_WIDTH = 1283
 STEEL_VIEWPORT_CROP_HEIGHT = 800
 
 # Host labels that almost always serve machine/API surfaces, not HTML documents
-# the agent should browse. Vendor-agnostic — blocks api.*, js.*, /v1/, /health, …
+# the agent should browse. Shape-only (no vendor/product host names).
 _API_SURFACE_HOST_LABELS = frozenset(
     {
         "api",
-        "r",
-        "q",
         "js",
-        "files",
-        "hooks",
-        "events",
-        "merchant-ui-api",
         "graphql",
         "ws",
         "wss",
@@ -78,7 +72,7 @@ def url_looks_like_api_surface(url: str) -> bool:
     """True when a URL is a machine/API surface, not a browsable document.
 
     Network-log hosts (api.*, /v1/*, /healthcheck) are not pages — navigating
-    there after reading traffic strands the agent. Vendor-agnostic heuristic.
+    there after reading traffic strands the agent. Shape-only heuristic.
     """
     parsed = urlparse(url or "")
     host = (parsed.hostname or "").lower()
@@ -96,6 +90,28 @@ def url_looks_like_api_surface(url: str) -> bool:
     return False
 
 
+def effective_navigation_pin_host(
+    *,
+    current_url: str,
+    recovery_pin_host: Optional[str],
+    origin_base_domain: Optional[str],
+) -> Optional[str]:
+    """Resolve the host the agent must stay on.
+
+    Cross-origin handoff (live registrable domain ≠ session origin): pin to the
+    live host so Place-order / OAuth / 3DS redirects stick without path or
+    product-name allowlists. Otherwise keep an explicit post-recovery pin.
+    """
+    current_host = (urlparse(current_url or "").hostname or "").lower()
+    origin = (origin_base_domain or "").lower().strip(".")
+    if current_host and origin:
+        current_base = _get_base_domain(current_host)
+        if current_base and current_base != origin:
+            return current_host
+    pin = (recovery_pin_host or "").lower().strip(".")
+    return pin or None
+
+
 def navigation_leaves_pinned_host(
     *,
     current_url: str,
@@ -103,7 +119,7 @@ def navigation_leaves_pinned_host(
     pin_host: Optional[str],
     action: str,
 ) -> bool:
-    """True when a nav action would leave the post-recovery pinned browse host."""
+    """True when a nav action would leave the pinned browse host."""
     pin = (pin_host or "").lower().strip(".")
     if not pin:
         return False
@@ -563,6 +579,7 @@ class _ActionContext:
     current_auth_realm: str
     prepare_credentials_for_url: Optional[Callable[[str], Awaitable[Optional[Dict[str, Any]]]]]
     navigation_pin_host: Optional[str] = None
+    navigation_origin_base_domain: Optional[str] = None
 
 
 async def _refuse_navigation(
@@ -589,45 +606,28 @@ def _navigation_guard_error(
     action: str,
     target_url: Optional[str] = None,
 ) -> Optional[str]:
-    from .challenge_recovery import target_looks_like_payment_document
-
     if target_url and url_looks_like_api_surface(target_url):
         return (
             f"Refusing navigation to API/non-document URL {target_url!r}. "
             "Network request hosts are not pages — stay on the current document "
             f"({context.current_url or 'current page'}) and continue the task there."
         )
+    pin_host = effective_navigation_pin_host(
+        current_url=context.current_url,
+        recovery_pin_host=context.navigation_pin_host,
+        origin_base_domain=context.navigation_origin_base_domain,
+    )
     if navigation_leaves_pinned_host(
         current_url=context.current_url,
         target_url=target_url,
-        pin_host=context.navigation_pin_host,
+        pin_host=pin_host,
         action=action,
     ):
         return (
-            f"Refusing to leave recovered page host {context.navigation_pin_host!r}. "
+            f"Refusing to leave pinned page host {pin_host!r}. "
             f"Current page URL: {context.current_url}. Continue the task on this page "
             "(do not go back or navigate to another host until this page is done)."
         )
-    # Payment/checkout documents: do not leave via navback, and do not jump to
-    # non-document URLs. Merchant→hosted-checkout (both payment docs) stays allowed.
-    if target_looks_like_payment_document(context.current_url):
-        if action == "navback":
-            return (
-                f"Refusing navback away from payment page ({context.current_url}). "
-                "Fill the payment fields and submit on this page."
-            )
-        if action in {"goto", "open_new_tab"} and target_url:
-            if url_looks_like_api_surface(target_url):
-                return (
-                    f"Refusing navigation to API/non-document URL {target_url!r}. "
-                    f"Stay on the payment page ({context.current_url}) and continue there."
-                )
-            if not target_looks_like_payment_document(target_url):
-                return (
-                    f"Refusing navigation from payment page to {target_url!r}. "
-                    f"Current page URL: {context.current_url}. "
-                    "Fill the payment fields and submit on this page."
-                )
     return None
 
 
@@ -1066,6 +1066,7 @@ async def execute_action(
         Callable[[str], Awaitable[Optional[Dict[str, Any]]]]
     ] = None,
     navigation_pin_host: Optional[str] = None,
+    navigation_origin_base_domain: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a browser action using browser-use events.
 
@@ -1116,6 +1117,7 @@ async def execute_action(
             current_auth_realm=current_auth_realm,
             prepare_credentials_for_url=prepare_credentials_for_url,
             navigation_pin_host=navigation_pin_host,
+            navigation_origin_base_domain=navigation_origin_base_domain,
         )
         if action_name in _INTERACTION_ACTIONS:
             return await _execute_interaction_action(context)
