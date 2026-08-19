@@ -9,6 +9,7 @@ import asyncio
 import base64
 import inspect
 import json
+import re
 import time as time_module
 from contextlib import suppress
 from dataclasses import dataclass
@@ -1408,6 +1409,8 @@ _PAYMENT_FIELD_FINDER_JS = """
 (() => {
     const selectorsByRef = {
         card_number: [
+            'input[data-elements-stable-field-name="cardNumber"]',
+            'input[data-elements-stable-field-name="number"]',
             'input[autocomplete="cc-number"]',
             'input[autocomplete~="cc-number"]',
             'input#card-number',
@@ -1421,6 +1424,8 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input[aria-label*="Card number" i]'
         ],
         card_name: [
+            'input[data-elements-stable-field-name="cardName"]',
+            'input[data-elements-stable-field-name="name"]',
             'input[autocomplete="cc-name"]',
             'input[autocomplete~="cc-name"]',
             'input#card-name',
@@ -1433,6 +1438,8 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input[aria-label*="Name on card" i]'
         ],
         card_expiry: [
+            'input[data-elements-stable-field-name="cardExpiry"]',
+            'input[data-elements-stable-field-name="expiry"]',
             'input[autocomplete="cc-exp"]',
             'input[autocomplete~="cc-exp"]',
             'input#card-expiry',
@@ -1447,6 +1454,8 @@ _PAYMENT_FIELD_FINDER_JS = """
             'input[aria-label*="Expir" i]'
         ],
         card_cvv: [
+            'input[data-elements-stable-field-name="cardCvc"]',
+            'input[data-elements-stable-field-name="cvc"]',
             'input[autocomplete="cc-csc"]',
             'input[autocomplete~="cc-csc"]',
             'input#card-cvv',
@@ -1470,10 +1479,13 @@ _PAYMENT_FIELD_FINDER_JS = """
         card_expiry: ['cc-exp', 'expiration', 'expiry', 'exp date', 'mm/yy', 'mm / yy'],
         card_cvv: ['cc-csc', 'cvv', 'cvc', 'security code', 'security-code', 'security_code'],
     };
-    // High-confidence autocomplete selectors may mount readOnly / zero-size until
-    // focused (hosted payment widgets). Still reject disabled + display:none.
+    // High-confidence selectors may mount readOnly / zero-size until focused
+    // (hosted payment widgets). Still reject disabled + display:none.
     const isHighConfidenceSelector = (selector) =>
-        typeof selector === 'string' && selector.includes('autocomplete');
+        typeof selector === 'string' && (
+            selector.includes('autocomplete')
+            || selector.includes('data-elements-stable-field-name')
+        );
     const isVisible = (el, { allowCollapsed = false } = {}) => {
         if (!el || el.disabled) return false;
         if (el.readOnly && !allowCollapsed) return false;
@@ -1550,6 +1562,8 @@ _PAYMENT_FIELD_FINDER_JS = """
 # Playwright locator selectors — pierces open shadow DOM in frames.
 _PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
     "card_number": (
+        'input[data-elements-stable-field-name="cardNumber"]',
+        'input[data-elements-stable-field-name="number"]',
         'input[autocomplete="cc-number"]',
         'input[autocomplete~="cc-number"]',
         'input[name="number"]',
@@ -1561,6 +1575,8 @@ _PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
         'input[aria-label*="Card number" i]',
     ),
     "card_name": (
+        'input[data-elements-stable-field-name="cardName"]',
+        'input[data-elements-stable-field-name="name"]',
         'input[autocomplete="cc-name"]',
         'input[autocomplete~="cc-name"]',
         'input[name="name"]',
@@ -1571,6 +1587,8 @@ _PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
         'input[aria-label*="Name on card" i]',
     ),
     "card_expiry": (
+        'input[data-elements-stable-field-name="cardExpiry"]',
+        'input[data-elements-stable-field-name="expiry"]',
         'input[autocomplete="cc-exp"]',
         'input[autocomplete~="cc-exp"]',
         'input[name="exp-date"]',
@@ -1580,6 +1598,8 @@ _PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
         'input[aria-label*="Expir" i]',
     ),
     "card_cvv": (
+        'input[data-elements-stable-field-name="cardCvc"]',
+        'input[data-elements-stable-field-name="cvc"]',
         'input[autocomplete="cc-csc"]',
         'input[autocomplete~="cc-csc"]',
         'input[name="cvc"]',
@@ -1590,6 +1610,14 @@ _PAYMENT_REF_PLAYWRIGHT_SELECTORS: Dict[str, tuple[str, ...]] = {
         'input[aria-label*="CVV" i]',
         'input[aria-label*="Security code" i]',
     ),
+}
+
+# Accessible-name / placeholder patterns for Playwright get_by_* (host-agnostic).
+_PAYMENT_REF_PLAYWRIGHT_LABELS: Dict[str, tuple[str, ...]] = {
+    "card_number": (r"card number", r"card num", r"nummer", r"número"),
+    "card_name": (r"name on card", r"cardholder", r"card holder", r"nombre"),
+    "card_expiry": (r"expir", r"mm\s*/?\s*yy", r"mm\s*/?\s*aaaa"),
+    "card_cvv": (r"cvc", r"cvv", r"security code", r"código"),
 }
 
 _PAYMENT_REF_LOCATE_JS = f"""
@@ -1826,9 +1854,9 @@ async def _resolve_payment_ref_coordinates(
 
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
-    const pattern = /\\b(card|credit|debit)\\b/i;
+    const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
     const candidates = Array.from(document.querySelectorAll(
-        'button, [role="button"], [role="radio"], [role="tab"], label, a'
+        'button, [role="button"], [role="radio"], [role="tab"], label, a, [role="option"]'
     ));
     for (const el of candidates) {
         const signal = [
@@ -1910,63 +1938,86 @@ async def _fill_payment_ref_via_playwright_locator(
     roots: List[Any] = list(_playwright_frames(input_page))
     if not roots and hasattr(input_page, "locator"):
         roots = [input_page]
+
+    async def _try_locator(root: Any, root_index: int, locator: Any, selector: str) -> Optional[Dict[str, Any]]:
+        try:
+            count = await _maybe_await(locator.count())
+            # MagicMock.__int__ returns 1 — require a real int from Playwright.
+            if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+                return None
+            first = locator.first if hasattr(locator, "first") else locator
+            await _maybe_await(first.scroll_into_view_if_needed())
+            await _maybe_await(first.click(timeout=2500))
+            if humanizer is not None:
+                await humanizer.press_key("Control+a")
+                await humanizer.press_key("Backspace")
+                await humanizer.type_text(value)
+            else:
+                fill = getattr(first, "fill", None)
+                if not callable(fill):
+                    return None
+                await _maybe_await(fill(""))
+                press_seq = getattr(first, "press_sequentially", None)
+                if callable(press_seq):
+                    await _maybe_await(press_seq(value, delay=35))
+                else:
+                    await _maybe_await(fill(value))
+            box = None
+            with suppress(Exception):
+                box = await _maybe_await(first.bounding_box())
+            logger.info(
+                "Filled payment card secret ref via Playwright locator",
+                ref_name=ref_name,
+                selector=selector,
+                root=f"playwright:{root_index}",
+            )
+            result: Dict[str, Any] = {
+                "filled": True,
+                "selector": selector,
+                "score": 100,
+                "method": "playwright_locator",
+                "target": f"playwright:{root_index}",
+                "valueLength": len(value),
+            }
+            if isinstance(box, dict) and box.get("x") is not None:
+                result["x"] = int(box["x"] + (box.get("width") or 0) / 2)
+                result["y"] = int(box["y"] + (box.get("height") or 0) / 2)
+            return result
+        except Exception as exc:
+            logger.debug(
+                "Payment ref Playwright locator miss",
+                ref_name=ref_name,
+                selector=selector,
+                error=str(exc)[:160],
+            )
+            return None
+
     for root_index, root in enumerate(roots):
         if not hasattr(root, "locator"):
             continue
         for selector in _PAYMENT_REF_PLAYWRIGHT_SELECTORS[ref_name]:
-            try:
-                locator = root.locator(selector).first
-                count = await _maybe_await(locator.count())
-                # MagicMock.__int__ returns 1 — require a real int from Playwright.
-                if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            hit = await _try_locator(root, root_index, root.locator(selector), selector)
+            if hit:
+                return hit
+        # Accessible name / placeholder — hosted widgets often omit autocomplete
+        # until the user focuses a labeled control.
+        for pattern in _PAYMENT_REF_PLAYWRIGHT_LABELS.get(ref_name, ()):
+            for getter_name in ("get_by_label", "get_by_placeholder"):
+                getter = getattr(root, getter_name, None)
+                if not callable(getter):
                     continue
-                await _maybe_await(locator.scroll_into_view_if_needed())
-                await _maybe_await(locator.click(timeout=2500))
-                # Clear then type with real key events when possible.
-                if humanizer is not None:
-                    await humanizer.press_key("Control+a")
-                    await humanizer.press_key("Backspace")
-                    await humanizer.type_text(value)
-                else:
-                    fill = getattr(locator, "fill", None)
-                    if callable(fill):
-                        await _maybe_await(fill(""))
-                        press_seq = getattr(locator, "press_sequentially", None)
-                        if callable(press_seq):
-                            await _maybe_await(press_seq(value, delay=35))
-                        else:
-                            await _maybe_await(fill(value))
-                    else:
-                        continue
-                box = None
-                with suppress(Exception):
-                    box = await _maybe_await(locator.bounding_box())
-                logger.info(
-                    "Filled payment card secret ref via Playwright locator",
-                    ref_name=ref_name,
-                    selector=selector,
-                    root=f"playwright:{root_index}",
+                try:
+                    locator = getter(re.compile(pattern, re.I))
+                except Exception:
+                    continue
+                hit = await _try_locator(
+                    root,
+                    root_index,
+                    locator,
+                    f"{getter_name}(/{pattern}/i)",
                 )
-                result: Dict[str, Any] = {
-                    "filled": True,
-                    "selector": selector,
-                    "score": 100,
-                    "method": "playwright_locator",
-                    "target": f"playwright:{root_index}",
-                    "valueLength": len(value),
-                }
-                if isinstance(box, dict) and box.get("x") is not None:
-                    result["x"] = int(box["x"] + (box.get("width") or 0) / 2)
-                    result["y"] = int(box["y"] + (box.get("height") or 0) / 2)
-                return result
-            except Exception as exc:
-                logger.debug(
-                    "Payment ref Playwright locator miss",
-                    ref_name=ref_name,
-                    selector=selector,
-                    error=str(exc)[:160],
-                )
-                continue
+                if hit:
+                    return hit
     return None
 
 

@@ -11634,6 +11634,90 @@ async def test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs():
             await browser.close()
 
 
+async def test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs():
+    """Hosted Elements mark fields with data-elements-stable-field-name (may be 0×0)."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <iframe id="pay" srcdoc='
+                    <html><body>
+                      <input data-elements-stable-field-name="cardNumber"
+                             style="width:0;height:0;opacity:0;position:absolute" />
+                    </body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            frame = page.frame_locator("#pay")
+            await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            value = await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_via_playwright_label_when_no_autocomplete():
+    """Labeled inputs without autocomplete/name must still fill via get_by_label."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <label for="pan">Card number</label>
+                  <input id="pan" type="text" />
+                </body></html>
+                """
+            )
+            session = _fake_session_with_event_bus()
+            result = await service_actions._fill_payment_ref_via_playwright_locator(
+                input_page=page,
+                ref_name="card_number",
+                value="4111111111111111",
+                humanizer=None,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert "get_by_label" in str(result.get("selector") or "")
+            value = await page.locator("#pan").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
 async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
     """Payment secret refs without element/coords must not fake-success via focused typing."""
     from domains.spawn_browser_agent_v3 import service_actions
@@ -12388,6 +12472,12 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "Handoff payment auto-fill exhausted; pin retained" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
+    assert "wait_for_payment_ref_fields" in source
+    assert "Waiting for payment fields on handoff page" in source
+    # Attempt counter must only advance after fields are ready (else burns retries).
+    wait_offset = source.index("wait_for_payment_ref_fields")
+    attempt_offset = source.index("handoff_payment_fill_attempts += 1")
+    assert wait_offset < attempt_offset
     # Auto-fill gate must stay host/path agnostic.
     auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
@@ -16854,6 +16944,14 @@ async def run_all_tests():
     await r.record_async(
         "fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs",
         test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs",
+        test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_playwright_label_when_no_autocomplete",
+        test_fill_payment_ref_via_playwright_label_when_no_autocomplete,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_fail_closed_without_target",
