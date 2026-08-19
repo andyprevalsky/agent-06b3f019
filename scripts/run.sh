@@ -123,12 +123,27 @@ docker_info_quick() {
 
 docker_available_for_workspace_db() {
     local db_container=$1
+    # An isolated benchmark stack creates its DB container later in the same run,
+    # so its name can never already be listed. Callers in that mode pass true.
+    local container_may_not_exist_yet=${2:-false}
+    local running_containers
     docker_info_quick && return 0
     # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
     # the broad daemon probe miss its startup budget even while this known
     # container is available; preserve isolation instead of falling through to
     # the shared system Postgres in that case.
-    docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
+    running_containers=$(docker_ps_ports_quick '{{.Names}}') || return 1
+    printf '%s\n' "$running_containers" | grep -Fxq "$db_container" && return 0
+    # For an isolated benchmark run there is no container to recognize yet, so
+    # requiring one made a healthy-but-slow `docker info` (Docker Desktop
+    # routinely answers in ~2s, over the 1s fast budget) silently downgrade the
+    # run to the shared system Postgres. The canonical base fixture is published
+    # per pg major, so a system PG17/18 host then aborted with "canonical base
+    # fixture is unavailable" instead of running the benchmark. A daemon that
+    # answers the bounded `docker ps` probe at all can serve this run;
+    # docker_can_create_container still rejects a daemon that cannot actually
+    # start containers.
+    [ "$container_may_not_exist_yet" = "true" ]
 }
 
 # True only when Docker can actually create+run a container. Daemon `info`
@@ -663,7 +678,7 @@ fi
 DOCKER_OK=false
 if ! $PRESTARTED_WORKSPACE_DB && \
    [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
-   docker_available_for_workspace_db "$DB_CONTAINER"; then
+   docker_available_for_workspace_db "$DB_CONTAINER" "$BENCHMARK_ISOLATED_RUN"; then
     DOCKER_OK=true
 elif ! $PRESTARTED_WORKSPACE_DB && \
      [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \

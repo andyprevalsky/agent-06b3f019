@@ -60,6 +60,35 @@ if docker_available_for_workspace_db 'victoria-db-another-workspace'; then
 fi
 echo "PASS: a pre-started workspace DB survives a slow docker info probe"
 
+# An isolated benchmark stack creates its DB container later in the same run, so
+# its name cannot already be listed. Requiring it made a healthy-but-slow
+# `docker info` (Docker Desktop routinely answers in ~2s) silently downgrade
+# every isolated benchmark run to the shared system Postgres. The canonical base
+# fixture is published per pg major, so a system PG17/18 host then hard-failed
+# with "canonical base fixture is unavailable" instead of running the benchmark.
+docker_info_quick() {
+    return 1
+}
+docker_ps_ports_quick() {
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an isolated benchmark run must keep Docker selected via a responsive docker ps" >&2
+    exit 1
+fi
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet'; then
+    echo "FAIL: a non-isolated workspace must still require its own DB container" >&2
+    exit 1
+fi
+docker_ps_ports_quick() {
+    return 1
+}
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an unresponsive Docker daemon must not report the workspace DB as available" >&2
+    exit 1
+fi
+echo "PASS: isolated benchmark runs survive a slow docker info without losing Docker"
+
 DOCKER_COLD_SEED_PROBES=0
 docker_info_quick() {
     DOCKER_COLD_SEED_PROBES=$((DOCKER_COLD_SEED_PROBES + 1))

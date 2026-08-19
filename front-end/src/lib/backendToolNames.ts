@@ -93,6 +93,7 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'navback',
   'network_recording',
   'open_new_tab',
+  'payment_card_ready',
   'press_key',
   'purchase',
   'read_network_requests',
@@ -107,6 +108,7 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'send_message_to_user',
   'session_init',
   'session_paused',
+  'session_starting',
   'social_post',
   'supervisor_recovery',
   'switch_tab',
@@ -115,4 +117,5 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'task_started',
   'upload_file',
   'wait',
+  'write_lock_granted',
 ] as const;
