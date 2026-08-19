@@ -495,14 +495,10 @@ def append_completion_evidence(
     """Add deterministic final evidence that should not depend on model wording."""
     extra_parts: List[str] = []
     structured_response = structured_response or {}
+    _ = browser_url  # retained for call-site compat; never path-matched
 
     order_id = structured_response.get("order_confirmation_id")
-    if (
-        browser_url
-        and "/test_payment/confirmation/" in browser_url
-        and order_id
-        and "payment confirmed" not in message.lower()
-    ):
+    if order_id and "payment confirmed" not in message.lower():
         extra_parts.append(f"\n**Confirmation**: Payment confirmed\nOrder ID: {order_id}")
 
     if structured_response:

@@ -8616,6 +8616,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "net::ERR_BLOCKED_BY_CLIENT",
         resource_type="script",
     )
+    # Non-js.* hosts are not the sticky script-CDN tunnel class (generic script path).
     assert not _is_payment_cdn_tunnel_failure(
         "https://wl.eventim.us/asset.js",
         "net::ERR_TUNNEL_CONNECTION_FAILED",
@@ -8625,9 +8626,11 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         "net::ERR_NAME_NOT_RESOLVED",
     )
     assert _document_warrants_payment_cdn_exit("https://wl.eventim.us/checkout/abc")
-    assert not _document_warrants_payment_cdn_exit(
+    # Inventory paths are no longer excluded — exit caps bound thrash instead.
+    assert _document_warrants_payment_cdn_exit(
         "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom"
     )
+    assert not _document_warrants_payment_cdn_exit("")
 
     recorder = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     recorder._network_generation = 3
@@ -8746,7 +8749,8 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     }
     assert second_gen._payment_cdn_provider_exits == 2
 
-    # Ticket/event browse pages preload Stripe; do not rotate there.
+    # Ticket/event browse pages may still rotate on critical script CDN blocks;
+    # exit caps (not path allowlists) bound thrash.
     browse = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     browse._network_generation = 1
     browse._provider_exit_rejections = []
@@ -8760,8 +8764,8 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     browse.entries = {
         "1:r2": {
             "browser_generation": 1,
-            "url": "https://js.stripe.com/v3/",
-            "document_url": "https://wl.eventim.us/event/lyny/692405?afflky=1015Folsom",
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://shop.example.com/event/lyny/692405",
         }
     }
     browse._on_loading_failed(
@@ -8769,7 +8773,12 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
         session_id="cdp-1",
         generation=1,
     )
-    assert browse.pop_provider_exit_rejection() is None
+    assert browse.pop_provider_exit_rejection() == {
+        "reason": "critical third-party resource blocked",
+        "url": "https://js.cdn.example/v3/",
+        "browser_generation": 1,
+        "document_url": "https://shop.example.com/event/lyny/692405",
+    }
 
     # Consent/chat widget script blocks must not consume the payment-CDN budget.
     widget = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
@@ -8822,7 +8831,7 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     assert widget._payment_cdn_provider_exits == 1
     assert widget._generic_script_provider_exits == 1
 
-    # Non-js Stripe script hosts must charge the payment budget (not generic).
+    # Non-js.* cross-origin scripts charge the generic budget (no vendor hosts).
     mobile = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
     mobile._network_generation = 9
     mobile._provider_exit_rejections = []
@@ -8833,25 +8842,52 @@ def test_payment_cdn_tunnel_failure_triggers_provider_exit_rejection():
     mobile._active_request_ids = set()
     mobile.agent_id = "agent"
     mobile.task_id = "task"
-    for host in ("m.stripe.network", "checkout.stripe.com"):
-        mobile._network_generation += 1
-        generation = mobile._network_generation
-        mobile.entries = {
-            f"{generation}:r-{host}": {
-                "browser_generation": generation,
-                "url": f"https://{host}/inner-script.js",
-                "document_url": "https://checkout.eventim.us/",
-                "resource_type": "script",
-            }
+    mobile._network_generation += 1
+    generation = mobile._network_generation
+    mobile.entries = {
+        f"{generation}:r-widget": {
+            "browser_generation": generation,
+            "url": "https://cdn.widgets.example/inner-script.js",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
         }
-        mobile._on_loading_failed(
-            {"requestId": f"r-{host}", "errorText": "net::ERR_BLOCKED_BY_ORB"},
-            session_id=f"cdp-{generation}",
-            generation=generation,
-        )
-        assert mobile.pop_provider_exit_rejection() is not None
-    assert mobile._payment_cdn_provider_exits == 2
-    assert mobile._generic_script_provider_exits == 0
+    }
+    mobile._on_loading_failed(
+        {"requestId": "r-widget", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id=f"cdp-{generation}",
+        generation=generation,
+    )
+    assert mobile.pop_provider_exit_rejection() is not None
+    assert mobile._payment_cdn_provider_exits == 0
+    assert mobile._generic_script_provider_exits == 1
+
+    # js.* hosts charge the script-CDN budget.
+    js_cdn = BrowserNetworkRecorder.__new__(BrowserNetworkRecorder)
+    js_cdn._network_generation = 11
+    js_cdn._provider_exit_rejections = []
+    js_cdn._rejected_network_generations = set()
+    js_cdn._payment_cdn_provider_exits = 0
+    js_cdn._generic_script_provider_exits = 0
+    js_cdn._ignored_request_ids = set()
+    js_cdn._active_request_ids = set()
+    js_cdn.agent_id = "agent"
+    js_cdn.task_id = "task"
+    js_cdn.entries = {
+        "11:r-js": {
+            "browser_generation": 11,
+            "url": "https://js.cdn.example/v3/",
+            "document_url": "https://checkout.example.com/",
+            "resource_type": "script",
+        }
+    }
+    js_cdn._on_loading_failed(
+        {"requestId": "r-js", "errorText": "net::ERR_BLOCKED_BY_ORB"},
+        session_id="cdp-11",
+        generation=11,
+    )
+    assert js_cdn.pop_provider_exit_rejection() is not None
+    assert js_cdn._payment_cdn_provider_exits == 1
+    assert js_cdn._generic_script_provider_exits == 0
 
 
 def test_evicted_critical_request_meta_still_rejects_network_generation():
@@ -11130,8 +11166,12 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_sets_exact_valu
     assert out["typed_text"] == "[encrypted_data]"
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_number", "card_name", "card_expiry", "card_cvv"]
-    assert page.evaluate.await_count == 4
-    payloads = [call.args[1] for call in page.evaluate.await_args_list]
+    # wait_for_payment_ref_fields may locate first; assert the four fill payloads.
+    payloads = [
+        call.args[1]
+        for call in page.evaluate.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict) and "refName" in call.args[1]
+    ]
     assert payloads == [
         {"refName": "card_number", "value": "4111111111111111"},
         {"refName": "card_name", "value": "Rose Labs"},
@@ -11193,6 +11233,11 @@ async def test_execute_input_text_payment_secret_ref_waits_for_page_ready_before
             "wait_for_navigation_ready",
             AsyncMock(return_value={"ready": True, "reason": "content_present"}),
         ) as wait_ready,
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=True),
+        ),
     ):
         out = await service_actions._execute_input_text(
             session=session,
@@ -11290,18 +11335,19 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     assert out["success"] is True
     assert out["payment_ref_direct_fill"] is True
     assert out["payment_refs_filled"] == ["card_name", "card_number", "card_expiry", "card_cvv"]
-    assert session.get_or_create_cdp_session.await_count == 4
+    assert session.get_or_create_cdp_session.await_count >= 4
     for cdp_call in session.get_or_create_cdp_session.await_args_list:
         assert cdp_call.kwargs == {"focus": True}
-    assert cdp_client.send.Runtime.evaluate.await_count == 4
-    evaluate_kwargs = cdp_client.send.Runtime.evaluate.await_args_list[0].kwargs
-    assert evaluate_kwargs["session_id"] == "cdp-1"
-    assert '"refName": "card_name"' in evaluate_kwargs["params"]["expression"]
-    assert '"value": "Rose Labs"' in evaluate_kwargs["params"]["expression"]
-    expressions = [call.kwargs["params"]["expression"] for call in cdp_client.send.Runtime.evaluate.await_args_list]
-    assert any('"refName": "card_number"' in expression for expression in expressions)
-    assert any('"refName": "card_expiry"' in expression for expression in expressions)
-    assert any('"refName": "card_cvv"' in expression for expression in expressions)
+    assert cdp_client.send.Runtime.evaluate.await_count >= 4
+    fill_expressions = [
+        call.kwargs["params"]["expression"]
+        for call in cdp_client.send.Runtime.evaluate.await_args_list
+        if '"value":' in call.kwargs["params"]["expression"]
+    ]
+    assert any('"refName": "card_name"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_number"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_expiry"' in expression for expression in fill_expressions)
+    assert any('"refName": "card_cvv"' in expression for expression in fill_expressions)
     hu.click_at_coords.assert_not_called()
     hu.type_text.assert_not_called()
     recorded = ah.record_action.await_args.kwargs
@@ -11465,7 +11511,19 @@ async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_
     hu.press_key = AsyncMock()
     hu.type_text = AsyncMock()
 
-    with patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)):
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=True)),
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            service_actions,
+            "wait_for_navigation_ready",
+            AsyncMock(return_value={"ready": True, "reason": "content_present"}),
+        ),
+    ):
         out = await service_actions._execute_input_text(
             session=session,
             dom_service=dom,
@@ -11494,6 +11552,338 @@ async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_
     assert page.evaluate.await_count == 3
     hu.click_at_coords.assert_awaited_once_with(222, 333)
     hu.type_text.assert_awaited_once_with("4111111111111111")
+
+
+async def test_fill_payment_ref_directly_real_child_frame_fixture():
+    """Cement real multi-frame fill: payment inputs live in a child frame document."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <h1>Merchant shell</h1>
+                  <iframe id="pay" srcdoc='
+                    <html><body>
+                      <input autocomplete="cc-number" name="number" />
+                      <input autocomplete="cc-name" name="name" />
+                      <input autocomplete="cc-exp" name="exp-date" />
+                      <input autocomplete="cc-csc" name="cvc" />
+                    </body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            frame = page.frame_locator("#pay")
+            await frame.locator('input[autocomplete="cc-number"]').wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            value = await frame.locator('input[autocomplete="cc-number"]').input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs():
+    """Hosted widgets may mount autocomplete inputs with 0×0 until focused."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <input autocomplete="cc-number" name="number"
+                         style="width:0;height:0;opacity:0;position:absolute" />
+                </body></html>
+                """
+            )
+            session = _fake_session_with_event_bus()
+            coords = await service_actions._resolve_payment_ref_coordinates(
+                session,
+                "card_number",
+                input_page=page,
+            )
+            assert coords is not None
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs():
+    """Hosted Elements mark fields with data-elements-stable-field-name (may be 0×0)."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <iframe id="pay" srcdoc='
+                    <html><body>
+                      <input data-elements-stable-field-name="cardNumber"
+                             style="width:0;height:0;opacity:0;position:absolute" />
+                    </body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            frame = page.frame_locator("#pay")
+            await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            value = await frame.locator(
+                'input[data-elements-stable-field-name="cardNumber"]'
+            ).input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_via_playwright_label_when_no_autocomplete():
+    """Labeled inputs without autocomplete/name must still fill via get_by_label."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <label for="pan">Card number</label>
+                  <input id="pan" type="text" />
+                </body></html>
+                """
+            )
+            session = _fake_session_with_event_bus()
+            result = await service_actions._fill_payment_ref_via_playwright_locator(
+                input_page=page,
+                ref_name="card_number",
+                value="4111111111111111",
+                humanizer=None,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert "get_by_label" in str(result.get("selector") or "")
+            value = await page.locator("#pan").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_fill_payment_ref_via_titled_payment_iframe():
+    """Hosted widgets isolate fields in titled iframes — fill by semantic title."""
+    from playwright.async_api import async_playwright
+
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        try:
+            page = await browser.new_page()
+            await page.set_content(
+                """
+                <html><body>
+                  <h1>Hosted checkout shell</h1>
+                  <iframe title="Secure card number input frame" srcdoc='
+                    <html><body><input name="number" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure expiration date input frame" srcdoc='
+                    <html><body><input name="expiry" /></body></html>
+                  '></iframe>
+                  <iframe title="Secure CVC input frame" srcdoc='
+                    <html><body><input name="cvc" /></body></html>
+                  '></iframe>
+                </body></html>
+                """
+            )
+            await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").wait_for(state="attached")
+            session = _fake_session_with_event_bus()
+            ready = await service_actions.wait_for_payment_ref_fields(
+                session,
+                ref_names=["card_number"],
+                input_page=page,
+                timeout_seconds=5.0,
+            )
+            assert ready is True
+            result = await service_actions._fill_payment_ref_directly(
+                session,
+                "card_number",
+                "4111111111111111",
+                input_page=page,
+            )
+            assert result is not None
+            assert result.get("filled") is True
+            assert result.get("method") == "playwright_iframe_title"
+            value = await page.frame_locator(
+                'iframe[title*="card number" i]'
+            ).locator("input").input_value()
+            assert value.replace(" ", "") == "4111111111111111"
+        finally:
+            await browser.close()
+
+
+async def test_execute_input_text_payment_secret_ref_fail_closed_without_target():
+    """Payment secret refs without element/coords must not fake-success via focused typing."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    dom = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.type_text = AsyncMock()
+    hu.press_key = AsyncMock()
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "wait_for_payment_ref_fields",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(
+            service_actions,
+            "wait_for_navigation_ready",
+            AsyncMock(return_value={"ready": False}),
+        ),
+        patch.object(
+            service_actions,
+            "_fill_payment_ref_directly",
+            AsyncMock(return_value=None),
+        ),
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=None,
+            index=None,
+            coords=None,
+            params={"text": "card_number"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={
+                "card_number": "4111111111111111",
+                "card_name": "Rose Labs",
+                "card_expiry": "12/30",
+                "card_cvv": "123",
+            },
+            password_origins=None,
+            current_url="https://checkout.example.com/pay",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is False
+    assert out["error"] == "field_not_found"
+    assert out.get("payment_refs_filled") == []
+    hu.type_text.assert_not_called()
+
+
+async def test_fill_payment_ref_via_keyboard_types_after_cdp_focus():
+    """CDP-only payment documents must still receive keyboard events after focus."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "focused": True,
+                    "x": 10,
+                    "y": 20,
+                    "selector": 'input[autocomplete="cc-number"]',
+                    "score": 100,
+                }
+            }
+        }
+    )
+    iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
+    session = _fake_session_with_event_bus()
+    session.get_all_frames = AsyncMock(
+        return_value=(
+            {
+                "frame-1": {
+                    "id": "frame-1",
+                    "frameTargetId": "target-iframe-pay",
+                    "url": "https://pay.example/elements",
+                }
+            },
+            {"target-iframe-pay": "sess-1"},
+        )
+    )
+    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+    input_page = MagicMock()
+    input_page.frames = []
+    humanizer = MagicMock()
+    humanizer.input_page = input_page
+    humanizer.press_key = AsyncMock()
+    humanizer.type_text = AsyncMock()
+
+    result = await service_actions._fill_payment_ref_via_keyboard(
+        session=session,
+        ref_name="card_number",
+        value="4111111111111111",
+        input_page=input_page,
+        humanizer=humanizer,
+    )
+
+    assert result is not None
+    assert result["method"] == "keyboard"
+    assert result["target"].startswith("cdp:")
+    humanizer.type_text.assert_awaited_once_with("4111111111111111")
+
 
 async def test_execute_input_text_secret_redacts():
     """Text matching a secret ref is redacted in display and payment field origin mismatches abort."""
@@ -12133,9 +12523,18 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "Auto-returning to pinned handoff host" in source
     assert "navigation_origin_base_domain" in source
     assert "Auto-filled payment refs on pinned handoff page" in source
-    assert "Released handoff pin after payment auto-fill exhausted" in source
+    assert "Handoff payment auto-fill exhausted; pin retained" in source
     assert "handoff_payment_fill_attempts" in source
     assert '"text": "card_number"' in source
+    assert "wait_for_payment_ref_fields" in source
+    assert "Waiting for payment fields on handoff page" in source
+    assert "timeout_seconds=4.0" in source
+    # Prefer the live Playwright page (titled payment iframes) over humanizer-only.
+    assert "_autofill_page = input_page" in source
+    # Attempt counter must only advance after fields are ready (else burns retries).
+    wait_offset = source.index("wait_for_payment_ref_fields")
+    attempt_offset = source.index("handoff_payment_fill_attempts += 1")
+    assert wait_offset < attempt_offset
     # Auto-fill gate must stay host/path agnostic.
     auto_fill_start = source.index("handoff_payment_fill_attempts += 1")
     auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
@@ -12143,7 +12542,9 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "checkout.stripe" not in auto_fill_block
     assert "test_payment" not in auto_fill_block
     assert "api.stripe" not in auto_fill_block
-    assert "Released handoff pin — no payment fields found" in auto_fill_block
+    assert "Payment auto-fill exhausted — pin held; fill manually" in auto_fill_block
+    assert "Released handoff pin — no payment fields found" not in auto_fill_block
+    assert "navigation_pin_host = None" not in auto_fill_block
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -16683,6 +17084,34 @@ async def run_all_tests():
     await r.record_async(
         "fill_payment_ref_directly_uses_cdp_iframe_targets",
         test_fill_payment_ref_directly_uses_cdp_iframe_targets,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_real_child_frame_fixture",
+        test_fill_payment_ref_directly_real_child_frame_fixture,
+    )
+    await r.record_async(
+        "fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs",
+        test_fill_payment_ref_finder_accepts_collapsed_autocomplete_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs",
+        test_fill_payment_ref_finder_accepts_collapsed_stable_field_name_inputs,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_playwright_label_when_no_autocomplete",
+        test_fill_payment_ref_via_playwright_label_when_no_autocomplete,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_titled_payment_iframe",
+        test_fill_payment_ref_via_titled_payment_iframe,
+    )
+    await r.record_async(
+        "execute_input_text_payment_secret_ref_fail_closed_without_target",
+        test_execute_input_text_payment_secret_ref_fail_closed_without_target,
+    )
+    await r.record_async(
+        "fill_payment_ref_via_keyboard_types_after_cdp_focus",
+        test_fill_payment_ref_via_keyboard_types_after_cdp_focus,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_selector_recovery",

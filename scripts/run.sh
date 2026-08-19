@@ -446,6 +446,27 @@ kill_stale_tree() {
 # smoke/agentcard lane and the deploy reports `run.sh exited early with code -15`
 # with no hint that a sibling stack killed it. Returns 0 when the pid belongs to
 # a live isolated run.
+# Elapsed seconds for a pid, portable across BSD (macOS) and GNU ps.
+#
+# `ps -o etimes=` is GNU-only. On macOS BSD ps it is not a valid keyword, and ps
+# answers by printing its ENTIRE keyword list — which the caller then captured
+# as "$age" and fed to `[ "$age" -lt ... ]`, producing "integer expression
+# expected" on every call. That made the young-process guard below fail open, so
+# startup cleanup would kill a benchmark that had not yet published
+# services.json — exactly what the guard exists to prevent. Parse `etime`
+# ([[dd-]hh:]mm:ss), which both implementations support.
+process_age_seconds() {
+    local pid="$1" raw
+    raw=$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')
+    [ -n "$raw" ] || return 0
+    printf '%s' "$raw" | awk -F'[-:]' '{
+        if (NF == 4)      { print (($1 * 24 + $2) * 60 + $3) * 60 + $4 }
+        else if (NF == 3) { print ($1 * 60 + $2) * 60 + $3 }
+        else if (NF == 2) { print $1 * 60 + $2 }
+        else              { print 0 }
+    }'
+}
+
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
     # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
@@ -496,7 +517,7 @@ PYEOF
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
     local age grace
-    age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
+    age=$(process_age_seconds "$pid")
     # Fall back to the default on any non-integer override. An arithmetic error
     # here would return "not owned" and let cleanup kill a just-started run
     # before it publishes services.json — fail toward preserving the stack.

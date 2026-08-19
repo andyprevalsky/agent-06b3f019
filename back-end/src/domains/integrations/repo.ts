@@ -19,7 +19,16 @@ export async function findIntegrationsByUser(userId: string) {
     where: { userId },
     orderBy: { updatedAt: 'desc' },
     include: {
+      // Scoped to genuinely-connected accounts so callers can derive the
+      // connected-address list from the source of truth in this one query
+      // (no per-integration follow-up). An abandoned OAuth flow leaves a
+      // null-email, tokenless row, which must never surface as an account.
+      // Ordered so the derived primary is stable: without it Postgres may
+      // return a different first row per query and the displayed primary
+      // address would flicker between the user's accounts.
       emailCredentials: {
+        where: { email: { not: null }, accessToken: { not: null } },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         select: { email: true },
       },
     },
@@ -198,6 +207,58 @@ export async function upsertIntegrationForUpload(params: {
       config: params.config,
     },
   });
+}
+
+/**
+ * Reserve the integration row for an OAuth flow that is only just STARTING.
+ *
+ * Deliberately not `upsertIntegrationForUpload`: that helper REPLACES `config`
+ * wholesale, so merely opening the Google consent screen destroyed the
+ * `connectedEmails` the UI renders its account chips from. A user who then
+ * abandoned the flow never reached the callback that rewrites them, so a
+ * still-connected account silently lost its chips (prod, 2026-08-18).
+ *
+ * Nothing is known about the new grant yet, so this must be purely additive:
+ * merge the flow marker over existing config, and never downgrade a healthy
+ * integration's status — no credential has changed at this point.
+ *
+ * The merge happens INSIDE the database (`jsonb ||`) via a single
+ * INSERT ... ON CONFLICT, not as a read-modify-write in Node. A RMW would
+ * reintroduce the same data loss under concurrency: two OAuth starts racing
+ * each other both read the pre-write config, and the loser's write erases keys
+ * the winner (or an interleaved callback) just persisted. It would also race
+ * the `@@unique([userId, name])` constraint and fail one request outright.
+ * Being a single atomic statement, this is safe to run concurrently and on
+ * retry.
+ */
+export async function upsertIntegrationForOAuthStart(params: {
+  userId: string;
+  name: string;
+  config: Record<string, unknown>;
+}) {
+  const rows = await prisma.$queryRaw<Array<{ id: string }>>`
+    INSERT INTO "Integration" ("id", "userId", "name", "type", "status", "config", "createdAt", "updatedAt")
+    VALUES (
+      gen_random_uuid(),
+      ${params.userId},
+      ${params.name},
+      ${IntegrationType.DATA_SOURCE}::"IntegrationType",
+      ${IntegrationStatus.SYNCING}::"IntegrationStatus",
+      ${JSON.stringify(params.config)}::jsonb,
+      NOW(),
+      NOW()
+    )
+    ON CONFLICT ("userId", "name") DO UPDATE
+      SET "config" = COALESCE("Integration"."config", '{}'::jsonb) || EXCLUDED."config",
+          "updatedAt" = NOW()
+    RETURNING "id"
+  `;
+
+  const id = rows[0]?.id;
+  if (id === undefined) {
+    throw new Error(`Failed to reserve integration row for OAuth start: ${params.name}`);
+  }
+  return { id };
 }
 
 export async function updateIntegrationStatus(

@@ -4932,16 +4932,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     # document GET looks clean — cookie-stage recovery then false-succeeds forever.
     # After one cookies_sanitized result, escalate subsequent recoveries to config search.
     cookie_recovery_successes = 0
-    # Sticky hard filter: once a payment-CDN block triggered recovery on this
-    # task, later CF-only recoveries still require Stripe.js-capable configs.
+    # Sticky hard filter: once a critical third-party resource block triggered
+    # recovery on this task, later recoveries still re-verify that URL.
     require_payment_cdn = False
+    payment_cdn_verify_url = ""
     # After a successful challenge recovery, pin goto/navback to the recovered
     # host so the model cannot leave the cleared page for network-log thrash.
     navigation_pin_host: Optional[str] = None
     navigation_pin_url: Optional[str] = None
     handoff_payment_fill_attempts = 0
     handoff_payment_fill_succeeded = False
-    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 3
+    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -6375,228 +6376,224 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         or _nudge_host.endswith(f".{navigation_pin_host}")
                     )
                     if _on_pin:
-                        handoff_payment_fill_attempts += 1
-                        # Hosted payment widgets often mount fields in child
-                        # frames a few seconds after the document URL settles.
-                        if handoff_payment_fill_attempts > 1:
-                            await wait_for_navigation_ready(
-                                dom_service,
-                                url=current_url,
-                                timeout_seconds=4.0,
-                                reload_blank_spa_once=False,
-                            )
-                            await asyncio.sleep(1.5)
-                        auto_fill_result: Dict[str, Any] = {}
-                        auto_fill_call_id = f"handoff-autofill-{task_id}-{iteration}"
-                        await save_browser_action_message(
-                            agent_id=agent_id,
-                            title="Auto-filling payment fields on handoff page",
-                            task_id=task_id,
-                            message="",
-                            status=MessageStatus.IN_PROGRESS,
-                            browser_url=browser_url,
-                            action_type="input_text",
-                            tool_call_id=auto_fill_call_id,
-                            steps_taken=iteration,
-                            total_steps=MAX_ITERATIONS,
+                        # Hosted payment widgets mount fields in child frames
+                        # after the document URL settles — poll for semantic
+                        # payment inputs across frames before spending an attempt.
+                        from domains.spawn_browser_agent_v3.service_actions import (
+                            wait_for_payment_ref_fields,
                         )
-                        try:
-                            auto_fill_result = await asyncio.wait_for(
-                                execute_action(
-                                    dom_service,
-                                    action_history,
-                                    {
-                                        "action": "input_text",
-                                        "thinking": (
-                                            "Auto-fill approved payment card secret refs "
-                                            "on the pinned cross-origin handoff page."
-                                        ),
-                                        "params": {"text": "card_number"},
-                                    },
-                                    available_file_paths=available_file_paths,
-                                    session_id=session_id,
-                                    config=config,
-                                    humanizer=humanizer,
-                                    secret_refs=secret_refs,
-                                    password_origins=password_origins,
-                                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                                    user_id=user_id,
-                                    current_url=current_url,
-                                    trusted_page_urls=visited_urls,
-                                    write_lock_enabled=write_lock_enabled,
-                                    write_lock_approvals=write_lock_approvals,
-                                    system_name=system_name,
-                                    browser_network_recorder=browser_network_recorder,
-                                    current_auth_realm=auth_realm,
-                                    prepare_credentials_for_url=_prepare_credentials_for_url,
-                                    navigation_pin_host=navigation_pin_host,
-                                    navigation_origin_base_domain=navigation_origin_base_domain,
-                                ),
-                                timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+
+                        _autofill_page = input_page
+                        if _autofill_page is None and humanizer is not None:
+                            if "input_page" in getattr(humanizer, "__dict__", {}):
+                                _autofill_page = getattr(humanizer, "input_page", None)
+                        # Keep the wait short: long polls burned the 900s budget
+                        # before titled payment iframes mounted on the handoff page.
+                        fields_ready = await wait_for_payment_ref_fields(
+                            dom_service.session,
+                            ref_names=["card_number"],
+                            input_page=_autofill_page,
+                            timeout_seconds=4.0,
+                        )
+                        if not fields_ready:
+                            await save_browser_action_message(
+                                agent_id=agent_id,
+                                title="Waiting for payment fields on handoff page",
+                                task_id=task_id,
+                                message="Semantic payment inputs not visible yet in any frame",
+                                status=MessageStatus.FINISHED,
+                                browser_url=browser_url,
+                                action_type="input_text",
+                                tool_call_id=f"handoff-autofill-wait-{task_id}-{iteration}",
+                                steps_taken=iteration,
+                                total_steps=MAX_ITERATIONS,
                             )
-                        except Exception as auto_fill_error:
-                            auto_fill_result = {
-                                "success": False,
-                                "error": str(auto_fill_error)[:300],
-                            }
-                            logger.warning(
-                                "Handoff payment auto-fill raised",
-                                error=str(auto_fill_error)[:300],
+                            logger.info(
+                                "Handoff payment fields not ready; deferring auto-fill attempt",
                                 pin_host=navigation_pin_host,
                                 agent_id=agent_id,
                                 task_id=task_id,
                                 iteration=iteration,
-                                attempt=handoff_payment_fill_attempts,
                             )
-                        filled_refs = auto_fill_result.get("payment_refs_filled") or []
-                        if auto_fill_result.get("success") and filled_refs:
-                            handoff_payment_fill_succeeded = True
+                            # Do not burn an attempt — keep pin and retry next loop.
+                        else:
+                            handoff_payment_fill_attempts += 1
+                            auto_fill_result: Dict[str, Any] = {}
+                            auto_fill_call_id = f"handoff-autofill-{task_id}-{iteration}"
                             await save_browser_action_message(
                                 agent_id=agent_id,
-                                title=(
-                                    "Auto-filled payment fields "
-                                    f"({', '.join(str(r) for r in filled_refs)})"
-                                ),
+                                title="Auto-filling payment fields on handoff page",
                                 task_id=task_id,
                                 message="",
-                                status=MessageStatus.FINISHED,
+                                status=MessageStatus.IN_PROGRESS,
                                 browser_url=browser_url,
                                 action_type="input_text",
                                 tool_call_id=auto_fill_call_id,
                                 steps_taken=iteration,
                                 total_steps=MAX_ITERATIONS,
                             )
-                            browser_turn_messages.append(
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        "Cross-origin handoff page is pinned "
-                                        f"({navigation_pin_url}). Approved payment card "
-                                        f"secret refs were filled automatically "
-                                        f"({', '.join(str(r) for r in filled_refs)}). "
-                                        "Submit the payment form on THIS page now. "
-                                        "Do not navigate away, close tabs, or thrash "
-                                        "network/evaluate."
+                            try:
+                                auto_fill_result = await asyncio.wait_for(
+                                    execute_action(
+                                        dom_service,
+                                        action_history,
+                                        {
+                                            "action": "input_text",
+                                            "thinking": (
+                                                "Auto-fill approved payment card secret refs "
+                                                "on the pinned cross-origin handoff page."
+                                            ),
+                                            "params": {"text": "card_number"},
+                                        },
+                                        available_file_paths=available_file_paths,
+                                        session_id=session_id,
+                                        config=config,
+                                        humanizer=humanizer,
+                                        secret_refs=secret_refs,
+                                        password_origins=password_origins,
+                                        credential_refs_by_secret_ref=credential_refs_by_secret_ref,
+                                        user_id=user_id,
+                                        current_url=current_url,
+                                        trusted_page_urls=visited_urls,
+                                        write_lock_enabled=write_lock_enabled,
+                                        write_lock_approvals=write_lock_approvals,
+                                        system_name=system_name,
+                                        browser_network_recorder=browser_network_recorder,
+                                        current_auth_realm=auth_realm,
+                                        prepare_credentials_for_url=_prepare_credentials_for_url,
+                                        navigation_pin_host=navigation_pin_host,
+                                        navigation_origin_base_domain=navigation_origin_base_domain,
                                     ),
+                                    timeout=BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS,
+                                )
+                            except Exception as auto_fill_error:
+                                auto_fill_result = {
+                                    "success": False,
+                                    "error": str(auto_fill_error)[:300],
                                 }
-                            )
-                            logger.info(
-                                "Auto-filled payment refs on pinned handoff page",
-                                pin_host=navigation_pin_host,
-                                filled_refs=filled_refs,
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                iteration=iteration,
-                                attempt=handoff_payment_fill_attempts,
-                            )
-                        elif handoff_payment_fill_attempts < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS:
-                            await save_browser_action_message(
-                                agent_id=agent_id,
-                                title="Payment fields not ready yet — will retry auto-fill",
-                                task_id=task_id,
-                                message=str(auto_fill_result.get("error") or "field_not_found")[:200],
-                                status=MessageStatus.FINISHED,
-                                browser_url=browser_url,
-                                action_type="input_text",
-                                tool_call_id=auto_fill_call_id,
-                                steps_taken=iteration,
-                                total_steps=MAX_ITERATIONS,
-                            )
-                            logger.info(
-                                "Handoff payment auto-fill miss; will retry",
-                                pin_host=navigation_pin_host,
-                                attempt=handoff_payment_fill_attempts,
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                iteration=iteration,
-                            )
-                        else:
-                            # Handoff page never exposed semantic payment fields
-                            # (expired/incomplete document, etc.). Release the pin
-                            # so the agent can re-enter handoff from the origin —
-                            # still no vendor/path special-cases.
-                            released_pin_url = navigation_pin_url
-                            released_pin_host = navigation_pin_host
-                            navigation_pin_host = None
-                            navigation_pin_url = None
-                            await save_browser_action_message(
-                                agent_id=agent_id,
-                                title="Released handoff pin — no payment fields found",
-                                task_id=task_id,
-                                message=(
-                                    f"Pinned handoff {released_pin_url} never exposed "
-                                    "fillable payment fields after retries."
-                                ),
-                                status=MessageStatus.FINISHED,
-                                browser_url=browser_url,
-                                action_type="input_text",
-                                tool_call_id=auto_fill_call_id,
-                                steps_taken=iteration,
-                                total_steps=MAX_ITERATIONS,
-                            )
-                            origin_return_url = start_url or ""
-                            if origin_return_url:
-                                bounce = await execute_action(
-                                    dom_service,
-                                    action_history,
-                                    {"action": "goto", "params": {"url": origin_return_url}},
-                                    available_file_paths=available_file_paths,
-                                    session_id=session_id,
-                                    config=config,
-                                    humanizer=humanizer,
-                                    secret_refs=secret_refs,
-                                    password_origins=password_origins,
-                                    credential_refs_by_secret_ref=credential_refs_by_secret_ref,
-                                    user_id=user_id,
-                                    current_url=current_url,
-                                    trusted_page_urls=visited_urls,
-                                    write_lock_enabled=write_lock_enabled,
-                                    write_lock_approvals=write_lock_approvals,
-                                    system_name=system_name,
-                                    browser_network_recorder=browser_network_recorder,
-                                    current_auth_realm=auth_realm,
-                                    prepare_credentials_for_url=_prepare_credentials_for_url,
-                                    navigation_pin_host=None,
-                                    navigation_origin_base_domain=navigation_origin_base_domain,
+                                logger.warning(
+                                    "Handoff payment auto-fill raised",
+                                    error=str(auto_fill_error)[:300],
+                                    pin_host=navigation_pin_host,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                    attempt=handoff_payment_fill_attempts,
                                 )
-                                browser_state = await dom_service.get_browser_state(
-                                    include_screenshot=False
-                                )
-                                current_url = browser_state.get("url", origin_return_url)
-                                if not (isinstance(bounce, dict) and bounce.get("success")):
-                                    logger.warning(
-                                        "Origin return after handoff pin release failed",
-                                        origin_return_url=origin_return_url,
-                                        bounce=bounce,
-                                        agent_id=agent_id,
-                                        task_id=task_id,
-                                    )
-                            browser_turn_messages.append(
-                                {
-                                    "role": "user",
-                                    "content": (
-                                        "The cross-origin handoff page "
-                                        f"({released_pin_url}) never exposed fillable "
-                                        "payment fields (attempt "
-                                        f"{handoff_payment_fill_attempts}/"
-                                        f"{HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS}). The pin "
-                                        f"to {released_pin_host} was released and the "
-                                        "browser returned to the session origin. "
-                                        "Re-trigger the handoff from the origin page "
-                                        "(e.g. place/submit order), then fill card refs "
-                                        "on the new handoff page. Do not invent card numbers."
+                            filled_refs = auto_fill_result.get("payment_refs_filled") or []
+                            if auto_fill_result.get("success") and filled_refs:
+                                handoff_payment_fill_succeeded = True
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title=(
+                                        "Auto-filled payment fields "
+                                        f"({', '.join(str(r) for r in filled_refs)})"
                                     ),
-                                }
-                            )
-                            logger.info(
-                                "Released handoff pin after payment auto-fill exhausted",
-                                released_pin_host=released_pin_host,
-                                released_pin_url=released_pin_url,
-                                auto_fill_error=auto_fill_result.get("error"),
-                                agent_id=agent_id,
-                                task_id=task_id,
-                                iteration=iteration,
-                            )
+                                    task_id=task_id,
+                                    message="",
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                browser_turn_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Cross-origin handoff page is pinned "
+                                            f"({navigation_pin_url}). Approved payment card "
+                                            f"secret refs were filled automatically "
+                                            f"({', '.join(str(r) for r in filled_refs)}). "
+                                            "Submit the payment form on THIS page now. "
+                                            "Do not navigate away, close tabs, or thrash "
+                                            "network/evaluate."
+                                        ),
+                                    }
+                                )
+                                logger.info(
+                                    "Auto-filled payment refs on pinned handoff page",
+                                    pin_host=navigation_pin_host,
+                                    filled_refs=filled_refs,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                    attempt=handoff_payment_fill_attempts,
+                                )
+                            elif (
+                                handoff_payment_fill_attempts
+                                < HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS
+                            ):
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title="Payment fields not ready yet — will retry auto-fill",
+                                    task_id=task_id,
+                                    message=str(
+                                        auto_fill_result.get("error") or "field_not_found"
+                                    )[:200],
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                logger.info(
+                                    "Handoff payment auto-fill miss; will retry",
+                                    pin_host=navigation_pin_host,
+                                    attempt=handoff_payment_fill_attempts,
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                )
+                            else:
+                                # Keep the cross-origin pin. Releasing it let the model
+                                # abandon live handoff pages and restart Place order.
+                                # Stop auto-fill retries and nudge the model to fill/submit.
+                                await save_browser_action_message(
+                                    agent_id=agent_id,
+                                    title=(
+                                        "Payment auto-fill exhausted — pin held; fill manually"
+                                    ),
+                                    task_id=task_id,
+                                    message=(
+                                        f"Pinned handoff {navigation_pin_url} still has no "
+                                        "fillable payment fields after auto-fill retries. "
+                                        "Pin stays active — type card refs on this page."
+                                    ),
+                                    status=MessageStatus.FINISHED,
+                                    browser_url=browser_url,
+                                    action_type="input_text",
+                                    tool_call_id=auto_fill_call_id,
+                                    steps_taken=iteration,
+                                    total_steps=MAX_ITERATIONS,
+                                )
+                                browser_turn_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": (
+                                            "Cross-origin handoff page is still pinned "
+                                            f"({navigation_pin_url}). Automatic payment-field "
+                                            f"fill did not succeed after "
+                                            f"{handoff_payment_fill_attempts} attempts. "
+                                            "Stay on THIS page. Use input_text with "
+                                            "card_number / card_name / card_expiry / card_cvv "
+                                            "into the visible payment fields (including fields "
+                                            "inside iframes), then submit. Do not navigate away, "
+                                            "close tabs, or restart the merchant checkout."
+                                        ),
+                                    }
+                                )
+                                logger.info(
+                                    "Handoff payment auto-fill exhausted; pin retained",
+                                    pin_host=navigation_pin_host,
+                                    pin_url=navigation_pin_url,
+                                    auto_fill_error=auto_fill_result.get("error"),
+                                    agent_id=agent_id,
+                                    task_id=task_id,
+                                    iteration=iteration,
+                                )
                 if browser_recorder:
                     await browser_recorder.record_observation(
                         iteration=iteration,
@@ -7322,7 +7319,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
 
                 async def search_browser_configs(storage_state: Dict[str, Any]) -> Dict[str, Any]:
-                    nonlocal require_payment_cdn
+                    nonlocal require_payment_cdn, payment_cdn_verify_url
                     user_agent = ""
                     with contextlib.suppress(Exception):
                         user_agent = str(
@@ -7336,13 +7333,15 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     ).strip()
                     if blocked_resource_requires_payment_cdn(blocked_resource_url):
                         require_payment_cdn = True
+                        payment_cdn_verify_url = blocked_resource_url or payment_cdn_verify_url
+                    verify_url = blocked_resource_url or payment_cdn_verify_url
                     result = await recover_browser_challenge(
                         config,
                         task_id,
                         current_url,
                         storage_state,
                         user_agent,
-                        blocked_resource_url=blocked_resource_url,
+                        blocked_resource_url=verify_url,
                         require_payment_cdn=require_payment_cdn,
                     )
                     if result.get("rate_limited"):

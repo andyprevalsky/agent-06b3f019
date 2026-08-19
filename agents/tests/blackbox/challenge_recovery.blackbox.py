@@ -413,27 +413,23 @@ async def test_live_tab_verify_accepts_clean_and_rejects_access_denied():
 
 
 def test_payment_document_url_detection():
-    assert target_looks_like_payment_document("https://checkout.eventim.us/?afflky=1015Folsom")
-    assert target_looks_like_payment_document("https://shop.example/cart")
+    # Path allowlists removed — always False.
+    assert not target_looks_like_payment_document("https://checkout.eventim.us/?afflky=1015Folsom")
+    assert not target_looks_like_payment_document("https://shop.example/cart")
     assert not target_looks_like_payment_document("https://wl.eventim.us/event/lyny/692405")
 
 
 def test_blocked_resource_requires_payment_cdn():
     from domains.spawn_browser_agent_v3.recording import blocked_resource_requires_payment_cdn
 
-    assert blocked_resource_requires_payment_cdn("https://js.stripe.com/v3")
-    assert blocked_resource_requires_payment_cdn("https://m.stripe.com/6")
-    assert blocked_resource_requires_payment_cdn("https://checkout.stripe.com/c/pay/cs_test")
-    # api.stripe.com must NOT latch sticky require_payment_cdn — steel often
-    # fails /healthcheck while Stripe.js still loads.
-    assert not blocked_resource_requires_payment_cdn("https://api.stripe.com/v1/tokens")
-    assert not blocked_resource_requires_payment_cdn("https://wl.eventim.us/cdn-cgi/challenge")
-    # Query-string mentions of Stripe hosts must not sticky require_payment_cdn.
-    assert not blocked_resource_requires_payment_cdn(
-        "https://cdn.example.com/tag.js?ref=js.stripe.com"
-    )
+    # Any absolute http(s) URL latches — no vendor host allowlists.
+    assert blocked_resource_requires_payment_cdn("https://js.cdn.example/v3")
+    assert blocked_resource_requires_payment_cdn("https://cdn.example/widget.js")
+    assert blocked_resource_requires_payment_cdn("https://api.example.com/v1/tokens")
+    assert blocked_resource_requires_payment_cdn("https://wl.eventim.us/cdn-cgi/challenge")
     assert not blocked_resource_requires_payment_cdn(None)
     assert not blocked_resource_requires_payment_cdn("")
+    assert not blocked_resource_requires_payment_cdn("not-a-url")
 
 
 def test_blocked_resource_urls_for_verify_dedupes_and_strips_query():

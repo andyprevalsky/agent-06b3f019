@@ -20,27 +20,19 @@ export function bestSpecificity(location: ProxyGeoLocation): KernelRecoveryProxy
   return 'country';
 }
 
-/** Hosts Kernel's shared proxy is known to hard-blacklist (502 provider_blacklisted). */
-const KERNEL_PROVIDER_BLACKLISTED_HOST_SUFFIXES = [
-  'checkout.stripe.com',
-  'pay.stripe.com',
-] as const;
-
 /**
- * Prefer Steel candidates first when the target host is on Kernel's hard
- * blacklist. Rotating Kernel residential/ISP exits cannot clear a domain
- * denylist — probing Kernel first only burns recovery budget.
+ * Prefer Steel first when a hard CDN re-verify filter is active.
+ *
+ * Previously this special-cased vendor checkout hosts (Kernel denylist). That
+ * was endpoint-specific; the general rule is: when recovery must re-verify a
+ * blocked third-party resource, focus Steel first (Kernel residential exits
+ * often cannot fetch those CDNs). ``targetUrl`` is ignored.
  */
-export function shouldPreferSteelForChallengeTarget(targetUrl: string): boolean {
-  let hostname: string;
-  try {
-    hostname = new URL(targetUrl).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  return KERNEL_PROVIDER_BLACKLISTED_HOST_SUFFIXES.some(
-    (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`)
-  );
+export function shouldPreferSteelForChallengeTarget(
+  _targetUrl: string,
+  options?: { requirePaymentCdn?: boolean }
+): boolean {
+  return Boolean(options?.requirePaymentCdn);
 }
 
 /**

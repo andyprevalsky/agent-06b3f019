@@ -20,7 +20,7 @@ tags:
   - production-purchase
 sources:
   - agent 4a2ff6aa-fd5d-4d6d-bbad-f3e09380281a
-  - memory:fleet-run-20260818-235000-804185
+  - fleet run 20260818-235000-804185
   - PR #987
 repro: front-end/src/tests/blackbox/test-payment-confirmation.blackbox.tsx (keeps Place order submitting and exposes Stripe continue link after handoff)
 status: open

@@ -328,10 +328,16 @@ function testChallengeDetection(): void {
   );
 }
 
-function testSteelPreferredForKernelBlacklistedHosts(): void {
-  assert.ok(shouldPreferSteelForChallengeTarget('https://checkout.stripe.com/c/pay/cs_live_x'));
-  assert.ok(shouldPreferSteelForChallengeTarget('https://pay.stripe.com/b/session'));
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.roselabs.ai/test_payment'));
+function testSteelPreferredWhenCdnHardFilterActive(): void {
+  assert.ok(
+    !shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x')
+  );
+  assert.ok(
+    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
+      requirePaymentCdn: true,
+    })
+  );
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
   assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
 
   const preferred = browserRecoveryCandidates(
@@ -604,7 +610,7 @@ async function main(): Promise<void> {
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
-  testSteelPreferredForKernelBlacklistedHosts();
+  testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();

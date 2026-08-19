@@ -648,6 +648,15 @@ fi
 if [ -n "$FRONTEND_SUPABASE_ANON_KEY" ]; then
     STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")
 fi
+# Resolve catalog target before stack launch. Production-only tasks run with
+# --prod against roselabs.ai — they must not depend on trycloudflare/ngrok for
+# stack health (NXDOMAIN / missing ngrok on clones was killing fleets before
+# the start barrier even though the public tunnel was never used as {frontend_url}).
+BENCH_TARGET_MODE_FOR_STACK=""
+if BENCH_TARGET_PLAN_FOR_STACK="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
+    "$REPO_DIR/agents/benchmarks/tasks.json" "$BASE_PORT" "${BENCH_TASK_LIST[@]}" 2>/dev/null)"; then
+    BENCH_TARGET_MODE_FOR_STACK="$(printf '%s\n' "$BENCH_TARGET_PLAN_FOR_STACK" | head -1)"
+fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
         "BENCHMARK_WORLD_MODEL_MODE=simulate"
@@ -655,6 +664,12 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
         "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
+    )
+elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then
+    log "production-only target — skipping public tunnel (frontend is production)"
+    STACK_ENV+=(
+        "BENCHMARK_SKIP_WMH_BUILD=1"
+        "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     )
 else
     STACK_ENV+=(
