@@ -11307,6 +11307,137 @@ async def test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_withou
     recorded = ah.record_action.await_args.kwargs
     assert recorded["coordinates"] == {"x": 444, "y": 555}
 
+
+async def test_fill_payment_ref_directly_searches_playwright_frames():
+    """Hosted payment widgets live in child frames — search every frame, not just main."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    main = MagicMock()
+    main.evaluate = AsyncMock(return_value={"filled": False, "reason": "field_not_found"})
+    iframe = MagicMock()
+    iframe.evaluate = AsyncMock(
+        return_value={
+            "filled": True,
+            "x": 40,
+            "y": 80,
+            "selector": 'input[autocomplete="cc-number"]',
+            "valueLength": 16,
+            "score": 100,
+        }
+    )
+    input_page = MagicMock()
+    input_page.frames = [main, iframe]
+    session = _fake_session_with_event_bus()
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_number",
+        "4111111111111111",
+        input_page=input_page,
+    )
+
+    assert result is not None
+    assert result["filled"] is True
+    assert result["target"] == "playwright:1"
+    assert result["method"] == "js"
+    assert main.evaluate.await_count == 1
+    assert iframe.evaluate.await_count == 1
+
+
+async def test_fill_payment_ref_directly_uses_keyboard_when_js_value_rejected():
+    """Controlled inputs that keep an empty value after JS set must fall back to typing."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    frame = MagicMock()
+    frame.evaluate = AsyncMock(
+        side_effect=[
+            {
+                "filled": True,
+                "x": 10,
+                "y": 20,
+                "selector": 'input[autocomplete="cc-number"]',
+                "valueLength": 0,
+                "score": 100,
+            },
+            {
+                "focused": True,
+                "x": 10,
+                "y": 20,
+                "selector": 'input[autocomplete="cc-number"]',
+                "score": 100,
+            },
+        ]
+    )
+    input_page = MagicMock()
+    input_page.frames = [frame]
+    humanizer = MagicMock()
+    humanizer.input_page = input_page
+    humanizer.press_key = AsyncMock()
+    humanizer.type_text = AsyncMock()
+    session = _fake_session_with_event_bus()
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_number",
+        "4111111111111111",
+        input_page=input_page,
+        humanizer=humanizer,
+    )
+
+    assert result is not None
+    assert result["method"] == "keyboard"
+    humanizer.type_text.assert_awaited_once_with("4111111111111111")
+    assert humanizer.press_key.await_count >= 2
+
+
+async def test_fill_payment_ref_directly_uses_cdp_iframe_targets():
+    """OOPIF payment documents are reachable via session.get_all_frames targets."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    cdp_client = MagicMock()
+    cdp_client.send.Runtime.evaluate = AsyncMock(
+        return_value={
+            "result": {
+                "value": {
+                    "filled": True,
+                    "x": 12,
+                    "y": 34,
+                    "selector": 'input[autocomplete="cc-csc"]',
+                    "valueLength": 3,
+                    "score": 100,
+                }
+            }
+        }
+    )
+    iframe_cdp = SimpleNamespace(cdp_client=cdp_client, session_id="iframe-1")
+    session = _fake_session_with_event_bus()
+    session.get_all_frames = AsyncMock(
+        return_value=(
+            {
+                "frame-1": {
+                    "id": "frame-1",
+                    "frameTargetId": "target-iframe-pay",
+                    "url": "https://pay.example/elements",
+                }
+            },
+            {"target-iframe-pay": "sess-1"},
+        )
+    )
+    session.get_or_create_cdp_session = AsyncMock(return_value=iframe_cdp)
+
+    result = await service_actions._fill_payment_ref_directly(
+        session,
+        "card_cvv",
+        "123",
+    )
+
+    assert result is not None
+    assert result["filled"] is True
+    assert result["target"].startswith("cdp:")
+    session.get_or_create_cdp_session.assert_awaited()
+    cdp_client.send.Runtime.evaluate.assert_awaited()
+
+
 async def test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -12001,8 +12132,17 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "navigation_pin_url" in source
     assert "Auto-returning to pinned handoff host" in source
     assert "navigation_origin_base_domain" in source
-    assert "Injected handoff payment-fill nudge" in source
-    assert "text=card_number" in source
+    assert "Auto-filled payment refs on pinned handoff page" in source
+    assert "Injected handoff payment-fill nudge after auto-fill miss" in source
+    assert "handoff_payment_fill_attempted" in source
+    assert '"text": "card_number"' in source
+    # Auto-fill gate must stay host/path agnostic.
+    auto_fill_start = source.index("handoff_payment_fill_attempted = True")
+    auto_fill_end = source.index("if browser_recorder:", auto_fill_start)
+    auto_fill_block = source[auto_fill_start:auto_fill_end]
+    assert "checkout.stripe" not in auto_fill_block
+    assert "test_payment" not in auto_fill_block
+    assert "api.stripe" not in auto_fill_block
 
 
 def test_recovery_skips_when_live_tab_already_clear():
@@ -16441,6 +16581,18 @@ async def run_all_tests():
         test_execute_input_text_payment_secret_ref_direct_fill_uses_cdp_without_page,
     )
     await r.record_async(
+        "fill_payment_ref_directly_searches_playwright_frames",
+        test_fill_payment_ref_directly_searches_playwright_frames,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_uses_keyboard_when_js_value_rejected",
+        test_fill_payment_ref_directly_uses_keyboard_when_js_value_rejected,
+    )
+    await r.record_async(
+        "fill_payment_ref_directly_uses_cdp_iframe_targets",
+        test_fill_payment_ref_directly_uses_cdp_iframe_targets,
+    )
+    await r.record_async(
         "execute_input_text_payment_secret_ref_selector_recovery",
         test_execute_input_text_payment_secret_ref_recovers_dead_backend_node_with_selector,
     )
@@ -16465,7 +16617,7 @@ async def run_all_tests():
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
-    await r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
+    r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
     await r.record_async(
@@ -16484,12 +16636,12 @@ async def run_all_tests():
         "press_key_click_refuse_leave_while_pinned",
         test_execute_press_key_and_click_refuse_leave_while_pinned,
     )
-    await r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
-    await r.record(
+    r.record("handoff_pin_sticky_in_handler", test_handoff_pin_is_sticky_in_handler)
+    r.record(
         "nav_guard_no_endpoint_path_allowlists",
         test_navigation_guard_has_no_endpoint_path_allowlists,
     )
-    await r.record(
+    r.record(
         "recovery_skips_clean_live_tab",
         test_recovery_skips_when_live_tab_already_clear,
     )
