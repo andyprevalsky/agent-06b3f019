@@ -1151,4 +1151,48 @@ instead_token="$(
 [ "$instead_token" = "ghs_INSTEADOF" ] \
   || fail "insteadOf fallback must parse the rewrite token (got ${instead_token:-empty})"
 
+# Epoch 6: I-03 ignored the invalid injected token for fetch-ref but left
+# process $GITHUB_TOKEN and local .env on that github_pat_. Export must
+# overwrite both so children inherit the working hosts.yml / insteadOf token.
+require_text "$HELPER_SRC" \
+  'cloudbench_export_controller_github_token() {' \
+  "controller token export must live in the shared helper"
+require_text "$ROOT_DIR/scripts/cloud-init.sh" \
+  'cloudbench_export_controller_github_token agents/.env back-end/.env' \
+  "cloud-init must export a working GITHUB_TOKEN into process env and local .env"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_export_controller_github_token' \
+  "run-bench-cloud must export a working GITHUB_TOKEN into the controller env"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_export_controller_github_token' \
+  "run-bench-fleet must export a working GITHUB_TOKEN into the controller env"
+
+persist_a="$TMP_ROOT/persist-a.env"
+persist_b="$TMP_ROOT/persist-b.env"
+printf 'GITHUB_TOKEN=github_pat_STALE\nOTHER=keep-me\n' > "$persist_a"
+printf 'FOO=bar\n' > "$persist_b"
+GITHUB_TOKEN="github_pat_INVALID"
+export GITHUB_TOKEN
+cloudbench_export_controller_github_token "$persist_a" "$persist_b" >/dev/null \
+  || fail "export helper must succeed when a controller token exists"
+[ "$GITHUB_TOKEN" != "github_pat_INVALID" ] \
+  || fail "export helper must overwrite process GITHUB_TOKEN"
+[ -n "$GITHUB_TOKEN" ] \
+  || fail "export helper must set a non-empty process GITHUB_TOKEN"
+persisted_a="$(cloudbench_env_value "$persist_a" GITHUB_TOKEN)"
+persisted_b="$(cloudbench_env_value "$persist_b" GITHUB_TOKEN)"
+other="$(cloudbench_env_value "$persist_a" OTHER)"
+foo="$(cloudbench_env_value "$persist_b" FOO)"
+[ "$persisted_a" = "$GITHUB_TOKEN" ] \
+  || fail "export helper must persist the working token to the first dest"
+[ "$persisted_b" = "$GITHUB_TOKEN" ] \
+  || fail "export helper must persist the working token to the second dest"
+[ "$persisted_a" != "github_pat_STALE" ] \
+  || fail "export helper must replace a stale GITHUB_TOKEN in .env"
+[ "$other" = "keep-me" ] \
+  || fail "export helper must preserve other keys in the dest .env"
+[ "$foo" = "bar" ] \
+  || fail "export helper must preserve unrelated keys when appending GITHUB_TOKEN"
+unset GITHUB_TOKEN
+
 echo "All cloud benchmark environment checks passed."
