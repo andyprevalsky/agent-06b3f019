@@ -38,15 +38,17 @@ def test_suite_label_for_repeated_task_args_is_readable():
     assert rb.suite_name_for_error(args) == "--task parallel-tool-calls,spawn-sub-agents"
 
 
-def test_agent_payment_tasks_use_a_dedicated_non_admin_user():
-    expected_user_id = "00000000-0000-4000-8000-000000000106"
+def test_agent_payment_tasks_use_the_admin_account_with_forced_customer_path():
+    expected_user_id = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 
     assert local_runner.AGENT_PAYMENT_BENCHMARK_USER_ID == expected_user_id
     assert rb.AGENT_PAYMENT_BENCHMARK_USER_ID == expected_user_id
-    assert expected_user_id != rb.USER_ID
+    assert expected_user_id == rb.USER_ID
     for task_name in local_runner.AGENT_PAYMENT_TASK_NAMES:
         assert rb._benchmark_user_id_for_task(task_name) == expected_user_id
     assert rb._benchmark_user_id_for_task(rb.AGENT_PAYMENT_PRODUCTION_TASK_NAME) is None
+    local_runner.configure_task_environment(["agent-payment-test-shop"], isolated=True)
+    assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
 
 
 def test_payment_fixture_identity_is_shared_by_environment_and_seed(monkeypatch):
@@ -117,6 +119,10 @@ def test_payment_fixture_guards_identity_and_funds_non_admin_credit():
         "export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = "
         "'00000000-0000-4000-8000-000000000106'" in purchase_config
     )
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in purchase_config
+    assert "1f85ff25-6e29-4c1b-8739-f917bd101a30" in purchase_config
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in purchase_config
+    assert "function benchmarkForceCustomerPurchasePath()" in purchase_config
 
 
 def test_agentcard_setup_targets_the_effective_payment_user(monkeypatch):

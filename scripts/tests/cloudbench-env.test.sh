@@ -1195,4 +1195,23 @@ foo="$(cloudbench_env_value "$persist_b" FOO)"
   || fail "export helper must preserve unrelated keys when appending GITHUB_TOKEN"
 unset GITHUB_TOKEN
 
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCH_NEEDS_PAYMENT_FIXTURE=0' \
+  "cloudbench-run must track whether a sandbox payment fixture is required"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)' \
+  "cloudbench-run must treat the four sandbox AgentCard lifecycle tasks as payment-fixture work"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCH_NEEDS_PAYMENT_FIXTURE=1' \
+  "sandbox AgentCard lifecycle tasks must request the isolated payment fixture"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1' \
+  "cloudbench-run must force the customer mint path for sandbox payment benches"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30' \
+  "cloudbench-run must run sandbox payment benches as the admin account"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'npx tsx scripts/setup-benchmark-payment.ts --user-id' \
+  "cloudbench-run must seed the isolated payment fixture after the stack is healthy"
+
 echo "All cloud benchmark environment checks passed."
