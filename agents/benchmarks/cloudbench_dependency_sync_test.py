@@ -6971,6 +6971,7 @@ def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
     assert "cloudbench-fetch-ref.sh" in helper
     assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
     assert "No controller GitHub token" in helper
+    assert "cloudbench_controller_github_token" in helper
     assert "rm -f /data/cloudbench-fetch-ref.sh" in helper
     assert "warm_source_fetch_ref" in refresh
     assert "warm_source_fetch_ref" in wmh
@@ -7004,6 +7005,7 @@ CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS=5
 CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
 gh() {{ echo 'test-token'; }}
 resolve_github_token() {{ echo 'test-token'; }}
+cloudbench_controller_github_token() {{ echo 'test-token'; }}
 ssh_exec() {{
   echo checkout {sha[:8]}
   echo "::CLOUDBENCH-REF::{sha}"

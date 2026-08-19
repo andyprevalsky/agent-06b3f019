@@ -854,7 +854,7 @@ fi
 # prompt for a username over HTTPS and abort the fleet before any task starts.
 warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
     local mid="$1" sha="$2" token token_b64 sync_log remote_ref
-    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    token="$(cloudbench_controller_github_token)"
     [ -n "$token" ] || {
         echo "❌ No controller GitHub token for warm-source git-sync." >&2
         return 1
@@ -2190,7 +2190,7 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    _ghb64="$(printf '%s' "$(cloudbench_controller_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
@@ -2404,7 +2404,7 @@ done
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+CONTROLLER_GITHUB_TOKEN="$(cloudbench_controller_github_token)"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 

@@ -1106,4 +1106,49 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
+# Epoch 4: injected GITHUB_TOKEN is invalid (`gh auth status`: "The token in
+# GITHUB_TOKEN is invalid") but `gh auth token` still returns it. Warm-box
+# fetch-ref then 401s as `could not read Username for 'https://github.com'`.
+# The controller must ignore that env token and use gh's hosts.yml credential
+# (`env -u GITHUB_TOKEN gh auth token`) — the same ghs_ token git insteadOf uses.
+require_text "$HELPER_SRC" \
+  'cloudbench_controller_github_token() {' \
+  "controller GitHub token resolution must live in the shared helper"
+require_text "$HELPER_SRC" \
+  'env -u GITHUB_TOKEN gh auth token' \
+  "controller token resolution must ignore injected GITHUB_TOKEN when asking gh"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_controller_github_token' \
+  "warm-source git-sync must use the shared controller token helper"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_controller_github_token' \
+  "fleet worker token cache must use the shared controller token helper"
+
+GITHUB_TOKEN="github_pat_INVALID"
+resolved_token="$(cloudbench_controller_github_token)" \
+  || fail "controller token helper must succeed when gh hosts.yml or git insteadOf exists"
+[ "$resolved_token" != "$GITHUB_TOKEN" ] \
+  || fail "controller token helper must not return the injected invalid GITHUB_TOKEN"
+[ -n "$resolved_token" ] \
+  || fail "controller token helper must return a non-empty hosts.yml/insteadOf token"
+unset GITHUB_TOKEN
+
+# insteadOf fallback when gh cannot return a token
+instead_home="$TMP_ROOT/token-home"
+instead_bin="$TMP_ROOT/token-bin"
+mkdir -p "$instead_home" "$instead_bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$instead_bin/gh"
+chmod +x "$instead_bin/gh"
+printf '%s\n' \
+  '[url "https://x-access-token:ghs_INSTEADOF@github.com/"]' \
+  '	insteadOf = https://github.com/' \
+  > "$instead_home/.gitconfig"
+instead_token="$(
+  env -u GITHUB_TOKEN HOME="$instead_home" GIT_CONFIG_GLOBAL="$instead_home/.gitconfig" \
+    PATH="$instead_bin:/usr/bin:/bin" \
+    bash -c "source $(printf '%q' "$HELPER_SRC"); cloudbench_controller_github_token"
+)" || fail "insteadOf fallback must succeed when gh is unavailable"
+[ "$instead_token" = "ghs_INSTEADOF" ] \
+  || fail "insteadOf fallback must parse the rewrite token (got ${instead_token:-empty})"
+
 echo "All cloud benchmark environment checks passed."

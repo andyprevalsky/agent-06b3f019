@@ -74,7 +74,9 @@ Cemented by
 
 ## Human feedback
 
-None recorded.
+Epoch 4 showed the I-01 guardrail was incomplete: fetch-ref ran and received
+a token, but `gh auth token` returned the injected invalid `$GITHUB_TOKEN`.
+Follow-up case `2026-08-19-refresh-deps-invalid-env-github-token`.
 
 ## Reusable lesson
 
