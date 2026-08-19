@@ -834,7 +834,12 @@ class RoseClient:
             waterfall_tools = direct_auth_tools
             waterfall_tool_choice = effective_tool_choice or "any"
 
-        if _exclude_anthropic_family and gpt_auth is not None:
+        if not pool_spec.direct_auth_enabled:
+            # An open-weights-only pool must never reach a proprietary
+            # direct-token provider, or the model guarantee it exists to make
+            # is silently void.
+            direct_auth = None
+        elif _exclude_anthropic_family and gpt_auth is not None:
             direct_auth = gpt_auth
         elif _exclude_anthropic_family:
             direct_auth = None
