@@ -39,7 +39,12 @@ is_ignored_path() {
     mac-app/tests/* | mac-app/tests-e2e/*) return 0 ;;
     mac-app/scripts/* | mac-app/playwright.config.ts | mac-app/vitest.config.ts) return 0 ;;
     front-end/vitest.config.ts) return 0 ;;
-    *.blackbox.ts | *.blackbox.tsx | *.test.ts | *.test.tsx | *.test.mjs) return 0 ;;
+    # Every test-file suffix the repo actually uses. A missing one here silently
+    # burns a signed + notarized release on a test-only change.
+    *.blackbox.ts | *.blackbox.tsx | *.blackbox.js | *.blackbox.jsx) return 0 ;;
+    *.test.ts | *.test.tsx | *.test.mts | *.test.mjs | *.test.js | *.test.jsx) return 0 ;;
+    *.spec.ts | *.spec.tsx | *.spec.mts | *.spec.mjs | *.spec.js | *.spec.jsx) return 0 ;;
+    front-end/tests-e2e/* | front-end/src/**/__tests__/*) return 0 ;;
     *) return 1 ;;
   esac
 }

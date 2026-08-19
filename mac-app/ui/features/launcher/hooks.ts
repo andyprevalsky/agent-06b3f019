@@ -176,6 +176,10 @@ export const useLauncher = (): LauncherHandle => {
  */
 export const useLauncherWindowHeight = (pillHeight: number): void => {
   useEffect(() => {
-    void resizeQuickQuery({ height: launcherWindowHeightFromPill(pillHeight) });
+    // The launcher window and its IPC bridge can tear down mid-resize (the window
+    // is hidden on blur), which rejects this call. An unhandled rejection there
+    // would surface as a renderer error for a resize that no longer matters, so
+    // swallow it: there is no window left to size.
+    resizeQuickQuery({ height: launcherWindowHeightFromPill(pillHeight) }).catch(() => {});
   }, [pillHeight]);
 };

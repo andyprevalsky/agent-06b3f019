@@ -80,10 +80,31 @@ export async function extractDroppedFilesAsync(
     if (!uri.startsWith('file:')) continue;
     const blob = await readDroppedFileUrl(uri);
     if (blob === null) continue;
-    const name = decodeURIComponent(uri.split('/').pop() ?? 'file');
-    files.push(new File([blob], name, { type: blob.type || 'application/octet-stream' }));
+    files.push(
+      new File([blob], fileNameFromUri(uri), {
+        type: blob.type || 'application/octet-stream',
+      })
+    );
   }
   return files;
+}
+
+/**
+ * Last path segment of a `file:` URI, percent-decoded when possible.
+ *
+ * `decodeURIComponent` throws `URIError` on an invalid escape (`%ZZ`, a trailing
+ * `%`, a truncated multi-byte sequence). Letting that propagate would reject the
+ * whole drop and lose every other file the user dragged, so fall back to the raw
+ * segment: a slightly ugly filename beats a dropped drop.
+ */
+function fileNameFromUri(uri: string): string {
+  const segment = uri.split('/').pop() ?? 'file';
+  if (segment === '') return 'file';
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 function readUriList(dataTransfer: DataTransfer): string[] {

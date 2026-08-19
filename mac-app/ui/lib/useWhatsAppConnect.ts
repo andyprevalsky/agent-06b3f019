@@ -35,12 +35,15 @@ export interface WhatsAppConnectState {
 
 const UNAVAILABLE = 'WhatsApp is unavailable in this app version.';
 const FAILED = 'WhatsApp connection failed. Please try again.';
+const CANCELED = 'WhatsApp pairing was canceled.';
 
 export function useWhatsAppConnect(): WhatsAppConnectState {
   const [isModalOpen, setModalOpen] = useState(false);
   const [isConnecting, setConnecting] = useState(false);
   const [qrCode, setQRCode] = useState<string | null>(null);
   const qrCleanupRef = useRef<(() => void) | null>(null);
+  /** Settles the in-flight `connect()` when the user dismisses the QR modal. */
+  const dismissRef = useRef<(() => void) | null>(null);
 
   const clearQRListener = useCallback(() => {
     qrCleanupRef.current?.();
@@ -48,8 +51,15 @@ export function useWhatsAppConnect(): WhatsAppConnectState {
   }, []);
 
   // A pairing left open when the window unmounts would otherwise leak the IPC
-  // subscription for the lifetime of the app.
-  useEffect(() => clearQRListener, [clearQRListener]);
+  // subscription (and strand the caller) for the lifetime of the app.
+  useEffect(
+    () => () => {
+      dismissRef.current?.();
+      dismissRef.current = null;
+      clearQRListener();
+    },
+    [clearQRListener]
+  );
 
   const connect = useCallback(async () => {
     const whatsapp = getElectronApi()?.whatsapp;
@@ -70,11 +80,21 @@ export function useWhatsAppConnect(): WhatsAppConnectState {
       }
       setModalOpen(true);
 
-      const result = await whatsapp.connect();
+      // Native pairing only settles when the phone scans the QR, so a user who
+      // dismisses the modal would otherwise leave the caller (and the shared
+      // Integrations row's spinner) pending indefinitely. Race the native call
+      // against dismissal so closing the modal always settles this attempt.
+      const dismissal = new Promise<{ success: false; error: string }>((resolve) => {
+        dismissRef.current = () => resolve({ success: false, error: CANCELED });
+      });
+      const result = await Promise.race([whatsapp.connect(), dismissal]);
       return result.success ? { success: true } : { success: false, error: result.error ?? FAILED };
     } catch (error) {
       return { success: false, error: getErrorMessageOrFallback(error, FAILED) };
     } finally {
+      // A late result from an abandoned attempt must not reopen or re-clear UI
+      // that a newer attempt now owns.
+      dismissRef.current = null;
       clearQRListener();
       setConnecting(false);
       setModalOpen(false);
@@ -83,6 +103,10 @@ export function useWhatsAppConnect(): WhatsAppConnectState {
   }, [clearQRListener]);
 
   const closeModal = useCallback(() => {
+    // Settle the in-flight attempt first; the finally block above owns the rest
+    // of the teardown so both paths converge on the same cleared state.
+    dismissRef.current?.();
+    dismissRef.current = null;
     clearQRListener();
     setModalOpen(false);
     setQRCode(null);

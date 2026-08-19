@@ -141,6 +141,67 @@ describe('useWhatsAppConnect', () => {
     expect(result.current.isConnecting).toBe(false);
   });
 
+  // Native pairing only settles when the phone scans the QR. Without this,
+  // dismissing the modal left connect() pending forever and the shared
+  // Integrations row spun indefinitely.
+  it('settles the pending attempt when the user dismisses the QR modal', async () => {
+    const neverSettles = vi.fn(() => new Promise<{ success: boolean }>(() => {}));
+    installApi({ hasCredentials: vi.fn(async () => false), connect: neverSettles }, () => () => {});
+
+    const { result } = renderHook(() => useWhatsAppConnect());
+    let pending: Promise<{ success: boolean; error?: string }> | undefined;
+    act(() => {
+      pending = result.current.connect();
+    });
+    await waitFor(() => {
+      expect(result.current.isModalOpen).toBe(true);
+    });
+
+    let outcome: { success: boolean; error?: string } | undefined;
+    await act(async () => {
+      result.current.closeModal();
+      outcome = await pending;
+    });
+
+    expect(outcome?.success).toBe(false);
+    expect(outcome?.error).toMatch(/canceled/i);
+    expect(result.current.isConnecting).toBe(false);
+    expect(result.current.isModalOpen).toBe(false);
+    expect(result.current.qrCode).toBeNull();
+  });
+
+  it('ignores a late native result from a dismissed attempt', async () => {
+    let settle: ((r: { success: boolean }) => void) | undefined;
+    installApi(
+      {
+        hasCredentials: vi.fn(async () => false),
+        connect: vi.fn(() => new Promise<{ success: boolean }>((r) => (settle = r))),
+      },
+      () => () => {}
+    );
+
+    const { result } = renderHook(() => useWhatsAppConnect());
+    let pending: Promise<{ success: boolean; error?: string }> | undefined;
+    act(() => {
+      pending = result.current.connect();
+    });
+    await waitFor(() => {
+      expect(result.current.isModalOpen).toBe(true);
+    });
+
+    await act(async () => {
+      result.current.closeModal();
+      await pending;
+    });
+    // The native side finally answers, after the user already gave up.
+    await act(async () => {
+      settle!({ success: true });
+    });
+
+    expect(result.current.isModalOpen).toBe(false);
+    expect(result.current.isConnecting).toBe(false);
+  });
+
   it('surfaces a thrown bridge failure as a resolved error and clears state', async () => {
     const connect = vi.fn(async () => {
       throw new Error('bridge crashed');

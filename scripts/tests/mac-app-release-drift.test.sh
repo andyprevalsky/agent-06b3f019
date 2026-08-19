@@ -84,6 +84,29 @@ assert_decision "mac-app test-only changes must not ship" \
 assert_decision "docs-only changes must not ship" \
   false false no-shipped-change 'front-end/README.md' 'docs/testing.md'
 
+# A colocated test (not under a tests/ directory) is classified purely by its
+# suffix. Any suffix missing from is_ignored_path silently burns a signed +
+# notarized release on a test-only change, so pin every suffix the repo uses.
+for colocated_test in \
+  'front-end/src/Example.spec.tsx' \
+  'front-end/src/Example.spec.ts' \
+  'front-end/src/Example.spec.js' \
+  'front-end/src/Example.spec.jsx' \
+  'front-end/src/Example.test.tsx' \
+  'front-end/src/Example.test.js' \
+  'mac-app/ui/Example.spec.ts' \
+  'mac-app/ui/Example.blackbox.ts' \
+  'front-end/tests-e2e/login.spec.ts'; do
+  assert_decision "colocated test file $colocated_test must not ship" \
+    false false no-shipped-change "$colocated_test"
+done
+
+# ...but a colocated test must not mask a real shipped change beside it.
+assert_decision "a real change alongside a colocated test still ships" \
+  false true shipped-surface \
+  'front-end/src/Example.spec.tsx' \
+  'front-end/src/features/integrations/components/SyncItemButton.tsx'
+
 assert_decision "an empty diff must not ship" false false no-shipped-change ''
 
 # --- structural: the workflow must use that decision ----------------------

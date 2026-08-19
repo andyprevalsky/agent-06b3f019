@@ -15,13 +15,14 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { screen, waitFor, within, renderHook, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { server } from './msw/server';
 import { renderWithProviders } from './test-wrapper';
 import Integrations from '@/pages/Integrations';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
+import { useMessagesSync } from '@/features/integrations/hooks/useMessagesSync';
 import type { IntegrationHandlers } from '@/features/integration-handlers-context';
 
 const API_BASE = 'http://localhost:3001/api';
@@ -262,6 +263,60 @@ describe('Integrations connected-state treatment', () => {
       expect(
         within(row).queryByRole('button', { name: /connect whatsapp/i }),
       ).not.toBeInTheDocument();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // 3. Message operations share one loading slot
+  // -------------------------------------------------------------------------
+
+  describe('message sync serialization', () => {
+    // iMessage and WhatsApp both drive `messageSyncLoading`. Started together,
+    // the second overwrote the first's label and the first `finally` cleared the
+    // row while the other native operation was still running -- re-exposing the
+    // action mid-flight and allowing a duplicate native call.
+    it('refuses a second message operation while one is in flight', async () => {
+      let releaseIMessage: (() => void) | undefined;
+      const iMessageClick = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseIMessage = resolve;
+          }),
+      );
+      const whatsAppConnect = vi.fn(async () => ({ success: true }));
+      const handlers = {
+        iMessage: { isAvailable: true, onClick: iMessageClick },
+        whatsApp: { isAvailable: true, connect: whatsAppConnect },
+      } as unknown as Parameters<typeof useMessagesSync>[0];
+
+      const { result } = renderHook(() => useMessagesSync(handlers, async () => {}));
+
+      let iMessagePending: Promise<void> | undefined;
+      act(() => {
+        iMessagePending = result.current.handleIMessageSync();
+      });
+      await waitFor(() => {
+        expect(result.current.messageSyncLoading).toBe('imessage');
+      });
+
+      // WhatsApp must not start, and must not steal the loading label.
+      await act(async () => {
+        await result.current.handleWhatsAppConnect();
+      });
+      expect(whatsAppConnect).not.toHaveBeenCalled();
+      expect(result.current.messageSyncLoading).toBe('imessage');
+
+      await act(async () => {
+        releaseIMessage!();
+        await iMessagePending;
+      });
+      expect(result.current.messageSyncLoading).toBeNull();
+
+      // Once settled, the next operation is allowed.
+      await act(async () => {
+        await result.current.handleWhatsAppConnect();
+      });
+      expect(whatsAppConnect).toHaveBeenCalledTimes(1);
     });
   });
 });
