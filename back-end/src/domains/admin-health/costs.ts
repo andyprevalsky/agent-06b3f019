@@ -83,7 +83,9 @@ const MODEL_RATES: Record<string, ModelRates> = {
   'gpt-5.6-terra': openAi(2.5, 15, 1.25),
   'gpt-5.6-luna': openAi(1, 6, 1.25),
   'gpt-5.5': openAi(5, 30),
-  'gpt-5.4': openAi(1.75, 14),
+  // 5.4 is the one model whose direct and OpenRouter rates coincide; the
+  // long-standing $1.75/$14 was stale for both.
+  'gpt-5.4': openAi(2.5, 15),
   // OpenRouter-routed OpenAI models (waterfall). Same cache semantics as the
   // direct route (inclusive prompt totals, 0.1x read, 1.25x write) but
   // OpenRouter's cheaper per-token rates.

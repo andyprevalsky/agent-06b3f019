@@ -39,9 +39,12 @@ const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }
 // Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
 // above 272k input tokens, which this flat table does not model.
 const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
+  // $2.50/$15 per M. The long-standing $1.75/$14 was stale for the direct
+  // route too, under-reporting funded API usage by ~30%. Unlike sol/terra/luna,
+  // 5.4's direct and OpenRouter rates coincide.
   'gpt-5.4-openai': {
-    prompt: (1.75 / 1_000_000).toString(),
-    completion: (14.0 / 1_000_000).toString(),
+    prompt: (2.5 / 1_000_000).toString(),
+    completion: (15.0 / 1_000_000).toString(),
   },
   'gpt-5.5-openai': {
     prompt: (5.0 / 1_000_000).toString(),

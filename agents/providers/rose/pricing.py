@@ -78,7 +78,10 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
 # Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
 # above 272k input tokens, which this flat table does not model.
 _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-5.4-openai":       {"input_cents_per_1k": 0.175, "output_cents_per_1k": 1.4},
+    # $2.50/$15 per M. The repo's long-standing $1.75/$14 was stale for the
+    # direct route as well, so it under-reported funded API usage by ~30%.
+    # (Unlike sol/terra/luna, 5.4's direct and OpenRouter rates coincide.)
+    "gpt-5.4-openai":       {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},
     "gpt-5.5-openai":       {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
     "gpt-5.6-luna-openai":  {"input_cents_per_1k": 0.1,   "output_cents_per_1k": 0.6},
     "gpt-5.6-terra-openai": {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},

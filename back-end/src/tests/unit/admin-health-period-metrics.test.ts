@@ -345,17 +345,17 @@ assert.strictEqual(
   1_500,
   'Unpriceable LLM tokens must be surfaced as coverage loss, not silently averaged in as $0'
 );
-// `gpt-5.4` (bare) is the DIRECT OpenAI route, so it keeps OpenAI's list price
-// of $1.75/$14 -- not OpenRouter's $2.50/$15, which is keyed separately under
-// `openai/gpt-5.4`.
+// `gpt-5.4` (bare) is the DIRECT OpenAI route at $2.50/$15 per M. Unlike
+// sol/terra/luna, 5.4's direct and OpenRouter rates coincide; the repo's
+// long-standing $1.75/$14 was stale for both and under-reported by ~30%.
 // gpt-5.4 leg: prompt total is inclusive, so the 400k cache-read and 100k
 // cache-write are subtracted from the 1M before charging full rate --
-// 500k*$1.75 + 400k*$0.175 + 100k*$1.75 per M = $1.12.
+// 500k*$2.50 + 400k*$0.25 + 100k*$2.50 per M = $1.60.
 // claude-sonnet-5 leg: input is exclusive, so all three buckets are additive --
-// 500k*$2 + 400k*$0.20 + 100k*$2.50 per M = $1.33. Total $2.45.
+// 500k*$2 + 400k*$0.20 + 100k*$2.50 per M = $1.33. Total $2.93.
 assert.strictEqual(
   providerCacheSemantics.apiRateDollars,
-  2.45,
+  2.93,
   'OpenAI prompt totals must subtract cache tokens while Anthropic input totals remain exclusive'
 );
 // The OpenRouter route and the direct OpenAI API are separate contracts for the
