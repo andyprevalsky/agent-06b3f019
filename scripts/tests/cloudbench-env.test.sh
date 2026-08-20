@@ -1187,7 +1187,7 @@ grep -Fq 'after ${warm_stop_attempts} attempts' "$ROOT_DIR/scripts/run-bench-fle
 # Boot-launch already injects CLOUDBENCH_GITHUB_TOKEN_B64 from the controller;
 # maintenance git-sync must fail closed the same way and never allow empty auth.
 python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps/wmh controller-token git-sync contract failed"
-import pathlib, re, subprocess, sys, textwrap
+import base64, pathlib, re, subprocess, sys, textwrap
 
 src_path = pathlib.Path(sys.argv[1])
 src = src_path.read_text()
@@ -1234,6 +1234,38 @@ if proc.returncode == 0:
 if "No controller GitHub token" not in (proc.stderr + proc.stdout):
     raise SystemExit("helper must name the missing controller GitHub token")
 
+# Poisoned GITHUB_TOKEN env must be cleared before gh runs. Prefix assignment
+# makes gh see empty GITHUB_TOKEN; when gh fails, fall back to resolve_github_token.
+script = helper + textwrap.dedent(
+    """
+    export GITHUB_TOKEN=poisoned_invalid_token
+    export GH_TOKEN=poisoned_invalid_token
+    resolve_github_token() { echo "ghp_fallback_from_dotenv"; }
+    gh() {
+      # Prove poison was cleared for this invocation.
+      if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
+        echo "POISON_LEAKED" >&2
+        return 1
+      fi
+      return 1
+    }
+    build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
+    """
+)
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+if proc.returncode != 0:
+    raise SystemExit(f"helper must fall back after clearing poisoned GITHUB_TOKEN: {proc.stderr}")
+if "POISON_LEAKED" in (proc.stderr + proc.stdout):
+    raise SystemExit("helper must clear GITHUB_TOKEN/GH_TOKEN before invoking gh")
+if "poisoned_invalid_token" in proc.stdout:
+    raise SystemExit("helper must not embed the poisoned GITHUB_TOKEN value")
+_m = re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", proc.stdout)
+if not _m:
+    raise SystemExit("could not parse AUTH_HDR after poison-clear fallback")
+_decoded = base64.b64decode(_m.group(1)).decode()
+if "ghp_fallback_from_dotenv" not in _decoded:
+    raise SystemExit(f"expected dotenv fallback token in AUTH_HDR, got {_decoded!r}")
+
 # With a token, embed non-optional auth header.
 script = helper + textwrap.dedent(
     """
@@ -1253,10 +1285,9 @@ if "GITHUB_TOKEN:-" in cmd:
 if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
     raise SystemExit("authenticated sync cmd must embed a Basic auth header from the controller token")
 # The Basic payload must decode to x-access-token:<token>
-import base64, re as _re
-m = _re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", cmd)
+m = re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", cmd)
 if not m:
-    m = _re.search(r"AUTH_HDR='Authorization: Basic ([A-Za-z0-9+/=]+)'", cmd)
+    m = re.search(r"AUTH_HDR='Authorization: Basic ([A-Za-z0-9+/=]+)'", cmd)
 if not m:
     raise SystemExit(f"could not parse embedded AUTH_HDR from cmd: {cmd[:200]!r}")
 decoded = base64.b64decode(m.group(1)).decode()
