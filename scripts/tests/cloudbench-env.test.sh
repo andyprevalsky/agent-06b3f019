@@ -1213,5 +1213,11 @@ require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
 require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
   'npx tsx scripts/setup-benchmark-payment.ts --user-id' \
   "cloudbench-run must seed the isolated payment fixture after the stack is healthy"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'sh -c '\''cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"'\''' \
+  "cloudbench-run must pass payment fixture paths as argv instead of interpolating them into a shell string"
+if grep -Fq "bash -lc \"cd '\$REPO_DIR/back-end'" "$ROOT_DIR/scripts/cloudbench-run.sh"; then
+  fail "cloudbench-run must not interpolate REPO_DIR/PAYMENT_USER_ID into bash -lc"
+fi
 
 echo "All cloud benchmark environment checks passed."
