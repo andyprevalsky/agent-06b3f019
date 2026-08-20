@@ -1,5 +1,6 @@
 import { PrismaClient, IntegrationStatus, IntegrationType } from '@prisma/client';
 import dotenv from 'dotenv';
+import { resolveBenchmarkCardholderId } from '../src/providers/agentcard/benchmark-float';
 
 dotenv.config();
 
@@ -11,6 +12,14 @@ const USER_IDS: Record<string, string> = {
   'purchase-kyc': '00000000-0000-4000-8000-000000000103',
   'source-connect': '00000000-0000-4000-8000-000000000104',
 };
+
+/**
+ * Must equal `ADMIN_SUBSCRIPTION_BYPASS_USER_ID` in agents/benchmarks/run_benchmark.py and
+ * `ADMIN_BYPASS_USER_ID` in agents/benchmarks/local.py. The admin-bypass gate runs as this user
+ * under `purchase-subscription` mode (via BENCHMARK_USER_ID override).
+ */
+export const ADMIN_SUBSCRIPTION_BYPASS_USER_ID =
+  '00000000-0000-4000-8000-000000000105'; // pragma: allowlist secret
 
 type FixtureMode = 'purchase-subscription' | 'purchase-kyc' | 'source-connect';
 
@@ -47,6 +56,37 @@ async function ensureUser(mode: FixtureMode, userId: string): Promise<void> {
     update: {
       isAnonymous: false,
       name: `Gate Benchmark ${mode}`,
+    },
+  });
+}
+
+/**
+ * Admin company-funded mints (`issueAdminCompanyCard` → `fundsSource: company_flow`) require an
+ * org-managed AgentCard cardholder on the Integration row. The depleted purchase-subscription
+ * fixture deletes all integrations, so without this re-seed the admin-bypass gate raises
+ * `agentcard_user_cardholder_onboarding_required` instead of minting.
+ */
+export async function seedOrgManagedAgentCardForUser(
+  userId: string,
+  cardholderId: string
+): Promise<void> {
+  const config = { orgManaged: true, cardholderId };
+  await prisma.integration.upsert({
+    where: { userId_name: { userId, name: 'agentcard' } },
+    create: {
+      userId,
+      name: 'agentcard',
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      config,
+    },
+    update: {
+      type: IntegrationType.TOOL_SETUP,
+      status: IntegrationStatus.CONNECTED,
+      isActive: true,
+      config,
+      lastUsedAt: new Date(),
     },
   });
 }
@@ -89,12 +129,19 @@ async function apply(): Promise<Record<string, unknown>> {
     });
   }
 
+  let agentcardOrgCardholderId: string | null = null;
+  if (userId === ADMIN_SUBSCRIPTION_BYPASS_USER_ID) {
+    agentcardOrgCardholderId = await resolveBenchmarkCardholderId();
+    await seedOrgManagedAgentCardForUser(userId, agentcardOrgCardholderId);
+  }
+
   return {
     fixture_mode: mode,
     user_id: userId,
     credit_cents: 10_000,
     subscription: mode === 'purchase-kyc' ? 'active_benchmark_subscription' : null,
     gmail_connected: false,
+    agentcard_org_cardholder_id: agentcardOrgCardholderId,
   };
 }
 
