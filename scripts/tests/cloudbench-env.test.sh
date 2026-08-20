@@ -1120,5 +1120,11 @@ box_only_auth_lines="$(
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   'requesting stop before fleet provisioning' \
   "fleet must stop a started warm source before provisioning instead of hard-failing"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'npx not found on PATH; cannot verify the cloud-guest seed dump' \
+  "fleet seed-dump probe must fail closed with a clear npx PATH error"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  '.nvm/versions/node' \
+  "fleet seed-dump probe must restore nvm npx onto PATH when stripped"
 
 echo "All cloud benchmark environment checks passed."
