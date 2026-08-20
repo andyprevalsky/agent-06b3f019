@@ -3361,8 +3361,30 @@ warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID"
 }
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 if [ "$warm_state" != "stopped" ]; then
-    echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
-    exit 1
+    # Concurrent controllers / maintenance briefly start the shared warm donor.
+    # Wait for it to park again instead of hard-failing the whole fleet.
+    warm_wait_attempts="${CLOUDBENCH_WARM_STOPPED_ATTEMPTS:-36}"
+    warm_wait_delay="${CLOUDBENCH_WARM_STOPPED_RETRY_SECONDS:-5}"
+    echo "⏳ warm source state=$warm_state; waiting until stopped before fleet provisioning"
+    warm_state_reader() {
+        local mid="$1" shape
+        shape="$(FLY machines list -a "$APP" --json 2>/dev/null | pool_machine_shape_from_json "$mid")" || return 1
+        printf '%s\n' "${shape%% *}"
+    }
+    if ! cloudbench_wait_machine_stopped warm_state_reader "$WARM_ID" \
+        "$warm_wait_attempts" "$warm_wait_delay"; then
+        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+        exit 1
+    fi
+    warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || true)"
+    warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+        echo "❌ could not re-read warm source shape after wait" >&2; exit 1;
+    }
+    read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+    if [ "$warm_state" != "stopped" ]; then
+        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+        exit 1
+    fi
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
