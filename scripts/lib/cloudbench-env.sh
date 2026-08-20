@@ -742,9 +742,10 @@ cloudbench_wait_machine_startable() {
 }
 
 # Warm-source clones require a fully stopped donor. Transitional states
-# (started/starting/stopping/replacing/created) are normal during concurrent
-# maintenance; aborting immediately turns a brief race into a fleet-wide INFRA
-# failure. Wait for stopped, fail closed on destroy or timeout.
+# (started/starting/stopping/replacing/created/creating/updating/restarting)
+# are normal during concurrent maintenance; aborting immediately turns a brief
+# race into a fleet-wide INFRA failure. Wait for stopped, fail closed on
+# destroy or timeout.
 cloudbench_wait_machine_stopped() {
   local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
   local attempt state
@@ -757,7 +758,7 @@ cloudbench_wait_machine_stopped() {
         echo "Machine $machine_id became unavailable while waiting to stop (state=$state)" >&2
         return 1
         ;;
-      created|replacing|started|starting|stopping|"")
+      created|creating|replacing|started|starting|stopping|updating|restarting|"")
         if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
           echo "⏳ waiting for machine $machine_id to stop (state=${state:-unknown}, attempt $attempt/$max_attempts)"
         fi
