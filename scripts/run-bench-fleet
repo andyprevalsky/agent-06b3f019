@@ -2788,6 +2788,39 @@ print(machine.get("state") or "", guest.get("cpu_kind") or "", guest.get("cpus")
 '
 }
 
+# Concurrent maintenance (or a peer fleet's prepare_warm_source) can leave the
+# shared donor started/replacing. Hard-failing here aborts every peer fleet that
+# raced the same window. Poll until stopped (or timeout); never start/stop the
+# warm source from the fleet path — ownership stays with maintenance.
+wait_for_stopped_warm_source() {  # wait_for_stopped_warm_source <id> -> prints shape line
+    local id="$1" shape state kind cpus memory attempt=0
+    local wait_s="${CLOUDBENCH_WARM_STOP_WAIT_SECONDS:-600}"
+    local poll_s="${CLOUDBENCH_WARM_STOP_POLL_SECONDS:-5}"
+    local deadline=$((SECONDS + wait_s))
+    while true; do
+        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+        shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$id")" || {
+            echo "❌ could not read warm source shape while waiting for stop" >&2
+            return 1
+        }
+        read -r state kind cpus memory <<< "$shape"
+        if [ "$state" = "stopped" ]; then
+            if [ "$attempt" -gt 0 ]; then
+                echo "✅ warm source stopped after ${attempt} wait(s); continuing fleet provisioning" >&2
+            fi
+            printf '%s\n' "$shape"
+            return 0
+        fi
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "❌ warm source must be stopped before fleet provisioning (state=$state; waited ${wait_s}s)" >&2
+            return 1
+        fi
+        attempt=$((attempt + 1))
+        echo "⏳ warm source state=$state — waiting for stop before fleet provisioning (attempt $attempt, next poll ${poll_s}s)..." >&2
+        sleep "$poll_s"
+    done
+}
+
 resize_pool_machine() {  # resize_pool_machine <id>
     local id="$1" attempt log
     log="$FLEET_DIR/pool-resize-$id.log"
@@ -3356,14 +3389,8 @@ echo "🏭 warm source machine: $WARM_ID (region $REGION)"
 # The volume snapshot does not depend on guest shape, so park the donor at 1x
 # between maintenance transactions; run-bench-cloud expands it only while
 # rebuilding/snapshotting and parks it again on every exit path.
-warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
-    echo "❌ could not read warm source shape" >&2; exit 1;
-}
+warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
-if [ "$warm_state" != "stopped" ]; then
-    echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
-    exit 1
-fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
     fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
