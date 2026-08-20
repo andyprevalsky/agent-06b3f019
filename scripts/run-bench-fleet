@@ -3360,9 +3360,31 @@ warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID"
     echo "❌ could not read warm source shape" >&2; exit 1;
 }
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+# A prior --refresh-deps / sibling controller can leave the donor in
+# starting|started|replacing. Hard-failing here aborted fleets before any task
+# machine existed (descend wait-for-trigger epoch 4). Wait+stop until stopped.
 if [ "$warm_state" != "stopped" ]; then
-    echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
-    exit 1
+    echo "⏳ warm source not stopped (state=$warm_state); waiting/stopping before provisioning ..."
+    warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-30}"
+    warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
+    for warm_stop_i in $(seq 1 "$warm_stop_attempts"); do
+        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+        warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+            echo "❌ could not re-read warm source shape while waiting for stop" >&2; exit 1;
+        }
+        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+        if [ "$warm_state" = "stopped" ]; then
+            echo "✅ warm source stopped"
+            break
+        fi
+        echo "   attempt $warm_stop_i/$warm_stop_attempts: state=$warm_state — requesting stop"
+        fly_with_timeout 90 machine stop "$WARM_ID" -a "$APP" >/dev/null 2>&1 || true
+        sleep "$warm_stop_sleep"
+    done
+    if [ "$warm_state" != "stopped" ]; then
+        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state after ${warm_stop_attempts} attempts)" >&2
+        exit 1
+    fi
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
