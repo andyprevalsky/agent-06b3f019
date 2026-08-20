@@ -1013,8 +1013,8 @@ readiness_failures=0
     fail "start_machine must fail closed when the machine never reaches started (rc=$rc)"
 ) || readiness_failures=$((readiness_failures + 1))
 
-# A recoverable started→stopped race must re-assert the start once, then accept
-# the same bounded readiness proof used at run launch.
+# A recoverable started→stopped race must re-assert start (after waiting out
+# Fly stopping/replacing), then accept the bounded readiness proof.
 (
   function_body="$(readiness_function wait_for_ssh)"
   [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
@@ -1029,11 +1029,61 @@ readiness_failures=0
     restart_calls=$((restart_calls + 1))
     current_state=started
   }
+  date() { echo 1000; }
   sleep() { :; }
   wait_for_ssh mach-recovers >/dev/null 2>&1 ||
     fail "wait_for_ssh must recover one stopped→started transition"
   [ "$restart_calls" -eq 1 ] ||
-    fail "wait_for_ssh must re-assert a regressed machine start exactly once"
+    fail "wait_for_ssh must re-assert a regressed machine start (calls=$restart_calls)"
+) || readiness_failures=$((readiness_failures + 1))
+
+# If the machine is still stopping when SSH probes, wait — do not fire a bare
+# start into Fly's failed_precondition window (files-in-sub-agents fleet log).
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=5
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  # machine_state runs in $(...), so the cursor must live on disk — a shell
+  # variable would reset every probe and never leave "stopping".
+  # Timeline: stopping → stopping → stopped → (start issued) → started
+  idx_file="$TMP_ROOT/wait-ssh-stopping-idx"
+  echo 0 > "$idx_file"
+  states_file="$TMP_ROOT/wait-ssh-stopping-states"
+  printf '%s\n' stopping stopping stopped started started > "$states_file"
+  restart_file="$TMP_ROOT/wait-ssh-stopping-restarts"
+  echo 0 > "$restart_file"
+  current_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    sed -n "$((idx + 1))p" "$states_file"
+  }
+  advance_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    if [ "$idx" -lt 4 ]; then
+      echo $((idx + 1)) > "$idx_file"
+    fi
+  }
+  ssh_ready() {
+    [ "$(current_state)" = "started" ]
+  }
+  machine_state() {
+    local s
+    s="$(current_state)"
+    advance_state
+    echo "$s"
+  }
+  request_machine_start() {
+    echo $(( $(cat "$restart_file") + 1 )) > "$restart_file"
+  }
+  date() { echo 1000; }
+  sleep() { :; }
+  wait_for_ssh mach-stopping-race >/dev/null 2>&1 ||
+    fail "wait_for_ssh must survive stopping→stopped→started before SSH ready"
+  [ "$(cat "$restart_file")" -eq 1 ] ||
+    fail "wait_for_ssh must start exactly once after stopping clears (calls=$(cat "$restart_file"))"
 ) || readiness_failures=$((readiness_failures + 1))
 
 # Exercise the maintenance gate itself: a failed start cannot reach the SSH
@@ -1090,6 +1140,109 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
+
+# ── warm-source resize must retry Fly rate limits (descend I-02) ─────────────
+# Epoch-2 fleet abort during --refresh-deps:
+#   🧮 sizing warm source for maintenance: shared-cpu-4x/8192MB
+#   Error: could not get machine … resource_exhausted: rate limit exceeded
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Relative of 2026-07-15 clone rate-limit RCAs: resize_stopped_warm_source was
+# single-shot, so a transient org limiter abort killed the whole slice before
+# any task machine existed.
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  [ -n "$function_body" ] || fail "could not load resize_stopped_warm_source"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  # FLY runs inside $(...), so a shell variable counter cannot cross attempts.
+  call_file="$TMP_ROOT/warm-resize-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must succeed after rate-limit retries"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "resize_stopped_warm_source must retry rate limits until success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize rate-limit retry regression failed"
+
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=2
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+    return 1
+  }
+  rc=0
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "resize_stopped_warm_source must fail closed after exhausting rate-limit retries"
+) || fail "warm-source resize rate-limit exhaustion regression failed"
+
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-concurrent"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  call_file="$TMP_ROOT/warm-resize-concurrent-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: aborted: machine version changed: concurrent update in progress" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-cu shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must retry concurrent-update aborts"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "concurrent-update retries must reach success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize concurrent-update retry regression failed"
 
 # ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
 # Observed fleet abort before any task machine was provisioned:
