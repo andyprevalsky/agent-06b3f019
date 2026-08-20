@@ -7190,12 +7190,13 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     snap_at = fleet.index('exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet"')
     assert snap_at < fleet.index("while [ $# -gt 0 ]; do")
     assert snap_at < fleet.index("cloudbench_controller_lock_acquire")
-    # the snapshot carries all three co-versioned interpreter files
+    # the snapshot carries all co-versioned interpreter + lib files
     for f in (
         "run-bench-fleet",
         "run-bench-cloud",
         "cloudbench-port-lease.py",
         "cloudbench-env.sh",
+        "cloudbench-github-token.sh",
     ):
         assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX") : snap_at], f"{f} missing from snapshot copy set"
     # every child/preflight/verify call goes through the snapshot binary —
