@@ -433,13 +433,44 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
     fi
 }
 
-# Read GITHUB_TOKEN from back-end/.env (fallback agents/.env) for the git clone +
-# per-run fetches (private repo).
+# Read a GitHub token for private-repo git clone + per-run fetches.
+# Prefer a working token: dotenv GITHUB_TOKEN can go stale while
+# GITHUB_DISPATCH_TOKEN (CI/dispatch oauth) remains valid — observed 2026-08-20
+# when warm --refresh-deps injected a 401 github_pat and git failed headless with
+# "could not read Username for 'https://github.com'".
 resolve_github_token() {
-    local t
-    t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -z "$t" ] && t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    echo "$t"
+    local key candidate
+    for key in GITHUB_TOKEN GH_TOKEN GITHUB_DISPATCH_TOKEN; do
+        candidate="${!key:-}"
+        if [ -z "$candidate" ]; then
+            candidate="$(grep -E "^${key}=" back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+        fi
+        if [ -z "$candidate" ]; then
+            candidate="$(grep -E "^${key}=" agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+        fi
+        if [ -n "$candidate" ] && github_token_is_usable "$candidate"; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    candidate="$(gh auth token 2>/dev/null || true)"
+    if [ -n "$candidate" ] && github_token_is_usable "$candidate"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+    return 1
+}
+
+# Cheap usability probe: GitHub user endpoint must accept the bearer token.
+# Avoids injecting staged-but-revoked pats into warm git-sync.
+github_token_is_usable() {
+    local token="$1" code
+    [ -n "$token" ] || return 1
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 \
+        -H "Authorization: Bearer ${token}" \
+        -H 'Accept: application/vnd.github+json' \
+        https://api.github.com/user 2>/dev/null || echo 000)"
+    [ "$code" = "200" ]
 }
 
 resolve_render_env_value() {
@@ -865,8 +896,9 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
 # on the shared warm source and abort fleets with "could not read Username".
 resolve_controller_github_token_b64() {
     local token
-    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    token="$(resolve_github_token)" || token="$(gh auth token 2>/dev/null || true)"
     [ -n "$token" ] || return 1
+    github_token_is_usable "$token" || return 1
     printf '%s' "$token" | base64 | tr -d '\n'
 }
 

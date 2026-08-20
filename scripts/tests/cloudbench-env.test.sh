@@ -1090,6 +1090,12 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'warm_git_auth_preamble' \
   "warm maintenance must share a git-auth preamble that injects CLOUDBENCH_GITHUB_TOKEN_B64"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'github_token_is_usable' \
+  "controller GitHub token resolution must reject unusable/stale tokens"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "resolve_github_token must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
 # Both maintenance modes must call the shared inject helpers (2 call sites).
 warm_auth_calls="$(
   grep -cF 'warm_git_auth_preamble "$CONTROLLER_GITHUB_TOKEN_B64"' \
