@@ -1141,4 +1141,11 @@ sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
 ) || fail "validated GitHub token resolver regression failed"
 rm -f "$resolve_snippet"
 
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT' \
+  "ssh_exec must honor an optional timeout so hung refresh-deps sessions fail closed"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec timed out after' \
+  "refresh-deps must report ssh timeout distinctly from auth/checkout failures"
+
 echo "All cloud benchmark environment checks passed."
