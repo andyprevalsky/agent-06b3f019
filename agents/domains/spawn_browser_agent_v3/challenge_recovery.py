@@ -110,6 +110,14 @@ _CHALLENGE_TEXT_MARKERS = _CHALLENGE_RENDERED_TEXT_MARKERS + _PROXY_ERROR_TEXT_M
 # ticket pages embed Turnstile next to short inventory copy (~80 chars) — a
 # 600-char bar false-positived those as still challenged.
 _CLEAN_PAGE_MIN_VISIBLE_CHARS = 80
+# Soft-walls often keep navigation shells instead of a real document title while
+# body HTML is already non-empty (meta/noscript). Structure-only — never a
+# vendor or registrable-domain token.
+_BARE_HOSTNAME_TITLE_RE = re.compile(r"^(www\.)?([a-z0-9-]+\.)+[a-z]{2,}$", re.IGNORECASE)
+_LOADING_URL_TITLE_RE = re.compile(r"^loading\s+https?://", re.IGNORECASE)
+_URL_TITLE_RE = re.compile(r"^https?://", re.IGNORECASE)
+# Provider-native solvers need wall-clock room after a soft-wall starts hydrating.
+DEFAULT_SOLVER_TIMEOUT_SECONDS = 60.0
 
 # Sensor/orchestration hosts that also load on recovered pages. A match alone
 # is not proof of an interstitial — `_has_substantive_content` must also fail.
@@ -194,6 +202,24 @@ def storage_without_cookies(storage_state: Mapping[str, Any], removed: Iterable[
     return candidate
 
 
+def is_usable_document_title(title: str) -> bool:
+    """True when title looks like a real document, not a navigation shell.
+
+    Soft anti-bot walls (any vendor) commonly keep empty titles, bare hostnames,
+    or Chromium "Loading https://..." titles while body text is already long.
+    Candidate probes that treated those as clean reported stablePasses=2 in a
+    few seconds, then live verify correctly failed on the promoted session.
+    """
+    trimmed = title.strip()
+    if not trimmed:
+        return False
+    if _LOADING_URL_TITLE_RE.match(trimmed) or _URL_TITLE_RE.match(trimmed):
+        return False
+    if _BARE_HOSTNAME_TITLE_RE.match(trimmed):
+        return False
+    return True
+
+
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
     # 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
     # as challenged keeps a blacklisted Kernel exit from looking "recovered".
@@ -243,6 +269,10 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     # misroute into request_user_assistance_for_authentication.
     if any(marker in normalized_html for marker in _CHALLENGE_INTERSTITIAL_HTML_MARKERS):
         return True
+    # Hard gate shared with backend challengePageDetect: no usable document
+    # title ⇒ still challenged, even with long body text from meta/noscript.
+    if not is_usable_document_title(title):
+        return True
     if not any(marker in normalized_html for marker in _CHALLENGE_SENSOR_HTML_MARKERS):
         return False
     # A sensor-host marker alone is not proof: those scripts stay loaded on the
@@ -258,7 +288,7 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
 def _has_substantive_content(title: str, body_text: str, visible_markup: str) -> bool:
     """A challenge interstitial shows almost nothing; a recovered page does not."""
     visible = body_text.strip() or visible_markup
-    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and bool(title.strip())
+    return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and is_usable_document_title(title)
 
 
 async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:
@@ -312,7 +342,7 @@ async def probe_storage_state(
     target_url: str,
     *,
     attempts: int = 2,
-    solver_timeout_seconds: float = 45.0,
+    solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
 ) -> bool:
     """Probe a storage variant in an isolated remote-browser context."""
     context = await playwright_browser.new_context(storage_state=storage_state)
@@ -334,7 +364,7 @@ async def verify_live_page_cleared_challenge(
     target_url: str,
     *,
     attempts: int = 2,
-    solver_timeout_seconds: float = 45.0,
+    solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
 ) -> bool:
     """Require the canonical live tab to clear challenge markers after promote/restore.
 

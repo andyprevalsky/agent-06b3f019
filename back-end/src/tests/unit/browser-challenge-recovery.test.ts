@@ -5,7 +5,9 @@ import type { Browser } from 'playwright';
 import {
   buildPreferredBrowserConfig,
   browserRecoveryCandidates,
+  challengeDetectionReason,
   compatiblePreferredBrowserConfig,
+  isUsableDocumentTitle,
   pageLooksChallenged,
   recoveryConfigKeyForSession,
   runParallelBrowserConfigSearch,
@@ -325,6 +327,51 @@ function testChallengeDetection(): void {
         '<main>General Admission</main>',
     }),
     'generic challenge prose in script bundles must not flag a cleared page'
+  );
+
+  // Soft-wall navigation shells (any vendor): empty / bare-hostname /
+  // Loading-URL titles must not win probes even with long body text.
+  const shellBody =
+    'Boutique hotel description that already appears in meta/noscript while the soft-wall has not produced a real document title yet.';
+  assert.ok(!isUsableDocumentTitle(''));
+  assert.ok(!isUsableDocumentTitle('www.example.com'));
+  assert.ok(!isUsableDocumentTitle('example.com'));
+  assert.ok(!isUsableDocumentTitle('Loading https://www.example.com/rooms'));
+  assert.ok(isUsableDocumentTitle('Boutique Hotel Near Downtown'));
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: '',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: 'www.example.com',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.strictEqual(
+    challengeDetectionReason({
+      status: null,
+      title: 'Loading https://www.example.com/path',
+      bodyText: shellBody,
+      html: '<main>shell</main>',
+    }),
+    'unusable_title'
+  );
+  assert.ok(
+    !pageLooksChallenged({
+      status: 200,
+      title: 'Boutique Hotel Near Downtown',
+      bodyText: shellBody,
+      html: '<main>Real inventory copy for rooms and rates.</main>',
+    })
   );
 }
 

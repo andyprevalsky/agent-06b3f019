@@ -15,6 +15,7 @@ from domains.spawn_browser_agent_v3.challenge_recovery import (
     commit_cookie_removals,
     cookie_key,
     is_auth_cookie,
+    is_usable_document_title,
     page_looks_challenged,
     recover_from_challenge,
     target_looks_like_payment_document,
@@ -281,6 +282,49 @@ def test_auth_classifier_is_conservative():
         assert is_auth_cookie(_cookie(name)), name
     for name in ["cf_clearance", "cart", "theme"]:
         assert not is_auth_cookie(_cookie(name)), name
+
+
+def test_challenge_page_classifier_rejects_navigation_shell_titles():
+    """Soft-wall shells must not win candidate probes without a real title.
+
+    RCA (browser-hotel-booking 101e508c): backend probes marked stablePasses=2 on
+    titles "", "www.<host>", and "Loading https://..." while the live tab was
+    still challenged. Gate is structural (empty / bare-hostname / Loading-URL /
+    raw-URL titles) — not a vendor or registrable-domain token list.
+    """
+    long_body = (
+        "Boutique hotel description that already appears in meta/noscript while "
+        "the anti-bot soft-wall has not yet produced a real document title. "
+        "This text alone must not clear the probe."
+    )
+    assert not is_usable_document_title("")
+    assert not is_usable_document_title("www.example.com")
+    assert not is_usable_document_title("example.com")
+    assert not is_usable_document_title("Loading https://www.example.com/rooms")
+    assert not is_usable_document_title("https://www.example.com/rooms")
+    assert is_usable_document_title("Boutique Hotel Near Downtown")
+
+    assert page_looks_challenged(
+        status=None, title="", body_text=long_body, html="<main>shell</main>"
+    ), "empty title + long body must stay challenged"
+    assert page_looks_challenged(
+        status=None,
+        title="www.example.com",
+        body_text=long_body,
+        html="<main>shell</main>",
+    ), "bare-hostname title must stay challenged"
+    assert page_looks_challenged(
+        status=None,
+        title="Loading https://www.example.com/path",
+        body_text=long_body,
+        html="<main>shell</main>",
+    ), "Chromium Loading-URL title must stay challenged"
+    assert not page_looks_challenged(
+        status=200,
+        title="Boutique Hotel Near Downtown",
+        body_text=long_body,
+        html="<main>Real inventory copy for rooms and rates.</main>",
+    ), "usable title + substance must read clean"
 
 
 def test_challenge_page_classifier_rejects_blank_and_known_walls():
@@ -767,6 +811,10 @@ async def run_all_tests():
     )
     await result.record_async("target_cookie_scope", test_other_site_cookies_are_never_candidates)
     result.record("auth_classifier", test_auth_classifier_is_conservative)
+    result.record(
+        "challenge_page_classifier_navigation_shell_titles",
+        test_challenge_page_classifier_rejects_navigation_shell_titles,
+    )
     result.record("challenge_page_classifier", test_challenge_page_classifier_rejects_blank_and_known_walls)
     result.record(
         "challenge_page_classifier_kernel_blacklist",

@@ -32,7 +32,12 @@ import {
   type BrowserRecoveryConfig,
 } from './challengeRecoveryCandidates';
 
-export { challengeDetectionReason, pageLooksChallenged } from './challengePageDetect';
+export {
+  challengeDetectionReason,
+  isUsableDocumentTitle,
+  pageLooksChallenged,
+  PROVIDER_SOLVER_WAIT_MS,
+} from './challengePageDetect';
 export {
   blockedResourceRequiresPaymentCdn,
   targetLooksLikePaymentDocument,
