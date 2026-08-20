@@ -1038,7 +1038,8 @@ resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory
         if [ "$update_rc" -eq 0 ]; then
             return 0
         fi
-        if ! printf '%s' "$update_out" | grep -Eqi 'resource_exhausted|rate[[:space:]]*limit|429'; then
+        if ! printf '%s' "$update_out" | grep -Eqi \
+            'resource_exhausted|rate[[:space:]]*limit|429|concurrent[[:space:]]+update|version[[:space:]]+changed|aborted:'; then
             printf '%s\n' "$update_out" | sed 's/^/   /' >&2
             echo "❌ warm-source resize for $purpose failed (non-retryable)" >&2
             return 1
