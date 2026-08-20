@@ -433,13 +433,47 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
     fi
 }
 
-# Read GITHUB_TOKEN from back-end/.env (fallback agents/.env) for the git clone +
-# per-run fetches (private repo).
+# Prefer a GitHub token that can actually fetch the private rose repo.
+# Stale GITHUB_TOKEN values in .env / the ambient environment previously made
+# --refresh-deps emit an empty AUTH_HDR and fail with:
+#   fatal: could not read Username for 'https://github.com'
+# Never return an unvalidated token: an invalid PAT is worse than a missing one
+# because callers treat non-empty as "auth is configured".
+github_token_can_fetch_repo() {
+    local token="$1" code
+    [ -n "$token" ] || return 1
+    code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+        -H "Authorization: Bearer ${token}" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'User-Agent: cloudbench' \
+        'https://api.github.com/repos/Rose-Ai-Labs/rose' 2>/dev/null)" || return 1
+    [ "$code" = "200" ]
+}
+
 resolve_github_token() {
-    local t
-    t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -z "$t" ] && t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    echo "$t"
+    local candidates=() t decoded gh_tok env_tok
+    if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+        decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+        [ -n "$decoded" ] && candidates+=("$decoded")
+    fi
+    # Dispatch tokens are often fresher than the long-lived GITHUB_TOKEN copy in .env.
+    [ -n "${GITHUB_DISPATCH_TOKEN:-}" ] && candidates+=("$GITHUB_DISPATCH_TOKEN")
+    # gh prefers ambient GITHUB_TOKEN over hosts.yml — unset it so a stale env
+    # override cannot mask a working CLI login.
+    gh_tok="$(env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+    [ -n "$gh_tok" ] && candidates+=("$gh_tok")
+    env_tok="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -z "$env_tok" ] && env_tok="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$env_tok" ] && candidates+=("$env_tok")
+    [ -n "${GITHUB_TOKEN:-}" ] && candidates+=("$GITHUB_TOKEN")
+
+    for t in "${candidates[@]}"; do
+        if github_token_can_fetch_repo "$t"; then
+            printf '%s' "$t"
+            return 0
+        fi
+    done
+    return 1
 }
 
 resolve_render_env_value() {
@@ -723,7 +757,7 @@ _inject_secrets_locked() {
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 agents/.env)"
     backend_sha="$(cloudbench_env_sha256 back-end/.env)"
-    gh_token="$(resolve_github_token)"
+    gh_token="$(resolve_github_token)" || gh_token=""
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
@@ -736,9 +770,9 @@ _inject_secrets_locked() {
     )
     if [ -n "$gh_token" ]; then
         set_args+=("GITHUB_TOKEN=$gh_token")
-        echo "   GITHUB_TOKEN present (for private-repo git-sync)"
+        echo "   GITHUB_TOKEN present + validated (for private-repo git-sync)"
     else
-        echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
+        echo "   ⚠️  No validated GitHub token — private-repo fetches will fail"
     fi
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
@@ -1257,24 +1291,25 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # ── git clone the repo into /data/repo (auth via GITHUB_TOKEN) ────────────
-    if [ -z "$(resolve_github_token)" ]; then
-        echo "❌ GITHUB_TOKEN not found in back-end/.env or agents/.env — cannot clone the repo." >&2
-        echo "   Stopping machine; add GITHUB_TOKEN and re-run --setup." >&2
+    # ── git clone the repo into /data/repo (auth via validated controller token) ─
+    SETUP_GITHUB_TOKEN="$(resolve_github_token)" || SETUP_GITHUB_TOKEN=""
+    if [ -z "$SETUP_GITHUB_TOKEN" ]; then
+        echo "❌ No validated GitHub token available — cannot clone the private repo." >&2
+        echo "   Checked CLOUDBENCH_GITHUB_TOKEN_B64, GITHUB_DISPATCH_TOKEN, gh auth, and .env GITHUB_TOKEN." >&2
+        echo "   Stopping machine; fix credentials and re-run --setup." >&2
         stop_machine "$mid"
         exit 1
     fi
+    SETUP_GITHUB_TOKEN_B64="$(printf '%s' "$SETUP_GITHUB_TOKEN" | base64 | tr -d '\n')"
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # GITHUB_TOKEN is already active as a Fly machine secret. The non-secret
-    # script is base64-transported into one remote Bash process so multiline
-    # quoting cannot split the auth setup from the Git commands. The token is
-    # used via http.extraheader rather than embedded in Git argv/config.
-    # The remote stays clean (https://github.com/...) for all future fetches, which
-    # then reuse the same header only when the run/refresh paths re-supply it.
+    # Request-scoped controller token via http.extraheader — never persist the
+    # credential into .git/config. The remote stays clean (https://github.com/...).
     CLONE_CMD="set -e
 mkdir -p /data
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+TOKEN=\$(printf '%s' '$SETUP_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)
+[ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for setup clone' >&2; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
   git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
@@ -1339,12 +1374,20 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match (auth via
-    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    # Sync the repo to the ref whose manifests the trees must match. Prefer a
+    # request-scoped controller token (same pattern as boot-launch) over the
+    # box-side GITHUB_TOKEN Fly secret, which can be a stale .env copy.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
+    REFRESH_GITHUB_TOKEN="$(resolve_github_token)" || {
+        echo "❌ No validated GitHub token available for --refresh-deps git-sync." >&2
+        echo "   Checked CLOUDBENCH_GITHUB_TOKEN_B64, GITHUB_DISPATCH_TOKEN, gh auth, and .env GITHUB_TOKEN." >&2
+        exit 1
+    }
+    REFRESH_GITHUB_TOKEN_B64="$(printf '%s' "$REFRESH_GITHUB_TOKEN" | base64 | tr -d '\n')"
     SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+TOKEN=\$(printf '%s' '$REFRESH_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)
+[ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for refresh-deps' >&2; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
@@ -1486,12 +1529,17 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Prefer a validated controller token over the box-side GITHUB_TOKEN secret.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
+    WMH_GITHUB_TOKEN="$(resolve_github_token)" || {
+        echo "❌ No validated GitHub token available for --refresh-wmh git-sync." >&2
+        exit 1
+    }
+    WMH_GITHUB_TOKEN_B64="$(printf '%s' "$WMH_GITHUB_TOKEN" | base64 | tr -d '\n')"
     SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+TOKEN=\$(printf '%s' '$WMH_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)
+[ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for refresh-wmh' >&2; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
@@ -2167,8 +2215,8 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
-    [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
+    _ghb64="$(printf '%s' "$(resolve_github_token)" | base64 | tr -d '\n')"
+    [ -n "$_ghb64" ] || { echo "❌ No validated controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
         --env CLOUDBENCH_RUN_SCRIPT=/cloudbench-run.sh
@@ -2381,8 +2429,8 @@ done
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
-[ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
+CONTROLLER_GITHUB_TOKEN="$(resolve_github_token)" || CONTROLLER_GITHUB_TOKEN=""
+[ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No validated controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 
 WRAPPER_LOCAL="$(mktemp)"
