@@ -30,22 +30,36 @@ interface OpenRouterModel {
 // per spawn during sub-agent fan-outs.
 const memoryCache = new Map<string, { pricing: ModelPricing; expiresAt: number }>();
 
+// The `-openai` suffix means the DIRECT OpenAI API (GPT_API_KEY ->
+// api.openai.com), so these are OpenAI's own list prices — NOT OpenRouter's
+// `openai/*` rates, which are a different commercial route and genuinely
+// cheaper (sol is $2.50/$15 per M on OpenRouter vs $5/$30 direct). Keep these
+// independent of `_PROVIDER_PRICING` in agents/providers/rose/pricing.py;
+// only the OpenRouter waterfall should track that table.
+// Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
+// above 272k input tokens, which this flat table does not model.
 const FIXED_MODEL_PRICING: Record<string, ModelPricing> = {
+  // $2.50/$15 per M. The long-standing $1.75/$14 was stale for the direct
+  // route too, under-reporting funded API usage by ~30%.
   'gpt-5.4-openai': {
-    prompt: (1.75 / 1_000_000).toString(),
-    completion: (14.0 / 1_000_000).toString(),
+    prompt: (2.5 / 1_000_000).toString(),
+    completion: (15.0 / 1_000_000).toString(),
   },
   'gpt-5.5-openai': {
     prompt: (5.0 / 1_000_000).toString(),
     completion: (30.0 / 1_000_000).toString(),
   },
+  // Luna and Terra were stale for the direct route too (previously $1/$6 and
+  // $2.50/$15). Sol below is the ONLY model in this set whose direct rate
+  // genuinely differs from OpenRouter's ($5/$30 vs $2.50/$15); 5.4, 5.5, terra
+  // and luna happen to price the same on both routes.
   'gpt-5.6-luna-openai': {
-    prompt: (1.0 / 1_000_000).toString(),
-    completion: (6.0 / 1_000_000).toString(),
+    prompt: (0.2 / 1_000_000).toString(),
+    completion: (1.2 / 1_000_000).toString(),
   },
   'gpt-5.6-terra-openai': {
-    prompt: (2.5 / 1_000_000).toString(),
-    completion: (15.0 / 1_000_000).toString(),
+    prompt: (2.0 / 1_000_000).toString(),
+    completion: (12.0 / 1_000_000).toString(),
   },
   'gpt-5.6-sol-openai': {
     prompt: (5.0 / 1_000_000).toString(),
