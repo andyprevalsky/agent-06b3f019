@@ -137,13 +137,16 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 run_stage --finish >"$TEST_ROOT/concurrent-finish.out" 2>&1 &
 finish_pid=$!
-# Under parallel deploy Group-3 load the finish transition can take >0.5s;
-# wait long enough that CPU contention cannot false-fail admission close.
-for _ in $(seq 1 80); do
-    grep -q '"status": "finishing"' "$RUN_ROOT/concurrent/metadata.json" && break
+# Under a loaded /deploy host the finish supervisor can take longer than 0.5s
+# to persist "finishing", or it can pass through that state so quickly the
+# 10x50ms poll misses it and only sees "finished". Either way admission is
+# closed; wait for one of those statuses instead of a single 0.5s snapshot.
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 \
+         21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40; do
+    grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" && break
     sleep 0.05
 done
-grep -q '"status": "finishing"' "$RUN_ROOT/concurrent/metadata.json" \
+grep -Eq '"status": "(finishing|finished)"' "$RUN_ROOT/concurrent/metadata.json" \
     || fail "finish did not close stage admission"
 if run_stage late -- true >"$TEST_ROOT/concurrent-late.out" 2>&1; then
     fail "admitted a stage after finish began"
