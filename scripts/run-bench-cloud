@@ -451,7 +451,17 @@ resolve_github_token() {
 build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
     local remote_repo="$1" ref="$2" verify_marker="${3:-}"
     local token auth_hdr
-    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    # Cursor Cloud (and many CI images) inject a poisoned GITHUB_TOKEN into the
+    # process environment. `gh auth token` prefers that env var and returns it
+    # even when it is invalid, which made --refresh-deps embed a dead PAT and
+    # fail with `could not read Username for 'https://github.com'`. Clear the
+    # poison via prefix assignment so gh returns the hosts.yml credential; fall
+    # back to .env only after that. (Do not use `env -u` — it bypasses shell
+    # function stubs used by owning-boundary tests and always execs.)
+    token="$(GITHUB_TOKEN= GH_TOKEN= gh auth token 2>/dev/null || true)"
+    if [ -z "$token" ]; then
+        token="$(resolve_github_token)"
+    fi
     if [ -z "$token" ]; then
         echo "❌ No controller GitHub token for private-repo git-sync." >&2
         echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
@@ -2227,7 +2237,7 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    _ghb64="$(printf '%s' "$(GITHUB_TOKEN= GH_TOKEN= gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
@@ -2441,7 +2451,7 @@ done
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+CONTROLLER_GITHUB_TOKEN="$(GITHUB_TOKEN= GH_TOKEN= gh auth token 2>/dev/null || resolve_github_token)"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 
