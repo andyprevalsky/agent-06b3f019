@@ -37,7 +37,9 @@ TARGET_DB="victoria_seedmem_tgt_$$"
 DUMP="$(ls -t ../.context/benchmarks/seed-cache/*.dump 2>/dev/null | head -1)"
 OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem}"
 mkdir -p "$OUT_DIR"
-SUMMARY="$OUT_DIR/summary.txt"
+# Per-PID summary so concurrent /deploy (or overlapping measure runs) cannot
+# interleave "run N: ok ..." lines into one file and fail the exact-count gate.
+SUMMARY="$OUT_DIR/summary-$$.txt"
 : > "$SUMMARY"
 
 if [ -n "$ENFORCE_BUDGET" ] && [ "$ENFORCE_BUDGET" != "--enforce-budget" ]; then
