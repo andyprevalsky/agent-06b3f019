@@ -455,19 +455,25 @@ github_token_can_fetch_repo() {
 
 # Long-lived token for Fly app secrets. Never use `gh auth token` here — those
 # expire and would leave the warm box unable to git-sync after the next hour.
+# Try candidates in priority order until one passes Contents validation so an
+# invalid DISPATCH value cannot block a later valid GITHUB_TOKEN.
 resolve_durable_github_token() {
-    local t=""
+    local candidates=() t
     t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    if [ -z "$t" ]; then
-        t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    fi
-    if [ -z "$t" ]; then
-        t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    fi
-    if [ -z "$t" ]; then
-        t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    fi
-    printf '%s' "$t"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    [ -n "$t" ] && candidates+=("$t")
+    for t in "${candidates[@]}"; do
+        if github_token_can_fetch_repo "$t"; then
+            printf '%s' "$t"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Resolve a GitHub token that can fetch this private repo for ephemeral
@@ -781,12 +787,9 @@ _inject_secrets_locked() {
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 agents/.env)"
     backend_sha="$(cloudbench_env_sha256 back-end/.env)"
-    # Fly secrets need a durable token (gh auth expires). Still require Contents
-    # validation so a stale DISPATCH/.env value is not staged as "configured".
-    gh_token="$(resolve_durable_github_token)"
-    if [ -n "$gh_token" ] && ! github_token_can_fetch_repo "$gh_token"; then
-        gh_token=""
-    fi
+    # Fly secrets need a durable token (gh auth expires). resolve_durable_*
+    # already Contents-validates candidates in priority order.
+    gh_token="$(resolve_durable_github_token)" || gh_token=""
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
@@ -797,11 +800,13 @@ _inject_secrets_locked() {
         "BACKEND_ENV_SHA256=$backend_sha"
         "CLOUDBENCH_BROWSER_PROVIDER=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     )
+    # Always stage GITHUB_TOKEN= so a missing/invalid durable candidate clears any
+    # previously staged stale credential while preserving the required secret name.
+    set_args+=("GITHUB_TOKEN=$gh_token")
     if [ -n "$gh_token" ]; then
-        set_args+=("GITHUB_TOKEN=$gh_token")
         echo "   GITHUB_TOKEN present (durable + Contents-validated for private-repo git-sync)"
     else
-        echo "   ⚠️  No validated durable GitHub token — private-repo fetches will fail"
+        echo "   ⚠️  No validated durable GitHub token — staging empty GITHUB_TOKEN to clear stale secret"
     fi
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {

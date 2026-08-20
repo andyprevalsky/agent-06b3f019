@@ -1114,6 +1114,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'resolve_durable_github_token' \
   "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'set_args+=("GITHUB_TOKEN=$gh_token")' \
+  "Fly secret staging must always set GITHUB_TOKEN (empty clears a stale staged credential)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com' \
   "token resolver must ignore ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST when reading gh auth"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
