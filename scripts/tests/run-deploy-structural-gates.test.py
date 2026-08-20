@@ -64,6 +64,44 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         self.assertEqual(stale, [], f"deploy.md names gate(s) absent from the registry: {stale}")
 
 
+class StructuralGatePortIsolationTests(unittest.TestCase):
+    """Concurrent gates must not be able to hand out the same port.
+
+    These suites allocate with check-then-bind (`lsof` probe, then bind), which
+    is not parallel-safe: two gates that scan overlapping ranges can both see the
+    same port as free and race for it. Because Step 4s runs every gate
+    concurrently, overlapping ranges are a latent flake, not a theoretical one --
+    `run-port-collision` scanned 61000-62000 while `kill-services` scanned
+    62000-63000, so both could claim 62000.
+    """
+
+    def test_concurrent_gate_port_ranges_are_disjoint(self) -> None:
+        ranges: dict[str, list[tuple[int, int]]] = {}
+        for command in _registry_commands():
+            script = ROOT / command.split()[-1]
+            if not script.exists():
+                continue
+            for low, high in re.findall(r"seq\s+(\d{4,5})\s+(\d{4,5})", script.read_text()):
+                ranges.setdefault(script.name, []).append((int(low), int(high)))
+
+        overlaps = []
+        names = sorted(ranges)
+        for i, first in enumerate(names):
+            for second in names[i + 1 :]:
+                for low_a, high_a in ranges[first]:
+                    for low_b, high_b in ranges[second]:
+                        if low_a <= high_b and low_b <= high_a:
+                            overlaps.append(
+                                f"{first} [{low_a}-{high_a}] overlaps {second} [{low_b}-{high_b}]"
+                            )
+        self.assertEqual(
+            overlaps,
+            [],
+            "concurrently-run gates share a port range; check-then-bind will race:\n"
+            + "\n".join(overlaps),
+        )
+
+
 class StructuralGateRunnerTests(unittest.TestCase):
     def test_signal_does_not_wait_for_unlaunched_gates(self) -> None:
         with tempfile.TemporaryDirectory(prefix="deploy-runner-signal-") as temporary:

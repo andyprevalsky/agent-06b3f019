@@ -71,11 +71,21 @@ export function useMessageRouting(message: Message): MessageRouting {
   // automation failed"). All become a single chip; the chip derives recording +
   // trajectory from task_id-scoped messages when available, else shows the
   // result with Recording/Trajectory unavailable.
+  //
+  // A task-scoped message must declare terminality via action_type. Browser
+  // sub-steps share the parent tool call's toolCallId and dedupByToolCallId is
+  // last-wins, so a workflow-scope PROGRESS event ("Payment card ready",
+  // "✓ Write permission granted") becomes the chip anchor mid-run; without this
+  // check it renders the still-running browser agent as "Done"
+  // (prod agent 7f354640-ffab-4098-b7ae-041ddf246c6f).
+  const isBrowserTerminalActionType =
+    metadata?.action_type === 'task_complete' || metadata?.action_type === 'session_paused';
   const isBrowserAgentChipMessage = Boolean(
     isTool &&
     metadata?.toolName === 'spawn_browser_agent' &&
     !metadata?.subAgentId &&
-    (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR'),
+    (metadata?.toolStatus === 'FINISHED' || metadata?.toolStatus === 'ERROR') &&
+    (isBrowserTerminalActionType || (!metadata?.task_id && metadata?.action_type == null)),
   );
 
   return {
