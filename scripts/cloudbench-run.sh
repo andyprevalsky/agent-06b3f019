@@ -808,7 +808,8 @@ PY
         DATABASE_URL="$STACK_DB_URL" \
         DIRECT_URL="$STACK_DB_URL" \
         BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
-        bash -lc "cd '$REPO_DIR/back-end' && npx tsx scripts/setup-benchmark-payment.ts --user-id '$PAYMENT_USER_ID'"; then
+        sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
+          sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
         log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
         finish 1
     fi
