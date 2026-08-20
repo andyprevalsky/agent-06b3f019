@@ -16,13 +16,21 @@ from typing import Dict, Optional
 from providers.rose.pools import POOL_REGISTRY
 
 # Per-token USD pricing for every provider model that appears in any pool's
-# waterfall. Values come from the providers' published per-million-token prices.
+# waterfall. Values are the models' published per-million-token OpenRouter
+# prices.
+#
+# Reconciled against the live OpenRouter /api/v1/models catalog on 2026-08-18.
+# Six entries had drifted — gpt-5.6-sol and gemini-3.6-flash were both billing
+# at 2x actual and gpt-5.6-luna at 5x, while kimi-k2.5 and gpt-5.4 were
+# UNDER-billing. Because `_average_pool_pricing` derives every pool's rate from
+# this table, each stale row silently mispriced whole pools rather than one
+# model. Re-check against the live catalog when adding a waterfall layer.
 _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     "google/gemini-3-flash-preview": {"prompt": 0.50 / 1_000_000, "completion": 3.00 / 1_000_000},
     "google/gemini-3.5-flash":        {"prompt": 1.50 / 1_000_000, "completion": 9.00 / 1_000_000},
-    "google/gemini-3.6-flash":        {"prompt": 1.50 / 1_000_000, "completion": 7.50 / 1_000_000},
-    "moonshotai/kimi-k2.5":           {"prompt": 0.38 / 1_000_000, "completion": 1.72 / 1_000_000},
-    "moonshotai/kimi-k2.7-code":      {"prompt": 0.74 / 1_000_000, "completion": 3.50 / 1_000_000},
+    "google/gemini-3.6-flash":        {"prompt": 0.75 / 1_000_000, "completion": 3.75 / 1_000_000},
+    "moonshotai/kimi-k2.5":           {"prompt": 0.57 / 1_000_000, "completion": 2.85 / 1_000_000},
+    "moonshotai/kimi-k2.7-code":      {"prompt": 0.71 / 1_000_000, "completion": 3.50 / 1_000_000},
     "moonshotai/kimi-k3":             {"prompt": 3.00 / 1_000_000, "completion": 15.00 / 1_000_000},
     "anthropic/claude-opus-4.8":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
     "anthropic/claude-opus-4.7":      {"prompt": 5.00 / 1_000_000, "completion": 25.00 / 1_000_000},
@@ -31,11 +39,11 @@ _PROVIDER_PRICING: Dict[str, Dict[str, float]] = {
     # KeyError instead of returning a number.
     "anthropic/claude-haiku-4.5":     {"prompt": 1.00 / 1_000_000, "completion": 5.00 / 1_000_000},
     "google/gemini-3.1-pro-preview":  {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
-    "openai/gpt-5.4":                 {"prompt": 1.75 / 1_000_000, "completion": 14.00 / 1_000_000},
+    "openai/gpt-5.4":                 {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
     "openai/gpt-5.5":                 {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
-    "openai/gpt-5.6-luna":            {"prompt": 1.00 / 1_000_000, "completion": 6.00 / 1_000_000},
-    "openai/gpt-5.6-terra":           {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
-    "openai/gpt-5.6-sol":             {"prompt": 5.00 / 1_000_000, "completion": 30.00 / 1_000_000},
+    "openai/gpt-5.6-luna":            {"prompt": 0.20 / 1_000_000, "completion": 1.20 / 1_000_000},
+    "openai/gpt-5.6-terra":           {"prompt": 2.00 / 1_000_000, "completion": 12.00 / 1_000_000},
+    "openai/gpt-5.6-sol":             {"prompt": 2.50 / 1_000_000, "completion": 15.00 / 1_000_000},
 }
 
 
@@ -57,27 +65,31 @@ _DIRECT_TOKEN_PRICING: Dict[str, Dict[str, float]] = {
     "gpt-5.6-sol-gpt":          {"input_cents_per_1k": 0.0, "output_cents_per_1k": 0.0},
 }
 
+# Direct OpenAI API pricing (the `-openai` suffix == GPT_API_KEY -> api.openai.com).
+#
+# These are OpenAI's own list prices and are DELIBERATELY NOT derived from
+# `_PROVIDER_PRICING`. That table holds OpenRouter's `openai/*` rates, which are
+# a different commercial route and genuinely cheaper -- gpt-5.6-sol is
+# $2.50/$15 per M on OpenRouter but $5.00/$30 per M direct from OpenAI. The old
+# derivation asserted the two routes were the same price, so correcting the
+# OpenRouter side silently halved what we believe our own funded key costs.
+# Keep the two tables independent; verify each against its own provider.
+#
+# Short-context rates only: OpenAI applies a 2x input / 1.5x output multiplier
+# above 272k input tokens, which this flat table does not model.
 _DIRECT_OPENAI_API_KEY_PRICING: Dict[str, Dict[str, float]] = {
-    "gpt-5.4-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.4"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.5-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.5"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-luna-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-luna"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-terra-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-terra"]["completion"] * 1000 * 100,
-    },
-    "gpt-5.6-sol-openai": {
-        "input_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["prompt"] * 1000 * 100,
-        "output_cents_per_1k": _PROVIDER_PRICING["openai/gpt-5.6-sol"]["completion"] * 1000 * 100,
-    },
+    # $2.50/$15 per M. The repo's long-standing $1.75/$14 was stale for the
+    # direct route as well, so it under-reported funded API usage by ~30%.
+    # (Unlike sol/terra/luna, 5.4's direct and OpenRouter rates coincide.)
+    "gpt-5.4-openai":       {"input_cents_per_1k": 0.25,  "output_cents_per_1k": 1.5},
+    "gpt-5.5-openai":       {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
+    # Luna $0.20/$1.20 and Terra $2/$12 per M. Like 5.4, the repo's previous
+    # $1.00/$6.00 and $2.50/$15 were stale for the direct route.
+    "gpt-5.6-luna-openai":  {"input_cents_per_1k": 0.02,  "output_cents_per_1k": 0.12},
+    "gpt-5.6-terra-openai": {"input_cents_per_1k": 0.2,   "output_cents_per_1k": 1.2},
+    # Sol is the ONLY model in this set whose direct rate differs from
+    # OpenRouter's: $5/$30 direct vs $2.50/$15 via OpenRouter.
+    "gpt-5.6-sol-openai":   {"input_cents_per_1k": 0.5,   "output_cents_per_1k": 3.0},
 }
 
 
