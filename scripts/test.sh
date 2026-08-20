@@ -315,6 +315,7 @@ if auto_rca_changed '^(scripts/(run\.sh|run-in-new-session\.py|run-bench-cloud|r
   run_suite "Cloud Benchmark Mandatory Autoscale" bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
   run_suite "Cloud Benchmark Lifecycle" agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py
   run_suite "Cloud Benchmark Git Fetch" bash scripts/tests/cloudbench-fetch-ref.test.sh
+  run_suite "Cloud Benchmark GitHub Token" bash scripts/tests/cloudbench-github-token.test.sh
   run_suite "Cloud Benchmark Multi-Workstream" bash scripts/tests/cloudbench-multi-workstream.test.sh
   run_suite "Cloud Benchmark App-Env Lock" bash scripts/tests/cloudbench-app-env-lock.test.sh
   run_suite "Cloud Benchmark Seed Budget" bash scripts/tests/cloudbench-seed-budget.test.sh
