@@ -878,11 +878,11 @@ def seed_payment_fixture(manifest: dict) -> None:
         "DIRECT_URL": database_url,
     }
     # `configure_task_environment` publishes the payment identity on
-    # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, so read it back here rather than re-deriving it: the
-    # seeded fixture and the identity the tasks actually run as can then never disagree.
+    # AGENT_PAYMENT_BENCHMARK_USER_ID_ENV. Prefer that, else the dedicated
+    # synthetic lifecycle id — never BENCHMARK_USER_ID / the admin operator,
+    # which would seed the no-charge admin path instead of the customer fixture.
     payment_user_id = (
         os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip()
-        or os.environ.get("BENCHMARK_USER_ID", "").strip()
         or AGENT_PAYMENT_LIFECYCLE_USER_ID
     )
     print(f"Seeding Stripe test billing fixture for the payment-lifecycle user {payment_user_id}")

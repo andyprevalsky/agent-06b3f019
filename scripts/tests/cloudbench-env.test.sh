@@ -762,6 +762,31 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_refresh_gh_b64=' \
+  "refresh-deps must inject a controller-resolved GitHub token into the warm-box git-sync SSH snippet"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+
+# Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
+# the only auth path for refresh-deps. The sync command must export a token
+# decoded from a controller-supplied base64 blob (same pattern as clone boot).
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_try_fetch' \
+  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -1074,17 +1099,11 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
-# ── Validated GitHub token for private-repo git-sync (descend I-01) ───────────
-# Fleet run 20260820-202356-7298 aborted before any task machine:
-#   🔄 git-syncing /data/repo → ab0e002a9 ...
-#      fatal: could not read Username for 'https://github.com': No such device or address
-#   ❌ exact remote checkout failed
-#   ❌ central dep refresh failed; refusing to provision task machines
-# Root cause: resolve_github_token echoed a stale .env GITHUB_TOKEN (HTTP 401),
-# and --refresh-deps built AUTH_HDR only from the box-side secret — empty/invalid
-# auth → interactive username prompt → failure. Resolver must validate against the
-# private repo and prefer fresher controller credentials; refresh-deps must inject
-# a request-scoped controller token and fail closed when none validates.
+# ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
+# Fleet run 20260820-202356-7298 aborted before any task machine on a stale
+# ambient GITHUB_TOKEN. Merged with #1034 durable/ephemeral split: ephemeral
+# resolve_github_token validates Contents access; Fly secrets use durable tokens;
+# refresh-deps retries durable fallback after primary auth failure.
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'github_token_can_fetch_repo()' \
   "cloudbench must validate GitHub tokens against the private rose repo"
@@ -1092,27 +1111,31 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'api.github.com/repos/Rose-Ai-Labs/rose/contents' \
   "token validation must require Contents access (not metadata-only GET /repos)"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'GITHUB_DISPATCH_TOKEN' \
-  "token resolver must consider GITHUB_DISPATCH_TOKEN before stale .env GITHUB_TOKEN"
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com' \
   "token resolver must ignore ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST when reading gh auth"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'REFRESH_GITHUB_TOKEN_B64' \
-  "refresh-deps must inject a request-scoped controller token for git-sync"
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'FATAL: controller GitHub token unavailable for refresh-deps' \
-  "refresh-deps must fail closed when the controller token is missing"
+  '_refresh_gh_b64=' \
+  "refresh-deps must inject a controller-resolved GitHub token into the warm-box git-sync SSH snippet"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_try_fetch' \
+  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
 # Prove the live resolver rejects the ambient stale GITHUB_TOKEN and still
-# returns a credential that can fetch the private repo (requires network).
+# returns a credential with Contents access (requires network).
 resolve_snippet="$(mktemp)"
 awk '
   /^github_token_can_fetch_repo\(\)/ { capture = 1 }
   capture { print }
   capture && /^resolve_render_env_value\(\)/ { exit }
 ' "$ROOT_DIR/scripts/run-bench-cloud" | sed '$d' > "$resolve_snippet"
-# Drop the trailing resolve_render line if awk included it — keep only the two fns.
-# The awk above exits when it sees resolve_render, after printing that line; strip it.
 sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
 (
   set -euo pipefail
@@ -1126,8 +1149,6 @@ sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
     -H 'User-Agent: cloudbench-env-test' \
     'https://api.github.com/repos/Rose-Ai-Labs/rose/contents')"
   [ "$code" = "200" ] || fail "resolve_github_token returned a token without Contents access to rose (HTTP $code)"
-  # Ambient GITHUB_TOKEN in this environment is known-stale (401). The resolver
-  # must not echo it when a fresher candidate exists.
   if [ -n "${GITHUB_TOKEN:-}" ]; then
     stale_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
       -H "Authorization: Bearer ${GITHUB_TOKEN}" \
@@ -1140,6 +1161,7 @@ sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
   fi
 ) || fail "validated GitHub token resolver regression failed"
 rm -f "$resolve_snippet"
+
 
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'CLOUDBENCH_SSH_EXEC_TIMEOUT' \
