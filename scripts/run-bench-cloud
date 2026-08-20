@@ -1016,14 +1016,45 @@ stop_machine_strict() {  # stop_machine_strict <id>
 
 resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory> <purpose>
     local id="$1" size="$2" memory="$3" purpose="$4" state
+    local attempt=1 max_attempts retry_delay this_delay cap update_out update_rc
     [ -n "$id" ] || return 0
+    max_attempts="${CLOUDBENCH_WARM_RESIZE_ATTEMPTS:-6}"
+    retry_delay="${CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS:-8}"
+    cap="${CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS:-90}"
     state="$(machine_state "$id")"
     if [ "$state" != "stopped" ]; then
         stop_machine_strict "$id" || return 1
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
-    FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
-        --command "sleep infinity" --skip-start --yes >/dev/null
+    # Fly org API rate limits (`resource_exhausted: rate limit exceeded`) are
+    # common right after park→prepare or sibling fleet traffic. A single-shot
+    # machine update aborted --refresh-deps before any task machine existed
+    # (descend wait-for-trigger epoch 2). Retry with exponential backoff+jitter
+    # — same rule as clone_machine_target.
+    while true; do
+        update_rc=0
+        update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
+            --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?
+        if [ "$update_rc" -eq 0 ]; then
+            return 0
+        fi
+        if ! printf '%s' "$update_out" | grep -Eqi 'resource_exhausted|rate[[:space:]]*limit|429'; then
+            printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+            echo "❌ warm-source resize for $purpose failed (non-retryable)" >&2
+            return 1
+        fi
+        if [ "$attempt" -ge "$max_attempts" ]; then
+            printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+            echo "❌ warm-source resize for $purpose exhausted $attempt rate-limit retries" >&2
+            return 1
+        fi
+        this_delay=$(( retry_delay * (1 << (attempt - 1)) ))
+        [ "$this_delay" -gt "$cap" ] && this_delay="$cap"
+        this_delay=$(( this_delay + (RANDOM % 5) ))
+        echo "⏳ warm-source resize rate-limited (attempt $attempt/$max_attempts); retrying in ${this_delay}s ..." >&2
+        sleep "$this_delay"
+        attempt=$((attempt + 1))
+    done
 }
 
 prepare_warm_source() {

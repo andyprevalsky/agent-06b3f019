@@ -1063,6 +1063,75 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
 
+# ── warm-source resize must retry Fly rate limits (descend I-02) ─────────────
+# Epoch-2 fleet abort during --refresh-deps:
+#   🧮 sizing warm source for maintenance: shared-cpu-4x/8192MB
+#   Error: could not get machine … resource_exhausted: rate limit exceeded
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Relative of 2026-07-15 clone rate-limit RCAs: resize_stopped_warm_source was
+# single-shot, so a transient org limiter abort killed the whole slice before
+# any task machine existed.
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  [ -n "$function_body" ] || fail "could not load resize_stopped_warm_source"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  # FLY runs inside $(...), so a shell variable counter cannot cross attempts.
+  call_file="$TMP_ROOT/warm-resize-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must succeed after rate-limit retries"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "resize_stopped_warm_source must retry rate limits until success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize rate-limit retry regression failed"
+
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-rate-limit"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=2
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    echo "Error: could not get machine $3: resource_exhausted: rate limit exceeded" >&2
+    return 1
+  }
+  rc=0
+  resize_stopped_warm_source mid-rl shared-cpu-4x 8192 maintenance >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] ||
+    fail "resize_stopped_warm_source must fail closed after exhausting rate-limit retries"
+) || fail "warm-source resize rate-limit exhaustion regression failed"
+
 # ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
 # Observed fleet abort before any task machine was provisioned:
 #   🔄 git-syncing /data/repo → <sha> ...
