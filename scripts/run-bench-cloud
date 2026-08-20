@@ -442,6 +442,48 @@ resolve_github_token() {
     echo "$t"
 }
 
+# Build a remote shell snippet that fetches+checks out $2 inside $1 using the
+# CONTROLLER's current GitHub token (gh auth token → resolve_github_token).
+# Fail closed when no token is available — never emit a command that optionally
+# clears AUTH_HDR from a missing box-side GITHUB_TOKEN secret (that produced
+# `fatal: could not read Username for 'https://github.com'` on non-TTY ssh and
+# aborted fleet --refresh-deps before any task machine was provisioned).
+build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
+    local remote_repo="$1" ref="$2" verify_marker="${3:-}"
+    local token auth_hdr
+    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    if [ -z "$token" ]; then
+        echo "❌ No controller GitHub token for private-repo git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
+        return 1
+    fi
+    auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+    # Quote the header for safe embedding; do not rely on remote env secrets.
+    local auth_q repo_q ref_q
+    printf -v auth_q '%q' "$auth_hdr"
+    printf -v repo_q '%q' "$remote_repo"
+    printf -v ref_q '%q' "$ref"
+    local cmd
+    cmd="set -e
+AUTH_HDR=$auth_q
+[ -n \"\$AUTH_HDR\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
+git -c safe.directory=$repo_q -C $repo_q -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin $ref_q
+git -c safe.directory=$repo_q -C $repo_q checkout -f $ref_q 2>/dev/null || git -c safe.directory=$repo_q -C $repo_q checkout -f FETCH_HEAD
+git -c safe.directory=$repo_q -C $repo_q reset --hard
+chown -R rose:rose $repo_q 2>/dev/null || true
+REMOTE_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse HEAD)
+echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)"
+    if [ -n "$verify_marker" ]; then
+        # Marker is a controller-owned constant (e.g. ::CLOUDBENCH-REF::).
+        case "$verify_marker" in
+            *[!A-Za-z0-9:_-]*) echo "❌ invalid git-sync verify marker" >&2; return 1 ;;
+        esac
+        cmd="$cmd
+echo \"${verify_marker}\$REMOTE_REF\""
+    fi
+    printf '%s' "$cmd"
+}
+
 resolve_render_env_value() {
     local key="$1" api_key service_id response
     api_key="$(cloudbench_env_value back-end/.env RENDER_API_KEY)"
@@ -929,6 +971,15 @@ start_machine() {  # start_machine <id>
         st="$(machine_state "$id")"
         [ "$st" = "started" ] && { echo "✅ Machine started"; return 0; }
         [ "$st" = "gone" ] && { echo "❌ Machine $id disappeared while starting"; return 1; }
+        # A start issued while Fly still reports stopping/replacing fails with
+        # failed_precondition and leaves require_machine_ready racing itself
+        # (observed: start error → false progress → SSH wait on stopped donor).
+        case "$st" in
+            stopping|replacing|starting)
+                sleep "$nap"
+                continue
+                ;;
+        esac
         now="$(date +%s)"
         if machine_storage_ready "$id" \
             && { [ "$last_start_ts" -eq 0 ] || [ $((now - last_start_ts)) -ge 20 ]; }; then
@@ -1099,6 +1150,12 @@ wait_for_ssh() {  # wait_for_ssh <id>
             return 1
         fi
         if [ "$state" != "started" ] && [ "$restarted" -eq 0 ]; then
+            case "$state" in
+                stopping|replacing|starting)
+                    sleep "$nap"
+                    continue
+                    ;;
+            esac
             echo "   ↻ $id fell out of 'started' (state=$state) — re-asserting start once"
             request_machine_start "$id" || true
             restarted=1
@@ -1339,19 +1396,10 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match (auth via
-    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    # Sync the repo to the ref whose manifests the trees must match. Auth via the
+    # CONTROLLER's current GitHub token (never an optional empty box-side secret).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
-    SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
-echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
-echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
+    SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$EXPECTED_REF" '::CLOUDBENCH-REF::')" || exit 1
     SYNC_LOG="$(mktemp)"
     if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
         rm -f "$SYNC_LOG"
@@ -1486,17 +1534,12 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Auth with the CONTROLLER's current GitHub token (fail closed; never optional
+    # empty box-side GITHUB_TOKEN → Username prompt on non-TTY ssh).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
-    SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-echo checkout \$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse --short HEAD)"
+    if ! SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$BENCH_REF")"; then
+        exit 1
+    fi
     ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
 
     echo ""
