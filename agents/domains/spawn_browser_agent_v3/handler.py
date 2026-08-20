@@ -90,6 +90,7 @@ from .config import (
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
 from .credential_runtime import build_realm_credential_state
+from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -4887,6 +4888,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
     network_recorder_task: Optional[asyncio.Task] = None
+    browser_download_persister: Optional[BrowserDownloadPersister] = None
+    download_persister_task: Optional[asyncio.Task] = None
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
@@ -5676,6 +5679,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # can take seconds and nothing downstream needs it synchronously, so it
         # attaches in the background (resolved before session close).
         network_recorder_task = asyncio.create_task(_create_network_recorder())
+
+        async def _create_download_persister():
+            # Kernel CDP downloads_path alone does not always yield listFiles entries;
+            # materialize Content-Disposition attachments under /tmp/downloads.
+            return await BrowserDownloadPersister.create(
+                browser_session=dom_service.session,
+                session_id=session_id,
+                config=config,
+                agent_id=agent_id,
+                task_id=task_id or "",
+            )
+
+        download_persister_task = asyncio.create_task(_create_download_persister())
 
         async def _init_humanizer():
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
@@ -7040,6 +7056,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                if download_persister_task.done():
+                                    browser_download_persister = download_persister_task.result()
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
                         humanizer = await _replace_browser_humanizer(
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
@@ -7472,6 +7498,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if browser_network_recorder is not None:
                             with contextlib.suppress(Exception):
                                 await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_download_persister = await asyncio.wait_for(
+                                    asyncio.shield(download_persister_task),
+                                    timeout=10,
+                                )
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
@@ -8726,6 +8764,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_error),
                 )
+        if browser_download_persister is None and download_persister_task is not None:
+            with contextlib.suppress(Exception):
+                browser_download_persister = await asyncio.wait_for(
+                    asyncio.shield(download_persister_task),
+                    timeout=10,
+                )
+        if browser_download_persister is not None:
+            with contextlib.suppress(Exception):
+                await browser_download_persister.close()
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
@@ -8793,30 +8840,55 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         agent_id = workflow_instance.agent_id
 
         attachments: List[Dict[str, Any]] = []
-        if requested_attachments and hasattr(workflow_instance, "context"):
+        if hasattr(workflow_instance, "context"):
             context_attachments = extract_attachments_from_context(workflow_instance.context)
             filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
-            for filename in requested_attachments:
-                if filename in filename_to_pointer:
-                    fp = filename_to_pointer[filename]
-                    attachments.append(
-                        {
-                            "id": fp.id,
-                            "storage_path": fp.storage_path,
-                            "original_filename": fp.original_filename,
-                            "mime_type": fp.mime_type,
-                            "size_bytes": fp.size_bytes,
-                            "created_at": fp.created_at,
-                        }
-                    )
-                else:
+            def _fp_dict(fp: Any) -> Dict[str, Any]:
+                return {
+                    "id": fp.id,
+                    "storage_path": fp.storage_path,
+                    "original_filename": fp.original_filename,
+                    "mime_type": fp.mime_type,
+                    "size_bytes": fp.size_bytes,
+                    "created_at": fp.created_at,
+                }
+
+            if requested_attachments:
+                if isinstance(requested_attachments, str):
+                    requested_attachments = [requested_attachments]
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        attachments.append(_fp_dict(filename_to_pointer[filename]))
+                    else:
+                        logger.warning(
+                            "[BrowserAgent] Attachment not found in context",
+                            agent_id=agent_id,
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys()),
+                        )
+                # Wrong/missing names previously left available_files empty so
+                # upload_file could never succeed. Fall back to every parent
+                # attachment when nothing matched.
+                if not attachments and filename_to_pointer:
                     logger.warning(
-                        "[BrowserAgent] Attachment not found in context",
+                        "[BrowserAgent] No requested attachments matched; "
+                        "falling back to all parent context attachments",
                         agent_id=agent_id,
-                        filename=filename,
+                        requested=requested_attachments,
                         available_files=list(filename_to_pointer.keys()),
                     )
+                    attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+            elif filename_to_pointer:
+                # Parent omitted attachments but context has files — forward them
+                # so upload tasks (e.g. tinypng) do not spawn with an empty set.
+                logger.info(
+                    "[BrowserAgent] No attachments requested; forwarding parent context files",
+                    agent_id=agent_id,
+                    available_files=list(filename_to_pointer.keys()),
+                )
+                attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+
 
         logger.info(
             "Browser agent starting (v3)",
