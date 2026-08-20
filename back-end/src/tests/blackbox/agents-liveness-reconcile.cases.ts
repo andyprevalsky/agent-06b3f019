@@ -15,10 +15,11 @@
 import {
   assert,
   createAnonymousSession,
-  createTestAgent,
   prisma,
   randomUUID,
   test,
+  trackedAgentIds,
+  withTransientDbRetry,
 } from './agents-blackbox-harness';
 import {
   RECONCILED_STATUS_MESSAGE,
@@ -26,23 +27,33 @@ import {
 } from '../../providers/workflowLivenessReconciler';
 
 /**
- * Point the row at a workflow and make it eligible.
- *
- * The backdate is raw SQL applied immediately before the reconcile: agent
- * creation kicks off background status writes, and under full-suite load one can
- * land after a Prisma update and push `updatedAt` back inside MIN_QUIET_MS,
- * silently removing the row from the candidate set.
+ * Seed a workflow-backed row without HTTP create. createTestAgent starts a
+ * chat-mode LLM whose later status/workflow writes can overwrite the fixture
+ * after makeEligible and drop the row from the candidate set (PAUSED is the
+ * typical loser).
  */
-async function attachWorkflow(
-  agentId: string,
+async function seedLivenessAgent(
+  userId: string,
+  label: string,
   status: 'ACTIVE' | 'PAUSED' | 'COST_LIMIT_REACHED'
-): Promise<string> {
+): Promise<{ agentId: string; workflowId: string }> {
+  const agentId = randomUUID();
   const workflowId = `wf-${randomUUID()}`;
-  await prisma.agent.update({
-    where: { id: agentId },
-    data: { status, temporalWorkflowId: workflowId },
+  trackedAgentIds.add(agentId);
+  await withTransientDbRetry(`create-liveness-${label}`, async () => {
+    await prisma.agent.create({
+      data: {
+        id: agentId,
+        userId,
+        goal: `liveness ${label}`,
+        status,
+        model: 'rose-labs/rose-1-ultra',
+        busId: agentId,
+        temporalWorkflowId: workflowId,
+      },
+    });
   });
-  return workflowId;
+  return { agentId, workflowId };
 }
 
 /** Force eligibility past any late background write. */
@@ -60,20 +71,14 @@ async function statusOf(agentId: string): Promise<string> {
   return String(row?.status);
 }
 
-/** Quiet-window clock far enough ahead that a late create/status write cannot un-qualify the row. */
-function afterQuietWindow(): number {
-  return Date.now() + 6 * 60_000;
-}
-
 test('reconciler seals ACTIVE/PAUSED/COST_LIMIT_REACHED agents whose workflow is TERMINATED', async () => {
   const session = await createAnonymousSession('liveness-seal');
   const statuses = ['ACTIVE', 'PAUSED', 'COST_LIMIT_REACHED'] as const;
 
   const agents = [];
   for (const status of statuses) {
-    const agentId = await createTestAgent(session.user.id, `liveness ${status}`);
-    const workflowId = await attachWorkflow(agentId, status);
-    agents.push({ agentId, workflowId, status });
+    const seeded = await seedLivenessAgent(session.user.id, status, status);
+    agents.push({ ...seeded, status });
   }
   const workflowIds = new Set(agents.map((a) => a.workflowId));
   await makeEligible(agents.map((a) => a.agentId));
@@ -82,7 +87,6 @@ test('reconciler seals ACTIVE/PAUSED/COST_LIMIT_REACHED agents whose workflow is
   // agents — only the three created here are eligible to be sealed.
   await reconcileWorkflowLiveness({
     batchSize: 1000,
-    now: afterQuietWindow,
     describeStatus: async (workflowId: string) =>
       workflowIds.has(workflowId) ? 'WORKFLOW_EXECUTION_STATUS_TERMINATED' : 'RUNNING',
   });
@@ -106,13 +110,11 @@ test('reconciler seals ACTIVE/PAUSED/COST_LIMIT_REACHED agents whose workflow is
 
 test('reconciler leaves an agent alone when Temporal reports RUNNING', async () => {
   const session = await createAnonymousSession('liveness-running');
-  const agentId = await createTestAgent(session.user.id, 'liveness running');
-  const workflowId = await attachWorkflow(agentId, 'ACTIVE');
+  const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'running', 'ACTIVE');
 
   await makeEligible([agentId]);
   await reconcileWorkflowLiveness({
     batchSize: 1000,
-    now: afterQuietWindow,
     describeStatus: async (id: string) =>
       id === workflowId ? 'WORKFLOW_EXECUTION_STATUS_RUNNING' : 'RUNNING',
   });
@@ -122,13 +124,11 @@ test('reconciler leaves an agent alone when Temporal reports RUNNING', async () 
 
 test('reconciler leaves an agent alone when the Temporal read is inconclusive', async () => {
   const session = await createAnonymousSession('liveness-error');
-  const agentId = await createTestAgent(session.user.id, 'liveness error');
-  const workflowId = await attachWorkflow(agentId, 'ACTIVE');
+  const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'error', 'ACTIVE');
 
   await makeEligible([agentId]);
   const summary = await reconcileWorkflowLiveness({
     batchSize: 1000,
-    now: afterQuietWindow,
     describeStatus: async (id: string) => {
       if (id === workflowId) throw new Error('Temporal unavailable');
       return 'RUNNING';
@@ -144,13 +144,11 @@ test('reconciler leaves an agent alone when the Temporal read is inconclusive', 
 
 test('reconciler seals an agent whose workflow no longer exists', async () => {
   const session = await createAnonymousSession('liveness-notfound');
-  const agentId = await createTestAgent(session.user.id, 'liveness notfound');
-  const workflowId = await attachWorkflow(agentId, 'ACTIVE');
+  const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'notfound', 'ACTIVE');
 
   await makeEligible([agentId]);
   await reconcileWorkflowLiveness({
     batchSize: 1000,
-    now: afterQuietWindow,
     describeStatus: async (id: string) => (id === workflowId ? 'NOT_FOUND' : 'RUNNING'),
   });
 
@@ -162,23 +160,14 @@ test('reconciler seals an agent whose workflow no longer exists', async () => {
 
 test('reconciler is idempotent and never re-transitions a settled agent', async () => {
   const session = await createAnonymousSession('liveness-idempotent');
-  const agentId = await createTestAgent(session.user.id, 'liveness idempotent');
-  const workflowId = await attachWorkflow(agentId, 'ACTIVE');
+  const { agentId, workflowId } = await seedLivenessAgent(session.user.id, 'idempotent', 'ACTIVE');
 
   const describeStatus = async (id: string) =>
     id === workflowId ? 'WORKFLOW_EXECUTION_STATUS_TERMINATED' : 'RUNNING';
 
   await makeEligible([agentId]);
-  const first = await reconcileWorkflowLiveness({
-    batchSize: 1000,
-    now: afterQuietWindow,
-    describeStatus,
-  });
-  const second = await reconcileWorkflowLiveness({
-    batchSize: 1000,
-    now: afterQuietWindow,
-    describeStatus,
-  });
+  const first = await reconcileWorkflowLiveness({ batchSize: 1000, describeStatus });
+  const second = await reconcileWorkflowLiveness({ batchSize: 1000, describeStatus });
 
   assert(first.sealed >= 1, 'first pass should seal the agent');
   assert((await statusOf(agentId)) === 'FAILED', 'agent should remain FAILED after a second pass');
