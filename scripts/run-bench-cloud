@@ -446,16 +446,24 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 # Never return an unvalidated token: an invalid PAT is worse than a missing one
 # because callers treat non-empty as "auth is configured".
 github_token_can_fetch_repo() {
-    local token="$1" code
+    local token="$1" code cfg
     [ -n "$token" ] || return 1
     # Metadata-only fine-grained PATs can pass GET /repos while lacking Contents
     # and failing git clone/fetch. Probe the contents root (no trailing slash) so
     # acceptance requires Contents: read — the permission git operations need.
+    # Keep the PAT out of curl argv (ps/audit) via a mode-0600 curl config file.
+    cfg="$(mktemp)"
+    printf 'header = "Authorization: Bearer %s"\n' "$token" >"$cfg"
+    chmod 600 "$cfg"
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
-        -H "Authorization: Bearer ${token}" \
+        --config "$cfg" \
         -H 'Accept: application/vnd.github+json' \
         -H 'User-Agent: cloudbench' \
-        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || return 1
+        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || {
+        rm -f "$cfg"
+        return 1
+    }
+    rm -f "$cfg"
     [ "$code" = "200" ]
 }
 
@@ -1087,18 +1095,24 @@ fi
 # back to optional box-side $GITHUB_TOKEN: an empty token makes `git fetch`
 # prompt for a username over HTTPS and abort the fleet before any task starts.
 warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
-    local mid="$1" sha="$2" token token_b64 sync_log remote_ref
+    local mid="$1" sha="$2" token token_b64 sync_log remote_ref token_local remote_token
     token="$(cloudbench_controller_github_token)"
     [ -n "$token" ] || {
         echo "❌ No controller GitHub token for warm-source git-sync." >&2
         return 1
     }
     token_b64="$(printf '%s' "$token" | base64 | tr -d '\n')"
+    token_local="$(mktemp)"
+    remote_token="/tmp/cloudbench-warm-fetch-token.$$"
+    printf '%s' "$token_b64" >"$token_local"
+    chmod 600 "$token_local"
     _sftp_put_fetch_ref() {
         # flyctl sftp will not overwrite; each attempt must start from a clean dest.
-        ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh" >/dev/null || true
+        ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh '$remote_token'" >/dev/null || true
         FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
-            "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh
+            "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 \
+            "$token_local" "$remote_token"
     }
     # Guest driver staging already retries sftp (CLOUDBENCH_STAGE_ATTEMPTS). A
     # single Fly API "tunnel unavailable / context deadline exceeded" here used
@@ -1107,12 +1121,16 @@ warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
         "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
         "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" \
         _sftp_put_fetch_ref; then
+        rm -f "$token_local"
         echo "❌ failed to upload cloudbench-fetch-ref.sh to $mid" >&2
         return 1
     fi
+    rm -f "$token_local"
     sync_log="$(mktemp)"
+    # -C argv names only remote paths — never the token bytes.
     if ! ssh_exec "$mid" "set -e
-export CLOUDBENCH_GITHUB_TOKEN_B64='$token_b64'
+trap 'rm -f $remote_token' EXIT
+export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat '$remote_token')
 export CLOUDBENCH_APP_USER=rose
 bash /data/cloudbench-fetch-ref.sh '$REMOTE_REPO' '$sha'
 REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
@@ -1614,9 +1632,10 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
     # Request-scoped controller token via http.extraheader — never persist the
     # credential into .git/config. The remote stays clean (https://github.com/...).
+    # Upload token + script via SFTP (mode 0600/0700); -C only names remote paths.
     CLONE_CMD="set -e
 mkdir -p /data
-TOKEN=\$(printf '%s' '$SETUP_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)
+TOKEN=\$(printf '%s' \"\$CLOUDBENCH_GITHUB_TOKEN_B64\" | base64 -d 2>/dev/null || true)
 [ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for setup clone' >&2; exit 1; }
 AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
 if [ -d '$REMOTE_REPO/.git' ]; then
@@ -1628,10 +1647,22 @@ fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo 'clone/fetch complete'"
-    CLONE_CMD_B64="$(printf '%s' "$CLONE_CMD" | base64 | tr -d '\n')"
+    setup_token_local="$(mktemp)"
+    setup_cmd_local="$(mktemp)"
+    remote_setup_token="/tmp/cloudbench-setup-token.$$"
+    remote_setup_cmd="/tmp/cloudbench-setup-cmd.$$"
+    printf '%s' "$SETUP_GITHUB_TOKEN_B64" >"$setup_token_local"
+    printf '%s' "$CLONE_CMD" >"$setup_cmd_local"
+    chmod 600 "$setup_token_local" "$setup_cmd_local"
+    if ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$setup_token_local" "$remote_setup_token" ||
+       ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 "$setup_cmd_local" "$remote_setup_cmd"; then
+        rm -f "$setup_token_local" "$setup_cmd_local"
+        echo "❌ failed to upload setup clone credentials/script"; stop_machine "$mid"; exit 1
+    fi
+    rm -f "$setup_token_local" "$setup_cmd_local"
     clone_output=""
     if ! clone_output="$(FLY ssh console -a "$APP" --machine "$mid" \
-        -C "bash -lc \"printf '%s' '$CLONE_CMD_B64' | base64 -d | bash\"" 2>&1)"; then
+        -C "bash -lc \"trap 'rm -f $remote_setup_token $remote_setup_cmd' EXIT; export CLOUDBENCH_GITHUB_TOKEN_B64=\$(cat $remote_setup_token); bash $remote_setup_cmd\"" 2>&1)"; then
         printf '%s\n' "$clone_output" | grep -av '^Connecting to' | sed 's/^/   /'
         echo "❌ git clone failed"; stop_machine "$mid"; exit 1
     fi
