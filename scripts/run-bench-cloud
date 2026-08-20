@@ -860,6 +860,32 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     FLY ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
 }
 
+# Controller-side GitHub token for warm-machine git-sync. Prefer injecting this
+# over relying on the box GITHUB_TOKEN secret, which can remain staged/unactivated
+# on the shared warm source and abort fleets with "could not read Username".
+resolve_controller_github_token_b64() {
+    local token
+    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    [ -n "$token" ] || return 1
+    printf '%s' "$token" | base64 | tr -d '\n'
+}
+
+# Remote shell preamble that builds AUTH_HDR from controller inject, falling
+# back to box-side GITHUB_TOKEN. Emits CLOUDBENCH_GITHUB_TOKEN_B64 in the remote
+# environment for any follow-on scripts that expect the clone-path contract.
+warm_git_auth_preamble() {  # warm_git_auth_preamble <controller_token_b64>
+    local b64="$1"
+    cat <<EOF
+AUTH_HDR=''
+TOKEN="\$(printf '%s' '$b64' | base64 -d 2>/dev/null || true)"
+[ -z "\$TOKEN" ] && TOKEN="\${GITHUB_TOKEN:-}"
+[ -n "\$TOKEN" ] || { echo '❌ warm git-sync has no GitHub token (controller inject + box secret both empty)' >&2; exit 1; }
+AUTH_HDR="Authorization: Basic \$(printf 'x-access-token:%s' "\$TOKEN" | base64 | tr -d '\n')"
+unset TOKEN
+export CLOUDBENCH_GITHUB_TOKEN_B64='$b64'
+EOF
+}
+
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
 # the session ends and can transiently fail (network blip, machine mid-start), so
 # every poll read is retried a few times. Returns the remote stdout on stdout;
@@ -1346,22 +1372,13 @@ if [ "$MODE" = "refresh-deps" ]; then
     # previously aborted whole fleets with "could not read Username for
     # https://github.com"). Fall back to box-side GITHUB_TOKEN when present.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
-    CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
-    [ -n "$CONTROLLER_GITHUB_TOKEN" ] || {
+    CONTROLLER_GITHUB_TOKEN_B64="$(resolve_controller_github_token_b64)" || {
         echo "❌ No controller GitHub token available for refresh-deps git-sync." >&2
         echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or run 'gh auth login'." >&2
         exit 1
     }
-    CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
-    unset CONTROLLER_GITHUB_TOKEN
     SYNC_CMD="set -e
-AUTH_HDR=''
-TOKEN=\"\$(printf '%s' '$CONTROLLER_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)\"
-[ -z \"\$TOKEN\" ] && TOKEN=\"\${GITHUB_TOKEN:-}\"
-[ -n \"\$TOKEN\" ] || { echo '❌ refresh-deps git-sync has no GitHub token (controller inject + box secret both empty)' >&2; exit 1; }
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
-unset TOKEN
-export CLOUDBENCH_GITHUB_TOKEN_B64='$CONTROLLER_GITHUB_TOKEN_B64'
+$(warm_git_auth_preamble "$CONTROLLER_GITHUB_TOKEN_B64")
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
@@ -1504,17 +1521,22 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Same controller-token inject as refresh-deps — do not depend on box-side
+    # GITHUB_TOKEN activation state for private-repo fetch.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
+    CONTROLLER_GITHUB_TOKEN_B64="$(resolve_controller_github_token_b64)" || {
+        echo "❌ No controller GitHub token available for refresh-wmh git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or run 'gh auth login'." >&2
+        exit 1
+    }
     SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+$(warm_git_auth_preamble "$CONTROLLER_GITHUB_TOKEN_B64")
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 echo checkout \$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse --short HEAD)"
+    unset CONTROLLER_GITHUB_TOKEN_B64
     ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
 
     echo ""
