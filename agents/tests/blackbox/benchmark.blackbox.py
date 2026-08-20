@@ -324,7 +324,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "14 passed" in result.stdout
+    # Count tracks the -k filter above. New refresh_deps_ cases (I-03 token
+    # export, I-04 fetch-ref retry) raised this from 14 to 15.
+    assert "15 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
@@ -859,6 +861,7 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         "SEED_ALLOW_MISSING_GPT_CODE",
         "AGENTCARD_ONBOARDING_RETURN_URL",
         "BENCHMARK_AGENT_PAYMENT_USER_ID",
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH",
     )
     with patch.dict(os.environ, {}, clear=False):
         for key in keys:
@@ -868,21 +871,22 @@ def test_payment_benchmark_preserves_lifecycle_stack_contract():
         assert os.environ["BENCHMARK_FAST_MODE_CACHE"] == "false"
         assert os.environ["SEED_ALLOW_MISSING_GPT_CODE"] == "1"
         assert os.environ["BENCHMARK_AGENT_PAYMENT_USER_ID"] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
         assert (
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"]
             == "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
         )
 
 
-def test_payment_benchmark_seeds_non_admin_fixture_identity():
-    """Stripe lifecycle tasks must not inherit the admin operator's no-charge semantics."""
+def test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path():
+    """Sandbox lifecycle benches run as the admin account and force the charged mint path."""
     import os
     from unittest.mock import patch
 
     from benchmarks import local
     from benchmarks import run_benchmark as bench
 
-    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID != local.BENCHMARK_USER_ID
+    assert local.AGENT_PAYMENT_BENCHMARK_USER_ID == local.BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_BENCHMARK_USER_ID == local.AGENT_PAYMENT_BENCHMARK_USER_ID
     assert bench.AGENT_PAYMENT_SANDBOX_TASK_NAMES == local.AGENT_PAYMENT_TASK_NAMES
 
@@ -894,6 +898,11 @@ def test_payment_benchmark_seeds_non_admin_fixture_identity():
 
     command = run.call_args.args[0]
     assert command[-2:] == ["--user-id", local.AGENT_PAYMENT_BENCHMARK_USER_ID]
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH", None)
+        local.configure_task_environment(["agent-payment-test-shop"])
+        assert os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] == "1"
+        assert os.environ[local.AGENT_PAYMENT_BENCHMARK_USER_ID_ENV] == local.AGENT_PAYMENT_BENCHMARK_USER_ID
 
 
 async def test_agentcard_setup_targets_effective_benchmark_user():
@@ -1041,6 +1050,8 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
 
     assert 'if [ "$BOOTSTRAP_FLAG" = "--bootstrap" ]' in helper
     assert "scripts/setup-benchmark-payment.ts" in helper
+    assert "export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in helper
+    assert "1f85ff25-6e29-4c1b-8739-f917bd101a30" in helper
     assert "DATABASE_URL=" in helper
     assert "export BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1" in helper
     assert "unset FAST_MODE_CACHE_DATABASE_URL" in helper
@@ -1058,8 +1069,12 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in import_block, (
         "setup-benchmark-payment.ts must import BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
     )
-    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID" in fixture
-    assert "assertDedicatedBenchmarkUser(userId)" in fixture
+    assert "DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in fixture
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID" in import_block
+    assert "BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID" in import_block
+    assert "benchmarkPaymentIdentity" in import_block
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in fixture
+    assert "assertDedicatedBenchmarkUser(userId, mode)" in fixture
     assert "pg_advisory_xact_lock" in fixture
     assert "BENCHMARK_CREDIT_HEADROOM_CENTS" in fixture
     assert "await prisma.$transaction" in fixture
@@ -1096,15 +1111,15 @@ def test_agentcard_lifecycle_bootstrap_provisions_sandbox_float():
     assert "BENCHMARK_AGENTCARD_ORG_ID" in dotenv_helper
 
 
-def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
-    """The four AgentCard lifecycle benchmarks must run as the NON-ADMIN payment fixture user.
+def test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path():
+    """Sandbox AgentCard lifecycle benches run as the default admin account.
 
-    `resolveAndIssuePurchaseCard` routes ADMIN_USER_IDS to `issueAdminCompanyCard`, which mints a
-    company-funded card and never authorizes a personal Stripe hold. Every one of these tasks
-    asserts `expected_payment_lifecycle.stripeHold`, so running them as the default (admin)
-    benchmark user makes that assertion unreachable by construction. Three places must agree on
-    the identity — the harness run-user override, the local stack's fixture seeding, and the
-    back-end constant the seeding script and back-end blackbox share — so pin all three here.
+    Credit checks use the admin unlimited path so the agent is not gated at
+    `gate:subscription`. `BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH` (honored only
+    when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+    `resolveAndIssuePurchaseCard` onto `chargeAndIssueCard` so stripeHold /
+    payment_approval stay reachable. The disposable `…106` identity remains
+    the non-admin blackbox fixture (`BENCHMARK_PAYMENT_LIFECYCLE_USER_ID`).
     """
     import re
 
@@ -1118,27 +1133,40 @@ def test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user():
 
     repo_root = Path(__file__).resolve().parents[3]
     config_ts = (repo_root / "back-end" / "src" / "domains" / "purchases" / "config.ts").read_text()
-    match = re.search(r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts)
-    assert match, "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    match = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID =\s*'([^']+)'",
+        config_ts,
+    )
+    assert match, (
+        "back-end purchases/config.ts must export BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID"
+    )
     assert match.group(1) == AGENT_PAYMENT_LIFECYCLE_USER_ID, (
         "benchmark payment identity drifted between the harness and the back-end: "
         f"{AGENT_PAYMENT_LIFECYCLE_USER_ID} vs {match.group(1)}"
     )
+    assert "function benchmarkForceCustomerPurchasePath()" in config_ts
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in config_ts
+    disposable = re.search(
+        r"export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '([^']+)'", config_ts
+    )
+    assert disposable, "back-end purchases/config.ts must keep BENCHMARK_PAYMENT_LIFECYCLE_USER_ID"
+    assert disposable.group(1) == "00000000-0000-4000-8000-000000000106"
+    assert disposable.group(1) != AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_LIFECYCLE_USER_ID == AGENT_PAYMENT_LIFECYCLE_USER_ID
     assert local.AGENT_PAYMENT_TASK_NAMES == AGENT_PAYMENT_LIFECYCLE_TASK_NAMES
-    # Never the default (admin) benchmark user, and never a hardcoded ADMIN_USER_IDS entry.
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID != USER_ID
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID == USER_ID
     admin_ts = (repo_root / "back-end" / "src" / "utils" / "adminAccess.ts").read_text()
-    assert AGENT_PAYMENT_LIFECYCLE_USER_ID not in admin_ts
+    assert AGENT_PAYMENT_LIFECYCLE_USER_ID in admin_ts
 
     for name in sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES):
         task = get_task_by_name(name)
         assert task.expected_payment_lifecycle, f"{name} must assert a payment lifecycle"
         assert task.expected_payment_lifecycle["stripeHold"]["status"] == "succeeded", (
-            f"{name} asserts a captured personal Stripe hold, which only the non-admin funding path can produce"
+            f"{name} asserts a captured Stripe hold, which the forced customer path must produce"
         )
         assert task.environment["db_fixtures"] == ["agent_payment_lifecycle_v1"]
         assert AGENT_PAYMENT_LIFECYCLE_USER_ID in task.environment["context_notes"]
+        assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH" in task.environment["context_notes"]
 
 
 def test_production_payment_lifecycle_tasks_run_as_a_non_admin_identity():
@@ -1237,7 +1265,7 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         local.configure_task_environment([local.ADMIN_BYPASS_TASK_NAME])
         assert os.environ["ADMIN_USER_IDS_EXTRA"] == local.ADMIN_BYPASS_USER_ID
 
-    # Only that task opts in; the lifecycle tasks must stay NON-admin on the same stack.
+    # Only that task opts in; lifecycle benches are already hardcoded admins and must not get EXTRA.
     with patch.dict(os.environ, {}, clear=False):
         os.environ.pop("ADMIN_USER_IDS_EXTRA", None)
         local.configure_task_environment(sorted(AGENT_PAYMENT_LIFECYCLE_TASK_NAMES))
@@ -9412,8 +9440,15 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     assert reachable_probe in run_script
     assert ownership_probe in run_script
     assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
-    workspace_daemon_probe = 'docker_available_for_workspace_db "$DB_CONTAINER"; then'
+    # The probe receives this workspace's container AND the isolated-run flag. An
+    # isolated benchmark stack creates its DB container later in the same run, so
+    # it must be allowed to accept a responsive daemon before that container
+    # exists; a normal workspace still has to see its own container.
+    workspace_daemon_probe = (
+        'docker_available_for_workspace_db "$DB_CONTAINER" "$BENCHMARK_ISOLATED_RUN"'
+    )
     assert workspace_daemon_probe in run_script
+    assert f"{workspace_daemon_probe}; then" in run_script
     assert run_script.index(reachable_probe) < run_script.index(workspace_daemon_probe)
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
 
@@ -13636,8 +13671,8 @@ async def run_all_tests():
         test_payment_benchmark_preserves_lifecycle_stack_contract,
     )
     r.record(
-        "payment_benchmark_non_admin_fixture_identity",
-        test_payment_benchmark_seeds_non_admin_fixture_identity,
+        "payment_benchmark_admin_run_user_forced_customer_path",
+        test_payment_benchmark_seeds_admin_run_user_with_forced_customer_path,
     )
     await r.record_async(
         "agentcard_setup_effective_benchmark_user",
@@ -13660,8 +13695,8 @@ async def run_all_tests():
         test_agentcard_lifecycle_bootstrap_provisions_sandbox_float,
     )
     r.record(
-        "agent_payment_lifecycle_user_is_non_admin",
-        test_agent_payment_lifecycle_tasks_run_as_the_non_admin_fixture_user,
+        "agent_payment_lifecycle_user_is_admin_with_forced_customer_path",
+        test_agent_payment_lifecycle_tasks_run_as_the_admin_account_with_forced_customer_path,
     )
     r.record(
         "production_payment_lifecycle_user_is_non_admin",
