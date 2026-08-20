@@ -795,6 +795,12 @@ inject_secrets() {
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
 # only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
+#
+# Note: Machines API apps keep secrets at Status=Staged in `fly secrets list`
+# even after `machine update --skip-start` has activated them onto VMs. Do NOT
+# treat Staged as inactive. refresh-deps / task boot inject a request-scoped
+# CLOUDBENCH_GITHUB_TOKEN_B64 from the controller so git-sync does not depend
+# on the durable Fly GITHUB_TOKEN secret being present in the SSH session.
 REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
 verify_app_environment() {
     local listing missing
@@ -1339,12 +1345,22 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match (auth via
-    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    # Sync the repo to the ref whose manifests the trees must match.
+    # Prefer a request-scoped controller token (same as task-machine boot) so a
+    # staged-only Fly GITHUB_TOKEN secret cannot silently break refresh-deps.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
+    CONTROLLER_GH_B64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    [ -n "$CONTROLLER_GH_B64" ] || {
+        echo "❌ No controller GitHub token for refresh-deps git-sync." >&2
+        exit 1
+    }
     SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+export CLOUDBENCH_GITHUB_TOKEN_B64='$CONTROLLER_GH_B64'
+if [ -n \"\${CLOUDBENCH_GITHUB_TOKEN_B64:-}\" ]; then
+  GITHUB_TOKEN=\$(printf '%s' \"\$CLOUDBENCH_GITHUB_TOKEN_B64\" | base64 -d 2>/dev/null || true)
+fi
+[ -n \"\${GITHUB_TOKEN:-}\" ] || { echo '❌ GITHUB_TOKEN unavailable for refresh-deps git-sync'; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
@@ -1486,12 +1502,21 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
+    # Prefer a request-scoped controller token (same as refresh-deps / task boot)
+    # so a staged-only Fly GITHUB_TOKEN secret cannot silently break the fetch.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
+    CONTROLLER_GH_B64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    [ -n "$CONTROLLER_GH_B64" ] || {
+        echo "❌ No controller GitHub token for refresh-wmh git-sync." >&2
+        exit 1
+    }
     SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+export CLOUDBENCH_GITHUB_TOKEN_B64='$CONTROLLER_GH_B64'
+if [ -n \"\${CLOUDBENCH_GITHUB_TOKEN_B64:-}\" ]; then
+  GITHUB_TOKEN=\$(printf '%s' \"\$CLOUDBENCH_GITHUB_TOKEN_B64\" | base64 -d 2>/dev/null || true)
+fi
+[ -n \"\${GITHUB_TOKEN:-}\" ] || { echo '❌ GITHUB_TOKEN unavailable for refresh-wmh git-sync'; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard

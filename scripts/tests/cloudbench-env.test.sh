@@ -762,6 +762,15 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'No controller GitHub token for refresh-deps git-sync' \
+  "refresh-deps must fail closed when the controller has no GitHub token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  "export CLOUDBENCH_GITHUB_TOKEN_B64='\$CONTROLLER_GH_B64'" \
+  "refresh-deps git-sync must inject a request-scoped controller GitHub token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_TOKEN unavailable for refresh-deps git-sync' \
+  "refresh-deps remote sync must fail closed if the injected token does not decode"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -1062,6 +1071,29 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
+
+# ── refresh-deps must not depend on Fly GITHUB_TOKEN in the SSH session ──────
+# Fleet run 20260820-202516-7103: warm-box GITHUB_TOKEN was absent (secrets had
+# been staged but not machine-activated). refresh-deps then failed with:
+#   fatal: could not read Username for 'https://github.com': No such device or address
+#   ❌ exact remote checkout failed
+# Machines API apps leave secrets at Status=Staged in `fly secrets list` even
+# after activation, so a Staged check is not a valid preflight. The durable fix
+# is request-scoped CLOUDBENCH_GITHUB_TOKEN_B64 injection (same as task boot).
+refresh_deps_sync="$(awk '
+  /MODE.*=.*"refresh-deps"/ { in_mode = 1 }
+  in_mode && /git-syncing \$REMOTE_REPO/ { capture = 1 }
+  capture { print }
+  capture && /exact remote checkout failed/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud")"
+printf '%s' "$refresh_deps_sync" | grep -Fq 'CLOUDBENCH_GITHUB_TOKEN_B64' ||
+  fail "refresh-deps git-sync must set CLOUDBENCH_GITHUB_TOKEN_B64 from the controller"
+printf '%s' "$refresh_deps_sync" | grep -Fq 'No controller GitHub token for refresh-deps git-sync' ||
+  fail "refresh-deps must refuse to sync without a controller GitHub token"
+printf '%s' "$refresh_deps_sync" | grep -Fq 'GITHUB_TOKEN unavailable for refresh-deps git-sync' ||
+  fail "refresh-deps remote script must refuse an empty decoded GITHUB_TOKEN"
+printf '%s' "$refresh_deps_sync" | grep -Fq 'base64 -d' ||
+  fail "refresh-deps must decode the controller token on the remote before git fetch"
 
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
