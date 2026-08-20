@@ -1403,10 +1403,12 @@ if "AUTH_HDR_DURABLE" not in deliver:
     raise SystemExit("stdin delivery must support durable AUTH_HDR_DURABLE retry")
 if "resolve_durable_github_token" not in deliver:
     raise SystemExit("stdin delivery must resolve a durable fallback token")
-if 'printf' not in deliver or "AUTH_HDR" not in deliver:
-    raise SystemExit("stdin delivery must pipe AUTH_HDR into fly ssh, not embed it in -C")
-if ' -C ' in deliver and "Authorization: Basic" in deliver.split("-C", 1)[1]:
+if "sftp put" not in deliver:
+    raise SystemExit("git-sync delivery must SFTP credentials (fly ssh -C does not forward stdin)")
+if "Authorization: Basic" in deliver.split("-C", 1)[-1]:
     raise SystemExit("AUTH_HDR must not appear in the fly ssh -C argument")
+if "remote_auth" not in deliver and "cloudbench-git-sync-auth" not in deliver:
+    raise SystemExit("git-sync delivery must stage a remote auth file path")
 
 # Fail closed with no token.
 script = auth_helper + "\n" + helper + textwrap.dedent(

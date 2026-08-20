@@ -560,13 +560,14 @@ echo \"${verify_marker}\$REMOTE_REF\""
 }
 
 # Deliver a controller git-sync script over SSH without putting the token in
-# process arguments. Stdin layout: AUTH_HDR line, AUTH_HDR_DURABLE line (may be
-# empty), then base64(script). The -C bootstrap only reads those streams — no
-# credential appears in flyctl argv. Prefer the primary controller token; on
-# auth failure the remote script retries with the durable DISPATCH/GITHUB_TOKEN
-# header when it differs (main's refresh-deps durable fallback, argv-safe).
+# process arguments. flyctl `ssh console -C` does NOT forward local stdin to the
+# remote command (observed hang on `IFS= read -r AUTH_HDR`), so credentials are
+# SFTP'd to mode-0600 temp files and the -C argv only names those paths.
+# Prefer the primary controller token; on auth failure the remote script retries
+# with the durable DISPATCH/GITHUB_TOKEN header when it differs.
 ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
-    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr="" script_b64
+    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr="" 
+    local auth_local durable_local cmd_local remote_auth remote_durable remote_cmd
     primary="$(resolve_github_token)"
     [ -n "$primary" ] || {
         echo "❌ No controller GitHub token for private-repo git-sync." >&2
@@ -579,9 +580,34 @@ ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
         durable_hdr="$(token_to_git_auth_header "$durable")"
     fi
     unset primary durable
-    script_b64="$(printf '%s' "$sync_cmd" | base64 | tr -d '\n')"
-    printf '%s\n%s\n%s' "$primary_hdr" "$durable_hdr" "$script_b64" | FLY ssh console -a "$APP" --machine "$mid" \
-        -C 'bash -lc "IFS= read -r AUTH_HDR; IFS= read -r AUTH_HDR_DURABLE; export AUTH_HDR AUTH_HDR_DURABLE; base64 -d | bash -l"'
+    auth_local="$(mktemp)"
+    durable_local="$(mktemp)"
+    cmd_local="$(mktemp)"
+    remote_auth="/tmp/cloudbench-git-sync-auth.$$"
+    remote_durable="/tmp/cloudbench-git-sync-auth-durable.$$"
+    remote_cmd="/tmp/cloudbench-git-sync-cmd.$$"
+    printf '%s\n' "$primary_hdr" >"$auth_local"
+    printf '%s\n' "$durable_hdr" >"$durable_local"
+    printf '%s\n' "$sync_cmd" >"$cmd_local"
+    chmod 600 "$auth_local" "$durable_local" "$cmd_local"
+    _sftp_put_git_sync() {
+        ssh_exec "$mid" "rm -f '$remote_auth' '$remote_durable' '$remote_cmd'" >/dev/null || true
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$auth_local" "$remote_auth" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$durable_local" "$remote_durable" &&
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 "$cmd_local" "$remote_cmd"
+    }
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_GIT_SYNC_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_GIT_SYNC_SFTP_RETRY_SECONDS:-3}" \
+        _sftp_put_git_sync; then
+        rm -f "$auth_local" "$durable_local" "$cmd_local"
+        echo "❌ failed to upload controller git-sync credentials/script to $mid" >&2
+        return 1
+    fi
+    rm -f "$auth_local" "$durable_local" "$cmd_local"
+    # -C argv contains only remote paths — never the Authorization header.
+    FLY ssh console -a "$APP" --machine "$mid" \
+        -C "bash -lc \"IFS= read -r AUTH_HDR < '$remote_auth'; IFS= read -r AUTH_HDR_DURABLE < '$remote_durable'; export AUTH_HDR AUTH_HDR_DURABLE; trap 'rm -f \\'$remote_auth\\' \\'$remote_durable\\' \\'$remote_cmd\\'' EXIT; bash '$remote_cmd'\""
 }
 
 resolve_render_env_value() {
