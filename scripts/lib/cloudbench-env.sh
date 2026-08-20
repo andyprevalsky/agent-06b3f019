@@ -741,6 +741,29 @@ cloudbench_wait_machine_startable() {
   return 1
 }
 
+cloudbench_wait_machine_stopped() {
+  local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
+  local attempt state
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    state="$($state_reader "$machine_id" 2>/dev/null || true)"
+    case "$state" in
+      stopped) return 0 ;;
+      destroyed|destroying)
+        echo "Machine $machine_id became unavailable while waiting for stopped (state=$state)" >&2
+        return 1
+        ;;
+    esac
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      echo "⏳ warm source $machine_id still $state; waiting ${retry_delay_seconds}s before fleet provisioning ($attempt/$max_attempts)" >&2
+      sleep "$retry_delay_seconds"
+    fi
+  done
+
+  echo "Machine $machine_id did not become stopped (last_state=${state:-unknown})" >&2
+  return 1
+}
+
 cloudbench_validate_fresh_clone_id() {
   local candidate="$1" source_id="$2"
   shift 2
