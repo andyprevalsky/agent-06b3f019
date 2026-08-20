@@ -442,32 +442,40 @@ resolve_github_token() {
     echo "$t"
 }
 
-# Build a remote shell snippet that fetches+checks out $2 inside $1 using the
-# CONTROLLER's current GitHub token (gh auth token → resolve_github_token).
-# Fail closed when no token is available — never emit a command that optionally
-# clears AUTH_HDR from a missing box-side GITHUB_TOKEN secret (that produced
-# `fatal: could not read Username for 'https://github.com'` on non-TTY ssh and
-# aborted fleet --refresh-deps before any task machine was provisioned).
-build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
-    local remote_repo="$1" ref="$2" verify_marker="${3:-}"
-    local token auth_hdr
+# Resolve the CONTROLLER GitHub token into an Authorization Basic header value.
+# Fail closed when no token is available — never fall back to an optional empty
+# box-side GITHUB_TOKEN secret (that produced `fatal: could not read Username
+# for 'https://github.com'` on non-TTY ssh and aborted fleet --refresh-deps).
+resolve_controller_git_auth_header() {
+    local token
     token="$(gh auth token 2>/dev/null || resolve_github_token)"
     if [ -z "$token" ]; then
         echo "❌ No controller GitHub token for private-repo git-sync." >&2
         echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
         return 1
     fi
-    auth_hdr="Authorization: Basic $(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
-    # Quote the header for safe embedding; do not rely on remote env secrets.
-    local auth_q repo_q ref_q
-    printf -v auth_q '%q' "$auth_hdr"
+    printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+}
+
+# Build a remote shell snippet that fetches+checks out $2 inside $1.
+# The returned script NEVER embeds the controller token. Delivery must set
+# AUTH_HDR (via ssh_exec_controller_git_sync stdin) and uses git's
+# GIT_CONFIG_* environment mechanism for http.extraheader so credentials never
+# appear in flyctl/ssh/git argv.
+build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
+    local remote_repo="$1" ref="$2" verify_marker="${3:-}"
+    # Fail closed early if the controller has no token (same gate as delivery).
+    resolve_controller_git_auth_header >/dev/null || return 1
+    local repo_q ref_q
     printf -v repo_q '%q' "$remote_repo"
     printf -v ref_q '%q' "$ref"
     local cmd
     cmd="set -e
-AUTH_HDR=$auth_q
-[ -n \"\$AUTH_HDR\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
-git -c safe.directory=$repo_q -C $repo_q -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin $ref_q
+[ -n \"\${AUTH_HDR:-}\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0=http.extraheader
+export GIT_CONFIG_VALUE_0=\"\$AUTH_HDR\"
+git -c safe.directory=$repo_q -C $repo_q fetch --quiet origin $ref_q
 git -c safe.directory=$repo_q -C $repo_q checkout -f $ref_q 2>/dev/null || git -c safe.directory=$repo_q -C $repo_q checkout -f FETCH_HEAD
 git -c safe.directory=$repo_q -C $repo_q reset --hard
 chown -R rose:rose $repo_q 2>/dev/null || true
@@ -482,6 +490,17 @@ echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)"
 echo \"${verify_marker}\$REMOTE_REF\""
     fi
     printf '%s' "$cmd"
+}
+
+# Deliver a controller git-sync script over SSH without putting the token in
+# process arguments. Stdin layout: AUTH_HDR line, then base64(script). The -C
+# bootstrap only reads those streams — no credential appears in flyctl argv.
+ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
+    local mid="$1" sync_cmd="$2" auth_hdr script_b64
+    auth_hdr="$(resolve_controller_git_auth_header)" || return 1
+    script_b64="$(printf '%s' "$sync_cmd" | base64 | tr -d '\n')"
+    printf '%s\n%s' "$auth_hdr" "$script_b64" | FLY ssh console -a "$APP" --machine "$mid" \
+        -C 'bash -lc "IFS= read -r AUTH_HDR; export AUTH_HDR GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0=\"\$AUTH_HDR\"; base64 -d | bash -l"'
 }
 
 resolve_render_env_value() {
@@ -1435,10 +1454,11 @@ if [ "$MODE" = "refresh-deps" ]; then
 
     # Sync the repo to the ref whose manifests the trees must match. Auth via the
     # CONTROLLER's current GitHub token (never an optional empty box-side secret).
+    # Credential is stdin-delivered — never embedded in flyctl/ssh argv.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
     SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$EXPECTED_REF" '::CLOUDBENCH-REF::')" || exit 1
     SYNC_LOG="$(mktemp)"
-    if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
+    if ! ssh_exec_controller_git_sync "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
         rm -f "$SYNC_LOG"
         echo "❌ exact remote checkout failed" >&2
         exit 1
@@ -1572,12 +1592,13 @@ if [ "$MODE" = "refresh-wmh" ]; then
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
     # Auth with the CONTROLLER's current GitHub token (fail closed; never optional
-    # empty box-side GITHUB_TOKEN → Username prompt on non-TTY ssh).
+    # empty box-side GITHUB_TOKEN → Username prompt on non-TTY ssh). Credential
+    # is stdin-delivered — never embedded in flyctl/ssh argv.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
     if ! SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$BENCH_REF")"; then
         exit 1
     fi
-    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+    ssh_exec_controller_git_sync "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
 
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."

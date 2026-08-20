@@ -663,6 +663,11 @@ cloudbench_wait_machine_stopped read_machine_state warm-1 5 0 ||
   fail "warm source wait must tolerate replacing→stopping→stopped"
 [ ! -s "$machine_states" ] || fail "the stopped-state wait must consume the transition sequence"
 
+printf 'creating\nupdating\nrestarting\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-2 5 0 ||
+  fail "warm source wait must tolerate creating/updating/restarting as transitional"
+[ ! -s "$machine_states" ] || fail "creating/updating/restarting wait must consume the sequence"
+
 printf 'started\nstarted\nstarted\n' > "$machine_states"
 if cloudbench_wait_machine_stopped read_machine_state warm-stuck 3 0 >/dev/null 2>&1; then
   fail "warm source wait must fail closed when the donor never stops"
@@ -682,6 +687,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'build_controller_authenticated_git_sync_cmd' \
   "refresh-deps must use controller GitHub token for private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec_controller_git_sync' \
+  "controller git-sync must deliver the auth header via stdin, not argv"
 
 
 cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
@@ -1278,6 +1286,8 @@ wmh = mode_block("refresh-wmh")
 for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
     if "build_controller_authenticated_git_sync_cmd" not in block:
         raise SystemExit(f"{name} must call build_controller_authenticated_git_sync_cmd")
+    if "ssh_exec_controller_git_sync" not in block:
+        raise SystemExit(f"{name} must deliver auth via ssh_exec_controller_git_sync")
     if "GITHUB_TOKEN:-" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
@@ -1290,48 +1300,105 @@ if not helper_match:
     raise SystemExit("build_controller_authenticated_git_sync_cmd helper is missing")
 helper = helper_match.group(0)
 
+auth_helper_match = re.search(
+    r"^resolve_controller_git_auth_header\(\) \{.*?\n\}$",
+    src,
+    flags=re.M | re.S,
+)
+if not auth_helper_match:
+    raise SystemExit("resolve_controller_git_auth_header helper is missing")
+auth_helper = auth_helper_match.group(0)
+
+deliver_match = re.search(
+    r"^ssh_exec_controller_git_sync\(\) \{.*?\n\}$",
+    src,
+    flags=re.M | re.S,
+)
+if not deliver_match:
+    raise SystemExit("ssh_exec_controller_git_sync helper is missing")
+deliver = deliver_match.group(0)
+if "http.extraheader" not in deliver and "GIT_CONFIG_KEY_0=http.extraheader" not in deliver:
+    raise SystemExit("stdin delivery must configure http.extraheader via GIT_CONFIG_*")
+if 'printf' not in deliver or "AUTH_HDR" not in deliver:
+    raise SystemExit("stdin delivery must pipe AUTH_HDR into fly ssh, not embed it in -C")
+if ' -C ' in deliver and "Authorization: Basic" in deliver.split("-C", 1)[1]:
+    raise SystemExit("AUTH_HDR must not appear in the fly ssh -C argument")
+
 # Fail closed with no token.
-script = helper + textwrap.dedent(
+script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo ""; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef
     """
 )
-proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+# Run via a tempfile — bash -c mangles the nested quotes inside the multi-line
+# helper body (syntax error EOF). File execution preserves the source exactly.
+import tempfile, os
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    fail_path = fh.name
+try:
+    proc = subprocess.run(["bash", fail_path], capture_output=True, text=True)
+finally:
+    os.unlink(fail_path)
 if proc.returncode == 0:
     raise SystemExit("helper must fail closed when no controller GitHub token is available")
 if "No controller GitHub token" not in (proc.stderr + proc.stdout):
     raise SystemExit("helper must name the missing controller GitHub token")
 
-# With a token, embed non-optional auth header.
-script = helper + textwrap.dedent(
+# With a token, emit a script that consumes AUTH_HDR via GIT_CONFIG_* — never
+# embed the Basic auth header in the returned command (argv leak via fly -C).
+script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
     """
 )
-proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    ok_path = fh.name
+try:
+    proc = subprocess.run(["bash", ok_path], capture_output=True, text=True)
+finally:
+    os.unlink(ok_path)
 if proc.returncode != 0:
     raise SystemExit(f"helper must succeed with a controller token: {proc.stderr}")
 cmd = proc.stdout
-if "http.extraheader" not in cmd:
-    raise SystemExit("authenticated sync cmd must set http.extraheader")
+if "GIT_CONFIG_KEY_0=http.extraheader" not in cmd:
+    raise SystemExit("authenticated sync cmd must set http.extraheader via GIT_CONFIG_*")
 if "GITHUB_TOKEN:-" in cmd:
     raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
-if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
-    raise SystemExit("authenticated sync cmd must embed a Basic auth header from the controller token")
-# The Basic payload must decode to x-access-token:<token>
-import base64, re as _re
-m = _re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", cmd)
-if not m:
-    m = _re.search(r"AUTH_HDR='Authorization: Basic ([A-Za-z0-9+/=]+)'", cmd)
-if not m:
-    raise SystemExit(f"could not parse embedded AUTH_HDR from cmd: {cmd[:200]!r}")
-decoded = base64.b64decode(m.group(1)).decode()
-if not decoded.startswith("x-access-token:"):
-    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {decoded!r}")
+if "Authorization: Basic" in cmd or "x-access-token:" in cmd or "ghp_test_token" in cmd:
+    raise SystemExit("authenticated sync cmd must not embed the controller token/header")
+if "AUTH_HDR" not in cmd:
+    raise SystemExit("authenticated sync cmd must require AUTH_HDR from the delivery path")
+
+# Auth header resolver must produce x-access-token Basic payload separately.
+script = auth_helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    gh() { return 1; }
+    resolve_controller_git_auth_header
+    """
+)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    hdr_path = fh.name
+try:
+    proc = subprocess.run(["bash", hdr_path], capture_output=True, text=True)
+finally:
+    os.unlink(hdr_path)
+if proc.returncode != 0:
+    raise SystemExit(f"auth header helper must succeed with a controller token: {proc.stderr}")
+hdr = proc.stdout.strip()
+if not hdr.startswith("Authorization: Basic "):
+    raise SystemExit(f"auth header must be Authorization: Basic …, got {hdr!r}")
+import base64
+payload = base64.b64decode(hdr.split(" ", 2)[2]).decode()
+if payload != "x-access-token:ghp_test_token_for_sync_cmd":
+    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {payload!r}")
 print("controller-token git-sync contract ok")
 PY
 
