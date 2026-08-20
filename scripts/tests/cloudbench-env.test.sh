@@ -686,7 +686,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "machine start must wait out Fly stopping/replacing before request_machine_start"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'build_controller_authenticated_git_sync_cmd' \
-  "refresh-deps must use controller GitHub token for private-repo git-sync"
+  "controller authenticated git-sync helper must remain available for stdin/SFTP delivery"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'ssh_exec_controller_git_sync' \
   "controller git-sync must deliver the auth header via stdin, not argv"
@@ -807,24 +807,24 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'GITHUB_DISPATCH_TOKEN' \
   "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'AUTH_HDR_DURABLE' \
-  "refresh-deps must deliver a durable auth header via stdin for warm-box git-sync retry"
+  'warm_source_fetch_ref' \
+  "refresh-deps/wmh must sync via warm_source_fetch_ref (controller token + fetch-ref.sh)"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
   "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'primary GitHub token auth failed; retrying with durable fallback' \
-  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+  'resolve_github_token' \
+  "warm-source git-sync must Contents-validate via resolve_github_token"
 
 # Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
-# the only auth path for refresh-deps. Controller auth is stdin-delivered
-# (primary + optional durable) and the remote script retries via _try_fetch.
+# the only auth path for refresh-deps. warm_source_fetch_ref uses the controller
+# token + cloudbench-fetch-ref.sh (same as guest drivers).
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  '_try_fetch' \
-  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
+  'cloudbench-fetch-ref.sh' \
+  "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'ssh_exec_controller_git_sync' \
-  "refresh-deps must deliver controller git auth via stdin, not flyctl argv"
+  'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
@@ -1343,23 +1343,15 @@ def mode_block(mode: str) -> str:
 
 deps = mode_block("refresh-deps")
 wmh = mode_block("refresh-wmh")
-# refresh-deps: argv-safe stdin controller auth (+ durable retry).
-if "build_controller_authenticated_git_sync_cmd" not in deps:
-    raise SystemExit("refresh-deps must call build_controller_authenticated_git_sync_cmd")
-if "ssh_exec_controller_git_sync" not in deps:
-    raise SystemExit("refresh-deps must deliver auth via ssh_exec_controller_git_sync")
-for line in deps.splitlines():
-    if "ssh_exec_controller_git_sync" in line and "|| true" in line:
-        raise SystemExit("refresh-deps must not mask git-sync failures with || true")
-if "GITHUB_TOKEN:-" in deps:
-    raise SystemExit("refresh-deps must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
-# refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
-if "warm_source_fetch_ref" not in wmh:
-    raise SystemExit("refresh-wmh must call warm_source_fetch_ref")
-if "warm_source_fetch_ref" in wmh:
-    for line in wmh.splitlines():
+# refresh-deps + refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
+for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
+    if "warm_source_fetch_ref" not in block:
+        raise SystemExit(f"{name} must call warm_source_fetch_ref")
+    for line in block.splitlines():
         if "warm_source_fetch_ref" in line and "|| true" in line:
-            raise SystemExit("refresh-wmh must not mask warm_source_fetch_ref failures")
+            raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
+    if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
+        raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
 def extract_bash_function(source: str, name: str) -> str:
     marker = f"{name}() {{"
@@ -1557,13 +1549,13 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'build_controller_authenticated_git_sync_cmd' \
-  "refresh-deps must build a controller-authenticated git-sync command for the warm box"
+  "controller authenticated git-sync helper must remain for stdin/SFTP delivery paths"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'primary GitHub token auth failed; retrying with durable fallback' \
-  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+  "authenticated git-sync must retry git fetch with the durable token after primary auth failure"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   '_try_fetch' \
-  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
+  "authenticated git-sync must try controller primary token then durable fallback via _try_fetch"
 # Prove the live resolver rejects the ambient stale GITHUB_TOKEN and still
 # returns a credential with Contents access (requires network).
 resolve_snippet="$(mktemp)"
@@ -1604,6 +1596,9 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "ssh_exec must honor an optional timeout so hung refresh-deps sessions fail closed"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'ssh_exec timed out after' \
-  "refresh-deps must report ssh timeout distinctly from auth/checkout failures"
+  "ssh_exec must report timeout distinctly from auth/checkout failures"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT"' \
+  "refresh-deps must bound warm_source_fetch_ref via CLOUDBENCH_SSH_EXEC_TIMEOUT"
 
 echo "All cloud benchmark environment checks passed."
