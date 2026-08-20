@@ -24,8 +24,11 @@ fi
 
 # Bench user whose frozen WhatsApp history the revision promises
 # (agents/benchmarks/tasks.json → whatsapp-history-recall context_notes).
-BENCH_USER_ID="${CANONICAL_SEED_WHATSAPP_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
-MIN_WHATSAPP_MESSAGES="${CANONICAL_SEED_MIN_WHATSAPP_MESSAGES:-3825}"
+# These are fixed canonical constants — do NOT read them from the environment.
+# Inherited CANONICAL_SEED_* overrides could zero the floor or redirect the
+# check to a noncanonical user and silently bless a poisoned dump on restore.
+BENCH_USER_ID="1f85ff25-6e29-4c1b-8739-f917bd101a30"
+MIN_WHATSAPP_MESSAGES="3825"
 
 export PGPASSWORD="${PGPASSWORD:-postgres}"
 
