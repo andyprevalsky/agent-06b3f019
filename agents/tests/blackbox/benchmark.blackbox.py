@@ -9412,8 +9412,15 @@ def test_run_sh_reuses_reachable_workspace_db_before_docker_daemon_probe():
     assert reachable_probe in run_script
     assert ownership_probe in run_script
     assert run_script.index(ownership_probe) < run_script.index(reachable_probe)
-    workspace_daemon_probe = 'docker_available_for_workspace_db "$DB_CONTAINER"; then'
+    # The probe receives this workspace's container AND the isolated-run flag. An
+    # isolated benchmark stack creates its DB container later in the same run, so
+    # it must be allowed to accept a responsive daemon before that container
+    # exists; a normal workspace still has to see its own container.
+    workspace_daemon_probe = (
+        'docker_available_for_workspace_db "$DB_CONTAINER" "$BENCHMARK_ISOLATED_RUN"'
+    )
     assert workspace_daemon_probe in run_script
+    assert f"{workspace_daemon_probe}; then" in run_script
     assert run_script.index(reachable_probe) < run_script.index(workspace_daemon_probe)
     assert "if $PRESTARTED_WORKSPACE_DB; then" in run_script
 
