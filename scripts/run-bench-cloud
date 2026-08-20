@@ -1096,7 +1096,9 @@ fi
 # prompt for a username over HTTPS and abort the fleet before any task starts.
 warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
     local mid="$1" sha="$2" token token_b64 sync_log remote_ref token_local remote_token
-    token="$(cloudbench_controller_github_token)"
+    # Contents-validated resolver (same gate as --setup / refresh-deps) — never
+    # an unvalidated hosts.yml / url.insteadOf token that later 401s on fetch.
+    token="$(resolve_github_token)" || token=""
     [ -n "$token" ] || {
         echo "❌ No controller GitHub token for warm-source git-sync." >&2
         return 1
@@ -1630,19 +1632,23 @@ print("1" if any(v.get("name")==os.environ["VN"] for v in data) else "0")' 2>/de
     SETUP_GITHUB_TOKEN_B64="$(printf '%s' "$SETUP_GITHUB_TOKEN" | base64 | tr -d '\n')"
     echo ""
     echo "📥 Cloning repo into $REMOTE_REPO on the box (branch $BENCH_REF) ..."
-    # Request-scoped controller token via http.extraheader — never persist the
-    # credential into .git/config. The remote stays clean (https://github.com/...).
+    # Request-scoped controller token via GIT_CONFIG_GLOBAL http.extraheader —
+    # never persist into .git/config, never put AUTH_HDR on git argv (ps leak).
     # Upload token + script via SFTP (mode 0600/0700); -C only names remote paths.
     CLONE_CMD="set -e
 mkdir -p /data
 TOKEN=\$(printf '%s' \"\$CLOUDBENCH_GITHUB_TOKEN_B64\" | base64 -d 2>/dev/null || true)
 [ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for setup clone' >&2; exit 1; }
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
+auth_config=\$(mktemp /tmp/cloudbench-setup-gitconfig.XXXXXX)
+trap 'rm -f \"\$auth_config\"' EXIT
+printf '[http]\\n\\textraheader = Authorization: Basic %s\\n' \"\$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\\n')\" >\"\$auth_config\"
+chmod 600 \"\$auth_config\"
+git_auth() { env \"GIT_CONFIG_GLOBAL=\$auth_config\" GIT_CONFIG_NOSYSTEM=1 git \"\$@\"; }
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
-  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
+  git_auth -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' fetch --quiet origin
 else
-  git -c http.extraheader=\"\$AUTH_HDR\" clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
+  git_auth clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
 fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
@@ -1654,8 +1660,12 @@ echo 'clone/fetch complete'"
     printf '%s' "$SETUP_GITHUB_TOKEN_B64" >"$setup_token_local"
     printf '%s' "$CLONE_CMD" >"$setup_cmd_local"
     chmod 600 "$setup_token_local" "$setup_cmd_local"
+    # flyctl sftp will not overwrite; start clean, and wipe remotes on any
+    # partial failure so a lone token file cannot linger on the box.
+    ssh_exec "$mid" "rm -f '$remote_setup_token' '$remote_setup_cmd'" >/dev/null 2>&1 || true
     if ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0600 "$setup_token_local" "$remote_setup_token" ||
        ! FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0700 "$setup_cmd_local" "$remote_setup_cmd"; then
+        ssh_exec "$mid" "rm -f '$remote_setup_token' '$remote_setup_cmd'" >/dev/null 2>&1 || true
         rm -f "$setup_token_local" "$setup_cmd_local"
         echo "❌ failed to upload setup clone credentials/script"; stop_machine "$mid"; exit 1
     fi
