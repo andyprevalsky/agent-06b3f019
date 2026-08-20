@@ -178,7 +178,11 @@ echo "PASS: cold isolated seed validates and caps retry delays"
 
 find_free_port() {
     local port
-    for port in $(seq 61000 62000); do
+    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
+    # runs concurrently with it, so an inclusive upper bound of 62000 let both
+    # gates hand out the same port. check-then-bind is not parallel-safe, so the
+    # ranges must stay disjoint rather than merely usually-disjoint.
+    for port in $(seq 61000 61999); do
         if ! lsof -ti :"$port" >/dev/null 2>&1; then
             printf "%s" "$port"
             return 0
