@@ -2734,34 +2734,6 @@ async def _clear_input_with_events(session: Any) -> None:
         await event.event_result(raise_if_any=True, raise_if_none=False)
 
 
-def _is_password_like_element(element: Any) -> bool:
-    """True when the target is a password / current-password field.
-
-    Amazon checkout re-auth mounts `input[type=password][name=password]` whose
-    selector map can lack viewport coordinates after SPA transitions. Refusing
-    TypeTextEvent there hard-fails the only path to resume cookie sessions.
-    Generic antibot fields still refuse the non-humanized fallback.
-    """
-    if element is None:
-        return False
-    attrs = getattr(element, "attributes", None) or {}
-    if not isinstance(attrs, dict):
-        attrs = {}
-    input_type = str(attrs.get("type") or getattr(element, "type", "") or "").lower()
-    name = str(attrs.get("name") or getattr(element, "name", "") or "").lower()
-    autocomplete = str(attrs.get("autocomplete") or "").lower()
-    aria = str(attrs.get("aria-label") or attrs.get("aria_label") or "").lower()
-    if input_type == "password":
-        return True
-    if "password" in autocomplete or autocomplete in {"current-password", "new-password"}:
-        return True
-    if name == "password" or name.endswith("password"):
-        return True
-    if "password" in aria:
-        return True
-    return False
-
-
 async def _execute_indexed_input_text(
     *,
     session: Any,
@@ -2792,36 +2764,23 @@ async def _execute_indexed_input_text(
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
     asyncio.create_task(session.highlight_interaction_element(element))
 
-    use_typetext_fallback = False
     if humanizer and not element_coords:
-        if _is_password_like_element(element):
-            # Password re-auth fields (Amazon checkout) often lose selector-map
-            # coordinates after SPA navigations. Prefer TypeTextEvent over ERROR
-            # so cookie-session resume can continue; non-password fields still
-            # refuse the non-humanized fallback for antibot fidelity.
-            logger.warning(
-                "HUMANIZATION FALLBACK: password field missing coordinates; using TypeTextEvent",
-                index=index,
-            )
-            use_typetext_fallback = True
-        else:
-            logger.error(
-                "HUMANIZATION BLOCKED: indexed input_text has no coordinates; refusing TypeTextEvent fallback",
-                index=index,
-            )
-            return {
-                "success": False,
-                "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
-            }
-    if humanizer and element_coords and not use_typetext_fallback:
+        logger.error(
+            "HUMANIZATION BLOCKED: indexed input_text has no coordinates; refusing TypeTextEvent fallback",
+            index=index,
+        )
+        return {
+            "success": False,
+            "error": f"Cannot humanize input_text for element index {index}: no coordinates available",
+        }
+    if humanizer:
         await humanizer.click_at_coords(element_coords["x"], element_coords["y"])
         if clear_before_typing:
             await humanizer.press_key("Control+a")
             await humanizer.press_key("Backspace")
         await humanizer.type_text(text)
     else:
-        if not humanizer:
-            logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
+        logger.warning("⚠️ HUMANIZATION FALLBACK: No humanizer available, using browser-use TypeTextEvent")
         if clear_before_typing:
             await _clear_input_with_events(session)
         event = session.event_bus.dispatch(TypeTextEvent(node=element, text=text, clear=clear_before_typing))

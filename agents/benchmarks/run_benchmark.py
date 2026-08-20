@@ -7823,7 +7823,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8003,6 +8003,55 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers."""
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(str(message.get("message") or message.get("content") or ""))
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
+        candidate, message
+    )
+
+
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
@@ -8017,7 +8066,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_challenge_recovery_failure(candidate):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}

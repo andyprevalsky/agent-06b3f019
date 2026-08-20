@@ -3046,6 +3046,74 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
+    """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
+
+    Local repro: browser-agent-amazon-cookie-payment agent
+    b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
+    after `Cannot humanize input_text … no coordinates available` (CDP: no node for
+    backend id 87012), then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Cannot humanize input_text for element index 87012: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": 'Typed \'[encrypted_data]\' into <input name="password">',
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_4CoEgNcqTgih86rhKhCOCU88",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "No node found for given backend id",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_stale_backend_node",
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "write_lock",
+                    "toolCallId": "call_write_lock_ok",
+                    "title": "Purchase write lock requested",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+    still_fails = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Kernel session crashed mid-checkout",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "toolCallId": "call_real_failure",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(still_fails) == [
+        "spawn_browser_agent call_real_failure status=ERROR"
+    ]
+
+
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
     """Completion quality checks use the rendered summary and durable SMS receipt."""
     from copy import deepcopy
@@ -13850,6 +13918,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_stale_dom_node",
+        test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
     )
     await r.record_async(
         "auto_approve_payment_clears_write_lock_then_awaits_approval",
