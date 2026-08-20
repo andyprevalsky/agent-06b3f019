@@ -76,10 +76,14 @@ export async function listKernelSessionFiles(sessionId: string): Promise<Browser
 export async function uploadKernelSessionFile(
   sessionId: string,
   fileBuffer: Buffer,
-  filename: string
+  filename: string,
+  options: { directory?: string } = {}
 ): Promise<{ path: string; size: number }> {
   const client = kernelClient();
-  const directory = '/tmp/rose-uploads';
+  const directory = options.directory ?? '/tmp/rose-uploads';
+  if (!FILE_DIRECTORIES.includes(directory)) {
+    throw new Error(`Unsupported Kernel session file directory: ${directory}`);
+  }
   await ensureKernelSessionFileDirectories(sessionId);
   const remotePath = `${directory}/${path.basename(filename)}`;
   await client.browsers.fs.writeFile(sessionId, fileBuffer, { path: remotePath });
