@@ -2433,6 +2433,30 @@ async def _run_browser_supervisor_recovery(
     return recovery
 
 
+# Return/refund confirmation phrases share the purchase write-lock gate (irreversible
+# post-purchase state change) but must NOT use trigger_type=purchase for notification
+# metadata: purchase items require product-detail rating/review_count/product_url that
+# return pages and return-only trajectories do not expose (browser-amazon-return
+# 28e6e1a6 / write_lock_notification_fork_14).
+_RETURN_WRITE_LOCK_PHRASES = (
+    "confirm your return",
+    "confirm return",
+    "complete return",
+    "submit return",
+)
+
+
+def _is_return_like_write_lock(*, current_url: str, write_lock_result: Dict[str, Any]) -> bool:
+    """True when the gated control is a return/refund confirmation, not a buy."""
+    from browser_tools.write_lock import normalize_write_lock_text
+
+    element_text = normalize_write_lock_text(str(write_lock_result.get("element_text") or ""))
+    if any(normalize_write_lock_text(phrase) in element_text for phrase in _RETURN_WRITE_LOCK_PHRASES):
+        return True
+    url = (current_url or "").lower()
+    return "/returns/" in url or "/spr/returns" in url or "/return/" in url
+
+
 def _write_lock_notification_prompt(
     *,
     approval_type: str,
@@ -2450,25 +2474,45 @@ def _write_lock_notification_prompt(
     }
     if media_candidates:
         evidence["media_candidates"] = media_candidates[:12]
+
+    if _is_return_like_write_lock(current_url=current_url, write_lock_result=write_lock_result):
+        guidance = (
+            "Describe the real-world action the user is approving, not the clicked button or DOM "
+            "mechanic. This write lock gates a RETURN or REFUND confirmation (purchase-like "
+            "irreversible gate). Use trigger_type=generic_write — NOT purchase. Purchase requires "
+            "numeric rating, review count, and a canonical product-detail URL that return pages and "
+            "return-only trajectories do not expose; do not invent those fields. Populate "
+            "generic_write.label (for example 'Confirm Amazon return'), generic_write.target with "
+            "the visible item title being returned, and generic_write.payload_summary with the "
+            "visible refund amount, original payment method, selected drop-off or shipping method, "
+            "and return-by date when shown. Set media to exactly one returned-item image when "
+            "media_candidates includes one. For payment fields, never include secrets such as card "
+            "numbers, CVV, passwords, tokens, or one-time codes."
+        )
+    else:
+        guidance = (
+            "Describe the real-world action the user is approving, not the clicked button or DOM "
+            "mechanic. For purchases, include every visible item being bought and set media to exactly one "
+            "image when any product, checkout, or page image is visible; for multiple items, use one "
+            "rendered_summary image if available. For each "
+            "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
+            "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
+            "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
+            "invent them or perform a browser action in this fork. Also include "
+            "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
+            "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
+            "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
+            "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
+            "passwords, tokens, or one-time codes."
+        )
+
     return (
         "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
         "A write lock was triggered. Call generate_write_lock_notification exactly once using the "
         "current conversation, browser trajectory, latest page context, and pending action.\n\n"
         "Do not perform any browser action. Do not continue the task. Do not ask the user for "
         "approval. Generate structured approval metadata only.\n\n"
-        "Describe the real-world action the user is approving, not the clicked button or DOM "
-        "mechanic. For purchases, include every visible item being bought and set media to exactly one "
-        "image when any product, checkout, or page image is visible; for multiple items, use one "
-        "rendered_summary image if available. For each "
-        "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
-        "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
-        "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
-        "invent them or perform a browser action in this fork. Also include "
-        "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
-        "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
-        "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
-        "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
-        "passwords, tokens, or one-time codes.\n\n"
+        f"{guidance}\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
 
@@ -2841,6 +2885,8 @@ async def _generate_write_lock_notification(
     fallback_question: str,
 ) -> Dict[str, Any]:
     """Fork browser-use context to generate write-lock approval metadata."""
+    from browser_tools.schemas import GenerateWriteLockNotificationTool
+
     prompt = _write_lock_notification_prompt(
         approval_type=approval_type,
         current_url=current_url,
@@ -2848,49 +2894,89 @@ async def _generate_write_lock_notification(
         write_lock_result=write_lock_result,
         media_candidates=browser_state.get("media_candidates"),
     )
-    fork_result = await _call_browser_use_with_rotation(
-        rose_client=rose_client,
-        task=task_prompt,
-        dynamic_system_context=dynamic_system_context,
-        turn_messages=browser_turn_messages,
-        browser_state=browser_state,
-        action_entries=action_entries,
-        config=config,
-        user_id=user_id,
-        agent_id=agent_id,
-        browser_task_id=browser_task_id,
-        iteration=iteration,
-        token_state=token_state,
-        gpt_token=gpt_token,
-        gpt_account_id=gpt_account_id,
-        gpt_token_source=gpt_token_source,
-        gpt_token_pool_id=gpt_token_pool_id,
-        browser_use_mode=browser_use_mode,
-        extra_user_messages=[{"role": "user", "content": prompt}],
-        call_site=f"write_lock_notification_fork_{iteration}",
-        skip_cache_write=True,
-        dump_extra={
-            "write_lock_notification_fork": True,
-            "approval_type": approval_type,
-            "current_url": current_url,
-        },
-    )
-    action = fork_result.get("action") or {}
-    if action.get("action") != "generate_write_lock_notification":
-        raise ValueError(
-            f"write-lock notification fork did not call generate_write_lock_notification; got {action.get('action')!r}"
-        )
-    from browser_tools.schemas import GenerateWriteLockNotificationTool
+    extra_user_messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
+    fork_result: Dict[str, Any] = {}
+    action: Dict[str, Any] = {}
+    # One schema-feedback retry: the main browser loop feeds BrowserToolArgsValidationError
+    # back to the model, but this fork previously aborted the whole session on the first
+    # invalid generate_write_lock_notification payload (Amazon return 28e6e1a6).
+    for attempt in range(2):
+        try:
+            fork_result = await _call_browser_use_with_rotation(
+                rose_client=rose_client,
+                task=task_prompt,
+                dynamic_system_context=dynamic_system_context,
+                turn_messages=browser_turn_messages,
+                browser_state=browser_state,
+                action_entries=action_entries,
+                config=config,
+                user_id=user_id,
+                agent_id=agent_id,
+                browser_task_id=browser_task_id,
+                iteration=iteration,
+                token_state=token_state,
+                gpt_token=gpt_token,
+                gpt_account_id=gpt_account_id,
+                gpt_token_source=gpt_token_source,
+                gpt_token_pool_id=gpt_token_pool_id,
+                browser_use_mode=browser_use_mode,
+                extra_user_messages=extra_user_messages,
+                call_site=f"write_lock_notification_fork_{iteration}"
+                + (f"_retry{attempt}" if attempt else ""),
+                skip_cache_write=True,
+                dump_extra={
+                    "write_lock_notification_fork": True,
+                    "approval_type": approval_type,
+                    "current_url": current_url,
+                    "fork_attempt": attempt,
+                },
+            )
+        except BrowserToolArgsValidationError as validation_error:
+            logger.info(
+                "Write-lock notification fork tool args rejected; retrying once with validation feedback",
+                attempt=attempt,
+                tool_name=validation_error.tool_name,
+                detail=validation_error.detail,
+                tool_arg_keys=sorted(validation_error.tool_args.keys()),
+            )
+            if attempt >= 1:
+                raise
+            extra_user_messages = [
+                {"role": "user", "content": prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "Your previous generate_write_lock_notification call failed validation:\n"
+                        f"{validation_error.detail}\n"
+                        "Call generate_write_lock_notification exactly once again with corrected "
+                        "arguments. For return/refund confirmations use trigger_type=generic_write "
+                        "with label/target/payload_summary covering the item, refund amount, original "
+                        "payment method, and drop-off — do not use trigger_type=purchase unless every "
+                        "required purchase item field already exists in the browser trajectory."
+                    ),
+                },
+            ]
+            continue
 
-    try:
-        validated_notification = GenerateWriteLockNotificationTool.model_validate(
-            {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
-            context={"trusted_page_urls": [*trusted_page_urls, current_url]},
-        )
-    except ValueError as error:
-        raise PurchaseApprovalContextError(
-            "Purchase approval blocked because reviews and a canonical product link could not be verified"
-        ) from error
+        action = fork_result.get("action") or {}
+        if action.get("action") != "generate_write_lock_notification":
+            raise ValueError(
+                "write-lock notification fork did not call generate_write_lock_notification; "
+                f"got {action.get('action')!r}"
+            )
+        try:
+            validated_notification = GenerateWriteLockNotificationTool.model_validate(
+                {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
+                context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+            )
+        except ValueError as error:
+            raise PurchaseApprovalContextError(
+                "Purchase approval blocked because reviews and a canonical product link could not be verified"
+            ) from error
+        break
+    else:
+        raise RuntimeError("write-lock notification fork exhausted without a validated notification")
+
     notification = validated_notification.model_dump(exclude={"tool"}, exclude_none=True)
     notification = _normalize_write_lock_notification_media(
         notification,
