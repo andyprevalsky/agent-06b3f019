@@ -2275,10 +2275,20 @@ fi
 # DISABLE_FAST_MODE_PROXY=1 empties both URLs so the sandbox falls back to the
 # direct claudeAuth path (codeAgentFastModeEnv treats "" as "no proxy"). This is
 # a local-only convenience — prod code agents never route through this proxy.
+#
+# BENCHMARK_SKIP_PUBLIC_TUNNEL=1 sets PUBLIC_BASE_URL=http://localhost:<frontend>.
+# E2B sandboxes cannot reach that loopback — injecting it as ANTHROPIC_BASE_URL
+# yields `Unable to connect to API (ConnectionRefused)` (files-in-sub-agents).
+# Clear the proxy in that case so code agents use direct Anthropic OAuth instead
+# of a dead loopback tee (cache capture requires a publicly reachable URL).
 if [ "${DISABLE_FAST_MODE_PROXY:-}" = "1" ]; then
     export FAST_MODE_ANTHROPIC_PROXY_URL=""
     export FAST_MODE_CODEX_PROXY_URL=""
     echo "⚡ DISABLE_FAST_MODE_PROXY=1 — fast-mode proxy off; sandbox code agents use the direct claudeAuth path"
+elif [ "${BENCHMARK_SKIP_PUBLIC_TUNNEL:-}" = "1" ] || [[ "${PUBLIC_BASE_URL:-}" == http://localhost:* ]] || [[ "${PUBLIC_BASE_URL:-}" == http://127.* ]]; then
+    export FAST_MODE_ANTHROPIC_PROXY_URL=""
+    export FAST_MODE_CODEX_PROXY_URL=""
+    echo "⚡ Fast-mode proxy off — PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-unset} is not E2B-reachable; sandbox code agents use direct Anthropic OAuth"
 else
     export FAST_MODE_ANTHROPIC_PROXY_URL="$PUBLIC_BASE_URL/anthropic-proxy"
     export FAST_MODE_CODEX_PROXY_URL="$PUBLIC_BASE_URL/codex-proxy"
