@@ -3360,6 +3360,21 @@ warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID"
     echo "❌ could not read warm source shape" >&2; exit 1;
 }
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+# refresh-deps / refresh-secrets may leave the donor briefly started or
+# stopping. Wait for a clean stop (and request one) instead of aborting the
+# whole fleet on a transient guest state.
+if [ "$warm_state" != "stopped" ]; then
+    echo "🅿️  warm source is $warm_state — requesting stop before fleet provisioning"
+    fly_with_timeout 90 machine stop "$WARM_ID" -a "$APP" >/dev/null 2>&1 || true
+    warm_wait_deadline=$((SECONDS + 120))
+    while [ "$SECONDS" -lt "$warm_wait_deadline" ]; do
+        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null)" || break
+        warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || break
+        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+        [ "$warm_state" = "stopped" ] && break
+        sleep 2
+    done
+fi
 if [ "$warm_state" != "stopped" ]; then
     echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
     exit 1

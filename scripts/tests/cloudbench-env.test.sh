@@ -1117,5 +1117,8 @@ box_only_auth_lines="$(
 )"
 [ -z "$box_only_auth_lines" ] ||
   fail "private-repo git-sync must not use box-only GITHUB_TOKEN AUTH_HDR construction: $box_only_auth_lines"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'requesting stop before fleet provisioning' \
+  "fleet must stop a started warm source before provisioning instead of hard-failing"
 
 echo "All cloud benchmark environment checks passed."
