@@ -7557,6 +7557,117 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
 
 
+def test_fleet_waits_for_warm_source_stop_before_provisioning(tmp_path: Path) -> None:
+    """RCA (2026-08-20): concurrent maintenance left cloudbench-warm started/
+    replacing; fleet hard-failed immediately with 'warm source must be stopped
+    before fleet provisioning', aborting peer fleets that only needed a
+    snapshot. Wait/poll until stopped (or timeout) instead of exiting on the
+    first non-stopped observation."""
+    fleet = FLEET_SCRIPT.read_text()
+    assert "wait_for_stopped_warm_source() {" in fleet
+    assert 'warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1' in fleet
+    # The one-shot hard-fail gate must not remain ahead of parking.
+    gate = fleet.split("wait_for_stopped_warm_source() {", 1)[1]
+    call_at = gate.index('warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")"')
+    park_at = gate.index("parking warm source at $WARM_PARKED_VM_SIZE")
+    assert call_at < park_at
+    between = gate[call_at:park_at]
+    assert 'if [ "$warm_state" != "stopped" ]; then' not in between
+
+    helpers = "".join(
+        _extract_fleet_function(fleet, sig)
+        for sig in (
+            "pool_machine_shape_from_json() {",
+            "wait_for_stopped_warm_source() {",
+        )
+    )
+    started = json.dumps(
+        [
+            {
+                "id": "warm1",
+                "state": "started",
+                "config": {"guest": {"cpu_kind": "shared", "cpus": 4, "memory_mb": 8192}},
+            }
+        ]
+    )
+    stopped = json.dumps(
+        [
+            {
+                "id": "warm1",
+                "state": "stopped",
+                "config": {"guest": {"cpu_kind": "shared", "cpus": 1, "memory_mb": 2048}},
+            }
+        ]
+    )
+    state_file = tmp_path / "warm-polls.txt"
+    state_file.write_text("0\n")
+    script = f"""set -uo pipefail
+APP=bench-app
+WARM_ID=warm1
+CLOUDBENCH_WARM_STOP_WAIT_SECONDS=30
+CLOUDBENCH_WARM_STOP_POLL_SECONDS=0
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    n="$(cat "$STATE_FILE")"
+    n=$((n + 1))
+    printf '%s\\n' "$n" > "$STATE_FILE"
+    if [ "$n" -lt 3 ]; then
+      printf '%s\\n' '$STARTED'
+    else
+      printf '%s\\n' '$STOPPED'
+    fi
+  fi
+}}
+{helpers}
+warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1
+read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+echo "shape=$warm_state/$warm_kind/$warm_cpus/$warm_memory"
+echo "polls=$(cat "$STATE_FILE")"
+"""
+    # Escape JSON for single-quoted bash payloads without breaking quotes.
+    script = script.replace("$STARTED", started.replace("'", "'\"'\"'"))
+    script = script.replace("$STOPPED", stopped.replace("'", "'\"'\"'"))
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            "STATE_FILE": str(state_file),
+            "PATH": os.environ["PATH"],
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "waiting for stop before fleet provisioning" in result.stderr
+    assert "shape=stopped/shared/1/2048" in result.stdout
+    assert "polls=3" in result.stdout
+
+    # Timeout path: never becomes stopped → measured hard failure after wait.
+    state_file.write_text("0\n")
+    timeout_script = f"""set -uo pipefail
+APP=bench-app
+WARM_ID=warm1
+CLOUDBENCH_WARM_STOP_WAIT_SECONDS=0
+CLOUDBENCH_WARM_STOP_POLL_SECONDS=0
+FLY() {{
+  if [ "$1 $2" = "machines list" ]; then
+    printf '%s\\n' '{started}'
+  fi
+}}
+{helpers}
+wait_for_stopped_warm_source "$WARM_ID"
+"""
+    timed = subprocess.run(
+        ["bash", "-c", timeout_script],
+        env={"PATH": os.environ["PATH"]},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert timed.returncode == 1, f"{timed.stdout}\n{timed.stderr}"
+    assert "warm source must be stopped before fleet provisioning (state=started; waited 0s)" in timed.stderr
+
+
 def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
