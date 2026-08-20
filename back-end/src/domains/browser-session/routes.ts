@@ -284,7 +284,9 @@ router.post(
       const directory =
         directoryRaw === '/tmp/downloads' || directoryRaw === 'downloads'
           ? '/tmp/downloads'
-          : directoryRaw === '/tmp/rose-uploads' || directoryRaw === 'uploads' || directoryRaw === ''
+          : directoryRaw === '/tmp/rose-uploads' ||
+              directoryRaw === 'uploads' ||
+              directoryRaw === ''
             ? undefined
             : null;
       if (directory === null) {
