@@ -10621,6 +10621,34 @@ def test_write_lock_purchase_button_excludes_terms_consent_prose():
     assert is_purchase_button("Buy Now\nPrivacy Policy")
 
 
+def test_write_lock_purchase_button_excludes_buynow_dom_identifiers():
+    """Machine ids containing buynow must not trip the purchase write lock.
+
+    Fandango IMAX checkout (2026-08-20 agent 1c3003ef): clicking the email
+    sign-in input ``#buynow-email-si`` joined that id into the write-lock
+    signal. Whitespace-stripped matching turned phrase ``buy now`` into a
+    substring of ``buynow-email-si``, forced a purchase write_lock, and the
+    browser-imax-group-tickets harness observed write_lock instead of
+    payment_approval. Real Buy Now labels stay locked; a co-located id must
+    not veto them.
+    """
+    from browser_tools.write_lock import (
+        is_dom_identifier_write_lock_signal,
+        is_purchase_button,
+    )
+
+    assert is_dom_identifier_write_lock_signal("buynow-email-si")
+    assert is_dom_identifier_write_lock_signal("place_order_btn")
+    assert not is_dom_identifier_write_lock_signal("Buy Now")
+    assert not is_dom_identifier_write_lock_signal("buynow")
+
+    assert not is_purchase_button("buynow-email-si")
+    assert not is_purchase_button("buynow-email-si\nEmail")
+    assert not is_purchase_button("input\nbuynow-email-si")
+    assert is_purchase_button("Buy Now")
+    assert is_purchase_button("buynow-email-si\nBuy Now")
+
+
 def test_write_lock_email_send_excludes_marketing_opt_in_controls():
     """Marketing opt-in checkboxes never trigger the outbound-send write lock.
 
@@ -16907,6 +16935,10 @@ async def run_all_tests():
     r.record(
         "write_lock_purchase_button_excludes_terms_consent_prose",
         test_write_lock_purchase_button_excludes_terms_consent_prose,
+    )
+    r.record(
+        "write_lock_purchase_button_excludes_buynow_dom_identifiers",
+        test_write_lock_purchase_button_excludes_buynow_dom_identifiers,
     )
     r.record(
         "write_lock_email_send_excludes_marketing_opt_in_controls",
