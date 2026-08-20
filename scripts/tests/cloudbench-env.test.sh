@@ -1385,6 +1385,28 @@ def extract_bash_function(source: str, name: str) -> str:
                 return source[start : idx + 1]
     raise SystemExit(f"{name} helper is missing closing brace")
 
+# warm_source_fetch_ref must Contents-validate via resolve_github_token (not
+# unvalidated cloudbench_controller_github_token).
+warm_fn = extract_bash_function(src, "warm_source_fetch_ref")
+if "resolve_github_token" not in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must use resolve_github_token")
+if "cloudbench_controller_github_token" in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must not use unvalidated cloudbench_controller_github_token")
+
+# --setup clone: keep AUTH_HDR off git argv; use GIT_CONFIG_GLOBAL; wipe remotes
+# on partial SFTP failure so a lone token file cannot linger.
+clone_start = src.find("SETUP_GITHUB_TOKEN=")
+clone_end = src.find("park_warm_source", clone_start)
+if clone_start < 0 or clone_end < 0:
+    raise SystemExit("--setup clone block missing")
+clone = src[clone_start:clone_end]
+if "GIT_CONFIG_GLOBAL" not in clone:
+    raise SystemExit("--setup clone must use GIT_CONFIG_GLOBAL for http.extraheader")
+if "-c http.extraheader=" in clone:
+    raise SystemExit("--setup clone must not put AUTH_HDR on git -c argv")
+if "rm -f '$remote_setup_token' '$remote_setup_cmd'" not in clone:
+    raise SystemExit("--setup must rm remote token/cmd on SFTP failure")
+
 helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
 
 auth_bits = [
