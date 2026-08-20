@@ -1654,6 +1654,9 @@ chmod 600 \"\$auth_config\"
 git_auth() { env \"GIT_CONFIG_GLOBAL=\$auth_config\" GIT_CONFIG_NOSYSTEM=1 git \"\$@\"; }
 if [ -d '$REMOTE_REPO/.git' ]; then
   echo 'repo already present — fetching latest'
+  # Reset origin before authenticated fetch so a retained/altered remote cannot
+  # receive the controller token (same order as cloudbench-fetch-ref.sh).
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' remote set-url origin 'https://github.com/Rose-Ai-Labs/rose.git'
   git_auth -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' fetch --quiet origin
 else
   git_auth clone --quiet 'https://github.com/Rose-Ai-Labs/rose.git' '$REMOTE_REPO'
