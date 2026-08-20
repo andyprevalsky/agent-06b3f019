@@ -212,6 +212,29 @@ export function resolveClaudeCodeTokenSource(
 }
 
 /**
+ * Host ANTHROPIC_BASE_URL override for Claude Code sandboxes (Anthropic SDK
+ * compatible gateways such as OpenRouter). Fast Mode proxy URL wins when set.
+ */
+export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): string | undefined {
+  const trimmed = hostBaseUrl?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * True when credential lookup returned only a refreshable OAuth envelope
+ * (no access token) — the post-auth_error path that hopes the CLI will refresh.
+ */
+export function isRefreshOnlyOauthEnvelope(
+  credentialMeta: ClaudeCodeCredentialResult | null
+): boolean {
+  return (
+    credentialMeta?.credentialMode === 'oauth_envelope' &&
+    !credentialMeta.accessToken &&
+    Boolean(credentialMeta.credentials)
+  );
+}
+
+/**
  * Decide which auth env vars the Codex Code CLI sandbox should receive.
  *
  * Mirrors {@link resolveClaudeCodeAuthEnvs} (and the Rose completions fallback)
@@ -332,10 +355,18 @@ export async function createClaudeCodeSession(
   if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
     envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
     log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
-  } else if (fastModeWriteEnabled) {
-    log.warn(
-      'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
-    );
+  } else {
+    const hostAnthropicBaseUrl = resolveHostAnthropicBaseUrl(process.env.ANTHROPIC_BASE_URL);
+    if (hostAnthropicBaseUrl) {
+      // Honor a host override (e.g. Anthropic-compatible OpenRouter transport when
+      // the direct Anthropic org is credit-dead). Fast Mode proxy wins when set.
+      envs.ANTHROPIC_BASE_URL = hostAnthropicBaseUrl;
+      log.info(`Routing sandbox Anthropic calls via host ANTHROPIC_BASE_URL=${envs.ANTHROPIC_BASE_URL}`);
+    } else if (fastModeWriteEnabled) {
+      log.warn(
+        'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
+      );
+    }
   }
 
   // Try user's own credentials first, then rotate through the pool. The agent's
@@ -348,6 +379,19 @@ export async function createClaudeCodeSession(
   }
 
   const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  // A refreshable OAuth envelope after direct-token auth_error must not block the
+  // funded API-key path when the envelope's refresh_token is also dead
+  // (invalid_grant): Claude Code would 401 in-sandbox instead of using the key.
+  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && anthropicApiKey) {
+    const apiKeyOnCooldownForEnvelope = await isAnthropicApiKeyOnCooldown();
+    if (!apiKeyOnCooldownForEnvelope) {
+      log.info(
+        `Preferring ANTHROPIC_API_KEY over refresh-only OAuth envelope for agent ${agentId}`
+      );
+      credentialMeta = null;
+    }
+  }
+
   // Only consult the shared cooldown when we'd actually need the fallback.
   const apiKeyOnCooldown =
     !credentialMeta && anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
