@@ -484,7 +484,10 @@ def valid(value):
 pids = set()
 if valid(data.get("run_sh_pid")):
     pids.add(data["run_sh_pid"])
-for service in data.get("services") or []:
+services = data.get("services")
+if not isinstance(services, list):
+    services = []
+for service in services:
     if isinstance(service, dict) and valid(service.get("pid")):
         pids.add(service["pid"])
 try:
@@ -2410,6 +2413,7 @@ if $BENCHMARK_MODE; then
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
     # SMS-supervisor benchmarks stub web_search through a file the backend
     # re-reads per call (the backend is already running when a task picks its
     # fixture, so an env var set by the benchmark process can never reach it).
