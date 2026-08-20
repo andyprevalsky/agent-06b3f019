@@ -1126,5 +1126,14 @@ require_text "$ROOT_DIR/scripts/run-bench-fleet" \
 require_text "$ROOT_DIR/scripts/run-bench-fleet" \
   '.nvm/versions/node' \
   "fleet seed-dump probe must restore nvm npx onto PATH when stripped"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'No usable controller GitHub token for boot-launch' \
+  "boot-launch must require a usable controller GitHub token (not empty gh auth token)"
+if grep -Fq 'gh auth token 2>/dev/null || resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud"; then
+  fail "run-bench-cloud must not prefer possibly-empty gh auth token over resolve_controller_github_token_b64"
+fi
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "fleet controller_github_token_b64 must consider GITHUB_DISPATCH_TOKEN"
 
 echo "All cloud benchmark environment checks passed."
