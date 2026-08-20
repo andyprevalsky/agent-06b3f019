@@ -11064,6 +11064,54 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+
+async def test_execute_input_text_password_missing_coords_uses_typetext_fallback():
+    """Amazon checkout re-auth password fields must not hard-fail when coords are missing."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    element.tag_name = "input"
+    element.attributes = {"type": "password", "name": "password"}
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch("browser_use.browser.events.TypeTextEvent", lambda **kw: kw),
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=87012,
+            coords=None,
+            params={"text": "secret", "clear": False},
+            thinking=None,
+            humanizer=hu,
+            secret_refs=None,
+            password_origins=None,
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    hu.click_at_coords.assert_not_called()
+    hu.type_text.assert_not_called()
+    session.event_bus.dispatch.assert_called()
+    ah.record_action.assert_awaited()
+
+
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
