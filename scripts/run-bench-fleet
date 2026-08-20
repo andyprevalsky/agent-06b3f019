@@ -4125,22 +4125,49 @@ ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
 
 CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
-    local token="" dotenv
+    local token="" dotenv key candidate code
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
-        printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
-        return 0
+        # Cached value may be stale empty b64 from a prior empty gh auth token —
+        # only reuse when decode is non-empty.
+        token="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" | base64 -d 2>/dev/null || true)"
+        if [ -n "$token" ]; then
+            printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
+            return 0
+        fi
+        CONTROLLER_GITHUB_TOKEN_B64_CACHE=""
     fi
-    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    # Prefer usable tokens. Empty `gh auth token` (exit 0, empty stdout) and
+    # revoked dotenv GITHUB_TOKEN pats previously aborted clone git-sync with
+    # "could not read Username for https://github.com".
+    for key in GITHUB_DISPATCH_TOKEN GH_TOKEN GITHUB_TOKEN; do
+        candidate="${!key:-}"
+        if [ -z "$candidate" ]; then
+            for dotenv in "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env"; do
+                [ -f "$dotenv" ] || continue
+                candidate="$(grep -E "^${key}=" "$dotenv" 2>/dev/null | head -1 \
+                    | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+                [ -z "$candidate" ] || break
+            done
+        fi
+        [ -n "$candidate" ] || continue
+        code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 \
+            -H "Authorization: Bearer ${candidate}" \
+            -H 'Accept: application/vnd.github+json' \
+            https://api.github.com/user 2>/dev/null || echo 000)"
+        if [ "$code" = "200" ]; then
+            token="$candidate"
+            break
+        fi
+    done
     if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
-        token="$(gh auth token 2>/dev/null || true)"
-    fi
-    if [ -z "$token" ]; then
-        for dotenv in "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env"; do
-            [ -f "$dotenv" ] || continue
-            token="$(grep -E '^GITHUB_TOKEN=' "$dotenv" 2>/dev/null | head -1 \
-                | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-            [ -z "$token" ] || break
-        done
+        candidate="$(gh auth token 2>/dev/null || true)"
+        if [ -n "$candidate" ]; then
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 3 --max-time 8 \
+                -H "Authorization: Bearer ${candidate}" \
+                -H 'Accept: application/vnd.github+json' \
+                https://api.github.com/user 2>/dev/null || echo 000)"
+            [ "$code" = "200" ] && token="$candidate"
+        fi
     fi
     [ -n "$token" ] || return 1
     CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
