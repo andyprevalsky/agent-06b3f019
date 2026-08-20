@@ -536,34 +536,71 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   printf '%s' "$base"
 }
 
-# Prefer the credential this workspace can actually use for GitHub HTTPS.
-# Injected/invalid $GITHUB_TOKEN wins inside `gh auth token` and .env lookups,
-# which made warm-box fetch-ref 401 (`could not read Username for
-# 'https://github.com'`) even after the helper was uploaded. `env -u GITHUB_TOKEN
-# gh auth token` reads gh's hosts.yml account — the same ghs_ token git
-# url.insteadOf already uses to push from this controller.
-cloudbench_controller_github_token() {
-  local token=""
-  token="$(env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
-  if [ -n "$token" ]; then
-    printf '%s' "$token"
-    return 0
-  fi
-  token="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null \
-    | sed -n 's#.*https://x-access-token:\([^[:space:]@][^[:space:]@]*\)@github.com/.*#\1#p' \
-    | head -1)"
-  if [ -n "$token" ]; then
-    printf '%s' "$token"
-    return 0
-  fi
+# Resolve a request-scoped GitHub token for private-repo git-sync on Fly guests.
+# Cursor Cloud / CI often inject an invalid GITHUB_TOKEN while the working
+# credential lives in git url.insteadOf (or gh hosts.yml). Prefer those live
+# controller credentials over durable Fly/.env secrets that go stale.
+cloudbench_git_insteadof_github_token() {
+  local cfg line token=""
+  cfg="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true)"
+  [ -n "$cfg" ] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      *'https://x-access-token:'*'@github.com/'*|*x-access-token:*@github.com*)
+        token="${line#*x-access-token:}"
+        token="${token%%@github.com*}"
+        token="${token%%@github.com/*}"
+        ;;
+    esac
+    [ -n "$token" ] && printf '%s' "$token" && return 0
+  done <<< "$cfg"
   return 1
+}
+
+cloudbench_resolve_controller_github_token() {
+  local token="" dotenv
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  token="$(cloudbench_git_insteadof_github_token 2>/dev/null || true)"
+  [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  if command -v gh >/dev/null 2>&1; then
+    # gh prefers $GITHUB_TOKEN even when it is invalid; strip it so hosts.yml wins.
+    # Also clear GH_TOKEN for this subprocess; keep `env -u GITHUB_TOKEN gh auth token`
+    # contiguous so cloudbench-env.test.sh can pin the contract.
+    token="$(GH_TOKEN= env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+    [ -n "$token" ] && { printf '%s' "$token"; return 0; }
+  fi
+  token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+  if [ -z "$token" ]; then
+    for dotenv in "${CLOUDBENCH_FLEET_ROOT:-.}/back-end/.env" "${CLOUDBENCH_FLEET_ROOT:-.}/agents/.env" \
+      "back-end/.env" "agents/.env"; do
+      [ -f "$dotenv" ] || continue
+      token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN 2>/dev/null || true)"
+      [ -z "$token" ] || break
+    done
+  fi
+  [ -n "$token" ] || return 1
+  printf '%s' "$token"
+}
+
+# Canonical name used by main's warm_source_fetch_ref / export helpers.
+cloudbench_controller_github_token() {
+  cloudbench_resolve_controller_github_token "$@"
+}
+
+cloudbench_github_basic_auth_header() {  # <token>
+  local token="$1"
+  [ -n "$token" ] || return 1
+  printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
 }
 
 # Upsert KEY=value in a dotenv file without printing the value.
 cloudbench_upsert_env_key() {
   local dest="$1" key="$2" val="$3"
   [ -n "$dest" ] && [ -n "$key" ] || return 1
-  DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PY'
+  DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PYINNER'
 import os
 from pathlib import Path
 
@@ -589,7 +626,7 @@ if not found:
 p.parent.mkdir(parents=True, exist_ok=True)
 p.write_text("\n".join(out) + "\n")
 os.chmod(p, 0o600)
-PY
+PYINNER
 }
 
 # I-03 ignored invalid $GITHUB_TOKEN for fetch-ref but left the process env and
