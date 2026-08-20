@@ -446,7 +446,9 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 # resolve_durable_github_token (DISPATCH first). Never print the value.
 resolve_github_token() {
     local t=""
-    t="$(gh auth token 2>/dev/null || true)"
+    # Prefer live `gh` hosts.yml over an injected invalid $GITHUB_TOKEN, then
+    # honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback.
+    t="$(GH_TOKEN= env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
     if [ -z "$t" ]; then
         t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
     fi
@@ -1207,26 +1209,58 @@ stop_machine_strict() {  # stop_machine_strict <id>
 resize_stopped_warm_source() {  # resize_stopped_warm_source <id> <size> <memory> <purpose>
     local id="$1" size="$2" memory="$3" purpose="$4" state
     local attempt=1 max_attempts retry_delay this_delay cap update_out update_rc
+    local lease_attempts="${CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS:-8}"
+    local lease_delay="${CLOUDBENCH_WARM_RESIZE_LEASE_RETRY_SECONDS:-15}"
     [ -n "$id" ] || return 0
     max_attempts="${CLOUDBENCH_WARM_RESIZE_ATTEMPTS:-6}"
     retry_delay="${CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS:-8}"
     cap="${CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS:-90}"
+    if ! [[ "$lease_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS must be a positive integer (got: ${lease_attempts})" >&2
+        return 1
+    fi
+    if ! [[ "$lease_delay" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_LEASE_RETRY_SECONDS must be a positive integer (got: ${lease_delay})" >&2
+        return 1
+    fi
+    if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_ATTEMPTS must be a positive integer (got: ${max_attempts})" >&2
+        return 1
+    fi
+    # Retry delay/cap may be 0 in unit tests (instant retry); production defaults are >0.
+    if ! [[ "$retry_delay" =~ ^[0-9]+$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS must be a non-negative integer (got: ${retry_delay})" >&2
+        return 1
+    fi
+    if ! [[ "$cap" =~ ^[0-9]+$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS must be a non-negative integer (got: ${cap})" >&2
+        return 1
+    fi
     state="$(machine_state "$id")"
     if [ "$state" != "stopped" ]; then
         stop_machine_strict "$id" || return 1
     fi
     echo "🧮 sizing warm source for $purpose: $size/${memory}MB"
-    # Fly org API rate limits (`resource_exhausted: rate limit exceeded`) are
-    # common right after park→prepare or sibling fleet traffic. A single-shot
-    # machine update aborted --refresh-deps before any task machine existed
-    # (descend wait-for-trigger epoch 2). Retry with exponential backoff+jitter
-    # — same rule as clone_machine_target.
+    # Retry Fly machine-update failures that are either exclusive leases held by
+    # a peer workspace, or org API rate limits after park→prepare. Fail closed
+    # after bounded attempts so a stuck donor cannot strand every later fleet.
     while true; do
         update_rc=0
         update_out="$(FLY machine update "$id" -a "$APP" --vm-size "$size" --vm-memory "$memory" \
             --command "sleep infinity" --skip-start --yes 2>&1)" || update_rc=$?
         if [ "$update_rc" -eq 0 ]; then
             return 0
+        fi
+        if printf '%s' "$update_out" | grep -Eqi 'lease currently held|failed to (obtain|get) lease'; then
+            if [ "$attempt" -ge "$lease_attempts" ]; then
+                printf '%s\n' "$update_out" | sed 's/^/   /' >&2
+                echo "❌ warm source resize lease still held after ${lease_attempts} attempts" >&2
+                return 1
+            fi
+            echo "   ⏳ warm resize lease held — retry $attempt/$lease_attempts in ${lease_delay}s" >&2
+            sleep "$lease_delay"
+            attempt=$((attempt + 1))
+            continue
         fi
         if ! printf '%s' "$update_out" | grep -Eqi \
             'resource_exhausted|rate[[:space:]]*limit|429|concurrent[[:space:]]+update|version[[:space:]]+changed|aborted:'; then
@@ -1616,8 +1650,8 @@ if [ "$MODE" = "refresh-deps" ]; then
 
     # Sync the repo to the ref whose manifests the trees must match via the same
     # controller-token + cloudbench-fetch-ref.sh path used by WMH / guest drivers.
-    # (Custom fly-ssh stdin/SFTP auth delivery hung on wedged warm SSH; this path
-    # is the proven shared helper.)
+    # Token resolution prefers live controller credentials (insteadOf / gh hosts)
+    # via cloudbench_export_controller_github_token + cloudbench_controller_github_token.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
     warm_source_fetch_ref "$mid" "$EXPECTED_REF" || exit 1
 
