@@ -161,3 +161,38 @@ required an audit of whether `person`/`since` share the drift. They do not
 
 Never emit an identifier from one tool that no other tool accepts as input — a model
 holding an un-dereferenceable pointer will feed it to whatever parameter looks closest.
+
+## Recurrence — 2026-08-19 (agent a6b8593a-bd41-4a18-8eca-667cbf0020ba)
+
+Same class, new source. An explore child grepped `sources: ["documents"]`, and
+match #25 printed verbatim:
+
+```
+**25. source: documents path: documents/generic/User snapshot V1 bootstrap/user-snapshot-v1-bootstrap**
+```
+
+7s later the model called `web_fetch` with that exact string.
+
+**What held:** `assert_fetchable_url` rejected it non-retryably before any
+provider call — zero Firecrawl/Parallel spend, and the agent recovered on the
+next iteration. The guard added by this case did its job.
+
+**What did not hold:** the model still chose `web_fetch` over `grep`
+`filters.path`, which `documents` accepts. Two concrete gaps in the affordance,
+both in `agents/domains/web_fetch/service.py:93-97`:
+
+1. The rejection message exemplifies only `network/<name>.contact` and
+   `messages/<thread>.thread`. `documents/…` — the shape that actually recurred —
+   is not exemplified.
+2. It says "read them with the grep tool instead" but never names the parameter
+   (`grep filters.path`), so the model is told the tool and left to rediscover
+   the argument.
+
+The structural half of the original fix (grep round-trips paths) is sound; the
+*discoverability* half is prose that the model must infer. Because the guard
+contains the cost, this recurrence is logged rather than re-fixed — but it is the
+second observed instance, so the next occurrence should raise the affordance into
+the tool schema/result rather than the error string.
+
+The rendering fallout of this particular occurrence has its own cause and case:
+docs/rca/cases/2026-08-19-explore-fe-posts-race-into-last-write-wins-chip-id.md.

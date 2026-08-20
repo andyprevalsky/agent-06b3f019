@@ -1,9 +1,10 @@
 import Stripe from 'stripe';
-// PROD id's canonical home is providers/benchmarkPaymentIdentity; purchases/config
-// only exports the sandbox id (and a domain file may not re-export from providers/
-// per the layer gate). Importing PROD from config resolved to `undefined`.
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+// The production identity lives in providers/benchmarkPaymentIdentity; importing
+// it from purchases/config resolved to `undefined`, which silently disabled the
+// sandbox half of assertUserMatchesMode (undefined never equals a real user id),
+// so sandbox provisioning could overwrite the live Stripe customer + cardholder.
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
 
 /** Sandbox and live fixtures must never share their Stripe, user, or AgentCard identities. */
 export type FixtureMode = 'sandbox' | 'live';

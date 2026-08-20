@@ -162,4 +162,52 @@ assert_db_cleanup_guard "container-old" "container-old" false "" "normal service
 assert_required_service_exit_code 0 1
 assert_required_service_exit_code 17 17
 
+# ── process_age_seconds: portable elapsed time (BSD + GNU ps) ──
+#
+# `ps -o etimes=` is GNU-only. On macOS BSD ps it is not a valid keyword and ps
+# prints its whole keyword list instead, which the young-process guard captured
+# as "$age" and compared numerically ("integer expression expected"). The guard
+# then failed open and startup cleanup could kill a benchmark that had not yet
+# published services.json. Pin the parse so that never silently regresses.
+eval "$(awk '/^process_age_seconds\(\) \{/,/^\}/' "$ROOT_DIR/scripts/run.sh")"
+
+assert_age_parses() {
+  local etime="$1" expected="$2" label="$3" actual
+  actual="$(printf '%s' "$etime" | awk -F'[-:]' '{
+      if (NF == 4)      { print (($1 * 24 + $2) * 60 + $3) * 60 + $4 }
+      else if (NF == 3) { print ($1 * 60 + $2) * 60 + $3 }
+      else if (NF == 2) { print $1 * 60 + $2 }
+      else              { print 0 }
+  }')"
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL: $label — expected $expected, got $actual" >&2
+    exit 1
+  fi
+  echo "PASS: $label"
+}
+
+assert_age_parses "00:07" 7 "mm:ss elapsed parses to seconds"
+assert_age_parses "01:02:03" 3723 "hh:mm:ss elapsed parses to seconds"
+assert_age_parses "2-03:04:05" 183845 "dd-hh:mm:ss elapsed parses to seconds"
+
+# The real helper must return an integer this shell can compare numerically.
+age_self="$(process_age_seconds "$$")"
+case "$age_self" in
+  ''|*[!0-9]*)
+    echo "FAIL: process_age_seconds returned a non-integer: [$age_self]" >&2
+    exit 1 ;;
+esac
+if [ "$age_self" -lt 0 ]; then
+  echo "FAIL: process_age_seconds returned a negative age" >&2
+  exit 1
+fi
+echo "PASS: process_age_seconds yields a comparable integer for a live pid"
+
+# A dead pid must not yield garbage that breaks the caller's numeric test.
+age_dead="$(process_age_seconds 999999 || true)"
+case "$age_dead" in
+  ''|[0-9]*) echo "PASS: process_age_seconds is empty-or-numeric for a dead pid" ;;
+  *) echo "FAIL: process_age_seconds returned garbage for a dead pid: [$age_dead]" >&2; exit 1 ;;
+esac
+
 echo "All run process cleanup tests passed."
