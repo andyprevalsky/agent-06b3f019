@@ -1288,6 +1288,11 @@ for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
         raise SystemExit(f"{name} must call build_controller_authenticated_git_sync_cmd")
     if "ssh_exec_controller_git_sync" not in block:
         raise SystemExit(f"{name} must deliver auth via ssh_exec_controller_git_sync")
+    if "ssh_exec_controller_git_sync" in block and "|| true" in block:
+        # Narrow: only fail if a sync invocation itself is masked.
+        for line in block.splitlines():
+            if "ssh_exec_controller_git_sync" in line and "|| true" in line:
+                raise SystemExit(f"{name} must not mask git-sync failures with || true")
     if "GITHUB_TOKEN:-" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
@@ -1374,6 +1379,10 @@ if "Authorization: Basic" in cmd or "x-access-token:" in cmd or "ghp_test_token"
     raise SystemExit("authenticated sync cmd must not embed the controller token/header")
 if "AUTH_HDR" not in cmd:
     raise SystemExit("authenticated sync cmd must require AUTH_HDR from the delivery path")
+if "rev-parse FETCH_HEAD" not in cmd or 'checkout -f "$FETCHED_REF"' not in cmd:
+    raise SystemExit("authenticated sync cmd must check out FETCH_HEAD, not a stale local ref")
+if "checkout -f $ref_q" in cmd or "checkout -f \"$ref_q\"" in cmd:
+    raise SystemExit("authenticated sync cmd must not check out the possibly-stale local ref name")
 
 # Auth header resolver must produce x-access-token Basic payload separately.
 script = auth_helper + textwrap.dedent(
