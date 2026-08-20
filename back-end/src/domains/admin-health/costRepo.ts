@@ -69,7 +69,7 @@ async function findLiveRootAgentRunUsageBetween(
           COALESCE(
             NULLIF(item.value->>'model', ''),
             CASE
-              WHEN usage."toolName" IN ('chat_router', 'chat_generator') THEN 'zai-glm-4.7'
+              WHEN usage."toolName" IN ('chat_router', 'chat_generator') THEN 'gemma-4-31b'
               ELSE 'unknown'
             END
           ) AS model,

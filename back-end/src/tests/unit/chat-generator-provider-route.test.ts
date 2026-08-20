@@ -95,9 +95,9 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     const options = phaseGeneratorOptions();
     const chunks = await collect(await createStreamingCompletion(options));
     assert.deepEqual(calls, [CEREBRAS_API_URL]);
-    assert.equal(capturedBody.model, 'zai-glm-4.7');
+    assert.equal(capturedBody.model, 'gemma-4-31b');
     assert.equal(capturedBody.temperature, 0.7);
-    assert.equal(capturedBody.clear_thinking, true);
+    assert.equal(capturedBody.clear_thinking, undefined);
     assert.equal(capturedBody.reasoning_effort, 'none');
     assert.deepEqual(capturedBody.messages, options.messages);
     assert.deepEqual(capturedBody.response_format, options.response_format);
@@ -107,7 +107,7 @@ async function testPhaseUsesDirectCerebras(): Promise<void> {
     assert.equal(format.json_schema?.name, 'generator_response');
     assert.equal(format.json_schema?.strict, true);
     assert.deepEqual(format.json_schema?.schema, GENERATOR_JSON_SCHEMA);
-    assert.equal(chunks[0]?.actual_model, 'zai-glm-4.7');
+    assert.equal(chunks[0]?.actual_model, 'gemma-4-31b');
     assert.equal(chunks[0]?.pool_name, 'cerebras-direct');
     assert.equal(calls.includes(OPENROUTER_API_URL), false);
   } finally {
@@ -236,7 +236,7 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
     if (url === OPENROUTER_API_URL) {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       openRouterBodies.push(body);
-      if (body.model === 'z-ai/glm-4.7') {
+      if (body.model === 'google/gemma-4-31b-it') {
         glmSignal = init?.signal;
         return stallingResponse(init?.signal);
       }
@@ -249,12 +249,12 @@ async function testSilentDirectRouteRacesIndependentFallbacks(): Promise<void> {
   try {
     const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
     const text = chunks.map((chunk) => chunk.choices?.[0]?.delta?.content ?? '').join('');
-    assert.ok(text.length > 0, 'the independent fallback must rescue both silent GLM routes');
+    assert.ok(text.length > 0, 'the independent fallback must rescue both silent Cerebras routes');
 
-    const glmBody = openRouterBodies.find((body) => body.model === 'z-ai/glm-4.7');
+    const glmBody = openRouterBodies.find((body) => body.model === 'google/gemma-4-31b-it');
     const fastBody = openRouterBodies.find((body) => body.model === 'google/gemini-2.5-flash-lite');
-    assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter GLM spill');
-    assert.ok(fastBody, 'the GLM spill must race the measured fast fallback model');
+    assert.ok(glmBody, 'a silent direct route must arm the same-model OpenRouter Cerebras spill');
+    assert.ok(fastBody, 'the Cerebras spill must race the measured fast fallback model');
     assert.equal(
       (glmBody.provider as { allow_fallbacks?: boolean }).allow_fallbacks,
       true,
@@ -314,7 +314,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       const model = String(body.model);
       openRouterModels.push(model);
-      if (model === 'z-ai/glm-4.7') return sseResponse(GENERATOR_SSE);
+      if (model === 'google/gemma-4-31b-it') return sseResponse(GENERATOR_SSE);
       if (model === 'google/gemini-2.5-flash-lite') {
         fastSignal = init?.signal;
         return stallingResponse(init?.signal);
@@ -330,7 +330,7 @@ async function testLosingFastFallbackIsAborted(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       openRouterModels,
-      ['z-ai/glm-4.7', 'google/gemini-2.5-flash-lite'],
+      ['google/gemma-4-31b-it', 'google/gemini-2.5-flash-lite'],
       'the bounded fast fallback must not advance to the general waterfall'
     );
     assert.equal(fastSignal?.aborted, true, 'the losing fast fallback must be aborted');
@@ -388,7 +388,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       openRouterBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return sseResponse(GENERATOR_SSE);
     }
-    throw new Error(`Fallover left GLM-4.7-via-OpenRouter and hit a generic provider: ${url}`);
+    throw new Error(`Fallover left Gemma-via-OpenRouter and hit a generic provider: ${url}`);
   }) as typeof fetch;
   try {
     const chunks = await collect(await createStreamingCompletion(directGeneratorOptions()));
@@ -398,7 +398,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
       'a Cerebras 402 quota must fall over to OpenRouter'
     );
     // Same model — never a generic one.
-    assert.equal(openRouterBody.model, 'z-ai/glm-4.7', 'fallover must stay on GLM-4.7');
+    assert.equal(openRouterBody.model, 'google/gemma-4-31b-it', 'fallover must stay on Gemma-4-31B');
     // Provider unpinned: still prefer Cerebras, but allowed to spill past the cap.
     const provider = openRouterBody.provider as {
       order?: string[];
@@ -409,7 +409,7 @@ async function testDirectQuotaFallsOverToOpenRouterGlm(): Promise<void> {
     assert.equal(
       provider.allow_fallbacks,
       true,
-      'fallover must allow spill to another GLM-4.7 host'
+      'fallover must allow spill to another Gemma-4-31B host'
     );
     assert.equal(provider.only, undefined, 'fallover must not be pinned to Cerebras only');
     assert.ok(chunks.length > 0, 'the fallover must still produce a reply');
