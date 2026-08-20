@@ -1132,6 +1132,40 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     fail "resize_stopped_warm_source must fail closed after exhausting rate-limit retries"
 ) || fail "warm-source resize rate-limit exhaustion regression failed"
 
+(
+  function_body="$(awk '
+    $0 ~ /^resize_stopped_warm_source\(\)/ { capture = 1 }
+    capture { print }
+    capture && /^}$/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud")"
+  eval "$function_body"
+  APP="cloudbench-resize-concurrent"
+  CLOUDBENCH_WARM_RESIZE_ATTEMPTS=3
+  CLOUDBENCH_WARM_RESIZE_RETRY_SECONDS=0
+  CLOUDBENCH_WARM_RESIZE_RETRY_MAX_SECONDS=0
+  RANDOM=0
+  call_file="$TMP_ROOT/warm-resize-concurrent-calls"
+  echo 0 > "$call_file"
+  machine_state() { echo stopped; }
+  stop_machine_strict() { return 0; }
+  sleep() { :; }
+  FLY() {
+    local c
+    c="$(cat "$call_file")"
+    c=$((c + 1))
+    echo "$c" > "$call_file"
+    if [ "$c" -lt 3 ]; then
+      echo "Error: aborted: machine version changed: concurrent update in progress" >&2
+      return 1
+    fi
+    return 0
+  }
+  resize_stopped_warm_source mid-cu shared-cpu-4x 8192 maintenance >/dev/null ||
+    fail "resize_stopped_warm_source must retry concurrent-update aborts"
+  [ "$(cat "$call_file")" -eq 3 ] ||
+    fail "concurrent-update retries must reach success (calls=$(cat "$call_file"))"
+) || fail "warm-source resize concurrent-update retry regression failed"
+
 # ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
 # Observed fleet abort before any task machine was provisioned:
 #   🔄 git-syncing /data/repo → <sha> ...
