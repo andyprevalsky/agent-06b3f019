@@ -69,11 +69,12 @@ TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
 }
-# The payment-lifecycle fixture belongs to a dedicated NON-ADMIN synthetic user: admins mint
-# company-funded cards with no personal Stripe hold, which every AGENT_PAYMENT_TASK_NAMES task
-# asserts. Must equal run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID and
-# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
-AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox lifecycle benches run as the default admin account so credit checks
+# stay unlimited. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH (set below, honored
+# only in benchmark/isolated mode) forces chargeAndIssueCard so stripeHold
+# stays reachable. Must equal run_benchmark.AGENT_PAYMENT_LIFECYCLE_USER_ID and
+# BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 # Same identity, reached through the harness-wide env override so `run_benchmark` and this launcher
 # cannot drift: `configure_task_environment` publishes it and `seed_payment_fixture` reads it back.
 # Must equal run_benchmark.AGENT_PAYMENT_BENCHMARK_USER_ID.
@@ -836,7 +837,8 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
         os.environ["ALLOW_TEMPORAL_CLEANUP"] = "true"
         os.environ["BENCHMARK_FAST_MODE_CACHE"] = "false"
         os.environ["SEED_ALLOW_MISSING_GPT_CODE"] = "1"
-        # The lifecycle agents run as a dedicated synthetic customer. Make the dev-owned compute
+        # The lifecycle agents run as the admin account with the forced customer
+        # mint path. Make the dev-owned compute
         # token pool-eligible only after stack selection proves this run owns an isolated database;
         # never let shared-stack/use-existing modes mutate credential-pool eligibility.
         if isolated:
@@ -847,6 +849,7 @@ def configure_task_environment(tasks: Sequence[str], *, isolated: bool = False) 
             AGENT_PAYMENT_BENCHMARK_USER_ID_ENV,
             AGENT_PAYMENT_BENCHMARK_USER_ID,
         )
+        os.environ["BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"] = "1"
         if not os.environ.get("AGENTCARD_ONBOARDING_RETURN_URL"):
             os.environ["AGENTCARD_ONBOARDING_RETURN_URL"] = (
                 "https://navi-j9a9.onrender.com/api/agentcard/onboarding/callback"
