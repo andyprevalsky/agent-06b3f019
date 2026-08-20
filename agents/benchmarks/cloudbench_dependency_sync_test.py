@@ -6956,6 +6956,96 @@ def test_refresh_deps_mode_contract() -> None:
     assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
 
 
+def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
+    """RCA 2026-08-19: --refresh-deps fetched a private SHA with optional
+    box-side $GITHUB_TOKEN. The warm-box ssh login had no token, so git asked
+    for a username on https://github.com and aborted the whole fleet before any
+    task machine started ('exact remote checkout failed'). Guest drivers already
+    use cloudbench-fetch-ref.sh + CLOUDBENCH_GITHUB_TOKEN_B64; maintenance must
+    use that same controller-token path and fail closed when it is missing."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = cloud[cloud.index("warm_source_fetch_ref() {") : cloud.index("ssh_exec() {")]
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
+    wmh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert "cloudbench-fetch-ref.sh" in helper
+    assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
+    assert "No controller GitHub token" in helper
+    assert "cloudbench_controller_github_token" in helper
+    assert "rm -f /data/cloudbench-fetch-ref.sh" in helper
+    assert "warm_source_fetch_ref" in refresh
+    assert "warm_source_fetch_ref" in wmh
+    for mode in (refresh, wmh, helper):
+        assert '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' not in mode
+        assert "checkout -f FETCH_HEAD" not in mode
+
+
+def test_warm_source_fetch_ref_retries_transient_sftp_tunnel_timeout(
+    tmp_path: Path,
+) -> None:
+    """Epoch 3: Fly `ssh sftp put` of cloudbench-fetch-ref.sh failed once with
+    `tunnel unavailable: ... timed out (context deadline exceeded)` and
+    warm_source_fetch_ref aborted the fleet before any task started. Guest
+    driver staging already retries sftp; maintenance git-sync must too."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(cloud, "warm_source_fetch_ref() {")
+    retry = _extract_fleet_function(
+        ENV_HELPER_SCRIPT.read_text(), "cloudbench_retry_command() {"
+    )
+    sha = "f9ad6715cc0d572a5ad54c3dbedae73bf5c5ee00"
+    calls = tmp_path / "sftp-calls.txt"
+    script = f"""
+set -uo pipefail
+APP=bench-app
+ROOT_DIR={shlex.quote(str(ROOT))}
+REMOTE_REPO=/data/repo
+CALLS={shlex.quote(str(calls))}
+SFTP_ATTEMPTS=0
+CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS=5
+CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
+gh() {{ echo 'test-token'; }}
+resolve_github_token() {{ echo 'test-token'; }}
+cloudbench_controller_github_token() {{ echo 'test-token'; }}
+ssh_exec() {{
+  echo checkout {sha[:8]}
+  echo "::CLOUDBENCH-REF::{sha}"
+  return 0
+}}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "ssh sftp put" ]; then
+    SFTP_ATTEMPTS=$((SFTP_ATTEMPTS + 1))
+    if [ "$SFTP_ATTEMPTS" -eq 1 ]; then
+      echo 'Error: tunnel unavailable: Error contacting Fly.io API when probing "app": timed out (context deadline exceeded)' >&2
+      return 1
+    fi
+  fi
+  return 0
+}}
+sleep() {{ :; }}
+{retry}
+{helper}
+if ! warm_source_fetch_ref mid123 {sha}; then
+  echo "FETCH_REF_ABORTED attempts=$SFTP_ATTEMPTS"
+  exit 14
+fi
+echo "FETCH_REF_OK attempts=$SFTP_ATTEMPTS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "FETCH_REF_OK attempts=2" in result.stdout
+    assert "ssh sftp put" in calls.read_text()
+    assert helper.count("ssh sftp put") >= 1
+    assert "cloudbench_retry_command" in helper
+    assert "CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS" in helper
+
+
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the
@@ -7561,25 +7651,28 @@ def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
     """Parallel fleet launches must wait out concurrent warm maintenance instead
     of hard-failing the first non-stopped sample into INFRA."""
     fleet = FLEET_SCRIPT.read_text()
-    wait_budget = fleet.index(
-        'WARM_STOPPED_WAIT_SECONDS="${CLOUDBENCH_WARM_STOPPED_WAIT_SECONDS:-300}"'
+    wait_log = fleet.index(
+        "warm source is $warm_state; waiting until stopped before fleet provisioning"
     )
-    wait_log = fleet.index("warm source state=$warm_state — waiting for stop")
+    wait_helper = fleet.index(
+        'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"',
+        wait_log,
+    )
     gate = fleet.index("warm source must be stopped before fleet provisioning")
     park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
     fanout_at = fleet.index("# ── Phase 1:")
-    # Budget binds first; the timeout gate sits above the wait log inside the loop;
-    # parking and Phase-1 fanout must remain after the wait settles on stopped.
-    assert wait_budget < gate < wait_log < park_at < fanout_at
-    assert 'WARM_STOPPED_POLL_SECONDS="${CLOUDBENCH_WARM_STOPPED_POLL_SECONDS:-5}"' in fleet
-    # Must re-list machines inside the wait loop (not cache the first sample).
+    # Wait log → shared helper → timeout gate → parking → Phase-1 fanout.
+    assert wait_log < wait_helper < gate < park_at < fanout_at
+    assert 'warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"' in fleet
+    assert 'warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"' in fleet
+    # Must re-list machines after the wait settles (not cache the first sample).
     relist_at = fleet.index(
         'warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo \'[]\')"',
-        wait_log,
+        wait_helper,
     )
-    assert wait_log < relist_at < park_at
+    assert wait_helper < relist_at < park_at
     # Never stop/destroy the shared warm donor from the fleet wait path.
-    wait_block = fleet[wait_budget:park_at]
+    wait_block = fleet[wait_log:park_at]
     assert "machine stop" not in wait_block
     assert "machines destroy" not in wait_block
 
@@ -9318,6 +9411,11 @@ def test_cloud_agentcard_payment_tasks_provide_onboarding_callback_env() -> None
     assert "AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL=" in driver
     assert 'STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")' in driver
     assert "export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=0" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in driver
+    assert "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30" in driver
+    assert "scripts/setup-benchmark-payment.ts --user-id" in driver
 
 
 def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:

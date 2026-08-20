@@ -176,14 +176,36 @@ unset COLD_SEED_DOCKER_RETRY_DELAY_SECONDS
 unset -f sleep
 echo "PASS: cold isolated seed validates and caps retry delays"
 
+# Concurrent /deploy structural gates + aborted prior runs leave orphan
+# `python3 -m http.server` listeners in 61000-61999 (observed: 11 orphans
+# blocking find_free_port's lsof check-then-use window → "listener did not
+# start"). Reap only this gate's range before allocating.
+reap_orphan_http_servers() {
+    local pid cmd
+    for pid in $(lsof -tiTCP:61000-61999 -sTCP:LISTEN 2>/dev/null || true); do
+        cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+        case "$cmd" in
+            *'http.server'*) kill "$pid" 2>/dev/null || true ;;
+        esac
+    done
+}
+reap_orphan_http_servers
+
 find_free_port() {
     local port
     # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
     # runs concurrently with it, so an inclusive upper bound of 62000 let both
-    # gates hand out the same port. check-then-bind is not parallel-safe, so the
-    # ranges must stay disjoint rather than merely usually-disjoint.
+    # gates hand out the same port. Bind-probe instead of lsof-only so a
+    # concurrent claim between check and use cannot hand out a taken port.
     for port in $(seq 61000 61999); do
-        if ! lsof -ti :"$port" >/dev/null 2>&1; then
+        if python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
             printf "%s" "$port"
             return 0
         fi
@@ -195,8 +217,15 @@ find_free_port() {
 wait_for_port() {
     local port="$1"
     local attempt
-    for attempt in $(seq 1 30); do
-        if lsof -ti :"$port" >/dev/null 2>&1; then
+    for attempt in $(seq 1 50); do
+        if python3 -c 'import socket,sys
+s=socket.socket(); s.settimeout(0.05)
+try:
+    s.connect(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+    raise SystemExit(1)
+finally:
+    s.close()' "$port" 2>/dev/null; then
             return 0
         fi
         sleep 0.1
