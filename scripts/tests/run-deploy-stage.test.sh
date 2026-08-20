@@ -137,7 +137,9 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
 done
 run_stage --finish >"$TEST_ROOT/concurrent-finish.out" 2>&1 &
 finish_pid=$!
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+# Under parallel deploy Group-3 load the finish transition can take >0.5s;
+# wait long enough that CPU contention cannot false-fail admission close.
+for _ in $(seq 1 80); do
     grep -q '"status": "finishing"' "$RUN_ROOT/concurrent/metadata.json" && break
     sleep 0.05
 done
