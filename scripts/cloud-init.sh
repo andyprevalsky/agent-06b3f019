@@ -152,6 +152,19 @@ if [ -n "${NGROK_API_KEY:-}" ]; then
             ;;
     esac
 fi
+# Injected Cursor GITHUB_TOKEN is often an invalid github_pat_ that `gh auth
+# token` still echoes back. Overwrite process env + local .env with the working
+# hosts.yml / insteadOf credential so children inherit a valid token.
+if [ -f "$ROOT/scripts/lib/cloudbench-env.sh" ]; then
+    # shellcheck source=lib/cloudbench-env.sh
+    source "$ROOT/scripts/lib/cloudbench-env.sh"
+    if cloudbench_export_controller_github_token agents/.env back-end/.env; then
+        log "exported working GITHUB_TOKEN into process env + agents/.env + back-end/.env (len=${#GITHUB_TOKEN})"
+    else
+        log "WARN: could not resolve a working GITHUB_TOKEN from gh hosts.yml / git insteadOf"
+    fi
+fi
+
 if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
     for envf in agents/.env back-end/.env; do
         upsert_env_key "$envf" NGROK_AUTHTOKEN "$NGROK_AUTHTOKEN"

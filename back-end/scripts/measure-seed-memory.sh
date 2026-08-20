@@ -35,9 +35,15 @@ TARGET_DB="victoria_seedmem_tgt_$$"
 # does not depend on outbound reachability to prod (all .env hosts were
 # TCP-closed on 2026-07-29 and every run died in ~4s).
 DUMP="$(ls -t ../.context/benchmarks/seed-cache/*.dump 2>/dev/null | head -1)"
-OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem}"
+# Default to a PID-scoped directory so two concurrent /deploy worktrees (or a
+# controller + worker both hitting Step 4r) cannot append into one shared
+# summary.txt and poison `len(peaks) != requested_runs` (observed: interleaved
+# run lines → "got 9" after five real cold seeds).
+OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem-$$}"
 mkdir -p "$OUT_DIR"
-SUMMARY="$OUT_DIR/summary.txt"
+# Per-PID summary so concurrent /deploy (or overlapping measure runs) cannot
+# interleave "run N: ok ..." lines into one file and fail the exact-count gate.
+SUMMARY="$OUT_DIR/summary-$$.txt"
 : > "$SUMMARY"
 
 if [ -n "$ENFORCE_BUDGET" ] && [ "$ENFORCE_BUDGET" != "--enforce-budget" ]; then
@@ -122,19 +128,84 @@ else
     else
         SRC_PORT_MAPPING="$SRC_PORT_REQUESTED:5432"
     fi
+    # The dump's archive-format version pins which pg_restore can read it: a
+    # PG18 publisher emits format 1.16, which postgres:16's pg_restore rejects
+    # outright ("unsupported version (1.16) in file header"). Restoring with an
+    # older image silently produced an EMPTY source db, and the gate then failed
+    # with the misleading "no Cookie rows" message instead of naming the cause.
+    # Pick the image from the dump header so a newer publisher just works.
+    SRC_PG_IMAGE=postgres:16-alpine
+    DUMP_FORMAT_VERSION="$(
+        head -c 8 "$DUMP" | od -An -tu1 -j5 -N2 | awk 'NF{printf "%d.%d", $1, $2; exit}'
+    )"
+    case "$DUMP_FORMAT_VERSION" in
+        1.1[6-9]|1.[2-9][0-9]) SRC_PG_IMAGE=postgres:18-alpine ;;
+    esac
+    echo "   dump archive format $DUMP_FORMAT_VERSION -> $SRC_PG_IMAGE" | tee -a "$SUMMARY"
     docker run -d --name "$SRC_CONTAINER" \
         -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=postgres \
-        -p "$SRC_PORT_MAPPING" postgres:16-alpine >/dev/null || {
-            echo "❌ could not start source postgres" | tee -a "$SUMMARY"; exit 1; }
+        -p "$SRC_PORT_MAPPING" "$SRC_PG_IMAGE" >/dev/null || {
+            echo "❌ could not start source postgres ($SRC_PG_IMAGE)" | tee -a "$SUMMARY"; exit 1; }
     SRC_PORT="$(docker port "$SRC_CONTAINER" 5432/tcp | tail -1 | sed 's/.*://')"
     [ -n "$SRC_PORT" ] || { echo "❌ could not resolve source postgres port" | tee -a "$SUMMARY"; exit 1; }
+    SRC_READY=0
     for _ in $(seq 1 60); do
-        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && break
+        docker exec "$SRC_CONTAINER" pg_isready -U postgres >/dev/null 2>&1 && { SRC_READY=1; break; }
         sleep 1
     done
+    # Falling through the timeout used to continue into pg_restore against a
+    # server that never accepted connections, which produced an empty source db
+    # and the misleading "no Cookie rows" error further down.
+    if [ "$SRC_READY" != 1 ]; then
+        echo "❌ source postgres ($SRC_PG_IMAGE) never became ready in 60s" | tee -a "$SUMMARY"
+        docker logs --tail 20 "$SRC_CONTAINER" 2>&1 | tee -a "$SUMMARY"
+        exit 1
+    fi
     echo "   restoring source…" | tee -a "$SUMMARY"
+    SRC_RESTORE_ERR="$OUT_DIR/source-restore.err"
+    set +e
     docker exec -i "$SRC_CONTAINER" pg_restore -U postgres -d postgres --no-owner --no-acl \
-        < "$DUMP" >/dev/null 2>&1 || true   # non-fatal: dumps carry role/ext noise
+        < "$DUMP" >/dev/null 2>"$SRC_RESTORE_ERR"
+    SRC_RESTORE_STATUS=$?
+    set -e
+    if [ "$SRC_RESTORE_STATUS" -ne 0 ]; then
+        # pg_restore exits non-zero for genuinely benign noise: the dump names
+        # roles/extensions/owners that do not exist in a throwaway container.
+        # Strip exactly those, and treat ANY remaining diagnostic as fatal — a
+        # header refusal, a truncated archive, or a restore-time SQL error all
+        # leave an incomplete source db, which silently invalidates the whole
+        # measurement. Previously every failure was discarded by `|| true`.
+        SRC_RESTORE_UNEXPECTED="$(grep -vE \
+            'warning:|WARNING:|role "[^"]*" does not exist|extension "[^"]*" already exists|schema "[^"]*" already exists|must be owner of|no privileges (could be revoked|were granted)|^[[:space:]]*$|^pg_restore: while PROCESSING|^pg_restore: from TOC entry|^[[:space:]]*Command was:' \
+            "$SRC_RESTORE_ERR" 2>/dev/null || true)"
+        # A non-zero exit with NO diagnostic at all cannot be classified as
+        # benign — there is nothing to recognize, so the source db state is
+        # simply unknown (killed container, OOM, docker exec failure). Only a
+        # failure that actually explained itself as role/extension noise may
+        # continue; silence is fatal.
+        # NOTE: `grep -c` PRINTS 0 and EXITS 1 when nothing matches, so
+        # `$(grep -c ... || echo 0)` yields "0\n0" — a non-integer that makes
+        # the comparison below error out and silently take the tolerant branch,
+        # recreating exactly the hole this check closes. Assign, then correct.
+        SRC_RESTORE_DIAGNOSTIC_LINES=$(grep -cvE '^[[:space:]]*$' "$SRC_RESTORE_ERR" 2>/dev/null) ||
+            SRC_RESTORE_DIAGNOSTIC_LINES=0
+        case "$SRC_RESTORE_DIAGNOSTIC_LINES" in
+            ''|*[!0-9]*) SRC_RESTORE_DIAGNOSTIC_LINES=0 ;;
+        esac
+        if [ -n "$SRC_RESTORE_UNEXPECTED" ] || [ "$SRC_RESTORE_DIAGNOSTIC_LINES" -eq 0 ]; then
+            echo "❌ pg_restore failed on $DUMP (exit $SRC_RESTORE_STATUS):" | tee -a "$SUMMARY"
+            if [ "$SRC_RESTORE_DIAGNOSTIC_LINES" -eq 0 ]; then
+                echo "   (pg_restore produced no diagnostic output — source state unknown)" | tee -a "$SUMMARY"
+            else
+                printf '%s\n' "$SRC_RESTORE_UNEXPECTED" | head -5 | tee -a "$SUMMARY"
+            fi
+            echo "   Full log: $SRC_RESTORE_ERR" | tee -a "$SUMMARY"
+            echo "   A version refusal means the dump was published by a newer" | tee -a "$SUMMARY"
+            echo "   pg_dump than this reader — republish it, or extend the image map above." | tee -a "$SUMMARY"
+            exit 1
+        fi
+        echo "   pg_restore reported only role/extension noise (exit $SRC_RESTORE_STATUS)" | tee -a "$SUMMARY"
+    fi
     # Cookie is the fidelity-critical table the gate fingerprints below. Canonical
     # base dumps can have empty MessageRecord (messages still live in Message), so
     # Cookie (for the seeded DEV user) is the durable "dump is non-empty" probe.
