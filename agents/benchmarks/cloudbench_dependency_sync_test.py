@@ -6972,7 +6972,8 @@ def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
     assert "cloudbench-fetch-ref.sh" in helper
     assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
     assert "No controller GitHub token" in helper
-    assert "cloudbench_controller_github_token" in helper
+    # Contents-validated resolver — not the unvalidated hosts.yml helper alone.
+    assert "resolve_github_token" in helper
     assert "rm -f /data/cloudbench-fetch-ref.sh" in helper
     assert "warm_source_fetch_ref" in refresh
     assert "warm_source_fetch_ref" in wmh
@@ -7040,7 +7041,9 @@ echo "FETCH_REF_OK attempts=$SFTP_ATTEMPTS"
         timeout=10,
     )
     assert result.returncode == 0, result.stderr + result.stdout
-    assert "FETCH_REF_OK attempts=2" in result.stdout
+    # Two SFTP puts per attempt (fetch-ref.sh + token file); first attempt fails
+    # on the first put, second attempt succeeds both → 3 total put calls.
+    assert "FETCH_REF_OK attempts=3" in result.stdout
     assert "ssh sftp put" in calls.read_text()
     assert helper.count("ssh sftp put") >= 1
     assert "cloudbench_retry_command" in helper
