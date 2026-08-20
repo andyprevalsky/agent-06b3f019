@@ -1244,6 +1244,31 @@ def test_admin_bypass_gate_grants_admin_to_its_synthetic_user():
         assert os.environ.get("ADMIN_USER_IDS_EXTRA", "") == ""
 
 
+def test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard():
+    """Depleted purchase-subscription cleanup deletes integrations; admin company_flow mint needs one.
+
+    Observed 2026-08-20: `gate-subscription-card-mint-admin-bypass` reached
+    `issueAdminCompanyCard` (ADMIN_USER_IDS_EXTRA worked) then AgentCardRoutingProvider threw
+    `cardholder_onboarding_required` because the gate fixture left zero integrations for the
+    synthetic admin. The fixture must re-seed an org-managed agentcard row after cleanup.
+    """
+    from pathlib import Path
+
+    from benchmarks.run_benchmark import ADMIN_SUBSCRIPTION_BYPASS_USER_ID
+
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "back-end"
+        / "scripts"
+        / "gate-benchmark-fixture.ts"
+    ).read_text()
+    assert ADMIN_SUBSCRIPTION_BYPASS_USER_ID in fixture
+    assert "seedOrgManagedAgentCardForUser" in fixture
+    assert "resolveBenchmarkCardholderId" in fixture
+    assert "orgManaged: true" in fixture
+    assert "agentcard_org_cardholder_id" in fixture
+
+
 def test_payment_receipt_validation_allows_partial_live_receipts():
     """Live merchant receipts should validate stable fields without pinning tax/price drift."""
     from benchmarks.benchmark_tasks import BenchmarkTask
@@ -13670,6 +13695,8 @@ async def run_all_tests():
     r.record(
         "admin_bypass_gate_grants_synthetic_admin",
         test_admin_bypass_gate_grants_admin_to_its_synthetic_user,
+        "admin_bypass_gate_fixture_reseeds_org_managed_agentcard",
+        test_admin_bypass_gate_fixture_reseeds_org_managed_agentcard,
     )
     r.record(
         "success_on_payment_card_request",
