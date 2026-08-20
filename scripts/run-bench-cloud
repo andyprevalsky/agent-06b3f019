@@ -476,7 +476,16 @@ export GIT_CONFIG_COUNT=1
 export GIT_CONFIG_KEY_0=http.extraheader
 export GIT_CONFIG_VALUE_0=\"\$AUTH_HDR\"
 git -c safe.directory=$repo_q -C $repo_q fetch --quiet origin $ref_q
-git -c safe.directory=$repo_q -C $repo_q checkout -f $ref_q 2>/dev/null || git -c safe.directory=$repo_q -C $repo_q checkout -f FETCH_HEAD
+FETCHED_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse FETCH_HEAD)
+case $ref_q in
+  [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
+    case \"\$FETCHED_REF\" in
+      $ref_q*) ;;
+      *) echo \"FATAL: FETCH_HEAD \$FETCHED_REF does not match requested SHA $ref_q\" >&2; exit 1 ;;
+    esac
+    ;;
+esac
+git -c safe.directory=$repo_q -C $repo_q checkout -f \"\$FETCHED_REF\"
 git -c safe.directory=$repo_q -C $repo_q reset --hard
 chown -R rose:rose $repo_q 2>/dev/null || true
 REMOTE_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse HEAD)
@@ -1598,7 +1607,13 @@ if [ "$MODE" = "refresh-wmh" ]; then
     if ! SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$BENCH_REF")"; then
         exit 1
     fi
-    ssh_exec_controller_git_sync "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+    SYNC_LOG="$(mktemp)"
+    if ! ssh_exec_controller_git_sync "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
+        rm -f "$SYNC_LOG"
+        echo "❌ WMH git-sync failed; refusing to build with stale builder code" >&2
+        exit 1
+    fi
+    rm -f "$SYNC_LOG"
 
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
