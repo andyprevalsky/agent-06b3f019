@@ -1280,6 +1280,12 @@ if proc.returncode != 0:
 cmd = proc.stdout
 if "http.extraheader" not in cmd:
     raise SystemExit("authenticated sync cmd must set http.extraheader")
+if "--depth 1" not in cmd:
+    raise SystemExit("authenticated sync cmd must use shallow --depth 1 fetch")
+if "timeout 180" not in cmd:
+    raise SystemExit("authenticated sync cmd must bound fetch with timeout 180")
+if "timeout 180" not in cmd and "--depth 1" not in cmd:
+    raise SystemExit("authenticated sync cmd must bound fetch with timeout and --depth 1")
 if "GITHUB_TOKEN:-" in cmd:
     raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
 if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
