@@ -107,6 +107,25 @@ function collectRawWaitFor(messages: Message[]): Map<string, Message[]> {
   return raw;
 }
 
+const TERMINAL_TOOL_STATUSES = new Set(['FINISHED', 'ERROR']);
+
+function isTerminalTool(message: Message): boolean {
+  return TERMINAL_TOOL_STATUSES.has(String(message.metadata?.toolStatus));
+}
+
+/**
+ * A chip is identified by its tool call AND the tool that owns it.
+ *
+ * toolCallId alone is not an identity: more than one writer posts under a
+ * failing tool's toolCallId (run_agent's explore error post, and
+ * agent_workflow's main-path catch-all), so a plain toolCallId map let one
+ * writer's row silently delete another tool's chip. Keying by both means an
+ * unrelated writer adds a chip instead of destroying one.
+ */
+function chipKey(message: Message): string {
+  return `${String(message.metadata?.toolCallId)}::${String(message.metadata?.toolName ?? '')}`;
+}
+
 function dedupByToolCallId(messages: Message[]): {
   toolMessages: Message[];
   nonToolMessages: Message[];
@@ -127,19 +146,25 @@ function dedupByToolCallId(messages: Message[]): {
       return;
     }
 
-    const existing = toolMessageMap.get(toolCallId);
+    const key = chipKey(message);
+    const existing = toolMessageMap.get(key);
     if (existing) {
       const isAttention = !!message.metadata?.isUserAttentionMessage;
       const isWaitFor = message.metadata?.toolName === 'wait_for';
-      toolMessageMap.set(toolCallId, {
-        message:
-          isAttention || isWaitFor
+      // Writes can be persisted out of program order (backgrounded posts race),
+      // so a late IN_PROGRESS must not resurrect a chip that already finished —
+      // that strands a spinner cleanOrphanedInProgress never reaps for explore.
+      const wouldUnfinish = isTerminalTool(existing.message) && !isTerminalTool(message);
+      toolMessageMap.set(key, {
+        message: wouldUnfinish
+          ? existing.message
+          : isAttention || isWaitFor
             ? { ...message, message_id: existing.message.message_id }
             : message,
         firstTimestamp: existing.firstTimestamp,
       });
     } else {
-      toolMessageMap.set(toolCallId, {
+      toolMessageMap.set(key, {
         message,
         firstTimestamp: message.timestamp,
       });
