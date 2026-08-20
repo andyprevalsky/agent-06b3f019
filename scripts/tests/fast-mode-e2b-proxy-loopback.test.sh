@@ -10,26 +10,24 @@ RUN_SH="$ROOT_DIR/scripts/run.sh"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-grep -q 'E2B-reachable' "$RUN_SH" \
+grep -q 'not E2B-reachable' "$RUN_SH" \
   || fail "run.sh must refuse Fast Mode proxy when PUBLIC_BASE_URL is not E2B-reachable"
+grep -q 'BENCHMARK_SKIP_PUBLIC_TUNNEL:-.*" = "1"' "$RUN_SH" \
+  || fail "run.sh must gate Fast Mode proxy on BENCHMARK_SKIP_PUBLIC_TUNNEL"
 
-# The skip-tunnel / loopback branch must clear both proxy URLs (empty string).
-# Extract the elif block that mentions E2B-reachable and assert both clears.
-BLOCK="$(
-  awk '
-    /not E2B-reachable/ { print; inblk=1; next }
-    inblk && /^elif |^else$|^fi$/ { exit }
-    inblk { print }
-  ' "$RUN_SH"
+# The elif that mentions SKIP_PUBLIC_TUNNEL / localhost must clear both URLs
+# before the echo. Grep a contiguous window around the E2B-reachable message.
+WINDOW="$(
+  grep -n 'not E2B-reachable' "$RUN_SH" | head -1 | cut -d: -f1 \
+    | xargs -I{} awk -v n={} 'NR>=n-6 && NR<=n {print}' "$RUN_SH"
 )"
-printf '%s\n' "$BLOCK" | grep -q 'FAST_MODE_ANTHROPIC_PROXY_URL=""' \
+printf '%s\n' "$WINDOW" | grep -Fq 'FAST_MODE_ANTHROPIC_PROXY_URL=""' \
   || fail "E2B-unreachable branch must clear FAST_MODE_ANTHROPIC_PROXY_URL"
-printf '%s\n' "$BLOCK" | grep -q 'FAST_MODE_CODEX_PROXY_URL=""' \
+printf '%s\n' "$WINDOW" | grep -Fq 'FAST_MODE_CODEX_PROXY_URL=""' \
   || fail "E2B-unreachable branch must clear FAST_MODE_CODEX_PROXY_URL"
-printf '%s\n' "$BLOCK" | grep -q 'localhost' \
-  || fail "E2B-unreachable branch must mention localhost PUBLIC_BASE_URL"
+printf '%s\n' "$WINDOW" | grep -Fq 'http://localhost:*' \
+  || fail "E2B-unreachable branch must match localhost PUBLIC_BASE_URL"
 
-# Provider-side defense in depth (E2B inject path).
 ENV_TS="$ROOT_DIR/back-end/src/providers/codeAgentFastModeEnv.ts"
 grep -q 'isE2bReachableProxyBaseUrl' "$ENV_TS" \
   || fail "codeAgentFastModeEnv must export isE2bReachableProxyBaseUrl"
