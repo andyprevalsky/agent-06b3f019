@@ -1302,6 +1302,59 @@ if not decoded.startswith("x-access-token:"):
 print("controller-token git-sync contract ok")
 PY
 
+# ── ssh_exec must controller-bound flyctl (descend I-07) ──
+# Epoch-7: guest snippet used `timeout 180`, but `ssh_exec` invoked unbounded
+# `flyctl ssh console`. After warm machine stop mid-sync, flyctl never returned
+# (log frozen on "git-syncing" for 10+ minutes; controller had to be KILL'd).
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "ssh_exec controller-side timeout contract failed"
+import pathlib, re, subprocess, sys, textwrap, time
+
+src = pathlib.Path(sys.argv[1]).read_text()
+
+ssh_exec_match = re.search(r"^ssh_exec\(\) \{.*?\n\}$", src, flags=re.M | re.S)
+if not ssh_exec_match:
+    raise SystemExit("ssh_exec helper missing")
+ssh_exec = ssh_exec_match.group(0)
+if "_with_timeout" not in ssh_exec:
+    raise SystemExit("ssh_exec must wrap flyctl ssh via _with_timeout")
+if "FLY ssh console" in ssh_exec:
+    raise SystemExit("ssh_exec must call flyctl directly (Popen cannot resolve FLY wrapper)")
+if "flyctl ssh console" not in ssh_exec:
+    raise SystemExit("ssh_exec must invoke flyctl ssh console")
+
+deps = src[src.find('if [ "$MODE" = "refresh-deps" ]; then'):]
+deps = deps[: deps.find('\nif [ "$MODE" = "') if '\nif [ "$MODE" = "' in deps[1:] else len(deps)]
+if 'CLOUDBENCH_GIT_SYNC_TIMEOUT' not in deps and 'GIT_SYNC_TO' not in deps:
+    raise SystemExit("refresh-deps must pass an explicit git-sync ssh_exec timeout")
+if 'ssh_exec "$mid" "$SYNC_CMD" "$GIT_SYNC_TO"' not in deps:
+    raise SystemExit("refresh-deps git-sync must call ssh_exec with GIT_SYNC_TO")
+
+# Owning-boundary repro: unbounded sleep would hang; _with_timeout must return 124.
+wt = re.search(r"^_with_timeout\(\) \{.*?\n\}$", src, flags=re.M | re.S)
+if not wt:
+    raise SystemExit("_with_timeout helper missing")
+script = wt.group(0) + textwrap.dedent(
+    """
+    start=$(date +%s)
+    _with_timeout 2 sleep 30
+    rc=$?
+    end=$(date +%s)
+    echo "rc=$rc elapsed=$((end-start))"
+    exit $rc
+    """
+)
+t0 = time.time()
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+elapsed = time.time() - t0
+if proc.returncode != 124:
+    raise SystemExit(f"_with_timeout must exit 124 on overrun, got rc={proc.returncode} out={proc.stdout!r} err={proc.stderr!r}")
+if elapsed > 8:
+    raise SystemExit(f"_with_timeout took too long to kill hung child: {elapsed:.1f}s")
+if elapsed < 1.5:
+    raise SystemExit(f"_with_timeout returned too fast ({elapsed:.1f}s); expected ~2s bound")
+print("ssh_exec controller-side timeout contract ok")
+PY
+
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
