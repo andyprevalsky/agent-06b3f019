@@ -272,11 +272,40 @@ async function runLiveProviderParity(): Promise<void> {
           `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
         );
         const raw = await p.evaluate(() => document.body.innerText);
-        return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+        // A rented exit node that is not serving yet answers with its own error page
+        // (observed: a body starting "egress-pro…") instead of ipify's JSON. Report
+        // that as a named transient carrying the real body: a bare JSON.parse throw
+        // surfaces `Unexpected token 'e'`, which names neither the proxy nor the
+        // response and is undiagnosable from a CI log.
+        try {
+          return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+        } catch {
+          throw new Error(
+            `proxy returned a non-JSON exit-IP body: ${raw.slice(0, 120).replace(/\s+/g, ' ')}`
+          );
+        }
       } finally {
         await b.close();
       }
     };
+    // Same transient tolerance as the post-rotation reads below. This baseline read
+    // was the one unprotected call site, so a single not-ready exit node failed the
+    // whole live-parity domain (seen twice under BLACKBOX_TEST_CONCURRENCY=4 while
+    // the domain passed standalone).
+    const readExitIpWithRetry = (wsUrl: string): Promise<string> =>
+      retryWithBackoff(
+        async () => {
+          const ip = await readExitIp(wsUrl);
+          if (ip === '') throw new Error('proxy returned an empty exit IP');
+          return ip;
+        },
+        {
+          maxRetries: 3,
+          fixedDelays: [500, 1_000, 1_500],
+          isRetryable: () => true,
+          component: 'browser-provider:exit-ip-baseline',
+        }
+      );
     const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
       retryWithBackoff(
         async () => {
@@ -297,7 +326,7 @@ async function runLiveProviderParity(): Promise<void> {
         }
       );
 
-    const ipBefore = await readExitIp(String(init.ws_url));
+    const ipBefore = await readExitIpWithRetry(String(init.ws_url));
     assert(ipBefore !== '', 'could not read exit IP before rotation');
 
     const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });

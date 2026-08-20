@@ -1,8 +1,12 @@
 import Stripe from 'stripe';
-import {
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
-  BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
-} from '../src/domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
+// The production id lives in providers/, not in the purchases domain config, which
+// never exported it. Importing it from the domain module resolved to `undefined`,
+// silently disarming the sandbox half of assertUserMatchesMode below — `userId !==
+// undefined` is always true, so a sandbox run aimed at the PRODUCTION identity was
+// waved through instead of refused. scripts/ sits outside the tsconfig program, so
+// no build error surfaced; only the unit test caught it.
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
 
 /** Sandbox and live fixtures must never share their Stripe, user, or AgentCard identities. */
 export type FixtureMode = 'sandbox' | 'live';
