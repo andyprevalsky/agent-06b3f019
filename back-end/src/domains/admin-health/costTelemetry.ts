@@ -49,7 +49,7 @@ export function buildStoredRootCostTelemetry(
         kind: stringValue(value.type, 'unknown'),
         model: stringValue(
           value.model,
-          CHAT_ONLY_TOOL_NAME_SET.has(row.toolName) ? 'zai-glm-4.7' : 'unknown'
+          CHAT_ONLY_TOOL_NAME_SET.has(row.toolName) ? 'gemma-4-31b' : 'unknown'
         ),
         fromFastCache: value.from_fast_cache === true,
         tokensIn: finiteNumber(value.tokens_in),
