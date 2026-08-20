@@ -4413,15 +4413,17 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
     import benchmarks.run_benchmark as bench
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     raised = False
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         # Mirror the real signatures: _apply_live_fixture calls
-        # _sync_compute_tokens(tolerate_gpt_code_unavailable=True) and
+        # _sync_compute_tokens → _sync_email_credentials →
         # _sync_browser_credentials(ctx.cookie_domains).
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         bench._sync_browser_credentials = lambda *_a, **_k: False
         bench._apply_live_fixture(
             bench.LiveFixtureContext(
@@ -4434,6 +4436,7 @@ def test_live_fixture_fails_when_live_auth_refresh_fails():
         raised = "browser auth" in str(exc).lower()
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
@@ -4528,6 +4531,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     }
 
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_browser = bench._sync_browser_credentials
     original_sql = bench._run_local_victoria_sql
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
@@ -4555,6 +4559,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: True
         # The sync COMMAND succeeds — exactly the state that misreported the outage.
         bench._sync_browser_credentials = lambda *_a, **_k: True
         bench._run_local_victoria_sql = fake_sql
@@ -4605,6 +4610,7 @@ def test_live_fixture_fails_when_required_cookie_domain_has_no_injectable_bundle
         assert sql_calls == []
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_browser
         bench._run_local_victoria_sql = original_sql
         if original_mode is None:
@@ -4650,6 +4656,7 @@ async def test_task_live_fixture_only_preflights_explicit_injectable_cookie_requ
     with (
         patch.object(bench, "_is_simulate_mode", return_value=False),
         patch.object(bench, "_sync_compute_tokens", return_value=True),
+        patch.object(bench, "_sync_email_credentials", return_value=True),
         patch.object(bench, "_sync_browser_credentials", side_effect=fake_sync_browser_credentials),
         patch.object(bench, "_live_cookie_domain_credential_summary", side_effect=fake_credential_summary),
     ):
@@ -11625,6 +11632,93 @@ def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
     )
 
 
+def test_live_fixture_refreshes_email_credentials_before_browser_auth():
+    """cache-coverage message_person needs from_email; live overlay must sync email rows."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    calls: list[str] = []
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: calls.append("compute") or True
+        bench._sync_email_credentials = lambda: calls.append("email") or True
+        bench._sync_browser_credentials = lambda *_a, **_k: calls.append("browser") or True
+        manifest = bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert calls == ["compute", "email", "browser"]
+    assert manifest == {"fixture": "live", "browser_auth": True, "source": "prod_sync"}
+
+
+def test_live_fixture_fails_closed_when_email_credentials_refresh_fails():
+    """A frozen dump without usable Gmail tokens must abort before the agent runs."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
+    original_browser = bench._sync_browser_credentials
+    original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
+    raised = False
+    try:
+        os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
+        bench._sync_compute_tokens = lambda **_: True
+        bench._sync_email_credentials = lambda: False
+        bench._sync_browser_credentials = lambda *_a, **_k: True
+        bench._apply_live_fixture(
+            bench.LiveFixtureContext(
+                base_url="http://localhost:54121",
+                user_id="user-123",
+                auth_realm="local",
+            )
+        )
+    except RuntimeError as exc:
+        raised = "email credentials" in str(exc).lower()
+    finally:
+        bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
+        bench._sync_browser_credentials = original_browser
+        if original_mode is None:
+            os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)
+        else:
+            os.environ["BENCHMARK_WORLD_MODEL_MODE"] = original_mode
+
+    assert raised, "live fixture must fail closed when email credential refresh fails"
+
+
+def test_message_person_tasks_refresh_email_credentials_in_local_preflight():
+    """Local runs with message_person must overlay email creds after compute tokens."""
+    import inspect
+
+    from benchmarks import run_benchmark as bench
+    from benchmarks.benchmark_tasks import get_task_by_name
+
+    task = get_task_by_name("cache-coverage")
+    assert "message_person" in task.expected_tools
+    source = inspect.getsource(bench.main_async)
+    assert "_sync_email_credentials" in source
+    assert 'any("message_person" in (t.expected_tools or []) for t in tasks)' in source
+
+
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
     """The checkout-ready card-mint-and-abandon flow ends after its second browser action."""
     from benchmarks.benchmark_tasks import get_task_by_name
@@ -14126,6 +14220,18 @@ async def run_all_tests():
     r.record(
         "cache_coverage_two_step_browser_trajectory",
         test_cache_coverage_accepts_captured_two_step_browser_trajectory,
+    )
+    r.record(
+        "live_fixture_refreshes_email_credentials",
+        test_live_fixture_refreshes_email_credentials_before_browser_auth,
+    )
+    r.record(
+        "live_fixture_fails_closed_email_credentials",
+        test_live_fixture_fails_closed_when_email_credentials_refresh_fails,
+    )
+    r.record(
+        "message_person_tasks_refresh_email_credentials",
+        test_message_person_tasks_refresh_email_credentials_in_local_preflight,
     )
     r.record(
         "payment_abandonment_two_step_trajectory",
