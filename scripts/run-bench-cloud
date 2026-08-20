@@ -891,7 +891,15 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # by hand). base64 has no shell-special bytes, so it survives any shell.
     local b64
     b64="$(printf '%s' "$2" | base64 | tr -d '\n')"
-    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
+    local -a ssh_cmd=(flyctl ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\"")
+    # Optional bound for hung sessions (dead tunnel / rate-limit). refresh-deps
+    # sets CLOUDBENCH_SSH_EXEC_TIMEOUT so a stalled git-sync cannot block fleets
+    # indefinitely (descend I-02).
+    if [ -n "${CLOUDBENCH_SSH_EXEC_TIMEOUT:-}" ]; then
+        _with_timeout "$CLOUDBENCH_SSH_EXEC_TIMEOUT" "${ssh_cmd[@]}"
+    else
+        "${ssh_cmd[@]}"
+    fi
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
@@ -1396,7 +1404,21 @@ REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse H
 echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
 echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
     SYNC_LOG="$(mktemp)"
-    if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
+    # Bound hung flyctl ssh sessions (rate-limit / dead tunnel). Without this,
+    # refresh-deps can sit on "git-syncing ..." forever with no guest git
+    # process and never provision task machines (descend I-02).
+    SYNC_SSH_TIMEOUT="${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
+    set +e
+    CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT" \
+      ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'
+    sync_rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$sync_rc" -eq 124 ]; then
+        rm -f "$SYNC_LOG"
+        echo "❌ exact remote checkout failed: ssh_exec timed out after ${SYNC_SSH_TIMEOUT}s" >&2
+        exit 1
+    fi
+    if [ "$sync_rc" -ne 0 ]; then
         rm -f "$SYNC_LOG"
         echo "❌ exact remote checkout failed" >&2
         exit 1
