@@ -277,7 +277,6 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
         if (arg.loadAsScript) hosts['script.load'] = true;
         return hosts;
       }
-      const source = Function.prototype.toString.call(pageFunction);
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
         typeof pageFunction,
