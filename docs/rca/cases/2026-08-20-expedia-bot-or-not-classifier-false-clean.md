@@ -98,3 +98,11 @@ Treat interstitial captcha containers and rendered challenge titles as
 definitive challenged signals; never let captcha instruction prose clear the
 sensor-host substantive-content hatch, and never escalate a challenged page to
 auth_assistance.
+
+## Correction (2026-08-20)
+
+`skipped_clean_page` is **not** "passed proxy rotation metrics". It was an
+early handler no-op before `recover_from_challenge` ran solver → cookie probes
+→ parallel Kernel/Steel browser/IP search. Fix: remove that early-exit so an
+LLM-requested recover always runs the search; keep Bot or Not classifier +
+auth-assistance guard as secondary defenses.
