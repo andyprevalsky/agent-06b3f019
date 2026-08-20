@@ -371,6 +371,10 @@ async def test_resolve_attachments_for_llm_image():
     assert len(content_blocks) == 1
     assert content_blocks[0]["type"] == "image_url"
     assert "data:image/png;base64," in content_blocks[0]["image_url"]["url"]
+    # Inline images must still expose exact original_filename for spawn_agent.attachments
+    assert len(metadata) == 1
+    assert "[Attached file: a.png]" in metadata[0]
+    assert "exact original_filename" in metadata[0]
 
 
 async def test_resolve_attachments_for_llm_pdf():
@@ -489,7 +493,8 @@ async def test_build_multimodal_user_message_with_image():
     assert msg["role"] == "user"
     assert isinstance(msg["content"], list)
     assert msg["content"][0]["type"] == "text"
-    assert msg["content"][0]["text"] == "Look"
+    assert msg["content"][0]["text"].startswith("Look")
+    assert "[Attached file: a.png]" in msg["content"][0]["text"]
     # Image block appended
     assert any(b["type"] == "image_url" for b in msg["content"])
 

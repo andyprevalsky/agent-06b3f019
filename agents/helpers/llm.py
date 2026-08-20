@@ -1779,6 +1779,9 @@ async def build_llm_messages(
                     content.append(
                         {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
                     )
+                    # Filename must travel with the inline image — spawn_agent
+                    # attachments match on exact original_filename only.
+                    metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
                 elif fp.is_pdf():
                     content.append(
                         {
