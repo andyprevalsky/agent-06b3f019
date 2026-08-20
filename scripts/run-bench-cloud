@@ -85,6 +85,12 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Injected $GITHUB_TOKEN is often an invalid github_pat_. Overwrite process env
+# and local .env so children inherit the working hosts.yml / insteadOf token.
+cloudbench_export_controller_github_token \
+  "$ROOT_DIR/agents/.env" \
+  "$ROOT_DIR/back-end/.env" \
+  || echo "WARN: controller GITHUB_TOKEN export failed; fetch-ref still uses cloudbench_controller_github_token" >&2
 MACHINE_READINESS_SCRIPT="$ROOT_DIR/scripts/cloudbench-machine-readiness.py"
 
 STATE_FILE="$ROOT_DIR/.context/cloudbench-machine.json"
@@ -879,6 +885,55 @@ if [ "$MODE" = "refresh-secrets" ]; then
     exit 0
 fi
 
+# Checkout an exact SHA on the shared warm volume using the same controller
+# token + cloudbench-fetch-ref.sh path guest drivers already use. Never fall
+# back to optional box-side $GITHUB_TOKEN: an empty token makes `git fetch`
+# prompt for a username over HTTPS and abort the fleet before any task starts.
+warm_source_fetch_ref() {  # warm_source_fetch_ref <machine-id> <sha>
+    local mid="$1" sha="$2" token token_b64 sync_log remote_ref
+    token="$(cloudbench_controller_github_token)"
+    [ -n "$token" ] || {
+        echo "❌ No controller GitHub token for warm-source git-sync." >&2
+        return 1
+    }
+    token_b64="$(printf '%s' "$token" | base64 | tr -d '\n')"
+    _sftp_put_fetch_ref() {
+        # flyctl sftp will not overwrite; each attempt must start from a clean dest.
+        ssh_exec "$mid" "rm -f /data/cloudbench-fetch-ref.sh" >/dev/null || true
+        FLY ssh sftp put -a "$APP" --machine "$mid" -q -m 0755 \
+            "$ROOT_DIR/scripts/cloudbench-fetch-ref.sh" /data/cloudbench-fetch-ref.sh
+    }
+    # Guest driver staging already retries sftp (CLOUDBENCH_STAGE_ATTEMPTS). A
+    # single Fly API "tunnel unavailable / context deadline exceeded" here used
+    # to abort the whole fleet before any task machine started.
+    if ! cloudbench_retry_command \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS:-5}" \
+        "${CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS:-3}" \
+        _sftp_put_fetch_ref; then
+        echo "❌ failed to upload cloudbench-fetch-ref.sh to $mid" >&2
+        return 1
+    fi
+    sync_log="$(mktemp)"
+    if ! ssh_exec "$mid" "set -e
+export CLOUDBENCH_GITHUB_TOKEN_B64='$token_b64'
+export CLOUDBENCH_APP_USER=rose
+bash /data/cloudbench-fetch-ref.sh '$REMOTE_REPO' '$sha'
+REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
+echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
+echo \"::CLOUDBENCH-REF::\$REMOTE_REF\"" 2>&1 | grep -av '^Connecting to' | tee "$sync_log" | sed 's/^/   /'; then
+        rm -f "$sync_log"
+        echo "❌ exact remote checkout failed" >&2
+        return 1
+    fi
+    remote_ref="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$sync_log" | tail -1)"
+    rm -f "$sync_log"
+    if [ "$remote_ref" != "$sha" ]; then
+        echo "❌ remote checkout mismatch: expected $sha, got ${remote_ref:-<missing>}" >&2
+        return 1
+    fi
+    return 0
+}
+
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # base64 the command instead of printf %q: a multi-line command quotes to
@@ -1376,6 +1431,7 @@ if [ "$MODE" = "refresh-deps" ]; then
     # GITHUB_TOKEN secret fails when that secret is empty/stale even though
     # Status still lists the name — observed as:
     #   fatal: could not read Username for 'https://github.com'
+    # Other git-sync paths (WMH refresh) still use warm_source_fetch_ref.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
     _refresh_gh_token="$(resolve_github_token)"
     [ -n "$_refresh_gh_token" ] || {
@@ -1560,18 +1616,12 @@ if [ "$MODE" = "refresh-wmh" ]; then
     require_machine_ready "$mid" || exit 1
 
     # Sync the repo first so the WMH build uses the current branch's builder code.
-    # Auth the private-repo fetch with the box-side GITHUB_TOKEN secret via git
-    # http.extraheader (kept out of .git/config + git argv).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF (so the WMH build uses current builder code) ..."
-    SYNC_CMD="set -e
-AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$BENCH_REF' || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$BENCH_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
-chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
-echo checkout \$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse --short HEAD)"
-    ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | sed 's/^/   /' || true
+    if ! EXPECTED_WMH_REF="$(git -C "$ROOT_DIR" rev-parse --verify "${BENCH_REF}^{commit}" 2>/dev/null)"; then
+        echo "❌ invalid benchmark ref: $BENCH_REF is not a local commit" >&2
+        exit 1
+    fi
+    warm_source_fetch_ref "$mid" "$EXPECTED_WMH_REF" || exit 1
 
     echo ""
     echo "🌍 Building the WMH model on the box → $REMOTE_WMH (WMH_GEPA_BUDGET=0 index-only) ..."
@@ -2241,7 +2291,7 @@ CLOUDBENCH_API_KEY="$( { grep -h '^BACKEND_API_KEY' "$ROOT_DIR/back-end/.env" "$
 if [ "${CLOUDBENCH_BOOT_LAUNCH:-0}" = "1" ]; then
     POST_CONFIG_START_MARKER="$OUT_DIR/post-config-start.accepted"
     rm -f "$POST_CONFIG_START_MARKER"
-    _ghb64="$(printf '%s' "$(gh auth token 2>/dev/null || resolve_github_token)" | base64 | tr -d '\n')"
+    _ghb64="$(printf '%s' "$(cloudbench_controller_github_token)" | base64 | tr -d '\n')"
     [ -n "$_ghb64" ] || { echo "❌ No controller GitHub token for boot-launch." >&2; exit 1; }
     _envargs=(
         --env CLOUDBENCH_BOOT=1
@@ -2455,7 +2505,7 @@ done
 # frontend was fragile AND RLS-blocked; see agent_link_server.py.)
 # LIVE_BACKEND_PORT/URL + CLOUDBENCH_API_KEY are now set once before the launch
 # branch (shared by boot-launch + the post-launch proxy code).
-CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+CONTROLLER_GITHUB_TOKEN="$(cloudbench_controller_github_token)"
 [ -n "$CONTROLLER_GITHUB_TOKEN" ] || { echo "❌ No current controller GitHub token available." >&2; exit 1; }
 CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
 

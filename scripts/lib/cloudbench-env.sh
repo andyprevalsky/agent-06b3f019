@@ -502,18 +502,21 @@ cloudbench_fleet_workspace_name() {  # <bench-name> <controller-id> <ordinal>
 }
 
 cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-01>
-  # Fly guests can fetch only objects reachable from an advertised origin ref.
-  # When the requested local commit is unpushed, run from its fetchable
-  # origin/main ancestor and let create-worktree-patch carry the complete
-  # committed + uncommitted workspace delta.
+  # Fly guests can fetch only objects already reachable from origin/main.
+  # A SHA that exists only on a pushed feature branch is not guest-fetchable:
+  # warm-box git-sync has no interactive GitHub credentials, and treating any
+  # origin/* containment as fetchable made --refresh-deps fetch a feature SHA
+  # over unauthenticated HTTPS (`could not read Username for 'https://github.com'`).
+  # When the requested commit is not on origin/main, run from that ancestor and
+  # let create-worktree-patch carry the complete committed + uncommitted delta.
   local root="$1" requested="$2" allow_patch="$3" resolved base
   if ! resolved="$(git -C "$root" rev-parse --verify "${requested}^{commit}" 2>/dev/null)"; then
     # Preserve remote-only branch/tag names that this checkout cannot resolve.
     printf '%s' "$requested"
     return 0
   fi
-  if git -C "$root" branch -r --contains "$resolved" --format='%(refname:short)' 2>/dev/null \
-      | grep -q '^origin/'; then
+  if git -C "$root" rev-parse --verify 'origin/main^{commit}' >/dev/null 2>&1 \
+      && git -C "$root" merge-base --is-ancestor "$resolved" origin/main 2>/dev/null; then
     printf '%s' "$resolved"
     return 0
   fi
@@ -531,6 +534,78 @@ cloudbench_fetchable_ref() {  # <repo-root> <requested-ref> <allow-local-patch-0
   }
   echo "📦 local commit $resolved is not on origin; guest will fetch $base and receive the complete workspace delta as a patch" >&2
   printf '%s' "$base"
+}
+
+# Prefer the credential this workspace can actually use for GitHub HTTPS.
+# Injected/invalid $GITHUB_TOKEN wins inside `gh auth token` and .env lookups,
+# which made warm-box fetch-ref 401 (`could not read Username for
+# 'https://github.com'`) even after the helper was uploaded. `env -u GITHUB_TOKEN
+# gh auth token` reads gh's hosts.yml account — the same ghs_ token git
+# url.insteadOf already uses to push from this controller.
+cloudbench_controller_github_token() {
+  local token=""
+  token="$(env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  token="$(git config --get-regexp '^url\..*\.insteadof$' 2>/dev/null \
+    | sed -n 's#.*https://x-access-token:\([^[:space:]@][^[:space:]@]*\)@github.com/.*#\1#p' \
+    | head -1)"
+  if [ -n "$token" ]; then
+    printf '%s' "$token"
+    return 0
+  fi
+  return 1
+}
+
+# Upsert KEY=value in a dotenv file without printing the value.
+cloudbench_upsert_env_key() {
+  local dest="$1" key="$2" val="$3"
+  [ -n "$dest" ] && [ -n "$key" ] || return 1
+  DEST="$dest" KEY="$key" VAL="$val" python3 - <<'PY'
+import os
+from pathlib import Path
+
+p = Path(os.environ["DEST"])
+key = os.environ["KEY"]
+val = os.environ["VAL"]
+if any(ch in val for ch in ' \t\n"\'#$`\\'):
+    escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+    rendered = f'{key}="{escaped}"'
+else:
+    rendered = f"{key}={val}"
+lines = p.read_text().splitlines() if p.exists() else []
+out = []
+found = False
+for line in lines:
+    if line.startswith(key + "="):
+        out.append(rendered)
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(rendered)
+p.parent.mkdir(parents=True, exist_ok=True)
+p.write_text("\n".join(out) + "\n")
+os.chmod(p, 0o600)
+PY
+}
+
+# I-03 ignored invalid $GITHUB_TOKEN for fetch-ref but left the process env and
+# local .env files on the injected github_pat_. Children that still read
+# $GITHUB_TOKEN (gh, git extraheader, dotenv) then 401. Export the working
+# hosts.yml / insteadOf credential into this process and any listed .env paths.
+cloudbench_export_controller_github_token() {
+  local token dest
+  token="$(cloudbench_controller_github_token)" || return 1
+  export GITHUB_TOKEN="$token"
+  for dest in "$@"; do
+    [ -n "$dest" ] || continue
+    cloudbench_upsert_env_key "$dest" GITHUB_TOKEN "$token" || return 1
+  done
+  echo "controller GITHUB_TOKEN exported (len=${#GITHUB_TOKEN})" >&2
+  return 0
 }
 
 cloudbench_retry_command() {
