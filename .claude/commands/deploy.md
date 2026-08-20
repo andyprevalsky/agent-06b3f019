@@ -681,16 +681,19 @@ echo "DB pre-started: $DB_CONTAINER on port $LOCAL_DB_PORT"
 # Use run_in_background=true for this command:
 BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
   BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
-  BLACKBOX_TEST_REPLAY_OUTBOUND=1 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
 
-`BLACKBOX_TEST_REPLAY_OUTBOUND=1` is required, not optional. `run.sh` defaults it
-to `0`, and Step 6c runs the claude-code blackbox against this existing backend
-with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`, which hard-fails a capture-only
-stack with `❌ Existing-backend blackbox requires outbound capture and replay;
-got: {"captureEnabled":true,"replayEnabled":false}`. Launching without the flag
-makes Step 6c unrunnable and forces a full stack relaunch mid-deploy.
+This stack is deliberately **capture-only** (`run.sh` defaults
+`BLACKBOX_TEST_REPLAY_OUTBOUND` to `0`), and
+`scripts/tests/semantic-deploy-gate.test.sh` fails the build if `/deploy` adds
+the replay opt-in back. Do not point a `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`
+blackbox run at it: `back-end/scripts/run-blackbox-tests.sh` rejects a
+capture-only existing backend by design (pinned by
+`scripts/tests/blackbox-existing-replay-gate.test.sh`), so such a run fails
+before it starts with `❌ Existing-backend blackbox requires outbound capture and
+replay`. Blackbox lanes that need replay own their own backend instead — see
+Step 6c.
 
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
@@ -1101,12 +1104,21 @@ With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB 
 against the existing backend:
 
 ```bash
-cd back-end && BLACKBOX_SMOKE=1 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 \
-  TEST_BASE_URL="http://localhost:$CONDUCTOR_PORT" \
+cd back-end && BLACKBOX_SMOKE=1 \
   BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
+
+This lane launches **its own** backend on purpose. It must not be pointed at the
+Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is
+capture-only by contract, and `run-blackbox-tests.sh` rejects a capture-only
+existing backend before any database work
+(`scripts/tests/blackbox-existing-replay-gate.test.sh` pins that rejection, and
+`scripts/tests/semantic-deploy-gate.test.sh` forbids re-adding the replay opt-in
+to the shared stack). The two contracts are only satisfiable together by letting
+this lane own its backend, which also keeps it runnable when the shared stack is
+busy or down. It still reuses the workspace Postgres, so it stays cheap.
 
 ### Pass criteria
 
