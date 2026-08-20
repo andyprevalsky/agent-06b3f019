@@ -4989,6 +4989,29 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _prod_source_database_url_for_fixture(target_database_url: str) -> Optional[str]:
+    """Resolve a remote/prod DB URL for one-shot fixture freezes.
+
+    Isolated local runs set process ``DATABASE_URL`` to the per-run Victoria
+    database. Reading that process value as the freeze *source* makes
+    ``source == target``, so ``BENCHMARK_*_SOURCE_DATABASE_URL`` is never set
+    and a missing frozen fixture file fails closed with "no source URL".
+    Always read the backend ``.env`` file (not process env), preferring
+    direct URLs when present.
+    """
+    source_database_url = (
+        load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not source_database_url:
+        return None
+    source_database_url = _psql_compatible_database_url(source_database_url)
+    if source_database_url == target_database_url:
+        return None
+    return source_database_url
+
+
 def _plaid_transactions_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -4996,11 +5019,9 @@ def _plaid_transactions_fixture_env() -> dict:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["BENCHMARK_USER_ID"] = USER_ID
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5060,11 +5081,9 @@ def _user_data_fixture_env() -> dict:
     env["BENCHMARK_USER_ID"] = USER_ID
     # Source (prod) URL lets the fixture freeze real documents once if the frozen
     # file is missing. When the frozen file already exists, apply is fully offline.
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
