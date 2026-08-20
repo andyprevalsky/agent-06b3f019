@@ -435,12 +435,15 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 
 # Resolve a GitHub token that can fetch this private repo for ephemeral
 # controller→guest git-sync (refresh-deps SSH snippet, boot-launch env).
-# Prefer the controller's live `gh auth token`. Fall back to long-lived .env
-# tokens: GITHUB_DISPATCH_TOKEN first (often valid when GITHUB_TOKEN expired),
-# then GITHUB_TOKEN. Never print the value.
+# Prefer the controller's live `gh auth token`, then exported GITHUB_TOKEN /
+# GH_TOKEN (same order as run-bench-fleet), then long-lived .env tokens via
+# resolve_durable_github_token (DISPATCH first). Never print the value.
 resolve_github_token() {
     local t=""
     t="$(gh auth token 2>/dev/null || true)"
+    if [ -z "$t" ]; then
+        t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    fi
     if [ -z "$t" ]; then
         t="$(resolve_durable_github_token)"
     fi
@@ -1380,18 +1383,49 @@ if [ "$MODE" = "refresh-deps" ]; then
         exit 1
     }
     _refresh_gh_b64="$(printf '%s' "$_refresh_gh_token" | base64 | tr -d '\n')"
-    unset _refresh_gh_token
+    _refresh_durable="$(resolve_durable_github_token)"
+    _refresh_durable_b64=""
+    if [ -n "$_refresh_durable" ] && [ "$_refresh_durable" != "$_refresh_gh_token" ]; then
+        _refresh_durable_b64="$(printf '%s' "$_refresh_durable" | base64 | tr -d '\n')"
+    fi
+    unset _refresh_gh_token _refresh_durable
+    # Prefer the primary controller token; on auth failure only, retry once with
+    # the durable .env candidate (DISPATCH/GITHUB_TOKEN) so a revoked gh auth
+    # token cannot strand refresh-deps before durable fallback is tried.
     SYNC_CMD="set -e
-export GITHUB_TOKEN=\$(printf '%s' '$_refresh_gh_b64' | base64 -d)
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
+_try_fetch() {
+  export GITHUB_TOKEN=\$(printf '%s' \"\$1\" | base64 -d)
+  AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
+}
+if ! _try_fetch '$_refresh_gh_b64' 2>/tmp/cloudbench-git-fetch.err; then
+  _err=\$(cat /tmp/cloudbench-git-fetch.err 2>/dev/null || true)
+  rm -f /tmp/cloudbench-git-fetch.err
+  case \"\$_err\" in
+    *'could not read Username'*|*'Authentication failed'*|*'Invalid username or password'*|*'403'*|*'401'*)
+      if [ -n '$_refresh_durable_b64' ]; then
+        echo 'primary GitHub token auth failed; retrying with durable fallback'
+        _try_fetch '$_refresh_durable_b64'
+      else
+        printf '%s\n' \"\$_err\" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\n' \"\$_err\" >&2
+      exit 1
+      ;;
+  esac
+else
+  rm -f /tmp/cloudbench-git-fetch.err
+fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
 echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
 echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
-    unset _refresh_gh_b64
+    unset _refresh_gh_b64 _refresh_durable_b64
     SYNC_LOG="$(mktemp)"
     if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
         rm -f "$SYNC_LOG"
