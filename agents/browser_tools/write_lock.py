@@ -239,6 +239,25 @@ def normalize_write_lock_text(text: str) -> str:
     return re.sub(r"\s+", "", text or "").lower()
 
 
+_DOM_IDENTIFIER_SIGNAL = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def is_dom_identifier_write_lock_signal(signal: str) -> bool:
+    """Return True for CSS-like id/name tokens that are not user-visible labels.
+
+    Fandango checkout (2026-08-20 agent 1c3003ef): clicking the email sign-in
+    input ``#buynow-email-si`` joined the machine id into the write-lock signal.
+    After whitespace stripping, phrase ``buy now`` matched inside ``buynow-…``
+    and forced a purchase write lock before ``request_payment_card``.
+    """
+    text = (signal or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if "-" not in text and "_" not in text:
+        return False
+    return bool(_DOM_IDENTIFIER_SIGNAL.fullmatch(text))
+
+
 def is_social_domain(url: str) -> bool:
     """Check if URL is a social media or forum domain.
 
@@ -408,6 +427,11 @@ def is_purchase_button(element_text: str) -> bool:
     # exclusion only within the same signal that carries a purchase phrase so
     # "Terms of Service" in one signal cannot veto "Buy Now" in another.
     for signal in element_text.split("\n"):
+        if is_dom_identifier_write_lock_signal(signal):
+            logger.debug(
+                f"Element signal '{signal[:80]}' skipped as DOM id/name, not a purchase label"
+            )
+            continue
         text_lower = normalize_write_lock_text(signal)
         if not text_lower:
             continue
