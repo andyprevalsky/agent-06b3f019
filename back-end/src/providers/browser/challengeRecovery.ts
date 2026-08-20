@@ -6,6 +6,10 @@ import { createLogger } from '../logger';
 import { releaseSteelRemoteSession } from '../steel/session';
 import { createSteelRecoverySession } from '../steel/sessionRecovery';
 import { waitForProviderSolver } from './challengePageDetect';
+import type {
+  ChallengeClassifierBilling,
+  ChallengeClassifierLlmUsage,
+} from './challengeLlmClassifier';
 import {
   createKernelRecoverySession,
   releaseKernelRemoteSession,
@@ -38,6 +42,13 @@ export {
   pageLooksChallenged,
   PROVIDER_SOLVER_WAIT_MS,
 } from './challengePageDetect';
+export {
+  classifyChallengeWithLlm,
+  classifyPageAfterSettle,
+  CHALLENGE_LLM_MODEL,
+  type ChallengeClassifierBilling,
+  type ChallengeClassifierLlmUsage,
+} from './challengeLlmClassifier';
 export {
   blockedResourceRequiresPaymentCdn,
   targetLooksLikePaymentDocument,
@@ -79,6 +90,11 @@ export interface CandidateProbeResult {
   paymentCdnOk: boolean;
   /** Per-host / probe-step reachability results (for ranking + logs). */
   paymentCdnHosts?: Record<string, boolean>;
+  /**
+   * rose-1-mini classifier usage rows from this probe (forwarded into the
+   * agent ToolUsage ledger via recover-challenge → usage_by_model).
+   */
+  classifierLlmUsage?: ChallengeClassifierLlmUsage[];
 }
 
 export interface SuccessfulRecoveryCandidate {
@@ -291,12 +307,14 @@ export async function probeCandidateBrowser(
     requirePaymentCdn?: boolean;
     /** Absolute URL of the blocked third-party resource to re-verify. */
     blockedResourceUrl?: string;
-  } = {}
+  } = {},
+  billing: ChallengeClassifierBilling = {}
 ): Promise<CandidateProbeResult> {
   const started = Date.now();
   let stablePasses = 0;
   let paymentCdnOk = false;
   let paymentCdnHosts: Record<string, boolean> = {};
+  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [];
   const attempts = 2;
   const requirePaymentCdn = Boolean(logContext.requirePaymentCdn);
   const blockedResourceUrl = (logContext.blockedResourceUrl || '').trim();
@@ -325,7 +343,8 @@ export async function probeCandidateBrowser(
           await recoveryGlobal.__naviRestoreRecoveryStorage?.();
         });
       }
-      const attempt = await waitForProviderSolver(page, response);
+      const attempt = await waitForProviderSolver(page, response, billing);
+      if (attempt.usage) classifierLlmUsage.push(attempt.usage);
       if (!attempt.clean) {
         lastAttemptClean = false;
         log.info('Challenge recovery candidate probe attempt still challenged', {
@@ -334,6 +353,8 @@ export async function probeCandidateBrowser(
           attempts,
           reason: attempt.reason,
           title: attempt.title.slice(0, 200),
+          actual_model: attempt.usage?.actual_model ?? null,
+          prompt_tokens: attempt.usage?.prompt_tokens ?? null,
         });
         // Do NOT abort the remaining attempts — CF often clears on the second
         // load (Eventim steel_managed under parallel k=4). Breaking here left
@@ -347,6 +368,8 @@ export async function probeCandidateBrowser(
         attempt: index + 1,
         attempts,
         title: attempt.title.slice(0, 200),
+        actual_model: attempt.usage?.actual_model ?? null,
+        prompt_tokens: attempt.usage?.prompt_tokens ?? null,
       });
       stablePasses += 1;
     }
@@ -361,13 +384,15 @@ export async function probeCandidateBrowser(
         const response = await page
           .goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
           .catch(() => null);
-        const retry = await waitForProviderSolver(page, response);
+        const retry = await waitForProviderSolver(page, response, billing);
+        if (retry.usage) classifierLlmUsage.push(retry.usage);
         paymentPageClean = retry.clean;
         log.info('Challenge recovery payment CDN pre-probe navigation', {
           ...logContext,
           clean: retry.clean,
           reason: retry.reason,
           title: retry.title.slice(0, 200),
+          actual_model: retry.usage?.actual_model ?? null,
         });
       }
       if (paymentPageClean) {
@@ -393,6 +418,7 @@ export async function probeCandidateBrowser(
     latencyMs: Date.now() - started,
     paymentCdnOk,
     paymentCdnHosts,
+    classifierLlmUsage,
   };
 }
 
@@ -464,6 +490,10 @@ export async function searchAndPromoteBrowserConfig(
     include: { context: true },
   });
   if (current === null) throw new Error(`Browser task not found: ${input.taskId}`);
+  const billing: ChallengeClassifierBilling = {
+    agentId: current.agentId,
+    userId: input.userId ?? current.context.userId,
+  };
   const agent = await prisma.agent.findUnique({
     where: { id: current.agentId },
     select: { proxyCountry: true, proxyState: true, proxyCity: true },
@@ -520,13 +550,19 @@ export async function searchAndPromoteBrowserConfig(
       return { provider: 'steel', ...session };
     },
     probe: async (config, session) =>
-      dependencies.probe(session, input.targetUrl, input.storageState, {
-        configKey: config.key,
-        provider: config.provider,
-        proxyMode: config.proxyMode,
-        requirePaymentCdn,
-        blockedResourceUrl: input.blockedResourceUrl,
-      }),
+      dependencies.probe(
+        session,
+        input.targetUrl,
+        input.storageState,
+        {
+          configKey: config.key,
+          provider: config.provider,
+          proxyMode: config.proxyMode,
+          requirePaymentCdn,
+          blockedResourceUrl: input.blockedResourceUrl,
+        },
+        billing
+      ),
     promote: async ({ config, session }) => {
       const updated = await prisma.$transaction(async (tx) => {
         const replaced = await tx.browserSession.updateMany({
@@ -577,6 +613,7 @@ export async function searchAndPromoteBrowserConfig(
   });
   let winner: SuccessfulRecoveryCandidate | undefined;
   let lastError: unknown;
+  const classifierLlmUsage: ChallengeClassifierLlmUsage[] = [];
   for (let index = 0; index < phases.length; index += 1) {
     const phase = phases[index]!;
     log.info('Challenge recovery search phase', {
@@ -585,12 +622,14 @@ export async function searchAndPromoteBrowserConfig(
       configKeys: phase.configs.map((config) => config.key),
       avoidConfigKey: phase.avoidConfigKey ?? null,
       requirePaymentCdn,
+      agent_id: billing.agentId,
     });
     try {
       winner = await runParallelBrowserConfigSearch(phase.configs, searchDependencies, {
         avoidConfigKey: phase.avoidConfigKey,
         requirePaymentCdn,
       });
+      classifierLlmUsage.push(...(winner.probe.classifierLlmUsage ?? []));
       break;
     } catch (error) {
       lastError = error;
@@ -625,6 +664,7 @@ export async function searchAndPromoteBrowserConfig(
     recovery_message: winner.probe.paymentCdnOk
       ? `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes (payment CDN reachable).`
       : `Selected stable ${winner.config.key} browser configuration after ${winner.probe.attempts} clean probes.`,
+    classifier_llm_usage: classifierLlmUsage,
     browser_session_metadata: {
       provider: winner.config.provider,
       proxy_source: winner.session.proxySource,

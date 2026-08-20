@@ -16,6 +16,10 @@ import {
   type RecoveryCandidateSession,
 } from '../../providers/browser/challengeRecovery';
 import {
+  challengeClassifierCostCents,
+  CHALLENGE_LLM_MODEL,
+} from '../../providers/browser/challengeLlmClassifier';
+import {
   createSessionWithContextUsingDependencies,
   type BrowserSessionCreationDependencies,
 } from '../../providers/browser';
@@ -646,6 +650,30 @@ function testRecoveryRequestSchema(): void {
   );
 }
 
+function testChallengeLlmClassifierCostRouting(): void {
+  assert.equal(CHALLENGE_LLM_MODEL, 'rose-labs/rose-1-mini');
+  const paid = challengeClassifierCostCents({
+    call_site: 'challenge_llm_classifier',
+    prompt_tokens: 1_000,
+    completion_tokens: 100,
+    total_tokens: 1_100,
+    actual_model: 'anthropic/claude-haiku-4.5',
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  assert.ok(paid > 0, 'waterfall classifier usage must have positive cost');
+  const free = challengeClassifierCostCents({
+    call_site: 'challenge_llm_classifier',
+    prompt_tokens: 1_000,
+    completion_tokens: 100,
+    total_tokens: 1_100,
+    actual_model: 'claude-haiku-4-5-claude',
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+  });
+  assert.equal(free, 0, 'direct compute-token classifier usage is $0');
+}
+
 async function main(): Promise<void> {
   testCandidateMatrix();
   testConfigSearchUsesHiddenRemoteSessionsOnly();
@@ -657,6 +685,7 @@ async function main(): Promise<void> {
   // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
+  testChallengeLlmClassifierCostRouting();
   testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();

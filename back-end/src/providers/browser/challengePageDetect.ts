@@ -1,5 +1,11 @@
 import type { Page, Response } from 'playwright';
 
+import {
+  classifyPageAfterSettle,
+  type ChallengeClassifierBilling,
+  type ChallengeClassifierLlmUsage,
+} from './challengeLlmClassifier';
+
 const CHALLENGE_TEXT = [
   'access denied',
   'attention required! | cloudflare',
@@ -50,6 +56,11 @@ export function isUsableDocumentTitle(title: string): boolean {
   return true;
 }
 
+/**
+ * @deprecated Prefer the rose-1-mini LLM classifier in challengeLlmClassifier.ts.
+ * Retained for regression tests and historical RCA fixtures — do not use for
+ * probe/live-verify promotion decisions.
+ */
 export function challengeDetectionReason(input: {
   status: number | null;
   title: string;
@@ -93,6 +104,10 @@ export function challengeDetectionReason(input: {
   return null;
 }
 
+/**
+ * @deprecated Prefer classifyPageAfterSettle / classifyChallengeWithLlm.
+ * Thin wrapper over the deprecated heuristic reasoner.
+ */
 export function pageLooksChallenged(input: {
   status: number | null;
   title: string;
@@ -119,29 +134,29 @@ async function challengeSnapshot(page: Page, response: Response | null) {
   };
 }
 
+/**
+ * After DOM settle, ask rose-1-mini (screenshot + cleaned DOM + network meta)
+ * whether the page is still challenged. Heuristic marker polling is deprecated.
+ * Returns LLM usage so recover-challenge can forward cost rows to the agent.
+ */
 export async function waitForProviderSolver(
   page: Page,
-  response: Response | null
-): Promise<{ clean: boolean; reason: string | null; title: string }> {
-  // Both candidate factories explicitly enable their provider-native solver.
-  // Give it the first chance on every attempt, polling the page instead of
-  // assuming a fixed solve duration. A clean page exits immediately — but only
-  // after challengeDetectionReason accepts a usable document title (soft-walls
-  // must not win on empty/hostname/"Loading https://..." shells).
-  const deadline = Date.now() + PROVIDER_SOLVER_WAIT_MS;
-  let currentResponse = response;
-  let lastReason: string | null = 'probe_timeout';
-  let lastTitle = '';
-  while (Date.now() < deadline) {
-    await page.waitForTimeout(2_000);
-    const snapshot = await challengeSnapshot(page, currentResponse);
-    lastTitle = snapshot.title;
-    lastReason = challengeDetectionReason(snapshot);
-    if (lastReason === null) return { clean: true, reason: null, title: lastTitle };
-    // Drop the navigation Response after the first poll so a stale 403/429/502
-    // object cannot permanently pin a page that later hydrates a real document.
-    // Usable-title gating (above) is what prevents false-clean on soft-walls.
-    currentResponse = null;
-  }
-  return { clean: false, reason: lastReason, title: lastTitle };
+  response: Response | null,
+  billing: ChallengeClassifierBilling = {}
+): Promise<{
+  clean: boolean;
+  reason: string | null;
+  title: string;
+  usage: ChallengeClassifierLlmUsage | null;
+}> {
+  const result = await classifyPageAfterSettle(page, response, undefined, billing);
+  return {
+    clean: result.clean,
+    reason: result.clean ? null : result.reason,
+    title: result.title,
+    usage: result.usage,
+  };
 }
+
+// Keep challengeSnapshot exported-adjacent for tests that may monkeypatch via module.
+export const __deprecatedChallengeSnapshotForTests = challengeSnapshot;

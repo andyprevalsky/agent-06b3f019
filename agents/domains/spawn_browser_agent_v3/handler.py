@@ -6963,8 +6963,44 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 # CAPTCHA / bot walls are not sign-in blockers. browser-hotel-booking
                 # misrouted Expedia "Bot or Not?" into auth_assistance after
                 # recover_from_challenge falsely skipped as clean; refuse the
-                # handoff while the live document still looks challenged.
-                if input_page is not None and await live_tab_looks_challenged(input_page):
+                # handoff while the live document still looks challenged (LLM).
+                auth_guard_classifier_usages: list = []
+                auth_guard_page_challenged = False
+                if input_page is not None:
+                    auth_guard_page_challenged = await live_tab_looks_challenged(
+                        input_page,
+                        agent_id=agent_id,
+                        user_id=user_id,
+                        claude_token=token_state.access_token,
+                        claude_token_source=token_state.source,
+                        claude_token_pool_id=token_state.pool_token_id,
+                        gpt_token=gpt_token,
+                        gpt_account_id=gpt_account_id,
+                        gpt_token_source=gpt_token_source,
+                        gpt_token_pool_id=gpt_token_pool_id,
+                        usage_collector=auth_guard_classifier_usages,
+                    )
+                for classifier_usage in auth_guard_classifier_usages:
+                    if not isinstance(classifier_usage, dict):
+                        continue
+                    c_in = int(classifier_usage.get("prompt_tokens") or 0)
+                    c_out = int(classifier_usage.get("completion_tokens") or 0)
+                    total_input_tokens += c_in
+                    total_output_tokens += c_out
+                    accumulate_model_usage(
+                        usage_by_model,
+                        classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
+                        c_in,
+                        c_out,
+                        cache_read_input_tokens=int(
+                            classifier_usage.get("cache_read_input_tokens") or 0
+                        ),
+                        cache_creation_input_tokens=int(
+                            classifier_usage.get("cache_creation_input_tokens") or 0
+                        ),
+                        from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                    )
+                if auth_guard_page_challenged:
                     challenge_guard_reason = (
                         "Current page is a bot challenge/CAPTCHA, not an authentication "
                         "blocker. Call recover_from_challenge instead of "
@@ -7298,55 +7334,10 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 provider_exit_rejected = bool(
                     unified_action.get("params", {}).get("provider_exit_rejected")
                 )
-                # Same page_looks_challenged classifier as candidate probes and
-                # post-promote live_verify. Keep this early skip for clean-page
-                # recovery loops, but the classifier must not false-clean real
-                # interstitials (Expedia Bot or Not) or probes/verify lie too.
-                if (
-                    not provider_exit_rejected
-                    and input_page is not None
-                    and not await live_tab_looks_challenged(input_page)
-                ):
-                    skip_message = (
-                        f"Current page does not look challenged"
-                        + (f" ({current_url})" if current_url else "")
-                        + ". Continue the task on this page — do not start "
-                        "challenge recovery unless the document itself is blocked."
-                    )
-                    await save_browser_action_message(
-                        agent_id=agent_id,
-                        title="Page already clear — skip challenge recovery",
-                        task_id=task_id,
-                        message=skip_message,
-                        status=MessageStatus.FINISHED,
-                        browser_url=browser_url,
-                        action_type="browser_challenge_recovery",
-                        tool_call_id=recovery_call_id,
-                        extra_metadata={
-                            "recoveryStage": "skipped_clean_page",
-                            "resumeUrl": current_url,
-                        },
-                    )
-                    action_result = {
-                        "success": True,
-                        "message": skip_message,
-                        "recovery_action": "skipped_clean_page",
-                        "current_url": current_url,
-                    }
-                    await _finalize_browser_recovery_action_result(
-                        action_result=action_result,
-                        dom_service=dom_service,
-                        action_history=action_history,
-                        thinking=thinking,
-                        recovery_reason=recovery_reason,
-                        browser_turn_messages=browser_turn_messages,
-                        task_prompt=task_prompt,
-                        browser_state=browser_state,
-                        unified_action=unified_action,
-                        recovery_call_id=recovery_call_id,
-                        browser_stream=browser_stream,
-                    )
-                    continue
+                # Intentionally no early skipped_clean_page short-circuit: the
+                # rose-1-mini classifier runs after DOM settle inside probes /
+                # live verify. An up-front clean check would waste an LLM call
+                # and previously false-cleaned soft walls (Expedia Bot or Not).
 
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
@@ -7403,6 +7394,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         raise RuntimeError("Browser provider slots are busy; challenge recovery could not run")
                     return result
 
+                challenge_classifier_usages: list = []
                 try:
                     if playwright_browser is None or input_page is None:
                         raise RuntimeError("Browser state is unavailable for auth-preserving challenge recovery")
@@ -7435,6 +7427,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             playwright_browser,
                             candidate,
                             current_url,
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            claude_token=token_state.access_token,
+                            claude_token_source=token_state.source,
+                            claude_token_pool_id=token_state.pool_token_id,
+                            gpt_token=gpt_token,
+                            gpt_account_id=gpt_account_id,
+                            gpt_token_source=gpt_token_source,
+                            gpt_token_pool_id=gpt_token_pool_id,
+                            usage_collector=challenge_classifier_usages,
                         ),
                         commit_cookie_removals=lambda keys: commit_cookie_removals(
                             input_page,
@@ -7544,7 +7546,20 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             "live_verify",
                             "Verifying the promoted browser cleared the challenge on the live tab.",
                         )
-                        if not await verify_live_page_cleared_challenge(input_page, current_url):
+                        if not await verify_live_page_cleared_challenge(
+                            input_page,
+                            current_url,
+                            agent_id=agent_id,
+                            user_id=user_id,
+                            claude_token=token_state.access_token,
+                            claude_token_source=token_state.source,
+                            claude_token_pool_id=token_state.pool_token_id,
+                            gpt_token=gpt_token,
+                            gpt_account_id=gpt_account_id,
+                            gpt_token_source=gpt_token_source,
+                            gpt_token_pool_id=gpt_token_pool_id,
+                            usage_collector=challenge_classifier_usages,
+                        ):
                             provider = config_result.get("provider")
                             proxy_tier = config_result.get("proxy_tier")
                             config_key = config_result.get("config_key") or f"{provider}/{proxy_tier}"
@@ -7647,6 +7662,30 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         tool_call_id=recovery_call_id,
                     )
                     action_result = {"success": False, "error": error_message}
+                finally:
+                    # Fold Python-side rose-1-mini classifier usage into the
+                    # browser ledger (success or fail). Backend probe classifiers
+                    # already wrote ToolUsage via recordChallengeClassifierUsage.
+                    for classifier_usage in challenge_classifier_usages:
+                        if not isinstance(classifier_usage, dict):
+                            continue
+                        c_in = int(classifier_usage.get("prompt_tokens") or 0)
+                        c_out = int(classifier_usage.get("completion_tokens") or 0)
+                        total_input_tokens += c_in
+                        total_output_tokens += c_out
+                        accumulate_model_usage(
+                            usage_by_model,
+                            classifier_usage.get("actual_model") or "rose-labs/rose-1-mini",
+                            c_in,
+                            c_out,
+                            cache_read_input_tokens=int(
+                                classifier_usage.get("cache_read_input_tokens") or 0
+                            ),
+                            cache_creation_input_tokens=int(
+                                classifier_usage.get("cache_creation_input_tokens") or 0
+                            ),
+                            from_fast_cache=bool(classifier_usage.get("from_fast_cache")),
+                        )
 
                 await _finalize_browser_recovery_action_result(
                     action_result=action_result,

@@ -221,6 +221,12 @@ def is_usable_document_title(title: str) -> bool:
 
 
 def page_looks_challenged(*, status: int | None, title: str, body_text: str, html: str) -> bool:
+    """Deprecated heuristic challenge detector.
+
+    Prefer ``classify_page_after_settle`` / ``challenge_llm_classifier``
+    (rose-1-mini). Retained for regression tests and historical RCA fixtures —
+    do not use for probe / live-verify / auth-guard promotion decisions.
+    """
     # 502: Kernel (and similar) proxy denials surface as Bad Gateway. Treating them
     # as challenged keeps a blacklisted Kernel exit from looking "recovered".
     if status in {403, 429, 502}:
@@ -291,31 +297,41 @@ def _has_substantive_content(title: str, body_text: str, visible_markup: str) ->
     return len(visible) >= _CLEAN_PAGE_MIN_VISIBLE_CHARS and is_usable_document_title(title)
 
 
-async def _wait_for_clean_page(page: Any, response: Any, solver_timeout_seconds: float) -> bool:
-    deadline = asyncio.get_running_loop().time() + solver_timeout_seconds
-    current_response = response
-    while True:
-        await page.wait_for_timeout(2_000)
-        snapshot = await asyncio.gather(
-            page.title(),
-            page.locator("body").inner_text(timeout=2_000),
-            page.content(),
-            return_exceptions=True,
-        )
-        title = snapshot[0] if isinstance(snapshot[0], str) else ""
-        body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
-        html = snapshot[2] if isinstance(snapshot[2], str) else ""
-        status = current_response.status if current_response is not None else None
-        if not page_looks_challenged(
-            status=status,
-            title=title[:1_000],
-            body_text=body_text[:20_000],
-            html=html[:100_000],
-        ):
-            return True
-        if asyncio.get_running_loop().time() >= deadline:
-            return False
-        current_response = None
+async def _wait_for_clean_page(
+    page: Any,
+    response: Any,
+    solver_timeout_seconds: float,
+    *,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+) -> bool:
+    """After DOM settle, ask rose-1-mini whether the page is still challenged."""
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
+
+    result = await classify_page_after_settle(
+        page,
+        response,
+        settle_timeout_ms=max(1_000.0, float(solver_timeout_seconds) * 1000.0),
+        agent_id=agent_id,
+        user_id=user_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        usage_collector=usage_collector,
+    )
+    return bool(result.get("clean"))
 
 
 async def _probe_page(
@@ -324,6 +340,16 @@ async def _probe_page(
     *,
     attempts: int,
     solver_timeout_seconds: float,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
 ) -> bool:
     for _ in range(attempts):
         response = None
@@ -331,7 +357,21 @@ async def _probe_page(
             response = await page.goto(target_url, wait_until="domcontentloaded", timeout=45_000)
         except Exception:
             pass
-        if not await _wait_for_clean_page(page, response, solver_timeout_seconds):
+        if not await _wait_for_clean_page(
+            page,
+            response,
+            solver_timeout_seconds,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            usage_collector=usage_collector,
+        ):
             return False
     return True
 
@@ -343,6 +383,16 @@ async def probe_storage_state(
     *,
     attempts: int = 2,
     solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
 ) -> bool:
     """Probe a storage variant in an isolated remote-browser context."""
     context = await playwright_browser.new_context(storage_state=storage_state)
@@ -353,6 +403,16 @@ async def probe_storage_state(
             target_url,
             attempts=attempts,
             solver_timeout_seconds=solver_timeout_seconds,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            usage_collector=usage_collector,
         )
     finally:
         await context.close()
@@ -365,53 +425,85 @@ async def verify_live_page_cleared_challenge(
     *,
     attempts: int = 2,
     solver_timeout_seconds: float = DEFAULT_SOLVER_TIMEOUT_SECONDS,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
 ) -> bool:
-    """Require the canonical live tab to clear challenge markers after promote/restore.
+    """Require the canonical live tab to clear challenges after promote/restore.
 
     Candidate probes can false-stable: a remote session's already-loaded probe
     content looks clean, then a fresh same-host navigation lands on Access Denied
     (Eventim Cloudflare). Never accept a static snapshot of preloaded content —
-    always navigation-probe the target URL on the live tab.
+    always navigation-probe the target URL on the live tab via the LLM classifier.
     """
     return await _probe_page(
         page,
         target_url,
         attempts=attempts,
         solver_timeout_seconds=solver_timeout_seconds,
+        agent_id=agent_id,
+        user_id=user_id,
+        claude_token=claude_token,
+        claude_token_source=claude_token_source,
+        claude_token_pool_id=claude_token_pool_id,
+        gpt_token=gpt_token,
+        gpt_account_id=gpt_account_id,
+        gpt_token_source=gpt_token_source,
+        gpt_token_pool_id=gpt_token_pool_id,
+        usage_collector=usage_collector,
     )
 
 
-async def live_tab_looks_challenged(page: Any) -> bool:
-    """True when the live tab's current document still looks challenged.
+async def live_tab_looks_challenged(
+    page: Any,
+    *,
+    agent_id: str | None = None,
+    user_id: str | None = None,
+    claude_token: str | None = None,
+    claude_token_source: str | None = None,
+    claude_token_pool_id: str | None = None,
+    gpt_token: str | None = None,
+    gpt_account_id: str | None = None,
+    gpt_token_source: str | None = None,
+    gpt_token_pool_id: str | None = None,
+    usage_collector: list | None = None,
+) -> bool:
+    """True when the live tab's current document still looks challenged (LLM).
 
-    Used to no-op LLM-requested ``recover_from_challenge`` when the page is
-    already clean — avoids burning the step budget on recovery loops that the
-    model invents from network noise. Does NOT replace provider-exit recovery:
-    callers must still run full recovery when ``provider_exit_rejected`` is set
-    (page shell can look clean while a critical third-party resource is blocked).
+    Used by the auth-assistance guard so CAPTCHA walls are not misrouted into
+    request_user_assistance_for_authentication. Does NOT replace provider-exit
+    recovery: callers must still run full recovery when ``provider_exit_rejected``
+    is set.
     """
+    from domains.spawn_browser_agent_v3.challenge_llm_classifier import classify_page_after_settle
+
     try:
-        snapshot = await asyncio.wait_for(
-            asyncio.gather(
-                page.title(),
-                page.locator("body").inner_text(timeout=2_000),
-                page.content(),
-                return_exceptions=True,
-            ),
-            timeout=15,
+        result = await classify_page_after_settle(
+            page,
+            None,
+            settle_timeout_ms=15_000,
+            agent_id=agent_id,
+            user_id=user_id,
+            claude_token=claude_token,
+            claude_token_source=claude_token_source,
+            claude_token_pool_id=claude_token_pool_id,
+            gpt_token=gpt_token,
+            gpt_account_id=gpt_account_id,
+            gpt_token_source=gpt_token_source,
+            gpt_token_pool_id=gpt_token_pool_id,
+            usage_collector=usage_collector,
         )
     except Exception:
-        # Unknown page state — do not claim "clean" and skip recovery.
+        # Unknown page state — do not claim "clean".
         return True
-    title = snapshot[0] if isinstance(snapshot[0], str) else ""
-    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
-    html = snapshot[2] if isinstance(snapshot[2], str) else ""
-    return page_looks_challenged(
-        status=None,
-        title=title[:1_000],
-        body_text=body_text[:20_000],
-        html=html[:100_000],
-    )
+    return not bool(result.get("clean"))
 
 
 def target_looks_like_payment_document(_url: str) -> bool:

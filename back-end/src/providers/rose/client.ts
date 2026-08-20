@@ -92,8 +92,8 @@ export async function createStreamingCompletion(
   const pool = poolForModel(options.model);
   if (!pool) {
     throw new Error(
-      `Rose: unknown model ${options.model} (expected rose-labs/rose-1-lite, ` +
-        `rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
+      `Rose: unknown model ${options.model} (expected rose-labs/rose-1-mini, ` +
+        `rose-labs/rose-1-lite, rose-labs/rose-1-ultra, or rose-labs/rose-1-browser-use)`
     );
   }
   if (options.response_format && options.response_model) {

@@ -9,7 +9,7 @@
  * waterfall  = OpenRouter sequential fallback if claudeAuth fails / absent.
  */
 
-export type PoolName = 'rose-1-lite' | 'rose-1-ultra' | 'rose-1-browser-use';
+export type PoolName = 'rose-1-mini' | 'rose-1-lite' | 'rose-1-ultra' | 'rose-1-browser-use';
 
 export interface PoolSpec {
   name: PoolName;
@@ -22,6 +22,13 @@ export interface PoolSpec {
 }
 
 export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
+  'rose-1-mini': {
+    name: 'rose-1-mini',
+    claudeAuthModel: 'claude-haiku-4-5',
+    gptAuthModel: 'gpt-5.6-luna',
+    // Keep vision-capable layers — challenge classifier sends screenshots.
+    waterfall: ['anthropic/claude-haiku-4.5', 'google/gemini-3-flash-preview'],
+  },
   'rose-1-lite': {
     name: 'rose-1-lite',
     claudeAuthModel: 'claude-sonnet-5',
@@ -50,10 +57,12 @@ export const POOL_REGISTRY: Record<PoolName, PoolSpec> = {
 };
 
 const ALIAS_TO_POOL: Record<string, PoolName> = {
+  'rose-labs/rose-1-mini': 'rose-1-mini',
   'rose-labs/rose-1-lite': 'rose-1-lite',
   'rose-labs/rose-1-ultra': 'rose-1-ultra',
   'rose-labs/rose-1-browser-use': 'rose-1-browser-use',
   rose: 'rose-1-lite',
+  'rose-mini': 'rose-1-mini',
   'rose-ultra': 'rose-1-ultra',
 };
 

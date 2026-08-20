@@ -12111,7 +12111,9 @@ async def test_execute_goto_auto_adds_https():
 
 
 async def test_live_tab_looks_challenged_helpers():
-    """Clean live tabs must skip recovery; challenged tabs must still recover."""
+    """Deprecated heuristic stays for RCA; live_tab routes through LLM classifier."""
+    from unittest.mock import AsyncMock, patch
+
     from domains.spawn_browser_agent_v3.challenge_recovery import (
         live_tab_looks_challenged,
         page_looks_challenged,
@@ -12154,25 +12156,42 @@ async def test_live_tab_looks_challenged_helpers():
         body_text="Attention Required! | Cloudflare",
         html="",
     )
-    assert await live_tab_looks_challenged(_CleanPage()) is False
-    assert await live_tab_looks_challenged(_ChallengedPage()) is True
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(return_value={"clean": True, "reason": "ok", "title": "Buy tickets", "usage": {}}),
+    ):
+        assert await live_tab_looks_challenged(_CleanPage()) is False
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(
+            return_value={
+                "clean": False,
+                "reason": "challenge",
+                "title": "Access denied",
+                "usage": {},
+            }
+        ),
+    ):
+        assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
 async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
-    """Dump-faithful: Bot or Not must classify challenged (same gate as probes).
+    """Dump-faithful: Bot or Not must classify challenged (deprecated heuristic + LLM path).
 
     browser-hotel-booking agent fead82a5-791a-43b8-b807-5e71226da866:
 
     - browser_use_step_13 called recover_from_challenge (correct).
     - live_tab_looks_challenged / page_looks_challenged false-cleaned the wall,
       so the early skip returned skipped_clean_page — and that same classifier
-      is what candidate probes + post-promote live_verify use.
+      is what candidate probes + post-promote live_verify used.
     - browser_use_step_16 then called request_user_assistance_for_authentication.
 
-    Owning boundary: dump page snapshot must make page_looks_challenged /
-    live_tab_looks_challenged True so skip does not fire and probes/verify
-    would also reject the interstitial.
+    Owning boundary now: deprecated heuristic still flags the dump page, the
+    early skip is removed, and live_tab routes through the rose-1-mini LLM
+    classifier (mocked here to challenged).
     """
+    from unittest.mock import AsyncMock, patch
+
     from domains.spawn_browser_agent_v3.challenge_recovery import (
         live_tab_looks_challenged,
         page_looks_challenged,
@@ -12216,11 +12235,21 @@ async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
 
     assert page_looks_challenged(
         status=None, title=title, body_text=body, html=html
-    ), "dump page must classify challenged (shared skip/probe/live_verify classifier)"
-    assert await live_tab_looks_challenged(_ExpediaBotOrNotPage()) is True, (
-        "dump live tab must look challenged so recover skip does not fire and "
-        "config probes/live_verify would also reject this interstitial"
-    )
+    ), "deprecated heuristic must still flag dump page for RCA fixtures"
+    with patch(
+        "domains.spawn_browser_agent_v3.challenge_llm_classifier.classify_page_after_settle",
+        new=AsyncMock(
+            return_value={
+                "clean": False,
+                "reason": "Bot or Not interstitial",
+                "title": title,
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "actual_model": "rose-labs/rose-1-mini"},
+            }
+        ),
+    ):
+        assert await live_tab_looks_challenged(_ExpediaBotOrNotPage()) is True, (
+            "LLM classifier path must treat Bot or Not as challenged"
+        )
 
 
 def test_url_looks_like_api_surface_and_navigation_pin():
@@ -12612,11 +12641,12 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "navigation_pin_host = None" not in auto_fill_block
 
 
-def test_recovery_skips_when_live_tab_already_clear():
-    """LLM-invented recovery on a clean page must no-op (no host special-cases).
+def test_recovery_does_not_early_skip_clean_check():
+    """recover_from_challenge must not burn an LLM call on an early clean skip.
 
-    Same page_looks_challenged classifier as probes/live_verify — keep the early
-    skip; correctness depends on the classifier, not on removing the gate.
+    The rose-1-mini classifier runs after DOM settle inside probes / live
+    verify. An up-front skipped_clean_page short-circuit previously false-cleaned
+    soft walls and would now waste a classifier call even when correct.
     """
     import inspect
 
@@ -12627,16 +12657,16 @@ def test_recovery_skips_when_live_tab_already_clear():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
-    assert "live_tab_looks_challenged" in recovery_block
-    assert "skipped_clean_page" in recovery_block
+    assert 'recovery_action": "skipped_clean_page"' not in recovery_block
+    assert "recoveryStage\": \"skipped_clean_page\"" not in recovery_block
+    assert "Intentionally no early skipped_clean_page" in recovery_block
     assert "provider_exit_rejected" in recovery_block
     assert "is_hosted_stripe_checkout_url" not in recovery_block
     assert "healthcheck_noise" not in recovery_block
     assert "api.stripe.com" not in recovery_block
     assert "target_looks_like_payment_document" not in recovery_block
-    skip_offset = recovery_block.index("skipped_clean_page")
-    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
-    assert skip_offset < capture_offset
+    assert "await _capture_recovery_storage_state(" in recovery_block
+    assert "challenge_llm_classifier" in recovery_block or "usage_collector" in recovery_block
 
 
 def test_auth_assistance_blocked_while_challenge_page_visible():
@@ -17173,7 +17203,7 @@ async def run_all_tests():
     )
     r.record(
         "recovery_skips_clean_live_tab",
-        test_recovery_skips_when_live_tab_already_clear,
+        test_recovery_does_not_early_skip_clean_check,
     )
     r.record(
         "auth_assistance_blocked_on_challenge",
