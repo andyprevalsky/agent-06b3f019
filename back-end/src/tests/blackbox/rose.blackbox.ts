@@ -292,10 +292,29 @@ async function testPool_getPoolRegistryShape() {
   assertEqual(ultra.name, 'rose-1-ultra', 'ultra.name');
   assert(ultra.claudeAuthModel.startsWith('claude-'), 'ultra claudeAuthModel');
   assertEqual(ultra.gptAuthModel, 'gpt-5.6-sol', 'ultra.gptAuthModel');
-  assertEqual(ultra.waterfall.at(-1), 'openai/gpt-5.6-sol', 'ultra OpenRouter fallback');
+  // Anthropic dropped from both deep pools: opus-4.8 was the priciest layer
+  // while scoring below sol on every AA index. Sol leads, kimi-k3 backs it
+  // from a different vendor.
+  assertEqual(
+    ultra.waterfall.join(','),
+    'openai/gpt-5.6-sol,moonshotai/kimi-k3',
+    'ultra OpenRouter waterfall'
+  );
   assertEqual(browserUse.name, 'rose-1-browser-use', 'browserUse.name');
   assertEqual(browserUse.gptAuthModel, 'gpt-5.6-sol', 'browserUse.gptAuthModel');
-  assertEqual(browserUse.waterfall.at(-1), 'openai/gpt-5.6-sol', 'browserUse OpenRouter fallback');
+  assertEqual(
+    browserUse.waterfall.join(','),
+    'openai/gpt-5.6-sol,moonshotai/kimi-k3',
+    'browserUse OpenRouter waterfall'
+  );
+  assert(
+    !ultra.waterfall.some((m) => m.startsWith('anthropic/')),
+    'ultra waterfall has no anthropic layer'
+  );
+  assert(
+    !browserUse.waterfall.some((m) => m.startsWith('anthropic/')),
+    'browserUse waterfall has no anthropic layer'
+  );
   assert(lite.waterfall !== ultra.waterfall, 'lite.waterfall !== ultra.waterfall');
   assertEqual(Object.keys(POOL_REGISTRY).length, 3, 'registry has 3 pools');
 }
