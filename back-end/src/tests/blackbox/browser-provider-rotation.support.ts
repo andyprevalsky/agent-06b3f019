@@ -26,6 +26,18 @@ interface CrossProviderLadderOptions {
   readDifferentExitIp: (wsUrl: string, previousIp: string) => Promise<string>;
   retrieveKernelBrowser: (sessionId: string) => Promise<{ deleted_at?: string | Date | null }>;
   retrieveSteelBrowser: (sessionId: string) => Promise<{ status?: string }>;
+  /**
+   * Every provider session this ladder allocates, appended as it is created.
+   *
+   * The caller's `finally` can only close a session id it already holds, and it
+   * learns the ladder's final id from the RETURN value — so when the ladder throws
+   * partway (a Steel 429 on call 4 is the observed case) the session allocated by
+   * the provider switch is orphaned: still live, still billing, with its DB row
+   * already deleted by the caller's cleanup. Two such orphans were found live on
+   * the Steel account while diagnosing this, sharing the concurrency cap with 8
+   * legitimate production sessions.
+   */
+  allocatedSessionIds?: string[];
 }
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -129,7 +141,11 @@ export async function runCrossProviderRotationLadder(
     readDifferentExitIp,
     retrieveKernelBrowser,
     retrieveSteelBrowser,
+    allocatedSessionIds,
   } = options;
+  const recordAllocation = (sessionId: unknown): void => {
+    if (typeof sessionId === 'string' && sessionId !== '') allocatedSessionIds?.push(sessionId);
+  };
 
   // Steel create is flaky under parallel blackbox load; retry the Kernel→Steel
   // switch on transient connection failures (server already retries create).
@@ -192,6 +208,7 @@ export async function runCrossProviderRotationLadder(
       Boolean(switched.browser_session_metadata.steel_profile_id),
     'provider switch omitted Steel session metadata'
   );
+  recordAllocation(switched.session_id);
   assert(
     switched.session_id !== undefined && switched.session_id !== currentKernelSessionId,
     'provider switch did not allocate a new Steel session'
@@ -231,6 +248,7 @@ export async function runCrossProviderRotationLadder(
       steelRotated.next_recovery === 'rotation_budget_exhausted',
     'call 4 returned the wrong final rotation state'
   );
+  recordAllocation(steelRotated.session_id);
   assert(
     steelRotated.session_id !== undefined && steelRotated.session_id !== switched.session_id,
     'call 4 did not allocate another Steel session'

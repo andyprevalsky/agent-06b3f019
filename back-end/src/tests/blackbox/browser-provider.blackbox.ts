@@ -164,6 +164,9 @@ async function runLiveProviderParity(): Promise<void> {
   const userId = `kernel-provider-${randomUUID()}`;
   const agentId = randomUUID();
   let liveSessionId: string | undefined;
+  // Every provider session the cross-provider ladder allocates, so `finally` can
+  // release the ones this scope never learned about (see its loop below).
+  const allocatedSessionIds: string[] = [];
   let profileId: string | undefined;
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
@@ -564,6 +567,7 @@ async function runLiveProviderParity(): Promise<void> {
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      allocatedSessionIds,
     });
     if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
@@ -577,6 +581,15 @@ async function runLiveProviderParity(): Promise<void> {
   } finally {
     if (liveSessionId) {
       await post('/close', { session_id: liveSessionId, pause: false }).catch(() => {});
+    }
+    // Release every session the ladder allocated, not just the one this scope
+    // happens to hold. `liveSessionId` is only advanced to the ladder's final id on
+    // the SUCCESS path, so a mid-ladder throw (Steel 429 on call 4) otherwise leaves
+    // a live, billing Steel session behind with its DB row already deleted below.
+    // Closing an already-closed session is a no-op, so this is safe to repeat.
+    for (const sessionId of allocatedSessionIds) {
+      if (sessionId === liveSessionId) continue;
+      await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
     }
     if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
     if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});
