@@ -176,7 +176,9 @@ BROWSER_USE_TOOLS: Dict[str, Dict[str, Any]] = {
             "Request user help signing in only after every automated auth option in the current session is exhausted. "
             "Before calling, you must have tried every saved password, email OTP if available, SMS OTP if "
             "available, the minted agent account when it has an email, and guest/anonymous completion if possible. Cookie and "
-            "Steel-session auth are applied automatically before you start."
+            "Steel-session auth are applied automatically before you start. "
+            "Never use this for CAPTCHA, bot challenges, 'Bot or Not' walls, access-denied interstitials, or "
+            "unusual-traffic pages — those are not authentication blockers; call recover_from_challenge instead."
         ),
         "params": {},
     },
@@ -656,6 +658,7 @@ action envelope in text; use the provided tool call.
 - When a site offers OTP delivery options, prefer email over SMS.
 - OTP codes from email or SMS are automatically injected as user messages into your context as soon as they become available. If no OTP code is received after 60 seconds since requested, request a resend of the OTP code. If after another 60 seconds no OTP code is received, consider that authentication route exhausted and unusable.
 - If authentication blocks the task after all available automated auth options are exhausted, call request_user_assistance_for_authentication. Do not call attempt_completion, send_message_to_user, or report a status instead.
+- CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication. Call recover_from_challenge for those. Never call request_user_assistance_for_authentication while a challenge interstitial is still visible.
 - Do not open webmail or inbox websites to retrieve OTP codes."""
 
 

@@ -12571,6 +12571,33 @@ def test_recovery_skips_when_live_tab_already_clear():
     assert skip_offset < capture_offset
 
 
+def test_auth_assistance_blocked_while_challenge_page_visible():
+    """CAPTCHA walls must not escalate to auth_assistance attention.
+
+    browser-hotel-booking observed auth_assistance on Expedia "Bot or Not?" after
+    recover_from_challenge falsely skipped clean. The auth-assistance path must
+    re-check live_tab_looks_challenged and refuse the handoff.
+    """
+    import inspect
+
+    from domains.spawn_browser_agent_v3 import handler
+
+    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
+    start = source.index('if action_name == "request_user_assistance_for_authentication":')
+    end = source.index('if action_name == "recover_from_challenge":', start)
+    auth_block = source[start:end]
+
+    assert "live_tab_looks_challenged" in auth_block
+    assert "auth_assistance_blocked_challenged_page" in auth_block
+    assert "Call recover_from_challenge instead" in auth_block
+    # Challenge guard must run after the automated-auth exhaustion guard and
+    # before create_user_auth_assistance_request so a captcha page never opens
+    # an auth_assistance attention row.
+    challenge_offset = auth_block.index("auth_assistance_blocked_challenged_page")
+    create_offset = auth_block.index("create_user_auth_assistance_request")
+    assert challenge_offset < create_offset
+
+
 def test_navigation_guard_has_no_endpoint_path_allowlists():
     """Nav guards must not special-case payment/checkout path markers."""
     import inspect
@@ -17074,6 +17101,10 @@ async def run_all_tests():
     r.record(
         "recovery_skips_clean_live_tab",
         test_recovery_skips_when_live_tab_already_clear,
+    )
+    r.record(
+        "auth_assistance_blocked_on_challenge",
+        test_auth_assistance_blocked_while_challenge_page_visible,
     )
     await r.record_async("execute_goto_injects_ls", test_execute_goto_injects_local_storage)
     await r.record_async(

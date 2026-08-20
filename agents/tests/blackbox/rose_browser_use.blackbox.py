@@ -223,6 +223,7 @@ def test_build_browser_use_system_prompt_auth_priority_is_numbered():
     assert "OTP codes from email or SMS are automatically injected" in prompt
     assert "call request_user_assistance_for_authentication" in prompt
     assert "Do not call attempt_completion, send_message_to_user, or report a status instead." in prompt
+    assert "CAPTCHA, bot challenges, 'Bot or Not' walls, and access-denied interstitials are not authentication." in prompt
     assert "# OTP Rules" not in prompt
     assert "Do not classify final credential failures yourself" not in prompt
 
@@ -260,6 +261,8 @@ def test_build_browser_use_tools_preserves_catalog_descriptions():
 
     auth_help = tools[1]
     assert auth_help["description"] == BROWSER_USE_TOOLS["request_user_assistance_for_authentication"]["description"]
+    assert "Never use this for CAPTCHA" in auth_help["description"]
+    assert "Bot or Not" in auth_help["description"]
     assert auth_help["input_schema"]["properties"] == {}
     assert auth_help["input_schema"]["required"] == []
 

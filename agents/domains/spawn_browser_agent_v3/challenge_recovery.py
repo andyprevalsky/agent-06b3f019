@@ -59,11 +59,17 @@ _CHALLENGE_COOKIE_RE = re.compile(
 _CHALLENGE_RENDERED_TEXT_MARKERS = (
     "access denied",
     "attention required! | cloudflare",
+    # Expedia/DataDome PWA interstitial (title "Bot or Not?"). Matched against
+    # rendered title/body only — must stay out of raw HTML scans so merchant
+    # pages that discuss bots in script bundles do not false-positive.
+    "bot or not",
+    "can't tell if you're a human or a bot",
     "checking your browser",
     "enable javascript and cookies to continue",
     "just a moment",
     "performing security verification",
     "please verify you are a human",
+    "show us your human side",
     "sorry, you have been blocked",
     "this site can't be reached",
     "too many requests",
@@ -105,21 +111,29 @@ _CHALLENGE_TEXT_MARKERS = _CHALLENGE_RENDERED_TEXT_MARKERS + _PROXY_ERROR_TEXT_M
 # 600-char bar false-positived those as still challenged.
 _CLEAN_PAGE_MIN_VISIBLE_CHARS = 80
 
-_CHALLENGE_HTML_MARKERS = (
-    # Cloudflare
+# Sensor/orchestration hosts that also load on recovered pages. A match alone
+# is not proof of an interstitial — `_has_substantive_content` must also fail.
+_CHALLENGE_SENSOR_HTML_MARKERS = (
     "/cdn-cgi/challenge-platform",
-    "cf-chl-",
     "challenges.cloudflare.com/turnstile",
-    # DataDome
     "captcha-delivery.com",
-    "ddchallengebody",
-    # PerimeterX
     "perimeterx.net",
+)
+# Interstitial containers / challenge widgets that do not remain after a wall
+# clears. A match is definitive even when captcha instruction copy exceeds the
+# substantive-content bar (Expedia Bot or Not + DataDome slide copy).
+_CHALLENGE_INTERSTITIAL_HTML_MARKERS = (
+    "app-captcha-pwa",
+    "captcha__audio_",
+    "captcha__puzzle",
+    "cf-chl-",
+    "ddchallengebody",
     "px-captcha",
-    # Imperva / Incapsula
     "_incapsula_resource",
     "incapsula incident id",
 )
+# Backward-compatible union for tests/callers that iterate every HTML marker.
+_CHALLENGE_HTML_MARKERS = _CHALLENGE_SENSOR_HTML_MARKERS + _CHALLENGE_INTERSTITIAL_HTML_MARKERS
 
 
 @dataclass(frozen=True)
@@ -222,14 +236,20 @@ def page_looks_challenged(*, status: int | None, title: str, body_text: str, htm
     visible_markup = re.sub(r"<[^>]+>", "", stripped_html).strip()
     if not title.strip() and not body_text.strip() and not visible_markup:
         return True
-    if not any(marker in normalized_html for marker in _CHALLENGE_HTML_MARKERS):
+    # Interstitial containers are definitive. Expedia's DataDome PWA ships
+    # enough captcha instruction prose to clear the substantive-content bar
+    # while #app-captcha-pwa is still mounted; treating that as "clean" made
+    # recover_from_challenge report skipped_clean_page and the browser agent
+    # misroute into request_user_assistance_for_authentication.
+    if any(marker in normalized_html for marker in _CHALLENGE_INTERSTITIAL_HTML_MARKERS):
+        return True
+    if not any(marker in normalized_html for marker in _CHALLENGE_SENSOR_HTML_MARKERS):
         return False
-    # A vendor marker alone is not proof: sensor scripts (perimeterx.net,
-    # captcha-delivery.com, /cdn-cgi/challenge-platform) stay loaded on the real
-    # page AFTER a challenge clears. Without this, _wait_for_clean_page could
-    # never converge on a site that keeps its sensor bundle, and recovery would
-    # report failure for a page that already works. A page that has recovered
-    # renders substantive content, so treat that as clean.
+    # A sensor-host marker alone is not proof: those scripts stay loaded on the
+    # real page AFTER a challenge clears. Without this, _wait_for_clean_page
+    # could never converge on a site that keeps its sensor bundle, and recovery
+    # would report failure for a page that already works. A page that has
+    # recovered renders substantive content, so treat that as clean.
     if _has_substantive_content(title, body_text, visible_markup):
         return False
     return True

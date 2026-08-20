@@ -533,6 +533,53 @@ def test_challenge_page_classifier_detects_non_cloudflare_vendors():
     )
 
 
+def test_challenge_page_classifier_detects_expedia_bot_or_not():
+    """Expedia DataDome 'Bot or Not?' must classify as challenged.
+
+    browser-hotel-booking (agent fead82a5-791a-43b8-b807-5e71226da866) landed on
+    title "Bot or Not?" with #app-captcha-pwa. `live_tab_looks_challenged` returned
+    False, so recover_from_challenge emitted skipped_clean_page and the model
+    called request_user_assistance_for_authentication — evaluator then saw
+    auth_assistance instead of write_lock.
+
+    Three shapes from that dump must all read challenged:
+    1. title + captcha instruction body with no vendor host in HTML
+    2. #app-captcha-pwa shell without captcha-delivery.com
+    3. captcha-delivery.com present but captcha prose clears the old 80-char
+       substantive-content hatch (false-clean under the prior unified marker list)
+    """
+    title = "Bot or Not?"
+    body = (
+        "Show us your human side...\n"
+        "We can't tell if you're a human or a bot.\n"
+        "Slide right to secure your access. Press and hold the button.\n"
+    )
+    html_shell = (
+        '<html><head><title>Bot or Not?</title></head><body>'
+        '<div id="app-captcha-pwa">'
+        '<iframe title="Verification"></iframe>'
+        '<button id="captcha__audio_"></button>'
+        '<button id="captcha__puzzle__button"></button>'
+        f"{body}"
+        "</div></body></html>"
+    )
+    html_with_vendor = html_shell.replace(
+        '<iframe title="Verification"></iframe>',
+        '<iframe title="Verification" '
+        'src="https://geo.captcha-delivery.com/captcha/?cid=x"></iframe>',
+    )
+
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html="<html></html>"
+    ), "title+body alone must match rendered text markers"
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html=html_shell
+    ), "#app-captcha-pwa interstitial container must be definitive"
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html=html_with_vendor
+    ), "captcha instruction prose must not clear an interstitial via substantive hatch"
+
+
 def test_recovered_page_keeping_vendor_sensor_markup_reads_clean():
     """A vendor sensor bundle stays loaded AFTER a challenge clears.
 
@@ -728,6 +775,10 @@ async def run_all_tests():
     result.record(
         "challenge_page_classifier_vendors",
         test_challenge_page_classifier_detects_non_cloudflare_vendors,
+    )
+    result.record(
+        "challenge_page_classifier_expedia_bot_or_not",
+        test_challenge_page_classifier_detects_expedia_bot_or_not,
     )
     result.record(
         "recovered_page_with_vendor_markup_reads_clean",

@@ -6960,6 +6960,60 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                     )
                     await browser_stream.finish_tools(status="ERROR")
                     continue
+                # CAPTCHA / bot walls are not sign-in blockers. browser-hotel-booking
+                # misrouted Expedia "Bot or Not?" into auth_assistance after
+                # recover_from_challenge falsely skipped as clean; refuse the
+                # handoff while the live document still looks challenged.
+                if input_page is not None and await live_tab_looks_challenged(input_page):
+                    challenge_guard_reason = (
+                        "Current page is a bot challenge/CAPTCHA, not an authentication "
+                        "blocker. Call recover_from_challenge instead of "
+                        "request_user_assistance_for_authentication."
+                    )
+                    logger.info(
+                        "Blocked auth assistance while challenge interstitial is visible",
+                        base_site=base_site,
+                        current_url=current_url,
+                    )
+                    blocked_result = {
+                        "success": False,
+                        "error": challenge_guard_reason,
+                        "recovery_action": "auth_assistance_blocked_challenged_page",
+                    }
+                    await action_history.record_action(
+                        dom_service=dom_service,
+                        action="request_user_assistance_for_authentication",
+                        thinking=thinking,
+                        params={},
+                        result=blocked_result,
+                    )
+                    _append_browser_turn_messages(
+                        browser_turn_messages,
+                        task=task_prompt,
+                        browser_state=browser_state,
+                        include_screenshot=False,
+                        unified_action=unified_action,
+                        result=blocked_result,
+                        tool_call_id=tool_call_id_action,
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Authentication assistance blocked — challenge page",
+                        task_id=task_id,
+                        message=challenge_guard_reason,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="request_user_assistance_for_authentication",
+                        tool_call_id=tool_call_id_action,
+                        steps_taken=iteration,
+                        total_steps=MAX_ITERATIONS,
+                        extra_metadata={
+                            "recovery_action": "auth_assistance_blocked_challenged_page",
+                            "current_url": current_url,
+                        },
+                    )
+                    await browser_stream.finish_tools(status="ERROR")
+                    continue
                 logger.info(
                     "Browser agent requested user authentication assistance",
                     base_site=base_site,
