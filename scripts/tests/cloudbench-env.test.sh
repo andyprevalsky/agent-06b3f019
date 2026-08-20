@@ -1063,6 +1063,97 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
 
+# ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
+# Observed fleet abort before any task machine was provisioned:
+#   🔄 git-syncing /data/repo → <sha> ...
+#      fatal: could not read Username for 'https://github.com': No such device or address
+#      Error: ssh shell: Process exited with status 128
+#   ❌ exact remote checkout failed
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Root cause: --refresh-deps built AUTH_HDR from optional box-side GITHUB_TOKEN
+# (`[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=...`). When the warm machine secret was
+# missing, AUTH_HDR stayed empty and git prompted for a Username on a non-TTY.
+# Boot-launch already injects CLOUDBENCH_GITHUB_TOKEN_B64 from the controller;
+# maintenance git-sync must fail closed the same way and never allow empty auth.
+python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps/wmh controller-token git-sync contract failed"
+import pathlib, re, subprocess, sys, textwrap
+
+src_path = pathlib.Path(sys.argv[1])
+src = src_path.read_text()
+
+def mode_block(mode: str) -> str:
+    marker = f'if [ "$MODE" = "{mode}" ]; then'
+    start = src.find(marker)
+    if start < 0:
+        raise SystemExit(f"missing {mode} mode block")
+    # Take until the matching top-level fi after the mode banner — stop at next MODE block or EOF.
+    rest = src[start:]
+    next_mode = re.search(r'\nif \[ "\$MODE" = "', rest[1:])
+    end = (next_mode.start() + 1) if next_mode else len(rest)
+    return rest[:end]
+
+deps = mode_block("refresh-deps")
+wmh = mode_block("refresh-wmh")
+for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
+    if "build_controller_authenticated_git_sync_cmd" not in block:
+        raise SystemExit(f"{name} must call build_controller_authenticated_git_sync_cmd")
+    if "GITHUB_TOKEN:-" in block:
+        raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
+
+helper_match = re.search(
+    r"^build_controller_authenticated_git_sync_cmd\(\) \{.*?\n\}$",
+    src,
+    flags=re.M | re.S,
+)
+if not helper_match:
+    raise SystemExit("build_controller_authenticated_git_sync_cmd helper is missing")
+helper = helper_match.group(0)
+
+# Fail closed with no token.
+script = helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo ""; }
+    gh() { return 1; }
+    build_controller_authenticated_git_sync_cmd /data/repo abcdef
+    """
+)
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+if proc.returncode == 0:
+    raise SystemExit("helper must fail closed when no controller GitHub token is available")
+if "No controller GitHub token" not in (proc.stderr + proc.stdout):
+    raise SystemExit("helper must name the missing controller GitHub token")
+
+# With a token, embed non-optional auth header.
+script = helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    gh() { return 1; }
+    build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
+    """
+)
+proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+if proc.returncode != 0:
+    raise SystemExit(f"helper must succeed with a controller token: {proc.stderr}")
+cmd = proc.stdout
+if "http.extraheader" not in cmd:
+    raise SystemExit("authenticated sync cmd must set http.extraheader")
+if "GITHUB_TOKEN:-" in cmd:
+    raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
+if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
+    raise SystemExit("authenticated sync cmd must embed a Basic auth header from the controller token")
+# The Basic payload must decode to x-access-token:<token>
+import base64, re as _re
+m = _re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", cmd)
+if not m:
+    m = _re.search(r"AUTH_HDR='Authorization: Basic ([A-Za-z0-9+/=]+)'", cmd)
+if not m:
+    raise SystemExit(f"could not parse embedded AUTH_HDR from cmd: {cmd[:200]!r}")
+decoded = base64.b64decode(m.group(1)).decode()
+if not decoded.startswith("x-access-token:"):
+    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {decoded!r}")
+print("controller-token git-sync contract ok")
+PY
+
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.
