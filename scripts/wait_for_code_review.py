@@ -82,6 +82,12 @@ def normalize_status(entry: dict[str, object]) -> ReviewStatus:
     # its terminal result directly as state=SUCCESS/FAILURE and has no startedAt.
     normalized = conclusion if status == "COMPLETED" and conclusion else state or status
     if normalized in SUCCESS_STATES:
+        description = " ".join(
+            str(entry.get(key) or "")
+            for key in ("description", "title", "output", "summary")
+        ).lower()
+        if "review skipped" in description:
+            return ReviewStatus("REVIEW_SKIPPED", True, False, kind, entry)
         return ReviewStatus(normalized, True, True, kind, entry)
     if normalized in FAILURE_STATES:
         return ReviewStatus(normalized, True, False, kind, entry)
