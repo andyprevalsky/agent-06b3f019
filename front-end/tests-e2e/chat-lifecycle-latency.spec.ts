@@ -23,6 +23,15 @@ import {
 const SAMPLE_COUNT = 5;
 const FULL_LIFECYCLE_RATCHET_MS = 5_000;
 const MILESTONE_TIMEOUT_MS = 15_000;
+// The discarded warmup (sample 0) exists to populate the prompt/fast-mode cache
+// so the measured samples are warm. On a freshly seeded workspace that cache is
+// EMPTY, and a genuinely cold web_search lifecycle exceeds MILESTONE_TIMEOUT_MS
+// — so the warmup timed out, never completed, and therefore never warmed
+// anything, pushing the cold cost onto sample 1 (observed: warmup 15000ms +
+// sample 1 15000ms, then samples 2-5 at ~170ms). Give the warmup room to finish
+// its one real round trip. This does NOT touch FULL_LIFECYCLE_RATCHET_MS or the
+// timeout applied to any measured sample.
+const WARMUP_MILESTONE_TIMEOUT_MS = 90_000;
 const SMOOTHNESS_TARGETS_MS = {
   screen: 200,
   userMessage: 200,
@@ -161,7 +170,11 @@ function selectedPaths(): ChatPathDefinition[] {
   return [selected];
 }
 
-function waitForFirstResponse(page: Page, startedAt: Promise<number>): Promise<number> {
+function waitForFirstResponse(
+  page: Page,
+  startedAt: Promise<number>,
+  timeoutMs: number,
+): Promise<number> {
   return page
     .waitForFunction(
       () => {
@@ -177,7 +190,7 @@ function waitForFirstResponse(page: Page, startedAt: Promise<number>): Promise<n
         return thinkingHasTokens || answerHasText || persistedAssistantHasText;
       },
       undefined,
-      { timeout: MILESTONE_TIMEOUT_MS },
+      { timeout: timeoutMs },
     )
     .then(() => elapsed(startedAt));
 }
@@ -186,11 +199,12 @@ function settledMilestone(
   name: string,
   result: PromiseSettledResult<number>,
   failures: string[],
+  timeoutMs: number,
 ): number {
   if (result.status === 'fulfilled') return result.value;
   const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
   failures.push(`${name}: ${reason}`);
-  return MILESTONE_TIMEOUT_MS;
+  return timeoutMs;
 }
 
 async function waitForRoute(
@@ -198,12 +212,13 @@ async function waitForRoute(
   path: ChatPathDefinition,
   marker: string,
   startedAt: Promise<number>,
+  timeoutMs: number,
 ): Promise<number> {
   if (path.id === 'web_search') {
     await page
       .locator('[data-tool-name="web_search"][data-tool-status="FINISHED"]')
       .last()
-      .waitFor({ state: 'visible', timeout: MILESTONE_TIMEOUT_MS });
+      .waitFor({ state: 'visible', timeout: timeoutMs });
     return elapsed(startedAt);
   }
   if (path.terminal === 'agent_mode') {
@@ -212,7 +227,7 @@ async function waitForRoute(
         `[data-tool-name="cloud_agent"][data-agent-start-phase="${path.expectedAgentPhase}"]`,
       )
       .last();
-    await cloudAgent.waitFor({ state: 'attached', timeout: MILESTONE_TIMEOUT_MS });
+    await cloudAgent.waitFor({ state: 'attached', timeout: timeoutMs });
     return elapsed(startedAt);
   }
   await page
@@ -220,7 +235,7 @@ async function waitForRoute(
       hasText: marker,
     })
     .last()
-    .waitFor({ state: 'visible', timeout: MILESTONE_TIMEOUT_MS });
+    .waitFor({ state: 'visible', timeout: timeoutMs });
   return elapsed(startedAt);
 }
 
@@ -230,10 +245,11 @@ async function waitForTerminalState(
   marker: string,
   startedAt: Promise<number>,
   agentIdentity: Promise<string>,
+  timeoutMs: number,
 ): Promise<number> {
   if (path.terminal === 'agent_mode') {
     const agentId = await agentIdentity;
-    await waitForTemporalWorkflow(agentId, MILESTONE_TIMEOUT_MS);
+    await waitForTemporalWorkflow(agentId, timeoutMs);
     return elapsed(startedAt);
   }
   await page
@@ -241,7 +257,7 @@ async function waitForTerminalState(
       hasText: marker,
     })
     .last()
-    .waitFor({ state: 'visible', timeout: MILESTONE_TIMEOUT_MS });
+    .waitFor({ state: 'visible', timeout: timeoutMs });
   return elapsed(startedAt);
 }
 
@@ -289,6 +305,9 @@ test.describe('chat full-lifecycle latency', () => {
       // stable across the path's independent agent submissions so the warmup can
       // actually warm the prompt/cache path it is designed to exclude.
       for (let sample = 0; sample <= SAMPLE_COUNT; sample += 1) {
+        // Sample 0 is the discarded warmup and may legitimately be cold-slow.
+        // Every measured sample keeps the strict milestone budget.
+        const milestoneTimeoutMs = sample === 0 ? WARMUP_MILESTONE_TIMEOUT_MS : MILESTONE_TIMEOUT_MS;
         await page.goto(FRONTEND_URL, { waitUntil: 'domcontentloaded' });
 
         const goal = path.prompt(marker);
@@ -300,7 +319,7 @@ test.describe('chat full-lifecycle latency', () => {
         const { startedAt } = await armLifecycleClock(page, input);
         const agentIdentity = page
           .waitForURL((url) => Boolean(url.searchParams.get('agent-id')), {
-            timeout: MILESTONE_TIMEOUT_MS,
+            timeout: milestoneTimeoutMs,
           })
           .then(() => {
             agentId = new URL(page.url()).searchParams.get('agent-id');
@@ -311,11 +330,18 @@ test.describe('chat full-lifecycle latency', () => {
         const userMessage = page
           .locator('[data-message-role="USER"]', { hasText: goal })
           .last()
-          .waitFor({ state: 'visible', timeout: MILESTONE_TIMEOUT_MS })
+          .waitFor({ state: 'visible', timeout: milestoneTimeoutMs })
           .then(() => elapsed(startedAt));
-        const firstResponse = waitForFirstResponse(page, startedAt);
-        const route = waitForRoute(page, path, marker, startedAt);
-        const terminal = waitForTerminalState(page, path, marker, startedAt, agentIdentity);
+        const firstResponse = waitForFirstResponse(page, startedAt, milestoneTimeoutMs);
+        const route = waitForRoute(page, path, marker, startedAt, milestoneTimeoutMs);
+        const terminal = waitForTerminalState(
+          page,
+          path,
+          marker,
+          startedAt,
+          agentIdentity,
+          milestoneTimeoutMs,
+        );
 
         try {
           await input.press('Enter');
@@ -327,11 +353,11 @@ test.describe('chat full-lifecycle latency', () => {
             terminal,
           ]);
           const failures: string[] = [];
-          const screenMs = settledMilestone('screen', milestones[0], failures);
-          const userMessageMs = settledMilestone('user-message', milestones[1], failures);
-          const firstResponseMs = settledMilestone('first-response', milestones[2], failures);
-          const routeMs = settledMilestone('route', milestones[3], failures);
-          const lifecycleMs = settledMilestone('terminal', milestones[4], failures);
+          const screenMs = settledMilestone('screen', milestones[0], failures, milestoneTimeoutMs);
+          const userMessageMs = settledMilestone('user-message', milestones[1], failures, milestoneTimeoutMs);
+          const firstResponseMs = settledMilestone('first-response', milestones[2], failures, milestoneTimeoutMs);
+          const routeMs = settledMilestone('route', milestones[3], failures, milestoneTimeoutMs);
+          const lifecycleMs = settledMilestone('terminal', milestones[4], failures, milestoneTimeoutMs);
 
           if (path.id === 'direct_answer') {
             const unexpectedRouteCount = await page
@@ -364,7 +390,7 @@ test.describe('chat full-lifecycle latency', () => {
             let safeToDelete = path.terminal !== 'agent_mode';
             if (!safeToDelete) {
               try {
-                await waitForTemporalWorkflow(agentId, MILESTONE_TIMEOUT_MS);
+                await waitForTemporalWorkflow(agentId, milestoneTimeoutMs);
                 safeToDelete = true;
               } catch (error) {
                 console.warn(

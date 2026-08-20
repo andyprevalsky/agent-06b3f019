@@ -202,6 +202,11 @@ export const TOOL_ICONS: Record<string, LucideIcon> = {
   // Browser lifecycle action_types (emitted by spawn_browser_agent_v3 outside
   // the model's action loop: session setup, recovery, and recording events)
   session_init: Power,
+  session_starting: Power,
+  // Approval-resume progress events. These are NOT terminals — the browser task
+  // continues on the same session right after them (see derivations.ts).
+  payment_card_ready: CreditCard,
+  write_lock_granted: BellRing,
   browser_challenge_recovery: ShieldCheck,
   supervisor_recovery: RotateCcw,
   credential_propagation: KeyRound,
