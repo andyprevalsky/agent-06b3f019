@@ -38,16 +38,19 @@ Never omit the FE link, substitute a run JSON path, or imply that a dead localho
 viewer works. If the workflow can restore an archived viewer without rerunning a
 gated action, restore it before requesting approval.
 
-**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
 
-Render the failing call's `.llm-dumps/<agent_id>/<file>.json` with
-`python3 scripts/render_llm_dump.py <dump> --no-open` immediately before
-presenting, then link the HTML URL the renderer prints. The primary link is the
-failing call site, not a directory listing. Never link raw JSON as a substitute
-for the rendered dump. If there was no LLM call, write
+Render the last LLM call in the entire trajectory — root agent plus every
+spawned sub-agent. Collect `.llm-dumps/<agent_id>/*.json` for all of those
+ids, sort by the millisecond prefix in the filename, and render the latest
+file with `python3 scripts/render_llm_dump.py <dump> --no-open`. Link the
+HTML URL the renderer prints. Never pick an earlier failing call, a directory
+listing, or raw JSON. If there was no LLM call, write
 `**LLM dump:** Not applicable — <reason>`.
 
 **Local repro (<wall-clock>):**
+
+Tests: <one sentence naming the actual assertion — the behavior or value under test, not the file name>
 
 Numbered, copy-pasteable steps a human can run unchanged. `<wall-clock>` is the
 actual time you measured running this owning-boundary repro (for example
@@ -57,11 +60,16 @@ actual time you measured running this owning-boundary repro (for example
 - Post-fix: <measured passing value>
 
 Do not replace the measurement with “the test failed” or “the test passed.”
+Do not omit `Tests:`; a command list without saying what is asserted is invalid.
 
 **Environment**
 
-- **Evaluators:** `<id>` (`<method>`) — <criteria, semicolon-separated>. List every
-  evaluator from the catalog entry. If several, one bullet per evaluator.
+- **Evaluators:** one bullet per catalog evaluator, in this shape:
+  `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`.
+  `<how checked>` must be one of `semantic`, `exact string`, `regex`, `count`,
+  or `status`. Map `single_turn_llm_judge` and `agentic_llm_judge` to
+  `semantic`. For `static_check`, name the real mechanism of each `checks[].type`
+  (exact string, regex, count, status) — never stop at the method name.
 - **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay
   `<live_fixtures or none>`
 - **Task prompt:**
@@ -121,8 +129,8 @@ End with one explicit approval question and unambiguous response syntax:
   `<approval-id> edit: <instruction>`
 
 An approval is invalid if any required section, Evidence field, in-scope file
-link, concrete FE agent link, rendered LLM dump link, local-repro steps and
-measured wall-clock, or Environment triple (evaluators, fixtures, task prompt)
-is missing. `Not applicable — <reason>` counts as present; a blank field does
+link, concrete FE agent link, last-call rendered LLM dump, local-repro `Tests:`
+sentence plus steps and measured wall-clock, or Environment triple (evaluators
+with how they are checked, fixtures, task prompt) is missing. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
 approval ID and present all six sections again.

@@ -708,9 +708,11 @@ summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
-**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
 
 **Local repro (<wall-clock>):**
+
+Tests: <one sentence naming the actual assertion>
 
 1. <copy-paste command>
 2. <next step>
@@ -720,7 +722,7 @@ summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 **Environment**
 
-- **Evaluators:** `<id>` (`<method>`) — <criteria>
+- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
 - **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
 - **Task prompt:**
 
@@ -780,9 +782,11 @@ After the affected lifecycle rows, include:
 
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
-**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`
 
 **Local repro (<wall-clock>):**
+
+Tests: <one sentence naming the actual assertion>
 
 1. <copy-paste command>
 
@@ -791,7 +795,7 @@ After the affected lifecycle rows, include:
 
 **Environment**
 
-- **Evaluators:** `<id>` (`<method>`) — <criteria>
+- **Evaluators:** `<id>` — **<how checked>**: <what is checked>. Catalog: `<method>` / `<check.type or judge>`
 - **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
 - **Task prompt:**
 

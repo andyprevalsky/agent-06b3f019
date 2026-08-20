@@ -51,14 +51,22 @@ require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
 require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
   "approval requests must include a concrete FE agent link"
-require_text "$FORMAT" '**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`' \
-  "approval requests must include a rendered LLM dump link"
+require_text "$FORMAT" '**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`' \
+  "approval requests must include a rendered LLM dump of the last call in the trajectory"
+require_text "$FORMAT" "last LLM call in the entire trajectory" \
+  "approval LLM dumps must be the last call across the whole agent tree"
 require_text "$FORMAT" "python3 scripts/render_llm_dump.py" \
   "approval requests must render LLM dumps before presenting"
 require_text "$FORMAT" "**Local repro (<wall-clock>):**" \
   "approval requests must include local repro steps with measured wall-clock"
+require_text "$FORMAT" "Tests: <one sentence naming the actual assertion" \
+  "local repro must say what is actually being tested"
 require_text "$FORMAT" "- **Evaluators:**" \
   "approval requests must list catalog evaluators"
+require_text "$FORMAT" '`<how checked>` must be one of `semantic`, `exact string`, `regex`, `count`,' \
+  "evaluators must name how they are checked"
+require_text "$FORMAT" "never stop at the method name" \
+  "evaluators must not hide behind catalog method names"
 require_text "$FORMAT" "- **Fixtures:**" \
   "approval requests must list data fixtures"
 require_text "$FORMAT" "- **Task prompt:**" \
@@ -89,9 +97,13 @@ require_text "$DESCEND" "the canonical approval narrative" \
   "/descend approval stops must use the canonical approval narrative"
 require_text "$DESCEND" "**Local repro (<wall-clock>):**" \
   "/descend Stop 1 must include local repro wall-clock"
-require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — \`<call_site>\`" \
-  "/descend Stop 1 must include the rendered LLM dump link"
-require_text "$RCA" "FE link, rendered LLM dump link, numbered local-repro steps" \
+require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call \`<call_site>\` on \`<agent_id>\`" \
+  "/descend Stop 1 must include the last-call rendered LLM dump link"
+require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
+  "/descend Stop 1 must describe what the local repro tests"
+require_text "$DESCEND" "**<how checked>**" \
+  "/descend Stop 1 must name how each evaluator is checked"
+require_text "$RCA" "last-call rendered LLM dump, numbered local-repro" \
   "/rca approval output must require the Evidence pack"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then
@@ -102,8 +114,12 @@ if grep -Fq "the canonical four-part approval narrative" "$DESCEND"; then
   fail "/descend must not retain the superseded four-part approval narrative"
 fi
 
-if grep -Fq "**Exact benchmark task (\`task.prompt\`, verbatim):**" "$DESCEND"; then
-  fail "/descend must put task.prompt inside Evidence, not as a standalone lead-in"
+if grep -Fq "primary link is the failing call site" "$FORMAT"; then
+  fail "approval LLM dumps must be the last trajectory call, not the failing call"
+fi
+
+if grep -Fq "**LLM dump:** [Open rendered dump](<rendered-html-url>) — \`<call_site>\`" "$DESCEND"; then
+  fail "/descend must label the LLM dump as the last call, not a bare call_site"
 fi
 
 echo "All shared approval-format checks passed."
