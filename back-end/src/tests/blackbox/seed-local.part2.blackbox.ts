@@ -196,10 +196,7 @@ test('email-credentials-only seed mode syncs integrations and email rows then re
   const flag = source.indexOf("process.argv.includes('--email-credentials-only')");
   const branch = source.indexOf('if (EMAIL_CREDENTIALS_ONLY)');
   const integrations = source.indexOf("await syncTable('Integrations', syncIntegrations)", branch);
-  const emailRows = source.indexOf(
-    "await syncTable('Email Credentials'",
-    branch
-  );
+  const emailRows = source.indexOf("await syncTable('Email Credentials'", branch);
   const remoteFind = source.indexOf('remote.emailIntegrationCredential.findMany', emailRows);
   const branchReturn = source.indexOf('return;', remoteFind);
   const toolsBranch = source.indexOf("await syncTable('Tools'", branchReturn);
