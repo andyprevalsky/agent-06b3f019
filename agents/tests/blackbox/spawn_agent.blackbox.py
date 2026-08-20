@@ -2359,6 +2359,131 @@ async def test_spawn_explore_agent_activity_inner_callbacks_work():
     assert save_calls[1]["tool_call_id"] == "completion-1"
 
 
+async def test_explore_tool_error_persists_under_the_failing_tools_name():
+    """An explore tool error must be persisted as that tool, not as spawn_agent.
+
+    Prod agent a6b8593a-bd41-4a18-8eca-667cbf0020ba lost its web_fetch chip this
+    way: the explore save path stamped every message `spawn_agent`, so a row
+    about a tool collided with that tool's own chip under the shared toolCallId
+    and the frontend (last write wins) dropped the formatted one.
+
+    The tool-error post that triggered it is now deleted, so this pins the
+    remaining live caller: run_agent's completion-rejection post, which carries
+    toolName=attempt_completion_with_result and must survive the save path.
+    """
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+
+    setup_mock({"/api/agents/": {"status": 200, "json": {"ok": True}}})
+
+    async def fake_run_agent(**kwargs):
+        post_message = kwargs["post_message"]
+        # Byte-shaped like agents/loop/run_agent.py's post_tool_error_message.
+        await post_message(
+            "Completion rejected: no tool evidence",
+            "TOOL",
+            {
+                "toolCallId": "10a6cbd0-346e-437f-af57-14c0a2c8b0d6",
+                "toolName": "attempt_completion_with_result",
+                "toolStatus": "ERROR",
+                "title": "attempt_completion_with_result rejected",
+                "error": True,
+                "subAgentId": "task-explore",
+            },
+        )
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+        )
+
+    posted = [
+        json.loads(c["requestBody"])
+        for c in get_captured_requests()
+        if "/api/agents/agent-x/messages" in c["url"]
+    ]
+    tool_errors = [b for b in posted if b["metadata"].get("error") is True]
+    assert tool_errors, f"no error message persisted: {posted}"
+
+    for body in tool_errors:
+        metadata = body["metadata"]
+        assert metadata["toolName"] == "attempt_completion_with_result", (
+            "explore tool message was relabelled as "
+            f"{metadata['toolName']!r}; it reuses the tool's toolCallId "
+            f"{metadata['toolCallId']!r} and therefore overwrites that tool's own chip"
+        )
+
+
+async def test_explore_fe_posts_are_ordered_within_one_tool_call():
+    """Backgrounded explore FE posts must not reorder a single chip's lifecycle.
+
+    tagged_execute_activity fire-and-forgets each post so parallel leaves don't
+    serialize on ~500ms round trips. But the FE resolves a chip by toolCallId
+    with last write wins, so an IN_PROGRESS overtaking its own ERROR strands a
+    spinner that cleanOrphanedInProgress never reaps (it exempts explore).
+    Prod agent a6b8593a persisted ERROR at .959 before IN_PROGRESS at .982.
+
+    Posts for DIFFERENT toolCallIds must stay concurrent — that is the whole
+    reason for backgrounding — so this asserts order per chip, not globally.
+    """
+    import asyncio
+    from unittest.mock import patch
+
+    from domains.spawn_agent.service import spawn_explore_agent_activity
+    from helpers.messages import post_agent_message
+
+    delivered: list = []
+
+    async def slow_first_post(activity_fn, args=None, **kwargs):
+        """First post for a chip is slow; a later one would overtake it unordered."""
+        metadata = args[3] if args and len(args) >= 4 and isinstance(args[3], dict) else {}
+        label = f"{metadata.get('toolCallId')}:{metadata.get('toolStatus')}"
+        if metadata.get("toolStatus") == "IN_PROGRESS":
+            await asyncio.sleep(0.05)
+        delivered.append(label)
+
+    async def fake_grep_execute_tool(_self, *, execute_activity, tool_call, tool_call_id, agent_id, user_id=None):
+        """Stands in for a tool manager: IN_PROGRESS chip, then terminal ERROR chip."""
+        for status in ("IN_PROGRESS", "ERROR"):
+            await execute_activity(
+                post_agent_message,
+                args=[
+                    agent_id,
+                    f"grep {status}",
+                    "TOOL",
+                    {"toolCallId": tool_call_id, "toolName": "grep", "toolStatus": status},
+                ],
+            )
+        return {"matches": []}
+
+    async def fake_run_agent(**kwargs):
+        # Drive the REAL explore_execute_tool so posts flow through
+        # tagged_execute_activity, the seam that backgrounds FE posts.
+        await kwargs["execute_tool"]("grep", {"pattern": "."}, "chip-1")
+        return {"status": "completed", "final_response": "ok", "tokens_in": 0, "tokens_out": 0}
+
+    with (
+        patch("temporalio.activity.heartbeat"),
+        patch("loop.run_agent.run_agent", new=fake_run_agent),
+        patch("domains.grep.handler.GrepManager.execute_tool", new=fake_grep_execute_tool),
+        patch("loop.activity_helper.call_temporal_activity_from_activity", new=slow_first_post),
+    ):
+        await spawn_explore_agent_activity(
+            agent_id="agent-x", user_id="u", goal="g", model="m", task_id="task-explore"
+        )
+
+    chip = [d for d in delivered if d.startswith("chip-1:")]
+    assert chip == ["chip-1:IN_PROGRESS", "chip-1:ERROR"], (
+        f"one chip's lifecycle was delivered out of order: {chip}. A slow "
+        "IN_PROGRESS overtook its own ERROR, leaving an unreapable spinner."
+    )
+
+
 def test_three_sibling_explores_get_stable_isolated_cache_sequences():
     """Each explore task owns one stable lane even under a shared parent agent."""
     from loop.run_agent import _resolve_cache_sequence_id
@@ -2831,6 +2956,10 @@ async def run_all_tests():
         test_spawn_explore_agent_activity_rejects_empty_or_failed_tool_results,
     )
     await r.record_async("explore_activity_callbacks", test_spawn_explore_agent_activity_inner_callbacks_work)
+    await r.record_async(
+        "explore_tool_error_keeps_tool_name", test_explore_tool_error_persists_under_the_failing_tools_name
+    )
+    await r.record_async("explore_fe_posts_ordered_per_chip", test_explore_fe_posts_are_ordered_within_one_tool_call)
     r.record(
         "explore_cache_sequences_stable_and_isolated",
         test_three_sibling_explores_get_stable_isolated_cache_sequences,

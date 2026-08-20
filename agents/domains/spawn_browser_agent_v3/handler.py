@@ -4942,7 +4942,7 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     navigation_pin_url: Optional[str] = None
     handoff_payment_fill_attempts = 0
     handoff_payment_fill_succeeded = False
-    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 5
+    HANDOFF_PAYMENT_FILL_MAX_ATTEMPTS = 8
     # Session origin registrable domain — when the live page leaves this domain
     # (Place order / OAuth / 3DS handoff), navigation sticks to the live host
     # without path or product-name allowlists.
@@ -6383,16 +6383,17 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                             wait_for_payment_ref_fields,
                         )
 
-                        _autofill_page = None
-                        if humanizer is not None and "input_page" in getattr(
-                            humanizer, "__dict__", {}
-                        ):
-                            _autofill_page = getattr(humanizer, "input_page", None)
+                        _autofill_page = input_page
+                        if _autofill_page is None and humanizer is not None:
+                            if "input_page" in getattr(humanizer, "__dict__", {}):
+                                _autofill_page = getattr(humanizer, "input_page", None)
+                        # Keep the wait short: long polls burned the 900s budget
+                        # before titled payment iframes mounted on the handoff page.
                         fields_ready = await wait_for_payment_ref_fields(
                             dom_service.session,
                             ref_names=["card_number"],
                             input_page=_autofill_page,
-                            timeout_seconds=18.0,
+                            timeout_seconds=4.0,
                         )
                         if not fields_ready:
                             await save_browser_action_message(
