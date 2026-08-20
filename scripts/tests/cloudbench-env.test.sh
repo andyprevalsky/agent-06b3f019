@@ -1166,6 +1166,14 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     fail "concurrent-update retries must reach success (calls=$(cat "$call_file"))"
 ) || fail "warm-source resize concurrent-update retry regression failed"
 
+# Fleet must wait/stop a non-stopped warm donor instead of hard-failing (I-04).
+grep -Fq 'warm source not stopped' "$ROOT_DIR/scripts/run-bench-fleet" ||
+  fail "fleet must wait/stop when warm source is not already stopped"
+grep -Fq 'CLOUDBENCH_WARM_STOP_ATTEMPTS' "$ROOT_DIR/scripts/run-bench-fleet" ||
+  fail "fleet warm-stop wait must be attempt-bounded"
+grep -Fq 'after ${warm_stop_attempts} attempts' "$ROOT_DIR/scripts/run-bench-fleet" ||
+  fail "fleet warm-stop exhaustion message must name the attempt budget"
+
 # ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
 # Observed fleet abort before any task machine was provisioned:
 #   🔄 git-syncing /data/repo → <sha> ...
