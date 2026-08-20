@@ -613,7 +613,7 @@ echo \"${verify_marker}\$REMOTE_REF\""
 # Prefer the primary controller token; on auth failure the remote script retries
 # with the durable DISPATCH/GITHUB_TOKEN header when it differs.
 ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
-    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr="" 
+    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr=""
     local auth_local durable_local cmd_local remote_auth remote_durable remote_cmd
     primary="$(resolve_github_token)"
     [ -n "$primary" ] || {
