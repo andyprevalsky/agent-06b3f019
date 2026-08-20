@@ -316,11 +316,17 @@ export async function uploadFile(
   sessionId: string,
   buffer: Buffer,
   originalname: string,
-  mimetype: string
+  mimetype: string,
+  options: { directory?: string } = {}
 ) {
-  log.info('Uploading file to session', { sessionId, originalname, sizeBytes: buffer.length });
+  log.info('Uploading file to session', {
+    sessionId,
+    originalname,
+    sizeBytes: buffer.length,
+    directory: options.directory,
+  });
 
-  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype);
+  const result = await uploadSessionFile(sessionId, buffer, originalname, mimetype, options);
 
   return {
     path: result.path,
