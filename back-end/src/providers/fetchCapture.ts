@@ -19,6 +19,9 @@
  * Activation: BLACKBOX_TEST_CAPTURE_OUTBOUND=1 before server boot. Replay is a
  * separate opt-in via BLACKBOX_TEST_REPLAY_OUTBOUND=1.
  * Only intended for isolated blackbox test backends — never in production.
+ *
+ * Binary responses (`image/*`, `application/pdf`, …) are stored as base64 so
+ * capture/replay does not UTF-8-corrupt attachment bytes used by E2B uploads.
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
@@ -70,12 +73,54 @@ interface SerializedResponse {
   headers: Record<string, string>;
 }
 
+/** Marks a SerializedResponse.body as base64 so binary bytes survive capture/replay. */
+export const FETCH_CAPTURE_BODY_ENCODING_HEADER = 'x-rose-fetch-capture-body-encoding';
+
+/**
+ * Content types whose bodies must not pass through `response.text()` — that path
+ * UTF-8-decodes with U+FFFD replacement and permanently corrupts JPEGs/PDFs/etc.
+ * Benchmark stacks enable capture by default (`BLACKBOX_TEST_CAPTURE_OUTBOUND=1`),
+ * so this boundary sits on the real attachment → E2B upload path.
+ */
+export function isBinaryContentType(contentType: string | null | undefined): boolean {
+  if (contentType === null || contentType === undefined || contentType === '') return false;
+  const ct = contentType.toLowerCase().split(';')[0]?.trim() ?? '';
+  if (ct.startsWith('image/')) return true;
+  if (ct.startsWith('audio/')) return true;
+  if (ct.startsWith('video/')) return true;
+  if (ct === 'application/octet-stream') return true;
+  if (ct === 'application/pdf') return true;
+  if (ct === 'application/zip') return true;
+  if (ct === 'application/gzip') return true;
+  if (ct === 'application/wasm') return true;
+  if (ct.endsWith('+protobuf') || ct.includes('protobuf')) return true;
+  return false;
+}
+
 export function isRetryableOutboundResponseStatus(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
 export function outboundReplayCacheKey(url: string, method: string, body: string | null): string {
   return `call:${JSON.stringify([url, method, body])}`;
+}
+
+function responseFromSerialized(serialized: SerializedResponse): globalThis.Response {
+  const headers: Record<string, string> = { ...serialized.headers };
+  const encoding =
+    headers[FETCH_CAPTURE_BODY_ENCODING_HEADER] ??
+    headers[FETCH_CAPTURE_BODY_ENCODING_HEADER.toLowerCase()];
+  delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER];
+  delete headers[FETCH_CAPTURE_BODY_ENCODING_HEADER.toLowerCase()];
+
+  const body =
+    encoding === 'base64' ? Buffer.from(serialized.body, 'base64') : serialized.body;
+
+  return new globalThis.Response(body, {
+    status: serialized.status,
+    statusText: serialized.statusText,
+    headers,
+  });
 }
 
 class NonReplayableResponseError extends Error {
@@ -108,12 +153,29 @@ class FetchReplayClient {
       body: body ?? undefined,
     });
 
-    const responseBody = await response.text();
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((v, k) => {
       responseHeaders[k] = v;
     });
 
+    const contentType =
+      responseHeaders['content-type'] ?? responseHeaders['Content-Type'] ?? response.headers.get('content-type');
+
+    // Binary responses must round-trip as raw bytes. `response.text()` UTF-8-decodes
+    // with replacement characters (U+FFFD), expanding a 207KB JPEG into ~370KB of
+    // corrupted text — the files-in-sub-agents / Claude Code attachment failure mode.
+    if (isBinaryContentType(contentType)) {
+      const bytes = Buffer.from(await response.arrayBuffer());
+      responseHeaders[FETCH_CAPTURE_BODY_ENCODING_HEADER] = 'base64';
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        body: bytes.toString('base64'),
+        headers: responseHeaders,
+      };
+    }
+
+    const responseBody = await response.text();
     return {
       status: response.status,
       statusText: response.statusText,
@@ -476,12 +538,8 @@ export function installFetchCapture(): Router {
 
       captures.push(entry);
 
-      // Reconstruct a Response object from the serialized data
-      return new globalThis.Response(serialized.body, {
-        status: serialized.status,
-        statusText: serialized.statusText,
-        headers: serialized.headers,
-      });
+      // Reconstruct a Response object from the serialized data (base64 for binary).
+      return responseFromSerialized(serialized);
     } catch (err) {
       entry.durationMs = Date.now() - start;
       entry.error = err instanceof Error ? err.message : String(err);

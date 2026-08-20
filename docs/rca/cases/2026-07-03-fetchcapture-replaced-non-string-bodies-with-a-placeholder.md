@@ -50,8 +50,23 @@ fast-forward cache.
 
 None recorded.
 
+## Recurrence (2026-08-20) — response bodies
+
+Same wrapper, opposite direction: `FetchReplayClient.request` always called
+`response.text()` before reconstructing the `Response`. Under benchmark stacks
+(`BLACKBOX_TEST_CAPTURE_OUTBOUND=1` default in `scripts/run.sh`), Supabase
+`image/jpeg` attachment downloads were UTF-8-decoded with U+FFFD replacement
+(207364 → 369851 bytes) and then written into Claude Code E2B sandboxes —
+`files-in-sub-agents` failed with Pillow `UnidentifiedImageError`.
+
+Fix: detect binary `Content-Type`s, serialize as base64 with
+`x-rose-fetch-capture-body-encoding: base64`, decode when reconstructing.
+Cemented in `back-end/src/tests/unit/fetch-capture.test.ts`.
+
 ## Reusable lesson
 
 A capture/replay wrapper may serialize a request to build its cache key, but must
 never substitute that serialization for the request — pass unserializable bodies
-through untouched and mark them uncacheable.
+through untouched and mark them uncacheable. The same rule applies to **response**
+bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
+or pass the original `Response` through.
