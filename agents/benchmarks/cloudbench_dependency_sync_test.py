@@ -7557,6 +7557,33 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
 
 
+def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
+    """Parallel fleet launches must wait out concurrent warm maintenance instead
+    of hard-failing the first non-stopped sample into INFRA."""
+    fleet = FLEET_SCRIPT.read_text()
+    wait_budget = fleet.index(
+        'WARM_STOPPED_WAIT_SECONDS="${CLOUDBENCH_WARM_STOPPED_WAIT_SECONDS:-300}"'
+    )
+    wait_log = fleet.index("warm source state=$warm_state — waiting for stop")
+    gate = fleet.index("warm source must be stopped before fleet provisioning")
+    park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
+    fanout_at = fleet.index("# ── Phase 1:")
+    # Budget binds first; the timeout gate sits above the wait log inside the loop;
+    # parking and Phase-1 fanout must remain after the wait settles on stopped.
+    assert wait_budget < gate < wait_log < park_at < fanout_at
+    assert 'WARM_STOPPED_POLL_SECONDS="${CLOUDBENCH_WARM_STOPPED_POLL_SECONDS:-5}"' in fleet
+    # Must re-list machines inside the wait loop (not cache the first sample).
+    relist_at = fleet.index(
+        'warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo \'[]\')"',
+        wait_log,
+    )
+    assert wait_log < relist_at < park_at
+    # Never stop/destroy the shared warm donor from the fleet wait path.
+    wait_block = fleet[wait_budget:park_at]
+    assert "machine stop" not in wait_block
+    assert "machines destroy" not in wait_block
+
+
 def test_controller_names_the_signal_that_killed_it() -> None:
     """Silent teardowns (children mass-TERM'd, no error, no barrier release)
     repeatedly masqueraded as infra failures when the controller was signalled
