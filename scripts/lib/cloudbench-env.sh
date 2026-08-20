@@ -741,6 +741,31 @@ cloudbench_wait_machine_startable() {
   return 1
 }
 
+# Fleet clones require a *stopped* warm donor (volume snapshot source). Concurrent
+# maintenance briefly leaves the donor in started/replacing/created/pending; hard-
+# failing on the first non-stopped sample aborts otherwise-healthy fleets.
+# state_reader must print the current provider state for the given machine id.
+cloudbench_wait_machine_stopped() {
+  local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
+  local attempt state
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    state="$($state_reader "$machine_id" 2>/dev/null || true)"
+    case "$state" in
+      stopped) return 0 ;;
+      destroyed|destroying)
+        echo "Machine $machine_id became unavailable while waiting to stop (state=$state)" >&2
+        return 1
+        ;;
+    esac
+    echo "⏳ waiting for machine $machine_id to stop (state=${state:-unknown}, attempt $attempt/$max_attempts)"
+    [ "$attempt" -ge "$max_attempts" ] || sleep "$retry_delay_seconds"
+  done
+
+  echo "❌ warm source must be stopped before fleet provisioning (state=${state:-unknown})" >&2
+  return 1
+}
+
 cloudbench_validate_fresh_clone_id() {
   local candidate="$1" source_id="$2"
   shift 2
