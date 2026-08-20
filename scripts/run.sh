@@ -1312,10 +1312,13 @@ ensure_ngrok_domain_reserved() {
         # locate the first JSON object before parsing.
         # Capture parser stderr separately — a full reserved-domain dump alone
         # hides the one-line malformed:* reason when pagination hits an empty
-        # cursor page or a truncated CLI response.
-        local page_parse_err
+        # cursor page or a truncated CLI response. Use a heredoc so nested
+        # Python quotes cannot break the surrounding bash single-quoted -c
+        # string (SC1078/SC2026).
+        local page_parse_err page_parse_py
         page_parse_err=$(mktemp)
-        page_parse=$(printf '%s\n' "$page_body" | python3 -c '
+        page_parse_py=$(mktemp)
+        cat >"$page_parse_py" <<'PY'
 import json
 import sys
 
@@ -1340,13 +1343,14 @@ if not isinstance(reserved_domains, list):
 if any(item.get("domain") == requested_domain for item in reserved_domains if isinstance(item, dict)):
     print("found")
     sys.exit(0)
-if data.get("next_page_uri"):
+next_page_uri = data.get("next_page_uri")
+if next_page_uri:
     # An empty page with a next_page_uri cannot advance; treat as exhausted so
     # we fall through to create instead of failing the whole stack.
     if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
         print(
             "malformed:missing before_id cursor "
-            f"(domains={len(reserved_domains)} next={data.get('next_page_uri')!r})",
+            f"(domains={len(reserved_domains)} next={next_page_uri!r})",
             file=sys.stderr,
         )
         print("done")
@@ -1354,18 +1358,24 @@ if data.get("next_page_uri"):
     print(f"next:{reserved_domains[-1]['id']}")
 else:
     print("done")
-' "$domain" 2>"$page_parse_err") || {
+PY
+        page_parse=$(printf '%s\n' "$page_body" | python3 "$page_parse_py" "$domain" 2>"$page_parse_err") || {
             parse_rc=$?
             echo "❌ Could not parse ngrok reserved-domains listing for $domain (rc=$parse_rc)."
             if [ -s "$page_parse_err" ]; then
                 echo "   parser: $(tr '\n' ' ' <"$page_parse_err")"
             fi
-            rm -f "$page_parse_err"
+            rm -f "$page_parse_err" "$page_parse_py"
             echo "$page_body" | tail -n 40
             [ "$failure_mode" = "soft" ] && return 1
             exit 1
         }
-        rm -f "$page_parse_err"
+        # Soft diagnostics (e.g. empty-page exhaustion) exit 0 with stdout
+        # "done"; surface them before cleanup so they are not silent.
+        if [ -s "$page_parse_err" ]; then
+            echo "   parser: $(tr '\n' ' ' <"$page_parse_err")"
+        fi
+        rm -f "$page_parse_err" "$page_parse_py"
         case "$page_parse" in
             found)
                 echo "🌐 Reserved domain already exists: $domain"
