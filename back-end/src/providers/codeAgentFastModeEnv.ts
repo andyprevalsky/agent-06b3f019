@@ -44,6 +44,26 @@ function escapeRegExp(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * E2B sandboxes cannot reach the controller's loopback. Injecting
+ * `http://localhost:<frontend>/anthropic-proxy/...` as ANTHROPIC_BASE_URL makes
+ * Claude Code fail with `Unable to connect to API (ConnectionRefused)` after
+ * 10 api_retries (descend files-in-sub-agents, 2026-08-20). Treat loopback /
+ * unspecified hosts as "no proxy" so the sandbox uses direct Anthropic OAuth.
+ */
+export function isE2bReachableProxyBaseUrl(proxyBaseUrl: string): boolean {
+  try {
+    const parsed = new URL(proxyBaseUrl);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host === '0.0.0.0' || host === '::1') return false;
+    if (host === '127.0.0.1' || host.startsWith('127.')) return false;
+    if (host.endsWith('.localhost')) return false;
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function canonicalStaticSystemPrompt(systemPrompt: string, workDir?: string): string {
   let canonical = systemPrompt
     .replace(/https:\/\/[^@\s"']+@github\.com\//g, 'https://github.com/')
@@ -103,6 +123,7 @@ export function buildFastModeAnthropicEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && fastModeCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     ANTHROPIC_BASE_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
   };
@@ -129,6 +150,7 @@ export function buildFastModeCodexEnv(
 ): Record<string, string> {
   if (fastModeCacheEnabled !== true && fastModeCacheWriteEnabled !== true) return {};
   if (proxyBaseUrl === undefined || proxyBaseUrl === '') return {};
+  if (!isE2bReachableProxyBaseUrl(proxyBaseUrl)) return {};
   return {
     CODEX_FAST_MODE_PROXY_URL: `${proxyBaseUrl.replace(/\/$/, '')}/${proxyPath(goal, fastModeCacheEnabled, traceOptions)}`,
   };
