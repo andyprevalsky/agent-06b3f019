@@ -798,6 +798,34 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'AUTH_HDR_DURABLE' \
+  "refresh-deps must deliver a durable auth header via stdin for warm-box git-sync retry"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+
+# Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
+# the only auth path for refresh-deps. Controller auth is stdin-delivered
+# (primary + optional durable) and the remote script retries via _try_fetch.
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_try_fetch' \
+  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec_controller_git_sync' \
+  "refresh-deps must deliver controller git auth via stdin, not flyctl argv"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
@@ -1296,34 +1324,48 @@ for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
     if "GITHUB_TOKEN:-" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
-helper_match = re.search(
-    r"^build_controller_authenticated_git_sync_cmd\(\) \{.*?\n\}$",
-    src,
-    flags=re.M | re.S,
-)
-if not helper_match:
-    raise SystemExit("build_controller_authenticated_git_sync_cmd helper is missing")
-helper = helper_match.group(0)
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        # Allow a comment between ) and {
+        import re as _re
+        m = _re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=_re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
 
-auth_helper_match = re.search(
-    r"^resolve_controller_git_auth_header\(\) \{.*?\n\}$",
-    src,
-    flags=re.M | re.S,
-)
-if not auth_helper_match:
-    raise SystemExit("resolve_controller_git_auth_header helper is missing")
-auth_helper = auth_helper_match.group(0)
+helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
 
-deliver_match = re.search(
-    r"^ssh_exec_controller_git_sync\(\) \{.*?\n\}$",
-    src,
-    flags=re.M | re.S,
-)
-if not deliver_match:
-    raise SystemExit("ssh_exec_controller_git_sync helper is missing")
-deliver = deliver_match.group(0)
-if "http.extraheader" not in deliver and "GIT_CONFIG_KEY_0=http.extraheader" not in deliver:
-    raise SystemExit("stdin delivery must configure http.extraheader via GIT_CONFIG_*")
+auth_bits = [
+    extract_bash_function(src, name)
+    for name in (
+        "token_to_git_auth_header",
+        "resolve_durable_github_token",
+        "resolve_github_token",
+        "resolve_controller_git_auth_header",
+    )
+]
+auth_helper = "\n".join(auth_bits)
+
+deliver = extract_bash_function(src, "ssh_exec_controller_git_sync")
+if "AUTH_HDR_DURABLE" not in deliver:
+    raise SystemExit("stdin delivery must support durable AUTH_HDR_DURABLE retry")
+if "resolve_durable_github_token" not in deliver:
+    raise SystemExit("stdin delivery must resolve a durable fallback token")
 if 'printf' not in deliver or "AUTH_HDR" not in deliver:
     raise SystemExit("stdin delivery must pipe AUTH_HDR into fly ssh, not embed it in -C")
 if ' -C ' in deliver and "Authorization: Basic" in deliver.split("-C", 1)[1]:
@@ -1333,6 +1375,7 @@ if ' -C ' in deliver and "Authorization: Basic" in deliver.split("-C", 1)[1]:
 script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo ""; }
+    resolve_durable_github_token() { echo ""; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef
     """
@@ -1357,6 +1400,7 @@ if "No controller GitHub token" not in (proc.stderr + proc.stdout):
 script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
     """
@@ -1371,8 +1415,12 @@ finally:
 if proc.returncode != 0:
     raise SystemExit(f"helper must succeed with a controller token: {proc.stderr}")
 cmd = proc.stdout
+if "_try_fetch" not in cmd:
+    raise SystemExit("authenticated sync cmd must use _try_fetch for primary→durable retry")
 if "GIT_CONFIG_KEY_0=http.extraheader" not in cmd:
     raise SystemExit("authenticated sync cmd must set http.extraheader via GIT_CONFIG_*")
+if "primary GitHub token auth failed; retrying with durable fallback" not in cmd:
+    raise SystemExit("authenticated sync cmd must retry with durable AUTH_HDR_DURABLE")
 if "GITHUB_TOKEN:-" in cmd:
     raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
 if "Authorization: Basic" in cmd or "x-access-token:" in cmd or "ghp_test_token" in cmd:
@@ -1388,6 +1436,7 @@ if "checkout -f $ref_q" in cmd or "checkout -f \"$ref_q\"" in cmd:
 script = auth_helper + textwrap.dedent(
     """
     resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
     gh() { return 1; }
     resolve_controller_git_auth_header
     """
