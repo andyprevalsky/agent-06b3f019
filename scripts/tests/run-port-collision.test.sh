@@ -60,6 +60,63 @@ if docker_available_for_workspace_db 'victoria-db-another-workspace'; then
 fi
 echo "PASS: a pre-started workspace DB survives a slow docker info probe"
 
+# An isolated benchmark stack creates its DB container later in the same run, so
+# its name cannot already be listed. Requiring it made a healthy-but-slow
+# `docker info` (Docker Desktop routinely answers in ~2s) silently downgrade
+# every isolated benchmark run to the shared system Postgres. The canonical base
+# fixture is published per pg major, so a system PG17/18 host then hard-failed
+# with "canonical base fixture is unavailable" instead of running the benchmark.
+docker_info_quick() {
+    return 1
+}
+docker_ps_ports_quick() {
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an isolated benchmark run must keep Docker selected via a responsive docker ps" >&2
+    exit 1
+fi
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet'; then
+    echo "FAIL: a non-isolated workspace must still require its own DB container" >&2
+    exit 1
+fi
+docker_ps_ports_quick() {
+    return 1
+}
+if docker_available_for_workspace_db 'victoria-db-bench-not-created-yet' true; then
+    echo "FAIL: an unresponsive Docker daemon must not report the workspace DB as available" >&2
+    exit 1
+fi
+echo "PASS: isolated benchmark runs survive a slow docker info without losing Docker"
+
+# A healthy `docker info` alone must select Docker, with no container-name check.
+# DOCKER_OK is precisely what makes run.sh *create* the workspace DB container
+# (create_db_container), so demanding the container already exist is circular: a
+# first-ever workspace has none, would be denied Docker, and would silently run
+# on the shared system Postgres forever. Do not "harden" the fast path by
+# requiring container_may_not_exist_yet here.
+HEALTHY_DOCKER_PS_CALLS=0
+docker_info_quick() {
+    return 0
+}
+docker_ps_ports_quick() {
+    HEALTHY_DOCKER_PS_CALLS=$((HEALTHY_DOCKER_PS_CALLS + 1))
+    printf '%s\n' 'victoria-db-some-other-workspace'
+}
+if ! docker_available_for_workspace_db 'victoria-db-never-created'; then
+    echo "FAIL: a healthy docker info must select Docker for a not-yet-created workspace DB" >&2
+    exit 1
+fi
+if ! docker_available_for_workspace_db 'victoria-db-never-created' true; then
+    echo "FAIL: a healthy docker info must select Docker for an isolated run too" >&2
+    exit 1
+fi
+[ "$HEALTHY_DOCKER_PS_CALLS" -eq 0 ] || {
+    echo "FAIL: a healthy docker info must not need a container listing" >&2
+    exit 1
+}
+echo "PASS: a healthy docker info selects Docker without requiring an existing container"
+
 DOCKER_COLD_SEED_PROBES=0
 docker_info_quick() {
     DOCKER_COLD_SEED_PROBES=$((DOCKER_COLD_SEED_PROBES + 1))
@@ -121,7 +178,11 @@ echo "PASS: cold isolated seed validates and caps retry delays"
 
 find_free_port() {
     local port
-    for port in $(seq 61000 62000); do
+    # 61000-61999 only. kill-services.test.sh scans 62000-63000 and this gate now
+    # runs concurrently with it, so an inclusive upper bound of 62000 let both
+    # gates hand out the same port. check-then-bind is not parallel-safe, so the
+    # ranges must stay disjoint rather than merely usually-disjoint.
+    for port in $(seq 61000 61999); do
         if ! lsof -ti :"$port" >/dev/null 2>&1; then
             printf "%s" "$port"
             return 0
