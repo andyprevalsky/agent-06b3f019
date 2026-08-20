@@ -3317,6 +3317,26 @@ _SEED_GUEST_TOKEN="$(
         "$ROOT_DIR/back-end/prisma/schema.prisma"
 )"
 _SEED_GUEST_PROBE="$(mktemp "${TMPDIR:-/tmp}/cloudbench-seed-probe.XXXXXX")"
+# Detached fleet controllers can inherit a stripped PATH (Cursor cloud / minimal
+# launchers). Ensure npx from nvm or common prefixes is visible before probing.
+if ! command -v npx >/dev/null 2>&1; then
+    for _npx_dir in \
+        "$HOME/.nvm/versions/node"/*/bin \
+        /usr/local/bin \
+        "$ROOT_DIR/node_modules/.bin"
+    do
+        if [ -x "$_npx_dir/npx" ]; then
+            export PATH="$_npx_dir:$PATH"
+            break
+        fi
+    done
+fi
+command -v npx >/dev/null 2>&1 || {
+    rm -f "$_SEED_GUEST_PROBE"
+    echo "❌ npx not found on PATH; cannot verify the cloud-guest seed dump." >&2
+    echo "   Install Node.js or ensure nvm's bin dir is on PATH before run-bench-fleet." >&2
+    exit 1
+}
 if ! (
         cd "$ROOT_DIR/back-end" &&
             npx tsx scripts/seed-dump-cache.ts get "$_SEED_GUEST_TOKEN" "$_SEED_GUEST_PROBE"
