@@ -12158,6 +12158,76 @@ async def test_live_tab_looks_challenged_helpers():
     assert await live_tab_looks_challenged(_ChallengedPage()) is True
 
 
+async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
+    """Dump-faithful: recover must not skip_clean; auth must not win on Bot or Not.
+
+    browser-hotel-booking agent fead82a5-791a-43b8-b807-5e71226da866:
+
+    - browser_use_step_13 called ``recover_from_challenge`` with reason naming
+      DataDome / Bot or Not — correct tool. Handler returned
+      ``recovery_action=skipped_clean_page`` ("Page already clear"), so the
+      proxy-rotation / CAPTCHA-solver path inside recover never ran.
+    - browser_use_step_16 (same interstitial still visible) called
+      ``request_user_assistance_for_authentication`` instead of calling
+      recover again — evaluator then saw auth_assistance instead of a
+      write_lock / payment-card attention.
+
+    Owning boundary: given the step-13/16 page snapshot, ``live_tab_looks_challenged``
+    must be True so recover enters proxy recovery (does not skip) and the
+    auth-assistance guard refuses the step-16 tool.
+    """
+    from domains.spawn_browser_agent_v3.challenge_recovery import (
+        live_tab_looks_challenged,
+        page_looks_challenged,
+    )
+
+    # Exact signals from browser_use_step_13 / _16 user snapshots.
+    title = "Bot or Not?"
+    body = (
+        "Show us your human side...\n"
+        "We can't tell if you're a human or a bot.\n"
+        "The visual verification might not be accessible to you. We recommend "
+        "you to use the audio verification instead.\n"
+        "Slide right to secure your access\n"
+        "You are browsing and clicking at a speed much faster than expected "
+        "of a human being.\n"
+    )
+    html = (
+        '<html><head><title>Bot or Not?</title></head><body>'
+        '<div id="app-captcha-pwa">'
+        '<iframe title="Verification system" id="ddChallengeBody1787258982218"></iframe>'
+        '<button id="captcha__puzzle__button" title="Switch to the visual verification"></button>'
+        '<button id="captcha__audio__button" title="Switch to the audio verification"></button>'
+        '<button id="captcha__reload__button" title="Reload the verification"></button>'
+        '<button id="show-human-auth"></button>'
+        f"{body}"
+        "</div></body></html>"
+    )
+
+    class _ExpediaBotOrNotPage:
+        async def title(self):
+            return title
+
+        def locator(self, _sel):
+            class _Body:
+                async def inner_text(self, timeout=0):
+                    return body
+
+            return _Body()
+
+        async def content(self):
+            return html
+
+    # Classifier gate used by the recover skip branch.
+    assert page_looks_challenged(
+        status=None, title=title, body_text=body, html=html
+    ), "step_13 dump page must classify challenged (else recover returns skipped_clean_page)"
+    # Live-tab gate the handler actually awaits before skip vs proxy recovery.
+    assert await live_tab_looks_challenged(_ExpediaBotOrNotPage()) is True, (
+        "step_13 dump live tab must look challenged so recover_from_challenge "
+        "enters proxy/CAPTCHA recovery instead of skipped_clean_page"
+    )
+
 def test_url_looks_like_api_surface_and_navigation_pin():
     """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
     from domains.spawn_browser_agent_v3.service_actions import (
@@ -17074,6 +17144,10 @@ async def run_all_tests():
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
+    await r.record_async(
+        "expedia_bot_or_not_dump_forces_proxy_recovery",
+        test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth,
+    )
     r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
     await r.record_async("navback_refuses_pinned_host", test_execute_navback_refuses_when_host_pinned)
