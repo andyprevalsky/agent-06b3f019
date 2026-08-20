@@ -1074,4 +1074,31 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
+# ── refresh-deps must inject controller GitHub auth (descend image-handling) ─
+# Fleet epoch evidence (2026-08-20): warm --refresh-deps git-sync failed with
+#   fatal: could not read Username for 'https://github.com'
+# while `fly secrets list` showed GITHUB_TOKEN (and sibling env blobs) as Staged,
+# not activated on the warm machine. refresh-deps only consulted box-side
+# ${GITHUB_TOKEN:-}, so a staged-only secret aborted the entire fleet before any
+# task machine was provisioned. Per-run clones already inject
+# CLOUDBENCH_GITHUB_TOKEN_B64 from the controller; central dep refresh must do
+# the same so private-repo fetch does not depend on warm-machine secret
+# activation state.
+refresh_deps_block="$(
+  awk '
+    $0 ~ /^if \[ "\$MODE" = "refresh-deps" \]; then$/ { capture = 1 }
+    capture { print }
+    capture && $0 ~ /^if \[ "\$MODE" = "/ && $0 !~ /refresh-deps/ { exit }
+  ' "$ROOT_DIR/scripts/run-bench-cloud"
+)"
+[ -n "$refresh_deps_block" ] || fail "could not extract production refresh-deps mode block"
+printf '%s' "$refresh_deps_block" | grep -Eq 'gh auth token|resolve_github_token' ||
+  fail "refresh-deps must resolve a controller GitHub token before warm git-sync"
+printf '%s' "$refresh_deps_block" | grep -Fq 'CLOUDBENCH_GITHUB_TOKEN_B64' ||
+  fail "refresh-deps must inject CLOUDBENCH_GITHUB_TOKEN_B64 into warm git-sync (not only box GITHUB_TOKEN)"
+if printf '%s' "$refresh_deps_block" | grep -Fq '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' \
+  && ! printf '%s' "$refresh_deps_block" | grep -Fq 'CLOUDBENCH_GITHUB_TOKEN_B64'; then
+  fail "refresh-deps must not rely solely on box-side GITHUB_TOKEN for private-repo fetch"
+fi
+
 echo "All cloud benchmark environment checks passed."

@@ -1339,12 +1339,29 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match (auth via
-    # the box-side GITHUB_TOKEN secret through git http.extraheader).
+    # Sync the repo to the ref whose manifests the trees must match.
+    # Auth preference mirrors per-run clones: inject the CONTROLLER GitHub token
+    # as CLOUDBENCH_GITHUB_TOKEN_B64 so private-repo fetch does not depend on the
+    # warm machine's GITHUB_TOKEN secret being activated (staged-only secrets
+    # previously aborted whole fleets with "could not read Username for
+    # https://github.com"). Fall back to box-side GITHUB_TOKEN when present.
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
+    CONTROLLER_GITHUB_TOKEN="$(gh auth token 2>/dev/null || resolve_github_token)"
+    [ -n "$CONTROLLER_GITHUB_TOKEN" ] || {
+        echo "❌ No controller GitHub token available for refresh-deps git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or run 'gh auth login'." >&2
+        exit 1
+    }
+    CONTROLLER_GITHUB_TOKEN_B64="$(printf '%s' "$CONTROLLER_GITHUB_TOKEN" | base64 | tr -d '\n')"
+    unset CONTROLLER_GITHUB_TOKEN
     SYNC_CMD="set -e
 AUTH_HDR=''
-[ -n \"\${GITHUB_TOKEN:-}\" ] && AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+TOKEN=\"\$(printf '%s' '$CONTROLLER_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)\"
+[ -z \"\$TOKEN\" ] && TOKEN=\"\${GITHUB_TOKEN:-}\"
+[ -n \"\$TOKEN\" ] || { echo '❌ refresh-deps git-sync has no GitHub token (controller inject + box secret both empty)' >&2; exit 1; }
+AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
+unset TOKEN
+export CLOUDBENCH_GITHUB_TOKEN_B64='$CONTROLLER_GITHUB_TOKEN_B64'
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
@@ -1352,6 +1369,7 @@ chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
 echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
 echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
+    unset CONTROLLER_GITHUB_TOKEN_B64
     SYNC_LOG="$(mktemp)"
     if ! ssh_exec "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'; then
         rm -f "$SYNC_LOG"
