@@ -8004,10 +8004,22 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
 
 
 def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
-    """Join transcript + metadata error surfaces for intermediate-failure classifiers."""
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
     parts: list[str] = []
     if isinstance(message, dict):
-        parts.append(str(message.get("message") or message.get("content") or ""))
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
     for key in ("error", "title", "detail", "details"):
         value = candidate.get(key)
         if isinstance(value, str) and value:

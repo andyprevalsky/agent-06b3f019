@@ -3053,6 +3053,10 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     b87b27c5-a055-41bf-ab63-8d2e90547f04 reached a grounded Amazon purchase write_lock
     after `Cannot humanize input_text … no coordinates available` (CDP: no node for
     backend id 87012), then failed only on no_tool_failures.
+
+    Outcome-proof agent 3cb17215-4a2a-4a13-8afb-52d087da0e27 showed the same class on
+    click (`Cannot humanize click …`); live GET payloads carry the body in `text`,
+    while archived transcripts remap to `message` — both shapes must classify.
     """
     from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
 
@@ -3061,7 +3065,8 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
         "messages": [
             {
                 "role": "TOOL",
-                "message": "Cannot humanize input_text for element index 87012: no coordinates available",
+                # Live agent GET shape (API field name).
+                "text": "Cannot humanize input_text for element index 87012: no coordinates available",
                 "metadata": {
                     "error": True,
                     "title": 'Typed \'[encrypted_data]\' into <input name="password">',
@@ -3073,6 +3078,19 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
             },
             {
                 "role": "TOOL",
+                "text": "Cannot humanize click for element index 91731: no coordinates available",
+                "metadata": {
+                    "error": True,
+                    "title": "Clicked <input #signInSubmit>",
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_u8k10geKSNi8U0RrsOGEM1Dr",
+                },
+            },
+            {
+                "role": "TOOL",
+                # Archived run-JSON shape after extract_message_transcript.
                 "message": "No node found for given backend id",
                 "metadata": {
                     "toolName": "spawn_browser_agent",
@@ -3100,7 +3118,7 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
         "messages": [
             {
                 "role": "TOOL",
-                "message": "Kernel session crashed mid-checkout",
+                "text": "Kernel session crashed mid-checkout",
                 "metadata": {
                     "toolName": "spawn_browser_agent",
                     "toolStatus": "ERROR",
