@@ -1,13 +1,10 @@
 import Stripe from 'stripe';
-// BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID lives in providers/, not
-// domains/purchases/config: it is consumed by both `purchases` and
-// `test-payment`, and the structural gate rejects a cross-domain import. It was
-// still being imported from the old location here, which resolved it to
-// `undefined` and made assertUserMatchesMode return early instead of throwing --
-// silently disabling the sandbox/production identity-crossing guard. `scripts/`
-// is outside the tsconfig `include`, so tsc never saw the dangling import.
-import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
+// The production identity lives in providers/benchmarkPaymentIdentity; importing
+// it from purchases/config resolved to `undefined`, which silently disabled the
+// sandbox half of assertUserMatchesMode (undefined never equals a real user id),
+// so sandbox provisioning could overwrite the live Stripe customer + cardholder.
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../src/domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
 
 /** Sandbox and live fixtures must never share their Stripe, user, or AgentCard identities. */
 export type FixtureMode = 'sandbox' | 'live';

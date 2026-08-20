@@ -390,7 +390,32 @@ async def spawn_explore_agent_activity(
     # already in-process; the post is FE/persistence-only. Backgrounded tasks are
     # drained after run_agent so no message is lost.
     _pending_fe_posts: "list[asyncio.Task]" = []
+    # Tail of the in-flight post chain for each chip, keyed by toolCallId.
+    _fe_post_chain: "dict[str, asyncio.Task]" = {}
     _FE_POST_DRAIN_THRESHOLD = 64
+
+    def _dispatch_fe_post(chain_key: Optional[str], coro_factory) -> None:
+        """Background one FE post, ordered against earlier posts for the same chip.
+
+        Posts for DIFFERENT chips stay fully concurrent — that concurrency is the
+        whole point of backgrounding. Posts that share a toolCallId are chained,
+        because the FE resolves a chip by toolCallId with last write wins: an
+        IN_PROGRESS landing after its own ERROR strands a spinner that
+        `cleanOrphanedInProgress` never reaps (it exempts agentType 'explore').
+        Prod agent a6b8593a persisted ERROR at .959 before IN_PROGRESS at .982.
+        """
+        previous = _fe_post_chain.get(chain_key) if chain_key else None
+
+        async def _ordered():
+            if previous is not None:
+                # Order only; a failed predecessor must not cancel its successor.
+                await asyncio.gather(previous, return_exceptions=True)
+            return await coro_factory()
+
+        task = asyncio.create_task(_ordered())
+        if chain_key:
+            _fe_post_chain[chain_key] = task
+        _pending_fe_posts.append(task)
 
     async def tagged_execute_activity(activity_fn, args=None, **kwargs):
         """Wraps call_temporal_activity_from_activity to tag internal messages with explore taskId.
@@ -400,12 +425,16 @@ async def spawn_explore_agent_activity(
         """
         if activity_fn.__name__ == "post_agent_message" and args and len(args) >= 4:
             metadata = args[3]
+            chain_key: Optional[str] = None
             if isinstance(metadata, dict):
                 metadata["taskId"] = task_id
                 metadata["agentType"] = "explore"
                 metadata["subAgentId"] = task_id
-            _pending_fe_posts.append(
-                asyncio.create_task(call_temporal_activity_from_activity(activity_fn, args=args, **kwargs))
+                tool_call_id = metadata.get("toolCallId")
+                chain_key = str(tool_call_id) if tool_call_id else None
+            _dispatch_fe_post(
+                chain_key,
+                lambda: call_temporal_activity_from_activity(activity_fn, args=args, **kwargs),
             )
             return None
         return await call_temporal_activity_from_activity(activity_fn, args=args, **kwargs)
@@ -426,6 +455,17 @@ async def spawn_explore_agent_activity(
                 pending_count=len(pending),
             ):
                 results = await asyncio.gather(*pending, return_exceptions=True)
+            # Only NOW drop the chain tails, and only those still pointing at a
+            # task we just drained. Clearing them before the gather would publish
+            # "no predecessor" across an await: a concurrent post for the same
+            # toolCallId would then start unchained and could overtake the one
+            # still draining — recreating the very write inversion the chain
+            # exists to prevent. A key whose tail was replaced during the await
+            # belongs to a newer in-flight post and must be left alone.
+            drained = set(pending)
+            for key, task in list(_fe_post_chain.items()):
+                if task in drained:
+                    _fe_post_chain.pop(key, None)
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
@@ -566,6 +606,11 @@ async def spawn_explore_agent_activity(
         message_status = MessageStatus.ERROR if is_tool_error else MessageStatus.FINISHED
         title = str(metadata.get("title")) if metadata and metadata.get("title") else "Explore agent thinking"
         tool_call_id = str(metadata.get("toolCallId")) if metadata and metadata.get("toolCallId") else None
+        # Carry the caller's toolName through. Stamping every explore message
+        # `spawn_agent` made a tool's message collide with that tool's own chip
+        # under the shared toolCallId, and the FE (last write wins) dropped the
+        # tool's formatted chip in favour of this one.
+        tool_name = str(metadata.get("toolName")) if metadata and metadata.get("toolName") else None
         async with span(
             "explore_fe_posts.enqueue",
             agent_id=agent_id,
@@ -574,8 +619,11 @@ async def spawn_explore_agent_activity(
             message_len=len(message or ""),
             pending_count=len(_pending_fe_posts),
         ):
-            _pending_fe_posts.append(
-                asyncio.create_task(
+            # Same chain as the tool managers' posts: both writers can target one
+            # toolCallId, so both must respect that chip's ordering invariant.
+            _dispatch_fe_post(
+                tool_call_id,
+                lambda: (
                     save_explore_message(
                         agent_id=agent_id,
                         title=title,
@@ -583,6 +631,7 @@ async def spawn_explore_agent_activity(
                         status=message_status,
                         task_id=task_id,
                         tool_call_id=tool_call_id,
+                        tool_name=tool_name,
                     )
                 )
             )
