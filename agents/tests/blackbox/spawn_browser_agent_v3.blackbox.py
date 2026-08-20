@@ -10114,6 +10114,38 @@ async def test_dom_service_disconnect_stops_browser_session_without_killing_remo
     assert dom.session is None
     assert dom.selector_map == {}
 
+
+def test_browser_downloads_path_for_provider_kernel_vs_steel():
+    """Kernel CDP downloads must land in /tmp/downloads (listed by session_files)."""
+    from browser_tools.dom_service import (
+        KERNEL_DOWNLOADS_PATH,
+        STEEL_DOWNLOADS_PATH,
+        browser_downloads_path_for_provider,
+    )
+
+    assert browser_downloads_path_for_provider("kernel") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("KERNEL") == KERNEL_DOWNLOADS_PATH
+    assert browser_downloads_path_for_provider("steel") == STEEL_DOWNLOADS_PATH
+    assert KERNEL_DOWNLOADS_PATH == "/tmp/downloads"
+    assert STEEL_DOWNLOADS_PATH == "/files"
+    # Pre-fix bug: Kernel sessions used Steel's /files, so CDP downloads never
+    # appeared in Kernel listFiles(/tmp/downloads) → session_files missed compressed output.
+    assert browser_downloads_path_for_provider("kernel") != STEEL_DOWNLOADS_PATH
+
+
+def test_dom_service_defaults_downloads_path_from_browser_provider_env():
+    """DOMService must default downloads_path from BROWSER_PROVIDER, not hardcode /files."""
+    import os
+
+    from browser_tools.dom_service import KERNEL_DOWNLOADS_PATH, STEEL_DOWNLOADS_PATH, DOMService
+
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "kernel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == KERNEL_DOWNLOADS_PATH
+    with patch.dict(os.environ, {"BROWSER_PROVIDER": "steel"}, clear=False):
+        assert DOMService(cdp_url="wss://example").downloads_path == STEEL_DOWNLOADS_PATH
+    assert DOMService(cdp_url="wss://example", downloads_path="/custom").downloads_path == "/custom"
+
+
 async def test_dom_service_passkey_webauthn_uses_cdp_client_session_api():
     """Steel/CDP sessions expose cdp_client.send.WebAuthn, not cdp_session.send."""
     from browser_tools.dom_service import DOMService
@@ -16959,6 +16991,14 @@ async def run_all_tests():
     await r.record_async(
         "dom_service_disconnect_stops_session",
         test_dom_service_disconnect_stops_browser_session_without_killing_remote_browser,
+    )
+    r.record(
+        "browser_downloads_path_for_provider",
+        test_browser_downloads_path_for_provider_kernel_vs_steel,
+    )
+    r.record(
+        "dom_service_defaults_downloads_path_from_env",
+        test_dom_service_defaults_downloads_path_from_browser_provider_env,
     )
     r.record(
         "browser_activity_memory_cleanup_clears_buffers",

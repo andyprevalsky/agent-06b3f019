@@ -38,8 +38,19 @@ export async function resizeKernelViewport(
 
 const FILE_DIRECTORIES = ['/tmp/downloads', '/tmp/rose-uploads', '/home/oai/share'];
 
+/** Ensure Kernel download/upload roots exist before CDP writes or listFiles. */
+export async function ensureKernelSessionFileDirectories(sessionId: string): Promise<void> {
+  const client = kernelClient();
+  await Promise.all(
+    FILE_DIRECTORIES.map((directory) =>
+      client.browsers.fs.createDirectory(sessionId, { path: directory }).catch(() => {})
+    )
+  );
+}
+
 export async function listKernelSessionFiles(sessionId: string): Promise<BrowserFileInfo[]> {
   const client = kernelClient();
+  await ensureKernelSessionFileDirectories(sessionId);
   const results = await Promise.all(
     FILE_DIRECTORIES.map(async (directory) => {
       try {
@@ -69,7 +80,7 @@ export async function uploadKernelSessionFile(
 ): Promise<{ path: string; size: number }> {
   const client = kernelClient();
   const directory = '/tmp/rose-uploads';
-  await client.browsers.fs.createDirectory(sessionId, { path: directory }).catch(() => {});
+  await ensureKernelSessionFileDirectories(sessionId);
   const remotePath = `${directory}/${path.basename(filename)}`;
   await client.browsers.fs.writeFile(sessionId, fileBuffer, { path: remotePath });
   return { path: remotePath, size: fileBuffer.length };
