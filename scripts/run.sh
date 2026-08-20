@@ -1036,8 +1036,23 @@ if [ "$_SEED_DECISION" = "restore-local" ] && [ -n "$_SEED_DUMP" ] && [ -s "$_SE
     if PGPASSWORD=postgres bash scripts/restore-seed-dump.sh \
         "$_SEED_DUMP" localhost "$LOCAL_DB_ACTUAL_PORT" postgres "$LOCAL_DB_NAME" \
         "$_SEED_RESTORE_CONTAINER" >/dev/null; then
-        DB_RESTORED=true
-        echo "   ✅ DB restored from dump"
+        # Custom-format archives of the good WhatsApp fixture and of a bare
+        # cold-sync are both ~30MiB, so size cannot detect a poisoned publish.
+        # Row-content check is the only trustworthy gate (see
+        # scripts/validate-canonical-seed-dump.sh).
+        if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
+           ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
+                "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
+            echo "   ⚠️ restored dump failed canonical WhatsApp content check — invalidating"
+            rm -f "$_SEED_DUMP" "${_SEED_DUMP}.schemahash" "${_SEED_DUMP}.cachetoken" 2>/dev/null || true
+            DB_RESTORED=false
+            if [ "${BENCHMARK_REQUIRE_SEED_DUMP:-0}" = "1" ]; then
+                fail_required_seed_dump "Required canonical base fixture restored but lacked reviewed WhatsApp history; refusing to continue on a poisoned substitute."
+            fi
+        else
+            DB_RESTORED=true
+            echo "   ✅ DB restored from dump"
+        fi
     else
         echo "   ⚠️ restore failed — falling back to push + seed"
         # The target database's own pg_restore just proved this archive bad.
@@ -1158,8 +1173,14 @@ if [ -n "$_SEED_DUMP" ]; then
         # Canonical base publication is an explicit operator action: an ordinary
         # cold sync must never overwrite reviewed fixture rows such as WhatsApp
         # history. The opt-in exists for the dedicated publication workflow only.
+        # Re-validate content before put so a cold-sync without WhatsApp history
+        # cannot poison the shared R2 object under the whatsapp-v2 revision.
         if [ "$_SEED_CACHE_ENABLED" = 1 ] && [ "${BENCHMARK_PUBLISH_SEED_DUMP:-0}" = "1" ]; then
-            if (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
+            if [[ "$_SEED_CACHE_TOKEN" == *victoria-prod-sync-v1-whatsapp-v2* ]] && \
+               ! PGPASSWORD=postgres bash scripts/validate-canonical-seed-dump.sh \
+                    "$LOCAL_DB_NAME" localhost "$LOCAL_DB_ACTUAL_PORT" postgres; then
+                echo "   ❌ refusing to publish: DB failed canonical WhatsApp content check"
+            elif (cd back-end && npx tsx scripts/seed-dump-cache.ts put "$_SEED_CACHE_TOKEN" "$_SEED_DUMP") >/dev/null 2>&1; then
                 printf '%s' "$_SEED_CACHE_TOKEN" > "${_SEED_DUMP}.cachetoken"
                 echo "   ☁️ published seed dump to shared cache ($_SEED_CACHE_TOKEN)"
             fi
