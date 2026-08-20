@@ -656,6 +656,27 @@ if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null
   fail "a destroyed provisioning clone must fail closed"
 fi
 
+# Warm donor must be *stopped* (not merely startable). Concurrent maintenance
+# leaves it started/replacing briefly; hard-failing the first sample is I-01.
+printf 'started\nreplacing\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-1 3 0 ||
+  fail "warm-source stop wait must tolerate started→replacing→stopped"
+[ ! -s "$machine_states" ] || fail "warm-source stop wait must consume the transition sequence"
+
+printf 'started\nstarted\nstarted\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-2 3 0 >/dev/null 2>&1; then
+  fail "warm-source stop wait must fail closed when the donor never stops"
+fi
+
+printf 'replacing\ndestroyed\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-3 3 0 >/dev/null 2>&1; then
+  fail "warm-source stop wait must fail closed when the donor is destroyed"
+fi
+
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_wait_machine_stopped' \
+  "fleet provisioning must wait for a stopped warm source instead of hard-failing the first sample"
+
 cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
   fail "a unique non-source clone id must be accepted"
 if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
