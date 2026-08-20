@@ -490,8 +490,21 @@ def _format_user_context(
         for integ in integrations:
             status = integ.get("status", "")
             name = integ.get("name", "")
-            creds = integ.get("emailCredentials", [])
-            emails = [c.get("email") for c in creds if c.get("email")]
+            creds = integ.get("emailCredentials") or []
+            emails = [c.get("email") for c in creds if isinstance(c, dict) and c.get("email")]
+            # Prefer credential rows; fall back to the denormalized config copy
+            # that withDerivedConnectedEmails writes for the UI. Without this,
+            # a SYNC_FAILED Gmail row whose nested credentials were stripped
+            # from the payload disappears from the prompt even though
+            # config.connectedEmails still lists usable send-from addresses.
+            if not emails:
+                config = integ.get("config") if isinstance(integ.get("config"), dict) else {}
+                connected = config.get("connectedEmails") if isinstance(config, dict) else None
+                if isinstance(connected, list):
+                    emails = [e for e in connected if isinstance(e, str) and e]
+                primary = config.get("connectedEmail") if isinstance(config, dict) else None
+                if isinstance(primary, str) and primary and primary not in emails:
+                    emails.insert(0, primary)
             # Include if CONNECTED, or if it has email credentials (Gmail can send even if sync failed)
             if status == "CONNECTED" or emails:
                 if emails:

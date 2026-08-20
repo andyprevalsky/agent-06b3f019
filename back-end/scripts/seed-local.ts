@@ -95,6 +95,13 @@ const DEV_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
 // --passkeys-only benchmark mode is authoritative and removes stale local
 // passkeys so its live-fixture preflight cannot succeed on obsolete material.
 const CREDENTIALS_ONLY = process.argv.includes('--credentials-only');
+// Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential tokens from
+// prod. The canonical base-image dump can freeze abandoned OAuth rows
+// (null email / null accessToken); cache-coverage and any message_person email
+// path then fail closed with "Missing from_email" because Connected Integrations
+// never lists a usable send-from address. Benchmark runs that need email pull
+// this overlay the same way compute tokens are refreshed.
+const EMAIL_CREDENTIALS_ONLY = process.argv.includes('--email-credentials-only');
 const SKIP_BROWSER_AUTH_SYNC =
   process.env.BENCHMARK_SKIP_BROWSER_AUTH_SYNC === '1' ||
   process.env.BENCHMARK_WORLD_MODEL_MODE === 'simulate';
@@ -138,6 +145,7 @@ const requestedSeedModes = [
   ['--compute-tokens-only', COMPUTE_TOKENS_ONLY],
   ['--passkeys-only', PASSKEYS_ONLY],
   ['--credentials-only', CREDENTIALS_ONLY],
+  ['--email-credentials-only', EMAIL_CREDENTIALS_ONLY],
 ].filter(([, enabled]) => enabled);
 if (requestedSeedModes.length > 1) {
   throw new Error(
@@ -956,6 +964,18 @@ async function sync() {
     );
     await syncBrowserAuthWithRetries();
     console.log('\n🔄 Credential sync complete.');
+    return;
+  }
+
+  if (EMAIL_CREDENTIALS_ONLY) {
+    await syncTable('Integrations', syncIntegrations);
+    await syncTable('Email Credentials', async () => {
+      const creds = await remote.emailIntegrationCredential.findMany({
+        where: { userId: DEV_USER_ID },
+      });
+      return upsertById(local.emailIntegrationCredential, creds);
+    });
+    console.log('\n🔄 Email credential sync complete.');
     return;
   }
 
