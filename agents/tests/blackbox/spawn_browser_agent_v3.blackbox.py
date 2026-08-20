@@ -10204,7 +10204,15 @@ async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
 
     calls = []
 
-    async def fake_upload(config, session_id, filename, file_content, mime_type="application/octet-stream", *, directory=None):
+    async def fake_upload(
+        config,
+        session_id,
+        filename,
+        file_content,
+        mime_type="application/octet-stream",
+        *,
+        directory=None,
+    ):
         calls.append(
             {
                 "session_id": session_id,
@@ -10216,9 +10224,6 @@ async def test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads():
         )
         return {"path": f"{directory}/{filename}", "size": len(file_content)}
 
-    with patch.object(download_persist, "upload_file_to_session", fake_upload):
-        # upload_file_to_session is imported inside the helper from repo — patch repo.
-        pass
     with patch(
         "domains.spawn_browser_agent_v3.repo.upload_file_to_session",
         new=fake_upload,
@@ -12439,6 +12444,57 @@ async def test_execute_goto_auto_adds_https():
     assert out["success"] is True
 
 
+async def test_execute_goto_err_aborted_persists_attachment_download():
+    """goto net::ERR_ABORTED on a download URL must persist bytes under /tmp/downloads."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class _FailEvent:
+        def __await__(self):
+            async def _done():
+                return None
+
+            return _done().__await__()
+
+        async def event_result(self, **_kwargs):
+            raise RuntimeError("Navigation failed: net::ERR_ABORTED")
+
+    session = SimpleNamespace(
+        event_bus=SimpleNamespace(dispatch=MagicMock(return_value=_FailEvent())),
+    )
+    ah = SimpleNamespace(record_action=AsyncMock())
+    download_url = "https://tinypng.com/backend/opt/download/abc/rs.jpeg"
+
+    async def fake_persist(**kwargs):
+        assert kwargs["url"] == download_url
+        assert kwargs["session_id"] == "sess-dl"
+        return {
+            "path": "/tmp/downloads/rs.jpeg",
+            "size": 149852,
+            "filename": "rs.jpeg",
+            "content_type": "image/jpeg",
+            "source_url": download_url,
+        }
+
+    with patch(
+        "domains.spawn_browser_agent_v3.download_persist.persist_navigation_download_via_page_fetch",
+        new=fake_persist,
+    ):
+        out = await service_actions._execute_goto(
+            session=session,
+            dom_service=MagicMock(),
+            action_history=ah,
+            params={"url": download_url},
+            thinking=None,
+            session_id="sess-dl",
+            config=_fake_config(),
+        )
+    assert out["success"] is True
+    assert out["download"]["path"] == "/tmp/downloads/rs.jpeg"
+    assert "saved to session" in out["message"]
+    ah.record_action.assert_awaited_once()
+
+
+# ── live challenge helpers ───────────────────────────────────────────
 
 async def test_live_tab_looks_challenged_helpers():
     """Clean live tabs must skip recovery; challenged tabs must still recover."""
@@ -16978,6 +17034,10 @@ async def run_all_tests():
         test_inject_local_storage_network_error_returns_none,
     )
     await r.record_async("upload_file_session_success", test_upload_file_to_session_success)
+    await r.record_async(
+        "upload_file_session_downloads_directory",
+        test_upload_file_to_session_downloads_directory,
+    )
     await r.record_async("upload_file_session_non_200", test_upload_file_to_session_non_200_returns_none)
     await r.record_async("upload_file_session_network", test_upload_file_to_session_network_error)
 
@@ -17295,6 +17355,18 @@ async def run_all_tests():
         test_browser_downloads_path_for_provider_kernel_vs_steel,
     )
     r.record(
+        "attachment_download_tinypng_vs_ad_script",
+        test_is_browser_attachment_download_tinypng_vs_ad_script,
+    )
+    await r.record_async(
+        "persist_bytes_to_session_downloads",
+        test_persist_bytes_to_session_downloads_uploads_under_tmp_downloads,
+    )
+    await r.record_async(
+        "browser_download_persister_cdp_attachment",
+        test_browser_download_persister_captures_attachment_via_cdp_body,
+    )
+    r.record(
         "dom_service_defaults_downloads_path_from_env",
         test_dom_service_defaults_downloads_path_from_browser_provider_env,
     )
@@ -17475,6 +17547,10 @@ async def run_all_tests():
     )
 
     await r.record_async("execute_goto_auto_https", test_execute_goto_auto_adds_https)
+    await r.record_async(
+        "execute_goto_err_aborted_persists_download",
+        test_execute_goto_err_aborted_persists_attachment_download,
+    )
     await r.record_async("live_tab_looks_challenged", test_live_tab_looks_challenged_helpers)
     r.record("api_surface_and_nav_pin", test_url_looks_like_api_surface_and_navigation_pin)
     await r.record_async("goto_refuses_api_surface", test_execute_goto_refuses_api_surface_urls)
