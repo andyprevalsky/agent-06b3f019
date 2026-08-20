@@ -86,4 +86,3 @@ Runtime evidence from local `scripts/run-bench --local files-in-sub-agents`:
 - Task contract requires Claude Code (`requires_claude_code: true`); Anthropic API-key fallback is intentionally refused for this class of task.
 
 Why the earlier remediation did not hold: the 2026-07-06 record left the case **open** with "re-auth or add fresh pool tokens" as the next step; supply was never replenished, so any `requires_claude_code` benchmark still fails closed at the same credential boundary.
-
