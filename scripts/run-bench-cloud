@@ -453,22 +453,43 @@ github_token_can_fetch_repo() {
     [ "$code" = "200" ]
 }
 
+# Long-lived token for Fly app secrets. Never use `gh auth token` here — those
+# expire and would leave the warm box unable to git-sync after the next hour.
+resolve_durable_github_token() {
+    local t=""
+    t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    printf '%s' "$t"
+}
+
+# Resolve a GitHub token that can fetch this private repo for ephemeral
+# controller→guest git-sync (refresh-deps SSH snippet, boot-launch env).
+# Prefer the controller's live `gh auth token`, then exported GITHUB_TOKEN /
+# GH_TOKEN (same order as run-bench-fleet), then long-lived .env tokens via
+# resolve_durable_github_token (DISPATCH first). Validate Contents access before
+# accepting any candidate. Never print the value.
 resolve_github_token() {
-    local candidates=() t decoded gh_tok env_tok
+    local candidates=() t decoded gh_tok
     if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
         decoded="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
         [ -n "$decoded" ] && candidates+=("$decoded")
     fi
-    # Dispatch tokens are often fresher than the long-lived GITHUB_TOKEN copy in .env.
-    [ -n "${GITHUB_DISPATCH_TOKEN:-}" ] && candidates+=("$GITHUB_DISPATCH_TOKEN")
     # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
     # so a stale env override cannot mask a working CLI login for github.com.
     gh_tok="$(env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com 2>/dev/null || true)"
     [ -n "$gh_tok" ] && candidates+=("$gh_tok")
-    env_tok="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -z "$env_tok" ] && env_tok="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -n "$env_tok" ] && candidates+=("$env_tok")
-    [ -n "${GITHUB_TOKEN:-}" ] && candidates+=("$GITHUB_TOKEN")
+    t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    [ -n "$t" ] && candidates+=("$t")
+    t="$(resolve_durable_github_token)"
+    [ -n "$t" ] && candidates+=("$t")
 
     for t in "${candidates[@]}"; do
         if github_token_can_fetch_repo "$t"; then
@@ -760,7 +781,12 @@ _inject_secrets_locked() {
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 agents/.env)"
     backend_sha="$(cloudbench_env_sha256 back-end/.env)"
-    gh_token="$(resolve_github_token)" || gh_token=""
+    # Fly secrets need a durable token (gh auth expires). Still require Contents
+    # validation so a stale DISPATCH/.env value is not staged as "configured".
+    gh_token="$(resolve_durable_github_token)"
+    if [ -n "$gh_token" ] && ! github_token_can_fetch_repo "$gh_token"; then
+        gh_token=""
+    fi
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
@@ -773,9 +799,9 @@ _inject_secrets_locked() {
     )
     if [ -n "$gh_token" ]; then
         set_args+=("GITHUB_TOKEN=$gh_token")
-        echo "   GITHUB_TOKEN present + validated (for private-repo git-sync)"
+        echo "   GITHUB_TOKEN present (durable + Contents-validated for private-repo git-sync)"
     else
-        echo "   ⚠️  No validated GitHub token — private-repo fetches will fail"
+        echo "   ⚠️  No validated durable GitHub token — private-repo fetches will fail"
     fi
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
@@ -832,7 +858,13 @@ inject_secrets() {
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
 # only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
-REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
+#
+# GITHUB_TOKEN must be present as an app secret name (on-box decode / legacy
+# paths). refresh-deps does NOT rely on that secret being non-empty in SSH —
+# it injects a controller-resolved token (gh auth / DISPATCH) into the sync
+# command — because Fly Status=Staged can persist on Machines-only apps even
+# after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing
     listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
@@ -1385,27 +1417,63 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match. Prefer a
-    # request-scoped controller token (same pattern as boot-launch) over the
-    # box-side GITHUB_TOKEN Fly secret, which can be a stale .env copy.
+
+    # Sync the repo to the ref whose manifests the trees must match.
+    # Inject a controller-resolved token into the SSH snippet (same pattern as
+    # CLOUDBENCH_GITHUB_TOKEN_B64 on clones). Relying on the warm box Fly
+    # GITHUB_TOKEN secret fails when that secret is empty/stale even though
+    # Status still lists the name — observed as:
+    #   fatal: could not read Username for 'https://github.com'
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
-    REFRESH_GITHUB_TOKEN="$(resolve_github_token)" || {
-        echo "❌ No validated GitHub token available for --refresh-deps git-sync." >&2
-        echo "   Checked CLOUDBENCH_GITHUB_TOKEN_B64, GITHUB_DISPATCH_TOKEN, gh auth, and .env GITHUB_TOKEN." >&2
+    _refresh_gh_token="$(resolve_github_token)"
+    [ -n "$_refresh_gh_token" ] || {
+        echo "❌ No controller GitHub token for refresh-deps git-sync (gh auth / GITHUB_DISPATCH_TOKEN / GITHUB_TOKEN)." >&2
         exit 1
     }
-    REFRESH_GITHUB_TOKEN_B64="$(printf '%s' "$REFRESH_GITHUB_TOKEN" | base64 | tr -d '\n')"
+    _refresh_gh_b64="$(printf '%s' "$_refresh_gh_token" | base64 | tr -d '\n')"
+    _refresh_durable="$(resolve_durable_github_token)"
+    _refresh_durable_b64=""
+    if [ -n "$_refresh_durable" ] && [ "$_refresh_durable" != "$_refresh_gh_token" ]; then
+        _refresh_durable_b64="$(printf '%s' "$_refresh_durable" | base64 | tr -d '\n')"
+    fi
+    unset _refresh_gh_token _refresh_durable
+    # Prefer the primary controller token; on auth failure only, retry once with
+    # the durable .env candidate (DISPATCH/GITHUB_TOKEN) so a revoked gh auth
+    # token cannot strand refresh-deps before durable fallback is tried.
     SYNC_CMD="set -e
-TOKEN=\$(printf '%s' '$REFRESH_GITHUB_TOKEN_B64' | base64 -d 2>/dev/null || true)
-[ -n \"\$TOKEN\" ] || { echo 'FATAL: controller GitHub token unavailable for refresh-deps' >&2; exit 1; }
-AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$TOKEN\" | base64 | tr -d '\n')\"
-git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
+_try_fetch() {
+  export GITHUB_TOKEN=\$(printf '%s' \"\$1\" | base64 -d)
+  AUTH_HDR=\"Authorization: Basic \$(printf 'x-access-token:%s' \"\$GITHUB_TOKEN\" | base64 | tr -d '\n')\"
+  git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin '$EXPECTED_REF'
+}
+if ! _try_fetch '$_refresh_gh_b64' 2>/tmp/cloudbench-git-fetch.err; then
+  _err=\$(cat /tmp/cloudbench-git-fetch.err 2>/dev/null || true)
+  rm -f /tmp/cloudbench-git-fetch.err
+  case \"\$_err\" in
+    *'could not read Username'*|*'Authentication failed'*|*'Invalid username or password'*|*'403'*|*'401'*)
+      if [ -n '$_refresh_durable_b64' ]; then
+        echo 'primary GitHub token auth failed; retrying with durable fallback'
+        _try_fetch '$_refresh_durable_b64'
+      else
+        printf '%s\n' \"\$_err\" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\n' \"\$_err\" >&2
+      exit 1
+      ;;
+  esac
+else
+  rm -f /tmp/cloudbench-git-fetch.err
+fi
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f '$EXPECTED_REF' 2>/dev/null || git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' checkout -f FETCH_HEAD
 git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' reset --hard
 chown -R rose:rose '$REMOTE_REPO' 2>/dev/null || true
 REMOTE_REF=\$(git -c safe.directory='$REMOTE_REPO' -C '$REMOTE_REPO' rev-parse HEAD)
 echo checkout \$(printf '%s' \"\$REMOTE_REF\" | cut -c1-8)
 echo \"::CLOUDBENCH-REF::\$REMOTE_REF\""
+    unset _refresh_gh_b64 _refresh_durable_b64
     SYNC_LOG="$(mktemp)"
     # Bound hung flyctl ssh sessions (rate-limit / dead tunnel). Without this,
     # refresh-deps can sit on "git-syncing ..." forever with no guest git
