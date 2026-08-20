@@ -143,8 +143,29 @@ async function testNotConfigured(): Promise<void> {
 }
 
 async function testRecipientUnreachableCodes(): Promise<void> {
-  // Meta deliverability codes → recipientUnreachable (stop mirroring to this number).
-  for (const code of [131026, 131030, 131047, 470]) {
+  // Only 131026 (recipient is not a valid WhatsApp user) flags recipientUnreachable.
+  await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ error: { message: 'x', code: 131026 } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppMessage('+15551234567', 'hi');
+      assert.strictEqual(result.success, false, 'code 131026 is a failure');
+      assert.strictEqual(
+        result.recipientUnreachable,
+        true,
+        'code 131026 must flag recipientUnreachable'
+      );
+    }
+  );
+  // Test-allow-list (131030) and closed-window re-engagement (131047/470) are
+  // message-level failures against a still-reachable recipient: they fail the
+  // send but must NOT flip whatsappReachable (the number is reachable via a
+  // template), so recipientUnreachable stays false.
+  for (const code of [131030, 131047, 470]) {
     await withMockedFetch(
       () =>
         new Response(JSON.stringify({ error: { message: 'x', code } }), {
@@ -155,10 +176,10 @@ async function testRecipientUnreachableCodes(): Promise<void> {
       async () => {
         const result = await sendWhatsAppMessage('+15551234567', 'hi');
         assert.strictEqual(result.success, false, `code ${code} is a failure`);
-        assert.strictEqual(
+        assert.notStrictEqual(
           result.recipientUnreachable,
           true,
-          `code ${code} must flag recipientUnreachable`
+          `code ${code} must NOT flag recipientUnreachable (reachable via template)`
         );
       }
     );

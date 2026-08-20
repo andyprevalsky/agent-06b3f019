@@ -123,16 +123,23 @@ interface WhatsAppSendResponse {
 }
 
 /**
- * Meta error codes meaning "this number cannot receive a proactive message from
- * us" — so we should stop mirroring lifecycle notifications to it (until it
- * texts our WhatsApp again, which re-enables it):
- *   131026 — message undeliverable (recipient not a valid WhatsApp user / can't receive)
- *   131030 — recipient phone number not in the allowed list (dev/test mode)
- *   131047 / 470 — re-engagement required (outside the 24h customer-service window)
- * Auth (190/401), rate-limit (131056/429), and transient errors are NOT here —
+ * The ONLY Meta error code meaning the recipient itself cannot receive WhatsApp
+ * from us at all — so we mark the number unreachable and stop mirroring lifecycle
+ * notifications to it (an inbound message from them re-enables it):
+ *   131026 — message undeliverable (recipient is not a valid WhatsApp user).
+ *
+ * Deliberately NOT here — these are message-level failures against a recipient
+ * who is still reachable, so they must NOT flip `whatsappReachable`:
+ *   131030      — recipient not in the test allow-list (dev/test mode, never prod).
+ *   131047 / 470 — re-engagement required: the 24h session window is closed, but
+ *                  the number is still reachable via an approved template.
+ *                  Flipping it unreachable here would wrongly and persistently
+ *                  suppress the window-bypassing onboarding template (which gates
+ *                  on `whatsappReachable !== false`) and all future mirroring.
+ * Auth (190/401), rate-limit (131056/429), and transient errors are also out —
  * those are our-side or temporary, not a property of the recipient number.
  */
-const WHATSAPP_UNREACHABLE_ERROR_CODES = new Set([131026, 131030, 131047, 470]);
+const WHATSAPP_UNREACHABLE_ERROR_CODES = new Set([131026]);
 
 function extractWhatsAppErrorCode(errorText: string): number | null {
   try {
