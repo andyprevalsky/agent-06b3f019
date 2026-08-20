@@ -86,10 +86,12 @@ fi
 pass "resolver fails closed when every candidate is stale"
 
 # ── 3. refresh-deps injects controller token (static contract) ───────────────
-grep -Fq 'cloudbench_remote_git_auth_preamble' "$ROOT_DIR/scripts/run-bench-cloud" \
-  || fail "run-bench-cloud must build remote git auth via cloudbench_remote_git_auth_preamble"
-grep -Fq 'require_controller_github_token_b64' "$ROOT_DIR/scripts/run-bench-cloud" \
-  || fail "run-bench-cloud must require a usable controller token before refresh-deps git-sync"
+grep -Fq 'resolve_github_token' "$ROOT_DIR/scripts/run-bench-cloud" \
+  || fail "run-bench-cloud must resolve a usable controller token before private-repo git-sync"
+grep -Fq 'GIT_CONFIG_GLOBAL' "$ROOT_DIR/scripts/run-bench-cloud" \
+  || fail "run-bench-cloud must authenticate git via GIT_CONFIG_GLOBAL http.extraheader"
+grep -Fq 'http.extraheader' "$ROOT_DIR/scripts/run-bench-cloud" \
+  || fail "run-bench-cloud must set http.extraheader for private-repo git-sync"
 grep -Fq 'cloudbench-github-token.sh' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "run-bench-cloud must source cloudbench-github-token.sh"
 grep -Fq 'cloudbench-github-token.sh' "$ROOT_DIR/scripts/run-bench-fleet" \
