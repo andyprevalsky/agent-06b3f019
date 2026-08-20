@@ -14,8 +14,8 @@ Every human approval request in this command—including prompt or
 agent-behavior approval, a gate override, credential/billing/environment
 escalation, a destructive action, or any other approval—must follow
 `.claude/shared/approval-format.md`. Read it completely immediately before
-composing the request. Its Detail, Before Behavior, After Behavior, and
-Downstream Implications sections are mandatory and additive to the
+composing the request. Its Evidence, Detail, Before Behavior, After Behavior,
+and Downstream Implications sections are mandatory and additive to the
 deploy-specific telemetry, file-link, and snapshot rules below.
 
 ---
