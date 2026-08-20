@@ -3390,11 +3390,38 @@ if [ "$warm_state" != "stopped" ]; then
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
-    fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
-        --vm-size "$WARM_PARKED_VM_SIZE" --vm-memory "$WARM_PARKED_VM_MEMORY" \
-        --skip-start --yes >/dev/null || {
-        echo "❌ could not park warm source for fleet capacity headroom" >&2; exit 1;
-    }
+    park_attempt=1
+    park_attempts="${CLOUDBENCH_WARM_PARK_LEASE_ATTEMPTS:-8}"
+    park_delay="${CLOUDBENCH_WARM_PARK_LEASE_RETRY_SECONDS:-15}"
+    park_out=""
+    if ! [[ "$park_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_PARK_LEASE_ATTEMPTS must be a positive integer (got: ${park_attempts})" >&2
+        exit 1
+    fi
+    if ! [[ "$park_delay" =~ ^[1-9][0-9]*$ ]]; then
+        echo "❌ CLOUDBENCH_WARM_PARK_LEASE_RETRY_SECONDS must be a positive integer (got: ${park_delay})" >&2
+        exit 1
+    fi
+    while true; do
+        if park_out="$(fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
+            --vm-size "$WARM_PARKED_VM_SIZE" --vm-memory "$WARM_PARKED_VM_MEMORY" \
+            --skip-start --yes 2>&1)"; then
+            break
+        fi
+        if ! printf '%s' "$park_out" | grep -Eqi 'lease currently held|failed to (obtain|get) lease'; then
+            printf '%s\n' "$park_out" | sed 's/^/   /' >&2
+            echo "❌ could not park warm source for fleet capacity headroom" >&2
+            exit 1
+        fi
+        if [ "$park_attempt" -ge "$park_attempts" ]; then
+            printf '%s\n' "$park_out" | sed 's/^/   /' >&2
+            echo "❌ could not park warm source for fleet capacity headroom (lease held)" >&2
+            exit 1
+        fi
+        echo "   ⏳ park lease held — retry $park_attempt/$park_attempts in ${park_delay}s" >&2
+        sleep "$park_delay"
+        park_attempt=$((park_attempt + 1))
+    done
 fi
 
 # ── Self-heal: sweep orphaned clone volumes ──────────────────────────────────
@@ -3554,6 +3581,12 @@ warm_deps_preflight() {
     fi
     write_startup_card "healing warm snapshot (dep trees)"
     echo "♻️  warm snapshot dep trees unproven/stale → central refresh ONCE (instead of ×${#BENCHES[@]} per-clone rsyncs) ..."
+    # Export a live controller token so --refresh-deps never depends solely on
+    # the durable Fly GITHUB_TOKEN secret (often missing/stale on the warm box).
+    if _refresh_tok_b64="$(controller_github_token_b64 2>/dev/null)"; then
+        export CLOUDBENCH_GITHUB_TOKEN_B64="$_refresh_tok_b64"
+    fi
+    unset _refresh_tok_b64
     if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
         s_node=""; s_py=""; s_epoch=""; new_snap=""
         [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
@@ -4119,7 +4152,9 @@ controller_github_token_b64() {
         printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
         return 0
     fi
-    token="$(cloudbench_controller_github_token)" || true
+    # Prefer live controller credentials (git insteadOf / gh hosts) over a
+    # stale injected GITHUB_TOKEN — see cloudbench_controller_github_token.
+    token="$(cloudbench_controller_github_token 2>/dev/null || true)"
     [ -n "$token" ] || return 1
     CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
     printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
