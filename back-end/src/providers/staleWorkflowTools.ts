@@ -46,13 +46,18 @@ function metadataString(metadata: Record<string, unknown>, key: string): string 
  * DEPLOY_INTERRUPTED and left the request pending forever (prod agents
  * 2dc4c954-0af7-4f50-8336-11f9925f3c05 and a87224a7-f9ac-4d09-b8c6-b758f37bac38).
  *
- * Gate requests (`gateKey` non-null) are deliberately excluded: they are a
- * cross-agent fan-in point. Several agents that hit the same gate collapse onto one
- * PENDING row and the extras live in `metadata.gateWaiters`
- * (`domains/attention-requests/service.ts` joinGateAsWaiter), so answering the row on
- * behalf of one fenced agent would strand every still-live waiter — `resolveAndSignal`
- * only signals waiters while `userResponse IS NULL`. Gates are owned by the gate
- * lifecycle and stay open for the user to resolve.
+ * A gate row is the one case where `(agentId, workflowId)` is not sole ownership.
+ * Several agents that hit the same gate collapse onto ONE pending row and the extras
+ * live in `metadata.gateWaiters` (`domains/attention-requests/repo.ts`
+ * appendGateWaiter). Answering such a row on behalf of one fenced agent would strand
+ * every still-live waiter, because `gateResolution.resolveAndSignal` signals waiters
+ * only while `userResponse IS NULL`. So a gate is closed only when this generation is
+ * its sole occupant.
+ *
+ * It must still be closed in that sole-occupant case: the partial unique index
+ * `(userId, gateKey) WHERE userResponse IS NULL` means a stale pending gate blocks the
+ * replacement workflow from ever raising a fresh one
+ * (`workflow-restart-tools.test.ts` "…so retry creates a fresh gate").
  *
  * `workflowGeneration` is null only for a pending descendant start that never
  * recorded a stale generation; there, every open request on the agent is owned by
@@ -63,16 +68,36 @@ export async function closeInterruptedAttentionRequests(
   agentId: string,
   workflowGeneration: string | null
 ): Promise<number> {
+  const scope = {
+    agentId,
+    ...(workflowGeneration === null ? {} : { workflowId: workflowGeneration }),
+    userResponse: null,
+  };
+  const open = await client.agentAttentionRequest.findMany({
+    where: scope,
+    select: { id: true, gateKey: true, metadata: true },
+  });
+  const closable = open
+    .filter((row) => row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId))
+    .map((row) => row.id);
+  if (closable.length === 0) return 0;
+
   const { count } = await client.agentAttentionRequest.updateMany({
-    where: {
-      agentId,
-      ...(workflowGeneration === null ? {} : { workflowId: workflowGeneration }),
-      gateKey: null,
-      userResponse: null,
-    },
+    where: { id: { in: closable }, userResponse: null },
     data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
   });
   return count;
+}
+
+/** True when a deduped gate is also holding a waiter belonging to another agent. */
+function hasForeignGateWaiter(metadata: Prisma.JsonValue | null, agentId: string): boolean {
+  const record = metadataRecord(metadata);
+  const waiters = record?.gateWaiters;
+  if (!Array.isArray(waiters)) return false;
+  return waiters.some((waiter) => {
+    const entry = metadataRecord(waiter as Prisma.JsonValue);
+    return entry !== null && metadataString(entry, 'agentId') !== agentId;
+  });
 }
 
 /** Read the latest lifecycle state for every call in one workflow generation. */

@@ -150,14 +150,25 @@ under the generation lock their surrounding seal already holds.
 
 Three constraints the naive blanket close would have violated, each handled explicitly:
 
-* **Gate rows are excluded** (`gateKey: null` in the predicate).
+* **A gate is closed only when this generation solely occupies it.**
   `AgentAttentionRequest` is a deliberate cross-agent fan-in point: agents that hit the
   same gate collapse onto one PENDING row and the rest live in `metadata.gateWaiters`
-  (`domains/attention-requests/service.ts` `joinGateAsWaiter`). Answering that row on
+  (`domains/attention-requests/repo.ts` `appendGateWaiter`). Answering that row on
   behalf of one fenced agent would strand every still-live waiter, because
   `gateResolution.resolveAndSignal` only signals waiters while `userResponse IS NULL`.
-  Gates belong to the gate lifecycle and stay open. The old metadata matcher *did* reach
-  gate chips (they carry `metadata.attentionRequestId`), so this also closes a latent
+  So `closeInterruptedAttentionRequests` reads the open rows in scope and skips any
+  gate carrying a `gateWaiters` entry for a *different* agent.
+
+  A first attempt excluded gates wholesale (`gateKey: null` in the predicate). That is
+  wrong, and the checked-in `workflow-restart-tools.test.ts` case
+  *"deployment interruption closes the stale approval request so retry creates a fresh
+  gate"* caught it: the partial unique index `(userId, gateKey) WHERE userResponse IS
+  NULL` means a stale pending gate permanently blocks the replacement workflow from
+  raising a fresh one. Both directions are now asserted — the sole-occupant gate must
+  close, the deduped gate must not.
+
+  The old metadata matcher *did* reach gate chips (they carry
+  `metadata.attentionRequestId`) with no waiter check at all, so this closes a latent
   cross-agent defect rather than merely avoiding a new one.
 * **Lock ordering is preserved.** `gateResolution.ts` documents that deployment cleanup
   takes `lockAgentWorkflowGeneration` before terminalizing attention rows; the new
@@ -187,21 +198,31 @@ IN_PROGRESS chip carrying `requestUserAuthentication.requestId` (fixture hand-co
 from `handler.py`), advances `temporalWorkflowId` to a `:replacement:` id, and calls
 `finalizeInterruptedWorkflowTools` unchanged. Two fixtures guard the edges: an
 approval-shaped request that must be closed (it passed pre-fix, proving the fence
-itself was healthy and only auth assistance was missed) and a `gateKey` row that must
-stay open. Assertions compare against `DEPLOY_INTERRUPTED_TOOL_MESSAGE` and require a
+itself was healthy and only auth assistance was missed), a deduped `gateKey` row
+carrying a foreign `gateWaiters` entry that must stay open, and a sole-occupant
+`gateKey` row that must be closed. Assertions compare against `DEPLOY_INTERRUPTED_TOOL_MESSAGE` and require a
 non-null row, so a deleted or missing row fails rather than passes.
 
 Scope honestly: post-fix the close no longer reads chip metadata, so this test cements
-the invariant "a sealed generation leaves no non-gate request pending" rather than the
-specific metadata shape. It does not drive the real cutover
+the invariant "a sealed generation leaves no request pending that it solely owns"
+rather than the specific metadata shape. It does not drive the real cutover
 (`prepareAgentWorkflowReplacement → sealClaimedReplacement → sealStaleWorkflow`); it
 invokes the fence routine those paths share.
 
 Pre-fix: `✗ deploy fence closes the pending auth assistance request with its tool chip
 (346ms) — Deploy fence closed the auth assistance chip but left its attention request
 pending (userResponse=null)`, `Passed 10/11`.
-Post-fix, same command and unweakened assertion: `Passed 11/11`; the `agents` domain
+Post-fix, same command and unweakened assertion: `Passed 13/13`; the `agents` domain
 (which owns the liveness-reconciler cases) also passes.
+
+A second case, "completion after a deploy fence keeps the interrupted marker", covers
+the sibling defect in `completeAuthAssistanceForUser`: an unconditional
+`agentAttentionRequest.update` overwrote the fence's DEPLOY_INTERRUPTED marker when the
+user finished signing in afterwards, then signalled the terminated generation. It now
+compare-and-swaps on `userResponse: null` like every other resolver, still records
+`completedAt` (the captured credential is the point), and skips the dead-generation
+signal. Pre-fix: `✗ … Completion overwrote the deploy-fence marker
+(userResponse=__AUTH_ASSISTANCE_COMPLETED__)`, `Passed 11/12`. Post-fix: `Passed 12/12`.
 
 The suite is auto-discovered by `src/tests/blackbox/run.ts` (filename-based) and runs
 under `/deploy` Step 5a's full back-end blackbox suite.
@@ -210,8 +231,9 @@ under `/deploy` Step 5a's full back-end blackbox suite.
 per-tool-call updates — strictly fewer statements than before. The common predicate is
 `workflowId = <generation>`, served by `AgentAttentionRequest_workflowId_idx`; there is
 no `agentId` index, so the null-generation path (an abandoned descendant start only)
-scans, which is acceptable at its frequency. Excluding `gateKey` rows keeps the write
-strictly per-agent, so no cross-agent fan-in row is touched.
+scans, which is acceptable at its frequency. The waiter check is evaluated on the rows
+already read for that generation — no extra query, and no cross-agent fan-in row with a
+live foreign waiter is ever written.
 
 ## Human feedback
 

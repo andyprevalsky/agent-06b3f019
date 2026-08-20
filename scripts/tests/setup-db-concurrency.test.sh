@@ -83,7 +83,15 @@ stamp() { printf '%s %s %s\n' "\$(date +%s%N)" "\${SETUP_DB_TEST_TAG:-?}" "\$1" 
 args="\$*"
 case "\$args" in
   *"prisma db push"*) stamp PUSH; sleep 0.2; exit 0 ;;
-  *seed-local.ts*)    stamp SEED_START; sleep 1.5; stamp SEED_END; exit 0 ;;
+  *seed-local.ts*)
+    stamp SEED_START
+    # Case 6 swaps in a long-lived seed so signal handling is observable.
+    if [ -n "\${SETUP_DB_TEST_SEED_COMMAND:-}" ]; then
+      "\$SETUP_DB_TEST_SEED_COMMAND"
+    else
+      sleep 1.5
+    fi
+    stamp SEED_END; exit 0 ;;
   *)                  exit 0 ;;
 esac
 STUB
@@ -124,6 +132,7 @@ run_setup_db() { # run_setup_db <tag> <workspace-name>
     CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
     ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
     ROSE_USE_SYSTEM_PG=false \
+    SETUP_DB_TEST_SEED_COMMAND="${SETUP_DB_TEST_SEED_COMMAND:-}" \
       bash "$TMP/fake-repo/scripts/setup-db.sh" > "$TMP/$tag.out" 2>&1
     printf '%s\n' "$?" > "$TMP/$tag.rc"
   )
@@ -241,5 +250,53 @@ $(cat "$TMP/E.out" 2>/dev/null)"
   "case 5: expected flattened lock file system-pg:localhost:5432_victoria.lock
 --- locks ---
 $(ls -la "$TMP/locks" 2>/dev/null)"
+
+# ── Case 6: TERM must stop the seed child, not just the script ───────────────
+# Releasing the lock on EXIT is not enough. The destructive section spawns
+# long-lived children (`prisma db push`, `seed-local.ts`); bash signals only the
+# script, so a TERM'd setup-db released its lock and returned while its seed
+# child kept writing prod rows into a database another process had just claimed.
+# Observed 2026-08-19 during /deploy: stopping a mid-flight setup-db left
+# `tsx scripts/seed-local.ts` alive against victoria-db-dallas and it corrupted a
+# concurrent back-end coverage run (11 domains failing with 500s). "Stopped"
+# must mean stopped.
+: > "$EVENTS"
+mkdir -p "$TMP/locks"
+CHILD_MARKER="$TMP/orphan-child-alive"
+rm -f "$CHILD_MARKER"
+# The seed stub for this case parks a long-lived grandchild exactly the way the
+# real seed does, and keeps touching a marker so survival is observable.
+cat > "$TMP/fake-repo/back-end/scripts/long-seed.sh" <<STUB
+#!/usr/bin/env bash
+for _ in \$(seq 1 200); do
+  printf '%s\n' "alive" > "$CHILD_MARKER"
+  sleep 0.1
+done
+STUB
+chmod +x "$TMP/fake-repo/back-end/scripts/long-seed.sh"
+SETUP_DB_TEST_SEED_COMMAND="$TMP/fake-repo/back-end/scripts/long-seed.sh" \
+  run_setup_db F term-ws &
+term_runner=$!
+term_pid=""
+for _ in $(seq 1 200); do
+  term_pid="$(pgrep -f "$TMP/fake-repo/scripts/setup-db.sh" | head -1 || true)"
+  [ -n "$term_pid" ] && [ -f "$CHILD_MARKER" ] && break
+  sleep 0.05
+done
+if [ -n "$term_pid" ] && [ -f "$CHILD_MARKER" ]; then
+  kill -TERM "$term_pid" 2>/dev/null || true
+  wait "$term_runner" 2>/dev/null || true
+  rm -f "$CHILD_MARKER"
+  sleep 1
+  [ ! -f "$CHILD_MARKER" ] || fail \
+    "case 6: a TERM'd setup-db.sh left its seed child running — it keeps writing to a
+database the next holder already claimed"
+  pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
+else
+  kill -TERM "$term_runner" 2>/dev/null || true
+  wait "$term_runner" 2>/dev/null || true
+  pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
+  echo "case 6: skipped (could not observe a live seed child on this host)" >&2
+fi
 
 echo "PASS: setup-db.sh serializes its destructive reset/push/seed per workspace database"

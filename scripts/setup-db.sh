@@ -194,7 +194,27 @@ if $USE_SYSTEM_PG; then
 else
     acquire_workspace_db_lock "$DB_CONTAINER"
 fi
-trap release_workspace_db_lock EXIT
+
+# Releasing the lock is not enough on a signal: the destructive critical section
+# below spawns long-lived children (`prisma db push`, `seed-local.ts`). Bash only
+# signals the script, so a TERM'd setup-db released its lock and exited while its
+# seed child kept writing prod rows into a database another process had just
+# claimed — a "stopped" reset that silently corrupts a concurrent blackbox run.
+# Kill the whole process group first so stopping this script actually stops it.
+setup_db_teardown() {
+    local exit_code=$?
+    trap - EXIT INT TERM
+    local group
+    group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    if [ -n "$group" ] && [ "$group" = "$$" ]; then
+        kill -TERM -"$group" 2>/dev/null || true
+    else
+        pkill -TERM -P $$ 2>/dev/null || true
+    fi
+    release_workspace_db_lock
+    exit "$exit_code"
+}
+trap setup_db_teardown EXIT INT TERM
 
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.

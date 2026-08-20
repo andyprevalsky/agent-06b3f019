@@ -164,17 +164,37 @@ async function runDeployFenceCase(userId: string): Promise<void> {
     },
   });
 
-  // Safety fixture: a deduped gate row is a cross-agent fan-in point, so fencing one
-  // agent must never answer it out from under still-live waiters.
-  const gateRequestId = randomUUID();
+  // Safety fixture: a DEDUPED gate is a cross-agent fan-in point. Another agent
+  // joined this row as a waiter, so fencing this agent must not answer it out from
+  // under it — `resolveAndSignal` only signals waiters while userResponse IS NULL.
+  const sharedGateRequestId = randomUUID();
   await prisma.agentAttentionRequest.create({
     data: {
-      id: gateRequestId,
+      id: sharedGateRequestId,
       userId,
       agentId: agent.id,
       workflowId: agent.id,
       question: 'Connect Gmail',
       gateKey: `source_connect:gmail:${randomUUID()}`,
+      metadata: {
+        attentionKind: 'gate',
+        gateWaiters: [{ agentId: randomUUID(), workflowId: randomUUID() }],
+      },
+    },
+  });
+
+  // Counter-fixture: a gate this generation solely occupies MUST be closed. The
+  // partial unique index (userId, gateKey) WHERE userResponse IS NULL means leaving
+  // it pending would block the replacement workflow from ever raising a fresh gate.
+  const soleGateRequestId = randomUUID();
+  await prisma.agentAttentionRequest.create({
+    data: {
+      id: soleGateRequestId,
+      userId,
+      agentId: agent.id,
+      workflowId: agent.id,
+      question: 'Connect Slack',
+      gateKey: `source_connect:slack:${randomUUID()}`,
       metadata: { attentionKind: 'gate' },
     },
   });
@@ -214,10 +234,20 @@ async function runDeployFenceCase(userId: string): Promise<void> {
   });
   assert(authAssistance !== null, 'Auth assistance row should survive so the closure is auditable');
 
-  const gate = await prisma.agentAttentionRequest.findUnique({ where: { id: gateRequestId } });
+  const sharedGate = await prisma.agentAttentionRequest.findUnique({
+    where: { id: sharedGateRequestId },
+  });
   assert(
-    gate !== null && gate.userResponse === null,
-    `Deploy fence must not answer a deduped gate on behalf of live waiters (userResponse=${String(gate?.userResponse)})`
+    sharedGate !== null && sharedGate.userResponse === null,
+    `Deploy fence must not answer a deduped gate on behalf of live waiters (userResponse=${String(sharedGate?.userResponse)})`
+  );
+
+  const soleGate = await prisma.agentAttentionRequest.findUnique({
+    where: { id: soleGateRequestId },
+  });
+  assert(
+    soleGate !== null && soleGate.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    `Deploy fence must close a gate it solely occupies, or the replacement can never raise a fresh one (userResponse=${String(soleGate?.userResponse)})`
   );
 }
 
