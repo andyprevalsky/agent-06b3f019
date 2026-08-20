@@ -67,6 +67,7 @@ from .challenge_recovery import (
     verify_live_blocked_resources,
     verify_live_page_cleared_challenge,
 )
+from .browser_use_patches import apply_browser_use_navigate_timeout_patch
 from .config import (
     ACTION_LOOP_DELAY_SECONDS,
     ACTIVITY_START_TO_CLOSE_TIMEOUT_MINUTES,
@@ -82,6 +83,7 @@ from .config import (
     MAX_CLAUDE_TOKEN_ROTATIONS,
     MAX_CONSECUTIVE_API_FAILURES,
     MAX_ITERATIONS,
+    NAVIGATE_TO_URL_TIMEOUT_SECONDS,
     SESSION_INIT_TRANSIENT_MAX_ATTEMPTS,
     SESSION_INIT_TRANSIENT_RETRY_SECONDS,
     SESSION_MAX_WAIT_SECONDS,
@@ -5808,18 +5810,41 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         if not write_lock_resume_state:
             from browser_use.browser.events import NavigateToUrlEvent
 
+            # Align browser-use's hardcoded 20s Page.navigate wait with our
+            # TIMEOUT_NavigateToUrlEvent budget before the first start_url hit.
+            apply_browser_use_navigate_timeout_patch()
+
             nav_url = start_url
             if not nav_url.startswith(("http://", "https://", "about:", "file:")):
                 nav_url = f"https://{nav_url}"
                 logger.info(f"\U0001f517 Auto-added https:// to start URL: {nav_url}")
 
+            start_url_nav_error: Optional[BaseException] = None
+
             async def _navigate_to_start_url():
+                nonlocal start_url_nav_error
                 t = time.monotonic()
-                event = dom_service.session.event_bus.dispatch(NavigateToUrlEvent(url=nav_url, wait_until="commit"))
-                await event
-                await event.event_result(raise_if_any=True, raise_if_none=False)
-                ready_state = await _wait_for_document_ready(dom_service)
-                logger.info(f"\U0001f310 Start URL readiness: {ready_state}")
+                try:
+                    event = dom_service.session.event_bus.dispatch(
+                        NavigateToUrlEvent(url=nav_url, wait_until="commit")
+                    )
+                    await event
+                    await event.event_result(raise_if_any=True, raise_if_none=False)
+                    ready_state = await _wait_for_document_ready(dom_service)
+                    logger.info(f"\U0001f310 Start URL readiness: {ready_state}")
+                except Exception as nav_exc:
+                    # Do not kill the whole browser activity on start_url
+                    # navigate failure. A tool ERROR here caused the root agent
+                    # to re-spawn with Fandango after an AMC 20s CDP timeout
+                    # (browser-event-ticket, 2026-08-20). Keep the session and
+                    # let the agent loop retry navigation. Do not catch
+                    # CancelledError/BaseException — activity cancellation must
+                    # still abort.
+                    start_url_nav_error = nav_exc
+                    logger.error(
+                        "Start URL navigation failed (continuing into agent loop): %s",
+                        nav_exc,
+                    )
                 _record_timing("navigation.navigate", t)
 
             # The "Navigating" progress message is pure bookkeeping \u2014 write it
@@ -5840,33 +5865,59 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 ),
             )
 
-            async def _mark_navigated():
-                if browser_recorder:
-                    await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
+            if start_url_nav_error is None:
 
-            async def _wait_for_start_url_ready():
-                t = time.monotonic()
-                await wait_for_navigation_ready(dom_service, url=nav_url)
-                _record_timing("navigation.wait_ready", t)
+                async def _mark_navigated():
+                    if browser_recorder:
+                        await browser_recorder.mark(f"Navigated -> {nav_url[:80]}", action="goto")
 
-            await asyncio.gather(
-                _wait_for_start_url_ready(),
-                save_browser_action_message(
+                async def _wait_for_start_url_ready():
+                    t = time.monotonic()
+                    await wait_for_navigation_ready(dom_service, url=nav_url)
+                    _record_timing("navigation.wait_ready", t)
+
+                await asyncio.gather(
+                    _wait_for_start_url_ready(),
+                    save_browser_action_message(
+                        agent_id=agent_id,
+                        title=f"Navigated \u2192 {nav_url[:50]}",
+                        task_id=task_id,
+                        message="",
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="goto",
+                        tool_call_id=tool_call_id,
+                        steps_taken=0,
+                        total_steps=MAX_ITERATIONS,
+                    ),
+                    _mark_navigated(),
+                )
+                logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+            else:
+                await save_browser_action_message(
                     agent_id=agent_id,
-                    title=f"Navigated \u2192 {nav_url[:50]}",
+                    title=f"Start URL navigate deferred \u2192 {nav_url[:40]}",
                     task_id=task_id,
-                    message="",
+                    message=(
+                        f"Initial navigation to {nav_url} failed "
+                        f"({type(start_url_nav_error).__name__}: {start_url_nav_error}). "
+                        f"Configured Page.navigate budget="
+                        f"{NAVIGATE_TO_URL_TIMEOUT_SECONDS}s; continuing so the "
+                        f"agent can retry without a tool ERROR."
+                    ),
                     status=MessageStatus.FINISHED,
                     browser_url=browser_url,
                     action_type="goto",
                     tool_call_id=tool_call_id,
                     steps_taken=0,
                     total_steps=MAX_ITERATIONS,
-                ),
-                _mark_navigated(),
-            )
-
-            logger.info(f"\U0001f310 Auto-navigated to start URL: {nav_url}")
+                )
+                logger.warning(
+                    "Continuing browser agent after start URL navigate failure "
+                    "(budget=%ss): %s",
+                    NAVIGATE_TO_URL_TIMEOUT_SECONDS,
+                    start_url_nav_error,
+                )
 
             # The provider can replace the pre-navigation target/session while
             # opening the first real page. Revalidate at that exact boundary so

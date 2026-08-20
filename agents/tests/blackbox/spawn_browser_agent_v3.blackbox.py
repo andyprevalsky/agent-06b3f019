@@ -491,6 +491,92 @@ def test_browser_supervisor_does_not_preempt_browser_use_event_timeouts():
     assert BROWSER_SUPERVISOR_STEP_TIMEOUT_SECONDS > BROWSER_STATE_REQUEST_TIMEOUT_SECONDS
     assert BROWSER_SUPERVISOR_ACTION_TIMEOUT_SECONDS > NAVIGATE_TO_URL_TIMEOUT_SECONDS
 
+
+def test_browser_use_upstream_still_hardcodes_page_navigate_20s():
+    """Canary: browser-use still hardcodes Page.navigate wait at 20s.
+
+    When upstream honors TIMEOUT_NavigateToUrlEvent, delete
+    ``browser_use_patches.apply_browser_use_navigate_timeout_patch``.
+    """
+    import browser_use.browser.session as browser_session_mod
+
+    source = Path(browser_session_mod.__file__).read_text(encoding="utf-8")
+    assert "nav_timeout = 20.0" in source, (
+        "browser-use no longer hardcodes nav_timeout=20.0; remove the Rose "
+        "navigate-timeout patch if TIMEOUT_NavigateToUrlEvent is honored"
+    )
+
+
+@pytest.mark.asyncio
+async def test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config():
+    """Owning boundary for browser-event-ticket AMC start_url tool ERROR.
+
+    browser-use ``_navigate_and_wait`` passes ``timeout=20.0`` to
+    ``asyncio.wait_for`` around CDP ``Page.navigate``. Our config sets
+    ``TIMEOUT_NavigateToUrlEvent=300``, but that env never reaches this wait.
+    Without the Rose patch the wait budget stays 20.0s — heavy AMC showtimes
+    pages time out, spawn_browser returns tool ERROR, and the root agent
+    re-spawns on Fandango (merchant mismatch).
+    """
+    from browser_use.browser.session import BrowserSession
+
+    from domains.spawn_browser_agent_v3 import browser_use_patches as patches
+    from domains.spawn_browser_agent_v3.config import NAVIGATE_TO_URL_TIMEOUT_SECONDS
+
+    assert NAVIGATE_TO_URL_TIMEOUT_SECONDS > patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS
+    assert patches.page_navigate_timeout_seconds() == float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)
+
+    seen_timeouts: list[float | None] = []
+    true_wait_for = asyncio.wait_for
+
+    async def recording_wait_for(awaitable, timeout=None, **kwargs):
+        seen_timeouts.append(timeout)
+        if asyncio.iscoroutine(awaitable):
+            awaitable.close()
+        return {"ok": True}
+
+    async def upstream_like_navigate(self, *args, **kwargs):
+        async def page_navigate_rpc():
+            return {"frameId": "1"}
+
+        # Exact upstream hardcode shape (session.py: nav_timeout = 20.0).
+        return await asyncio.wait_for(
+            page_navigate_rpc(),
+            timeout=patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS,
+        )
+
+    previous_navigate = BrowserSession._navigate_and_wait
+    previous_patched = getattr(BrowserSession, patches._PATCHED_ATTR, False)
+    setattr(BrowserSession, patches._PATCHED_ATTR, False)
+    BrowserSession._navigate_and_wait = upstream_like_navigate
+
+    # Pre-fix (unpatched): wait_for must still see the hardcoded 20.0s budget.
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        await upstream_like_navigate(MagicMock())
+        assert seen_timeouts == [patches._UPSTREAM_PAGE_NAVIGATE_TIMEOUT_SECONDS], (
+            "unpatched Page.navigate wait_for budget must be upstream 20.0s; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+
+    seen_timeouts.clear()
+    asyncio.wait_for = recording_wait_for  # type: ignore[assignment]
+    try:
+        assert patches.apply_browser_use_navigate_timeout_patch() is True
+        await BrowserSession._navigate_and_wait(MagicMock())
+        assert seen_timeouts == [float(NAVIGATE_TO_URL_TIMEOUT_SECONDS)], (
+            "patched Page.navigate wait_for budget must equal "
+            f"NAVIGATE_TO_URL_TIMEOUT_SECONDS={NAVIGATE_TO_URL_TIMEOUT_SECONDS}; "
+            f"got {seen_timeouts}"
+        )
+    finally:
+        asyncio.wait_for = true_wait_for  # type: ignore[assignment]
+        BrowserSession._navigate_and_wait = previous_navigate
+        setattr(BrowserSession, patches._PATCHED_ATTR, previous_patched)
+
+
 def test_browser_task_prompt_does_not_duplicate_system_prompt():
     from domains.spawn_browser_agent_v3.service import (
         append_completion_evidence,
@@ -16246,6 +16332,14 @@ async def run_all_tests():
     r.record(
         "browser_supervisor_timeout_ordering",
         test_browser_supervisor_does_not_preempt_browser_use_event_timeouts,
+    )
+    r.record(
+        "browser_use_upstream_still_hardcodes_page_navigate_20s",
+        test_browser_use_upstream_still_hardcodes_page_navigate_20s,
+    )
+    await r.record_async(
+        "browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config",
+        test_browser_use_navigate_timeout_patch_remaps_hardcoded_20s_to_config,
     )
     r.record(
         "browser_task_prompt_no_system_duplication",
