@@ -90,6 +90,7 @@ from .config import (
     VERIFIER_ULTRA_TIMEOUT_SECONDS,
 )
 from .credential_runtime import build_realm_credential_state
+from .download_persist import BrowserDownloadPersister
 from .recording import (
     BrowserAgentRecorder,
     BrowserNetworkRecorder,
@@ -4887,6 +4888,8 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
     browser_recorder: Optional[BrowserAgentRecorder] = None
     browser_network_recorder: Optional[BrowserNetworkRecorder] = None
     network_recorder_task: Optional[asyncio.Task] = None
+    browser_download_persister: Optional[BrowserDownloadPersister] = None
+    download_persister_task: Optional[asyncio.Task] = None
     interaction_layer_task: Optional[asyncio.Task] = None
     cursor_streamer: Optional[BrowserCursorRealtimeStreamer] = None
     action_history = ActionHistory()
@@ -5676,6 +5679,19 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
         # can take seconds and nothing downstream needs it synchronously, so it
         # attaches in the background (resolved before session close).
         network_recorder_task = asyncio.create_task(_create_network_recorder())
+
+        async def _create_download_persister():
+            # Kernel CDP downloads_path alone does not always yield listFiles entries;
+            # materialize Content-Disposition attachments under /tmp/downloads.
+            return await BrowserDownloadPersister.create(
+                browser_session=dom_service.session,
+                session_id=session_id,
+                config=config,
+                agent_id=agent_id,
+                task_id=task_id or "",
+            )
+
+        download_persister_task = asyncio.create_task(_create_download_persister())
 
         async def _init_humanizer():
             if not _env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True):
@@ -7040,6 +7056,16 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                if download_persister_task.done():
+                                    browser_download_persister = download_persister_task.result()
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
                         humanizer = await _replace_browser_humanizer(
                             current_humanizer=humanizer,
                             enabled=_env_enabled("BROWSER_AGENT_HUMANIZER_ENABLED", True),
@@ -7472,6 +7498,18 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                         if browser_network_recorder is not None:
                             with contextlib.suppress(Exception):
                                 await browser_network_recorder.transition_browser(
+                                    browser_session=dom_service.session,
+                                    session_id=session_id,
+                                )
+                        if browser_download_persister is None and download_persister_task is not None:
+                            with contextlib.suppress(Exception):
+                                browser_download_persister = await asyncio.wait_for(
+                                    asyncio.shield(download_persister_task),
+                                    timeout=10,
+                                )
+                        if browser_download_persister is not None:
+                            with contextlib.suppress(Exception):
+                                await browser_download_persister.transition_browser(
                                     browser_session=dom_service.session,
                                     session_id=session_id,
                                 )
@@ -8726,6 +8764,15 @@ Based on this feedback, I need to continue working on the task and address the i
                     task_id=task_id,
                     error=extract_error_message(diagnostics_error),
                 )
+        if browser_download_persister is None and download_persister_task is not None:
+            with contextlib.suppress(Exception):
+                browser_download_persister = await asyncio.wait_for(
+                    asyncio.shield(download_persister_task),
+                    timeout=10,
+                )
+        if browser_download_persister is not None:
+            with contextlib.suppress(Exception):
+                await browser_download_persister.close()
         _schedule_browser_cleanup(
             agent_id=agent_id,
             task_id=task_id,
