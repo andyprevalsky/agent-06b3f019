@@ -21,7 +21,7 @@ require_text() {
 
 [ -f "$FORMAT" ] || fail "canonical approval format is missing"
 
-for heading in "## Detail" "## Before Behavior" "## After Behavior" "## Downstream Implications"; do
+for heading in "## Evidence" "## Detail" "## Before Behavior" "## After Behavior" "## Downstream Implications"; do
   require_text "$FORMAT" "$heading" "canonical approval format must include $heading"
 done
 
@@ -31,6 +31,8 @@ import sys
 
 text = Path(sys.argv[1]).read_text()
 headings = [
+    "## TL;DR",
+    "## Evidence",
     "## Detail",
     "## Before Behavior",
     "## After Behavior",
@@ -49,6 +51,18 @@ require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
 require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
   "approval requests must include a concrete FE agent link"
+require_text "$FORMAT" '**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`' \
+  "approval requests must include a rendered LLM dump link"
+require_text "$FORMAT" "python3 scripts/render_llm_dump.py" \
+  "approval requests must render LLM dumps before presenting"
+require_text "$FORMAT" "**Local repro (<wall-clock>):**" \
+  "approval requests must include local repro steps with measured wall-clock"
+require_text "$FORMAT" "- **Evaluators:**" \
+  "approval requests must list catalog evaluators"
+require_text "$FORMAT" "- **Fixtures:**" \
+  "approval requests must list data fixtures"
+require_text "$FORMAT" "- **Task prompt:**" \
+  "approval requests must include the verbatim task prompt"
 require_text "$FORMAT" 'verified rendered' \
   "approval requests must report successful FE-link verification"
 require_text "$FORMAT" 'verified reachable' \
@@ -59,6 +73,8 @@ require_text "$FORMAT" 'restore an archived viewer without rerunning a' \
   "approval requests must restore archived FE evidence when safe"
 require_text "$FORMAT" "Never invent a failing test." \
   "approval requests must distinguish proactive changes from reproduced failures"
+require_text "$FORMAT" "Not applicable — <reason>" \
+  "approval requests must keep Evidence labels when a field does not apply"
 
 for command in "$DEPLOY" "$RCA" "$DESCEND"; do
   require_text "$command" ".claude/shared/approval-format.md" \
@@ -69,11 +85,25 @@ done
 
 require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
   "/deploy must cement the shared approval format in its no-skip structural gate"
-require_text "$DESCEND" "the canonical four-part approval narrative" \
-  "/descend approval stops must use the canonical four-part narrative"
+require_text "$DESCEND" "the canonical approval narrative" \
+  "/descend approval stops must use the canonical approval narrative"
+require_text "$DESCEND" "**Local repro (<wall-clock>):**" \
+  "/descend Stop 1 must include local repro wall-clock"
+require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — \`<call_site>\`" \
+  "/descend Stop 1 must include the rendered LLM dump link"
+require_text "$RCA" "FE link, rendered LLM dump link, numbered local-repro steps" \
+  "/rca approval output must require the Evidence pack"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then
   fail "/descend must not retain its superseded five-part approval narrative"
+fi
+
+if grep -Fq "the canonical four-part approval narrative" "$DESCEND"; then
+  fail "/descend must not retain the superseded four-part approval narrative"
+fi
+
+if grep -Fq "**Exact benchmark task (\`task.prompt\`, verbatim):**" "$DESCEND"; then
+  fail "/descend must put task.prompt inside Evidence, not as a standalone lead-in"
 fi
 
 echo "All shared approval-format checks passed."

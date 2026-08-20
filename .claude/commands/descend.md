@@ -18,8 +18,8 @@ Both planned user-input gates, and any unplanned human approval permitted by
 the composed commands, must follow `.claude/shared/approval-format.md`.
 Read it completely immediately before composing the request. The
 response-contract fields below add benchmark and lifecycle context, but never
-replace the shared Detail, Before Behavior, After Behavior, and Downstream
-Implications sections.
+replace the shared Evidence, Detail, Before Behavior, After Behavior, and
+Downstream Implications sections.
 
 ## Hard rules
 
@@ -693,14 +693,36 @@ or multi-line explanations.
 ### Stop 1 content — fix approval
 
 After the lifecycle table, include one section for the current min-idle heap
-item with ⏳ Fix approval. Lead with the complete benchmark task and the
-one-glance core claim, then use the canonical four-part approval narrative from
-`.claude/shared/approval-format.md`. Never truncate, summarize, or paraphrase
-`task.prompt`, even when it is long or multiline:
+item with ⏳ Fix approval. Lead with the one-glance core claim, then use
+the canonical approval narrative from `.claude/shared/approval-format.md`.
+Put the verbatim `task.prompt` in Evidence, not above it. Never truncate,
+summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 ### <row ID> · <issue summary>
 
-**Exact benchmark task (`task.prompt`, verbatim):**
+#### TL;DR
+
+<exactly one sentence: what to approve and its most important consequence>
+
+#### Evidence
+
+**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`
+
+**Local repro (<wall-clock>):**
+
+1. <copy-paste command>
+2. <next step>
+
+- Pre-fix: <measured wrong value>
+- Post-fix: <measured passing value>
+
+**Environment**
+
+- **Evaluators:** `<id>` (`<method>`) — <criteria>
+- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
+- **Task prompt:**
 
 > <full exact task.prompt with every line and character preserved>
 
@@ -715,7 +737,7 @@ The issue is **<root cause at the first-bad boundary>**. I reproduced it with
 and observed **<wrong result>** instead of **<expected result>**.
 The unchanged local repro now **<exact passing result>**, and the regression is
 cemented in **<permanent test name>**. Include the approval snapshot and
-clickable links to every affected hunk.
+clickable links to every affected hunk. Do not restate the Evidence pack.
 
 #### Before Behavior
 
@@ -750,12 +772,37 @@ After the affected lifecycle rows, include:
 
 ### A-<id> · <row IDs>
 
+#### TL;DR
+
+<exactly one sentence: what to approve and its most important consequence>
+
+#### Evidence
+
+**FE link:** [Open agent](<frontend-agent-url>) — <verification status>
+
+**LLM dump:** [Open rendered dump](<rendered-html-url>) — `<call_site>`
+
+**Local repro (<wall-clock>):**
+
+1. <copy-paste command>
+
+- Pre-fix: <measured wrong value>
+- Post-fix: <measured passing value>
+
+**Environment**
+
+- **Evaluators:** `<id>` (`<method>`) — <criteria>
+- **Fixtures:** base `<image>`; db `<db_fixtures or none>`; live overlay `<live_fixtures or none>`
+- **Task prompt:**
+
+> <full exact task.prompt, or `Not applicable — not a catalog task`>
+
 #### Detail
 
 This deploy changes **<one-line prompt or terminal-behavior effect>**. Name the
 exact unchanged test or reproduction that failed before and passes after the
 change, its concrete results, the approval snapshot ID, and clickable links to
-every affected hunk.
+every affected hunk. Do not restate the Evidence pack.
 
 #### Before Behavior
 

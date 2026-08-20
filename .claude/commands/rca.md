@@ -209,9 +209,11 @@ When RCA-only: present the evidence, which archive searches you ran and whether
 this is a recurrence/relative/novel, a one-sentence root cause at the first-bad
 boundary, exact local repro command + recorded failure, and proposed
 generalizable fix. Then stop for agreement before implementing using the
-canonical four-part approval narrative from
-`.claude/shared/approval-format.md`; include the unchanged repro's current
-failing result in Detail and the expected post-fix assertion in After Behavior.
+canonical approval narrative from `.claude/shared/approval-format.md`. Evidence
+must include the FE link, rendered LLM dump link, numbered local-repro steps
+with measured wall-clock, and Environment (evaluators, fixtures, task prompt).
+Put the unchanged repro's current failing result in Evidence and Detail, and
+the expected post-fix assertion in After Behavior.
 
 When fixing too: implement, re-run the identical repro command, and report the
 pre-fix failure AND the post-fix pass side by side.
