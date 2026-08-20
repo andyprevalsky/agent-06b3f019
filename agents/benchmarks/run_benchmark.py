@@ -295,6 +295,12 @@ def _benchmark_env_bool(name: str) -> Optional[bool]:
     raise ValueError(f"{name} must be one of true/false/1/0/yes/no/on/off")
 
 
+def _minted_clear_existing_auth_enabled() -> bool:
+    """Minted-account benches clear saved realm auth unless explicitly disabled."""
+    flag = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    return True if flag is None else flag
+
+
 def _resolved_fast_mode_cache(task: BenchmarkTask) -> Optional[bool]:
     """Resolve Fast Mode without overriding a task's side-effect safety contract."""
     if task.fast_cache == "off":
@@ -7101,8 +7107,21 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
 
 
 def _x_signup_has_terminal_phone_blocker(signup_text: str) -> bool:
-    """Return true when X forced phone auth and rejected it before account creation."""
-    normalized = signup_text.lower()
+    """Return true when X forced phone auth and rejected it before account creation.
+
+    The X post prompt embeds guidance that names these failure modes (including the
+    exact phrase "terminal phone-auth blocker"). `_task_result_search_text` includes
+    USER/spawn-goal text, so matching the raw blob false-positives every successful
+    run. Strip the stock auth hint / post prompt before scanning for outcome markers.
+    """
+    normalized = (signup_text or "").lower()
+    for stock in (
+        MINTED_AGENT_ACCOUNT_X_AUTH_HINT.lower(),
+        _x_post_prompt().lower(),
+        MINTED_AGENT_ACCOUNT_X_POST_GOAL.lower(),
+    ):
+        if stock:
+            normalized = normalized.replace(stock, " ")
     return any(
         marker in normalized
         for marker in (
@@ -7201,7 +7220,11 @@ async def run_minted_agent_account_task(
         "on",
     )
     prefer_phone_auth = _benchmark_env_bool("BENCHMARK_MINTED_PREFER_PHONE_AUTH") is True
-    clear_existing_auth = _benchmark_env_bool("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH") is True
+    # Minted-account benches must exercise a fresh realm login by default. Saved
+    # x.com cookies otherwise let the agent post as an existing profile without
+    # ever creating a MintedAccount row (observed 2026-08-20: posted as
+    # @rose_labs_ with no mint). Opt out with BENCHMARK_MINTED_CLEAR_EXISTING_AUTH=false.
+    clear_existing_auth = _minted_clear_existing_auth_enabled()
     phone_evidence_since = datetime.now(timezone.utc)
     identity_was_present = _local_agent_identity_present_for_user(USER_ID)
     deleted = _delete_local_minted_accounts_for_user(USER_ID, reset_agent_identity=reset_agent_identity)

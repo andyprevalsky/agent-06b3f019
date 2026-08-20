@@ -5407,11 +5407,20 @@ def test_minted_x_signup_evidence_rejects_terminal_phone_blocker():
 
     blocker = "X forced phone auth. Final DOM showed: An unexpected error occurred. Please try again."
     success = "Account creation completed and the account is signed in on the home timeline."
+    # Successful post transcripts still contain the USER/spawn auth hint that names
+    # the blocker phrase — that instruction text must not false-positive the check.
+    success_with_instruction = (
+        bench._x_post_prompt()
+        + "\n\nStatus: posted. Exact text: Hello World. "
+        + "Post URL: https://x.com/rose_labs_/status/2090546285698801794. "
+        + "No blocker. The final X post page visibly shows the published post."
+    )
 
     assert bench._x_signup_has_terminal_phone_blocker(blocker) is True
     assert bench._x_signup_has_account_creation_evidence(blocker) is False
     assert bench._x_signup_has_terminal_phone_blocker(success) is False
     assert bench._x_signup_has_account_creation_evidence(success) is True
+    assert bench._x_signup_has_terminal_phone_blocker(success_with_instruction) is False
 
 
 def test_amazon_passkey_scenario_isolates_passkey_and_fresh_kernel_profile():
@@ -5761,6 +5770,26 @@ def test_anon_benchmark_mode_disables_saved_auth_material():
             os.environ.pop("BENCHMARK_DISABLE_SAVED_BROWSER_AUTH", None)
         else:
             os.environ["BENCHMARK_DISABLE_SAVED_BROWSER_AUTH"] = previous_disable_saved_auth
+
+
+def test_minted_account_task_defaults_to_clearing_existing_auth():
+    """Without an explicit env override, minted benches must clear saved realm auth."""
+    import os
+
+    import benchmarks.run_benchmark as bench
+
+    previous = os.environ.get("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH")
+    try:
+        os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        assert bench._minted_clear_existing_auth_enabled() is True
+
+        os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = "false"
+        assert bench._minted_clear_existing_auth_enabled() is False
+    finally:
+        if previous is None:
+            os.environ.pop("BENCHMARK_MINTED_CLEAR_EXISTING_AUTH", None)
+        else:
+            os.environ["BENCHMARK_MINTED_CLEAR_EXISTING_AUTH"] = previous
 
 
 def test_x_post_prompt_keeps_goal_and_prefers_email_auth():
