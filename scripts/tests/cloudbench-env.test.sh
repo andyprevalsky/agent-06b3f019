@@ -1398,6 +1398,16 @@ if "-c http.extraheader=" in clone:
     raise SystemExit("--setup clone must not put AUTH_HDR on git -c argv")
 if "rm -f '$remote_setup_token' '$remote_setup_cmd'" not in clone:
     raise SystemExit("--setup must rm remote token/cmd on SFTP failure")
+# Existing-repo fetch must reset origin to the trusted URL BEFORE git_auth so a
+# retained/altered remote cannot receive the controller token.
+fetch_idx = clone.find("repo already present")
+if fetch_idx < 0:
+    raise SystemExit("--setup existing-repo fetch branch missing")
+fetch_branch = clone[fetch_idx : clone.find("else", fetch_idx)]
+set_url_at = fetch_branch.find("remote set-url origin")
+fetch_at = fetch_branch.find("fetch --quiet origin")
+if set_url_at < 0 or fetch_at < 0 or set_url_at > fetch_at:
+    raise SystemExit("--setup must set trusted origin before authenticated fetch")
 
 helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
 
