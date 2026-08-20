@@ -47,7 +47,15 @@ VISION_MODELS: frozenset[str] = frozenset({
     "google/gemini-2.5-flash",
     "google/gemini-2.5-pro",
     "google/gemini-3-pro-preview",
+    "google/gemini-3-flash-preview",
     "google/gemini-3.5-flash",
+    "google/gemini-3.6-flash",
+    # Vision-capable per OpenRouter (text+image+video->text). Required by the
+    # rose-1-ultra / rose-1-browser-use waterfalls. A waterfall model missing
+    # from this set silently strips screenshots instead of erroring, so the
+    # browser agent flies blind on that layer — see the invariant test in
+    # tests/blackbox/rose.blackbox.py.
+    "moonshotai/kimi-k3",
     "anthropic/claude-sonnet-4",
     "anthropic/claude-sonnet-4.5",
     "anthropic/claude-haiku-4.5",
