@@ -17,8 +17,10 @@ import assert from 'node:assert/strict';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
   CodeAgentCredentialError,
+  isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
   resolveCodexCodeAuthEnvs,
+  resolveHostAnthropicBaseUrl,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -108,6 +110,44 @@ function main(): void {
     assert.ok(!error.message.includes('sk-'), 'a raw key prefix must never reach the client');
     assert.ok(!error.detail.includes('sk-'), 'a raw key prefix must never reach the logs either');
   }
+
+  assert.equal(resolveHostAnthropicBaseUrl(undefined), undefined);
+  assert.equal(resolveHostAnthropicBaseUrl(''), undefined);
+  assert.equal(resolveHostAnthropicBaseUrl('  '), undefined);
+  assert.equal(
+    resolveHostAnthropicBaseUrl(' https://openrouter.ai/api '),
+    'https://openrouter.ai/api'
+  );
+
+  assert.equal(isRefreshOnlyOauthEnvelope(null), false);
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_token',
+      accessToken: 'tok',
+      source: 'user',
+      userId: 'u1',
+    }),
+    false
+  );
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_envelope',
+      credentials: '{"claudeAiOauth":{}}',
+      source: 'user',
+      userId: 'u1',
+    }),
+    true
+  );
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_envelope',
+      credentials: '{"claudeAiOauth":{}}',
+      accessToken: 'still-present',
+      source: 'user',
+      userId: 'u1',
+    }),
+    false
+  );
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
 }
