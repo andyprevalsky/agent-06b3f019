@@ -92,6 +92,8 @@ grep -Fq 'require_controller_github_token_b64' "$ROOT_DIR/scripts/run-bench-clou
   || fail "run-bench-cloud must require a usable controller token before refresh-deps git-sync"
 grep -Fq 'cloudbench-github-token.sh' "$ROOT_DIR/scripts/run-bench-cloud" \
   || fail "run-bench-cloud must source cloudbench-github-token.sh"
+grep -Fq 'cloudbench-github-token.sh' "$ROOT_DIR/scripts/run-bench-fleet" \
+  || fail "run-bench-fleet must copy cloudbench-github-token.sh into the script snapshot"
 
 # Old machine-only AUTH_HDR pattern must not remain inside --refresh-deps.
 if python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY'
