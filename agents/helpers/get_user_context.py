@@ -490,8 +490,14 @@ def _format_user_context(
         for integ in integrations:
             status = integ.get("status", "")
             name = integ.get("name", "")
-            creds = integ.get("emailCredentials") or []
-            emails = [c.get("email") for c in creds if isinstance(c, dict) and c.get("email")]
+            creds = integ.get("emailCredentials")
+            if not isinstance(creds, list):
+                creds = []
+            emails: List[str] = []
+            for credential in creds:
+                email = credential.get("email") if isinstance(credential, dict) else None
+                if isinstance(email, str) and email:
+                    emails.append(email)
             # Prefer credential rows; fall back to the denormalized config copy
             # that withDerivedConnectedEmails writes for the UI. Without this,
             # a SYNC_FAILED Gmail row whose nested credentials were stripped

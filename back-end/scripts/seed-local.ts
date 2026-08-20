@@ -393,6 +393,80 @@ async function syncIntegrations(): Promise<number> {
   return syncedIds.length;
 }
 
+/** Email providers refreshed by `--email-credentials-only` (no compute-token churn). */
+const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
+
+/**
+ * Sync only Gmail/Yahoo integration rows for the dev user. Unlike
+ * `syncIntegrations`, this never imports pool tokens and never deletes
+ * `claude_code` / `gpt_code` rows — email overlay must not disturb compute
+ * tokens already present in an isolated benchmark DB.
+ *
+ * Returns a remote-integration-id → local-integration-id map so credential
+ * upserts can rewrite foreign keys onto the preserved local IDs.
+ */
+async function syncEmailIntegrations(): Promise<Map<string, string>> {
+  const emailIntegrations = await remote.integration.findMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: [...EMAIL_INTEGRATION_NAMES] },
+    },
+    select: PROD_INTEGRATION_COLUMNS,
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const integration of emailIntegrations) {
+    const { id: remoteId, ...updateData } = integration;
+    const synced = await local.integration.upsert({
+      where: {
+        userId_name: {
+          userId: integration.userId,
+          name: integration.name,
+        },
+      },
+      create: integration,
+      update: updateData,
+      select: { id: true },
+    });
+    remoteToLocal.set(remoteId, synced.id);
+  }
+  return remoteToLocal;
+}
+
+/** Rewrite credential.integrationId onto the local Integration id when IDs diverge. */
+function remapEmailCredentialIntegrationIds<
+  T extends { integrationId: string; [key: string]: unknown },
+>(creds: T[], remoteToLocal: Map<string, string>): T[] {
+  return creds.map((cred) => {
+    const localId = remoteToLocal.get(cred.integrationId);
+    if (!localId || localId === cred.integrationId) return cred;
+    return { ...cred, integrationId: localId };
+  });
+}
+
+/**
+ * Build remote→local Integration id map for the email providers that own
+ * EmailIntegrationCredential rows. Used after any integration sync that
+ * preserves local primary keys via (userId, name).
+ */
+async function emailIntegrationIdMap(): Promise<Map<string, string>> {
+  const remoteRows = await remote.integration.findMany({
+    where: {
+      userId: DEV_USER_ID,
+      name: { in: [...EMAIL_INTEGRATION_NAMES] },
+    },
+    select: { id: true, userId: true, name: true },
+  });
+  const remoteToLocal = new Map<string, string>();
+  for (const row of remoteRows) {
+    const localRow = await local.integration.findUnique({
+      where: { userId_name: { userId: row.userId, name: row.name } },
+      select: { id: true },
+    });
+    if (localRow) remoteToLocal.set(row.id, localRow.id);
+  }
+  return remoteToLocal;
+}
+
 /**
  * Synthetic benchmark users must not receive copies of the developer's credential rows. For
  * isolated benchmark databases only, this explicit opt-in exposes the already-synced dev-owned
@@ -968,12 +1042,19 @@ async function sync() {
   }
 
   if (EMAIL_CREDENTIALS_ONLY) {
-    await syncTable('Integrations', syncIntegrations);
+    let remoteToLocal = new Map<string, string>();
+    await syncTable('Integrations', async () => {
+      remoteToLocal = await syncEmailIntegrations();
+      return remoteToLocal.size;
+    });
     await syncTable('Email Credentials', async () => {
       const creds = await remote.emailIntegrationCredential.findMany({
         where: { userId: DEV_USER_ID },
       });
-      return upsertById(local.emailIntegrationCredential, creds);
+      return upsertById(
+        local.emailIntegrationCredential,
+        remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+      );
     });
     console.log('\n🔄 Email credential sync complete.');
     return;
@@ -1026,7 +1107,11 @@ async function sync() {
     const creds = await remote.emailIntegrationCredential.findMany({
       where: { userId: DEV_USER_ID },
     });
-    return upsertById(local.emailIntegrationCredential, creds);
+    const remoteToLocal = await emailIntegrationIdMap();
+    return upsertById(
+      local.emailIntegrationCredential,
+      remapEmailCredentialIntegrationIds(creds, remoteToLocal)
+    );
   });
 
   // ── People (contacts) ──
