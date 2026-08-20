@@ -17,6 +17,9 @@
 
 import assert from 'node:assert/strict';
 import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../../domains/purchases/config';
+// The production identity is owned by providers/benchmarkPaymentIdentity; importing
+// it from purchases/config yielded `undefined`, which made every assertion below
+// compare against undefined instead of the real id.
 import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
 import {
   assertLiveOrgWallet,

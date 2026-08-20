@@ -86,7 +86,7 @@ PROBLEM_CLASSES = {
 
 STATUSES = {"fixed", "open", "mitigated", "wontfix", "superseded"}
 SURFACES = {"back-end", "front-end", "agents", "mac-app", "infra", "harness", "cross"}
-SOURCE_PREFIXES = ("PR #", "commit ", "memory:", "plan:", "agent ")
+SOURCE_PREFIXES = ("PR #", "commit ", "memory:", "plan:", "agent ", "fleet run ")
 TAG_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*")
 
 STOPWORDS = {
