@@ -938,3 +938,100 @@ cloudbench_controller_lock_release() {
 # immutable warm-volume snapshots, and mutates nothing but the machines it
 # created. The only lock a run takes is the workspace-local controller lock
 # above.
+
+# Extract an x-access-token from a git remote / insteadOf URL without printing it.
+cloudbench_token_from_git_url() {
+  local url="$1"
+  python3 - "$url" <<'PY'
+import re, sys
+url = sys.argv[1]
+match = re.search(r"x-access-token:([^@/\s]+)@", url)
+if match:
+    print(match.group(1))
+PY
+}
+
+# Prefer the controller's live push credential over a stale GITHUB_TOKEN secret.
+# Cursor Cloud injects an expired GITHUB_TOKEN while git's insteadOf / remote URL
+# carries a working short-lived token; preferring the env secret made warm
+# refresh-deps emit empty AUTH_HDR ("could not read Username for https://github.com")
+# and task boxes inherit the same dead token via controller_github_token_b64.
+cloudbench_resolve_controller_github_token() {
+  local root="${1:-${ROOT_DIR:-.}}" token="" url="" dotenv
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN:-}" ]; then
+    printf '%s' "$CLOUDBENCH_GITHUB_TOKEN"
+    return 0
+  fi
+  if [ -n "${CLOUDBENCH_GITHUB_TOKEN_B64:-}" ]; then
+    token="$(printf '%s' "$CLOUDBENCH_GITHUB_TOKEN_B64" | base64 -d 2>/dev/null || true)"
+    if [ -n "$token" ]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  fi
+  if command -v git >/dev/null 2>&1; then
+    url="$(git -C "$root" remote get-url origin 2>/dev/null || true)"
+    token="$(cloudbench_token_from_git_url "$url")"
+    if [ -n "$token" ]; then
+      printf '%s' "$token"
+      return 0
+    fi
+    # git config keys look like: url.https://x-access-token:TOKEN@github.com/.insteadof
+    while IFS= read -r cfg_key; do
+      [ -n "$cfg_key" ] || continue
+      url="${cfg_key#url.}"
+      url="${url%.insteadof}"
+      token="$(cloudbench_token_from_git_url "$url")"
+      if [ -n "$token" ]; then
+        printf '%s' "$token"
+        return 0
+      fi
+    done < <(git -C "$root" config --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '{print $1}' || true)
+  fi
+  if [ -n "${GITHUB_DISPATCH_TOKEN:-}" ]; then
+    printf '%s' "$GITHUB_DISPATCH_TOKEN"
+    return 0
+  fi
+  if command -v gh >/dev/null 2>&1; then
+    # A stale injected GITHUB_TOKEN makes `gh auth token` return the dead
+    # active account; clear both for the lookup so hosts.yml oauth wins.
+    token="$(env -u GITHUB_TOKEN -u GH_TOKEN gh auth token 2>/dev/null || true)"
+    if [ -n "$token" ]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  fi
+  for dotenv in "$root/back-end/.env" "$root/agents/.env"; do
+    [ -f "$dotenv" ] || continue
+    token="$(cloudbench_env_value "$dotenv" GITHUB_TOKEN)"
+    if [ -n "$token" ]; then
+      printf '%s' "$token"
+      return 0
+    fi
+  done
+  return 1
+}
+
+cloudbench_controller_github_token_b64() {
+  local token
+  token="$(cloudbench_resolve_controller_github_token "${1:-${ROOT_DIR:-.}}")" || return 1
+  printf '%s' "$token" | base64 | tr -d '\n'
+}
+
+# Build the AUTH_HDR used by warm-box git-sync. Prefer the controller-supplied
+# token; only fall back to an on-box GITHUB_TOKEN secret when no controller
+# credential was staged. Empty AUTH_HDR is the exact failure that aborted
+# fleet runs with "could not read Username for 'https://github.com'".
+cloudbench_git_auth_header_from_tokens() {
+  local controller_b64="${1:-}" machine_token="${2:-}" token="" 
+  if [ -n "$controller_b64" ]; then
+    token="$(printf '%s' "$controller_b64" | base64 -d 2>/dev/null || true)"
+  fi
+  if [ -z "$token" ] && [ -n "$machine_token" ]; then
+    token="$machine_token"
+  fi
+  if [ -z "$token" ]; then
+    return 1
+  fi
+  printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+}
