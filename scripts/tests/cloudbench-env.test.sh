@@ -1063,6 +1063,68 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
 [ "$readiness_failures" -eq 0 ] ||
   fail "$readiness_failures machine-readiness regression case(s) failed"
 
+# ssh_exec must retry transient Fly tunnel/lease errors. A one-shot SSH after
+# require_machine_ready still races stop/replace/lease churn and previously
+# aborted fleets at "exact remote checkout failed" before any task machine.
+(
+  function_body="$(readiness_function ssh_exec)"
+  [ -n "$function_body" ] || fail "could not load production ssh_exec"
+  # Pull the transient classifier too — ssh_exec depends on it.
+  classifier="$(readiness_function _ssh_exec_transient_error)"
+  [ -n "$classifier" ] || fail "could not load _ssh_exec_transient_error"
+  eval "$classifier"
+  eval "$function_body"
+  APP="cloudbench-ssh-exec-retry"
+  SSH_EXEC_TRIES=3
+  SSH_EXEC_RETRY_SLEEP_SECONDS=0
+  fly_calls=0
+  starts=0
+  request_machine_start() { starts=$((starts + 1)); return 0; }
+  FLY() {
+    fly_calls=$((fly_calls + 1))
+    if [ "$fly_calls" -lt 3 ]; then
+      echo "Error: tunnel unavailable: Error contacting Fly.io API when probing \"$APP\": timed out (context deadline exceeded)" >&2
+      return 1
+    fi
+    echo "SYNC_OK"
+    return 0
+  }
+  # Do not capture via command substitution — that runs ssh_exec in a subshell
+  # and hides FLY/request_machine_start counter updates from this scope.
+  out_file="$(mktemp)"
+  ssh_exec mach-retry 'echo SYNC_OK' >"$out_file" 2>/dev/null ||
+    fail "ssh_exec must succeed after transient tunnel failures"
+  out="$(cat "$out_file")"
+  rm -f "$out_file"
+  [ "$out" = "SYNC_OK" ] || fail "ssh_exec must stream the successful remote stdout (got=$out)"
+  [ "$fly_calls" -eq 3 ] || fail "ssh_exec must retry until success (fly_calls=$fly_calls)"
+  [ "$starts" -eq 2 ] || fail "ssh_exec must re-assert start between transient failures (starts=$starts)"
+) || readiness_failures=$((readiness_failures + 1))
+
+(
+  function_body="$(readiness_function ssh_exec)"
+  classifier="$(readiness_function _ssh_exec_transient_error)"
+  eval "$classifier"
+  eval "$function_body"
+  APP="cloudbench-ssh-exec-fatal"
+  SSH_EXEC_TRIES=5
+  SSH_EXEC_RETRY_SLEEP_SECONDS=0
+  fly_calls=0
+  request_machine_start() { return 0; }
+  FLY() {
+    fly_calls=$((fly_calls + 1))
+    echo "Error: permission denied (publickey)" >&2
+    return 1
+  }
+  rc=0
+  ssh_exec mach-fatal 'true' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "ssh_exec must fail closed on non-transient errors"
+  [ "$fly_calls" -eq 1 ] || fail "ssh_exec must not retry non-transient errors (fly_calls=$fly_calls)"
+) || readiness_failures=$((readiness_failures + 1))
+
+[ "$readiness_failures" -eq 0 ] ||
+  fail "$readiness_failures machine-readiness/ssh_exec regression case(s) failed"
+
 # An unprovisioned worktree (plain `git worktree add`, no credentials copied)
 # used to burn a full fleet launch and then die on a bare "BACKEND_API_KEY is
 # required" line that named neither the file it read nor the provisioning step.

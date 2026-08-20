@@ -848,16 +848,67 @@ if [ "$MODE" = "refresh-secrets" ]; then
     exit 0
 fi
 
+# True when flyctl stderr looks like a transient tunnel / Machines-API blip that
+# a short retry can absorb (mid-start WireGuard probe, brief lease churn).
+_ssh_exec_transient_error() {
+    local err="$1"
+    case "$err" in
+        *"tunnel unavailable"*|*"context deadline exceeded"*|*"no started VMs"*|*"lease currently held"*|*"rate limit exceeded"*|*"failed_precondition"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 # SSH-exec a shell snippet on the machine, streaming output. $1 = machine id.
+# Retries transient Fly tunnel/API failures: a one-shot ssh after require_machine_ready
+# still races machine stop/replace/lease churn and used to abort whole fleets with
+# "exact remote checkout failed" before any task machine was provisioned.
 ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # base64 the command instead of printf %q: a multi-line command quotes to
     # $'set -e\n...', which the remote `-C` shell (not guaranteed bash) does not
     # expand — the literal $'...' reaches `bash -lc` and fails (observed: heal
     # git-sync/sync-deps SSH commands failing while the same commands run fine
     # by hand). base64 has no shell-special bytes, so it survives any shell.
+    local id="$1" cmd="$2"
+    local tries="${SSH_EXEC_TRIES:-5}"
+    local nap="${SSH_EXEC_RETRY_SLEEP_SECONDS:-3}"
+    local n=0 rc=1 out="" err="" errf outf
     local b64
-    b64="$(printf '%s' "$2" | base64 | tr -d '\n')"
-    FLY ssh console -a "$APP" --machine "$1" -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\""
+    b64="$(printf '%s' "$cmd" | base64 | tr -d '\n')"
+    errf="$(mktemp)"
+    outf="$(mktemp)"
+    while [ "$n" -lt "$tries" ]; do
+        : >"$errf"
+        : >"$outf"
+        rc=0
+        FLY ssh console -a "$APP" --machine "$id" \
+            -C "bash -lc \"printf %s $b64 | base64 -d | bash -l\"" \
+            >"$outf" 2>"$errf" || rc=$?
+        out="$(cat "$outf")"
+        err="$(cat "$errf")"
+        # Stream successful (or final) remote stdout the way the old one-shot did.
+        if [ "$rc" -eq 0 ]; then
+            printf '%s' "$out"
+            # Still forward flyctl's "Connecting to ..." noise to stderr when present.
+            [ -n "$err" ] && printf '%s\n' "$err" >&2
+            rm -f "$errf" "$outf"
+            return 0
+        fi
+        n=$((n + 1))
+        if [ "$n" -ge "$tries" ] || ! _ssh_exec_transient_error "$err"; then
+            printf '%s' "$out"
+            [ -n "$err" ] && printf '%s\n' "$err" >&2
+            rm -f "$errf" "$outf"
+            return "$rc"
+        fi
+        echo "   ↻ ssh_exec transient failure on $id (attempt $n/$tries): $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-160)" >&2
+        # Re-assert start between attempts — lease churn often leaves the VM stopped.
+        request_machine_start "$id" 2>/dev/null || true
+        sleep "$nap"
+    done
+    rm -f "$errf" "$outf"
+    return 1
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
