@@ -7568,6 +7568,8 @@ def test_fleet_waits_for_warm_source_stop_before_provisioning(tmp_path: Path) ->
     assert 'warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1' in fleet
     assert 'CLOUDBENCH_WARM_PARK_ATTEMPTS' in fleet
     assert "warm-source park attempt" in fleet
+    assert "CLOUDBENCH_WARM_DEPS_REFRESH_ATTEMPTS" in fleet
+    assert "retrying central dep refresh" in fleet
     # The one-shot hard-fail gate must not remain ahead of parking.
     gate = fleet.split("wait_for_stopped_warm_source() {", 1)[1]
     call_at = gate.index('warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")"')
