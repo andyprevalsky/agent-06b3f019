@@ -762,6 +762,25 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_refresh_gh_b64=' \
+  "refresh-deps must inject a controller-resolved GitHub token into the warm-box git-sync SSH snippet"
+
+# Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
+# the only auth path for refresh-deps. The sync command must export a token
+# decoded from a controller-supplied base64 blob (same pattern as clone boot).
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_refresh_gh_b64'"'"' | base64 -d)' \
+  "refresh-deps SSH sync must export GITHUB_TOKEN from the controller blob"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
