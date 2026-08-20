@@ -7566,6 +7566,8 @@ def test_fleet_waits_for_warm_source_stop_before_provisioning(tmp_path: Path) ->
     fleet = FLEET_SCRIPT.read_text()
     assert "wait_for_stopped_warm_source() {" in fleet
     assert 'warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1' in fleet
+    assert 'CLOUDBENCH_WARM_PARK_ATTEMPTS' in fleet
+    assert "warm-source park attempt" in fleet
     # The one-shot hard-fail gate must not remain ahead of parking.
     gate = fleet.split("wait_for_stopped_warm_source() {", 1)[1]
     call_at = gate.index('warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")"')
@@ -7573,6 +7575,11 @@ def test_fleet_waits_for_warm_source_stop_before_provisioning(tmp_path: Path) ->
     assert call_at < park_at
     between = gate[call_at:park_at]
     assert 'if [ "$warm_state" != "stopped" ]; then' not in between
+    # One-shot park without retry must not remain.
+    park_block = gate[park_at : gate.index("Self-heal: sweep orphaned clone volumes")]
+    assert "CLOUDBENCH_WARM_PARK_ATTEMPTS" in park_block
+    assert park_block.count('fly_with_timeout 90 machine update "$WARM_ID"') == 1
+    assert "park_attempt" in park_block
 
     helpers = "".join(
         _extract_fleet_function(fleet, sig)

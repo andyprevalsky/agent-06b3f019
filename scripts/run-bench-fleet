@@ -3393,11 +3393,38 @@ warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
-    fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
-        --vm-size "$WARM_PARKED_VM_SIZE" --vm-memory "$WARM_PARKED_VM_MEMORY" \
-        --skip-start --yes >/dev/null || {
-        echo "❌ could not park warm source for fleet capacity headroom" >&2; exit 1;
-    }
+    mkdir -p "$FLEET_DIR"
+    park_attempt=0
+    park_ok=0
+    while [ "$park_attempt" -lt "${CLOUDBENCH_WARM_PARK_ATTEMPTS:-8}" ]; do
+        park_attempt=$((park_attempt + 1))
+        # Peer controllers may leave the donor replacing/started mid-update.
+        # Re-wait for stopped before each attempt so we never fight a live reshape.
+        warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1
+        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+        if [ "$warm_kind/$warm_cpus/$warm_memory" = "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
+            park_ok=1
+            break
+        fi
+        if fly_with_timeout 90 machine update "$WARM_ID" -a "$APP" \
+            --vm-size "$WARM_PARKED_VM_SIZE" --vm-memory "$WARM_PARKED_VM_MEMORY" \
+            --skip-start --yes >/dev/null 2>"$FLEET_DIR/warm-park-$park_attempt.log"; then
+            # Confirm the update settled at the parked shape.
+            warm_shape="$(wait_for_stopped_warm_source "$WARM_ID")" || exit 1
+            read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+            if [ "$warm_kind/$warm_cpus/$warm_memory" = "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
+                park_ok=1
+                break
+            fi
+        fi
+        echo "⏳ warm-source park attempt $park_attempt failed; retrying..." >&2
+        sleep $((park_attempt * 2))
+    done
+    if [ "$park_ok" -ne 1 ]; then
+        echo "❌ could not park warm source for fleet capacity headroom" >&2
+        tail -20 "$FLEET_DIR"/warm-park-*.log 2>/dev/null | sed 's/^/   /' >&2 || true
+        exit 1
+    fi
 fi
 
 # ── Self-heal: sweep orphaned clone volumes ──────────────────────────────────
