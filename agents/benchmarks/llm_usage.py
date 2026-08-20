@@ -35,7 +35,17 @@ def classify_model(model: str) -> tuple[str, str]:
         if model.endswith(suffix):
             return provider, model[: -len(suffix)]
     for slot in (0, 1):
-        if any(model == spec.waterfall[slot] for spec in POOL_REGISTRY.values()):
+        # Waterfalls are not all the same length -- rose-1-oss pins a single
+        # open-weights layer -- so the slot must be bounds-checked per pool.
+        # Without the guard this raised IndexError for any model that reached
+        # the loop without matching an earlier pool at that slot; `any()` had
+        # been hiding it by short-circuiting on a longer pool first, which made
+        # the crash depend on registry ordering and on which models happened to
+        # occupy slot 0.
+        if any(
+            slot < len(spec.waterfall) and model == spec.waterfall[slot]
+            for spec in POOL_REGISTRY.values()
+        ):
             return f"openrouter_model_{slot + 1}", model
     return "unclassified", model or "unknown"
 
