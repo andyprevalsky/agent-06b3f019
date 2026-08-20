@@ -8793,30 +8793,55 @@ class SpawnBrowserAgentManagerV3(ToolManager):
         agent_id = workflow_instance.agent_id
 
         attachments: List[Dict[str, Any]] = []
-        if requested_attachments and hasattr(workflow_instance, "context"):
+        if hasattr(workflow_instance, "context"):
             context_attachments = extract_attachments_from_context(workflow_instance.context)
             filename_to_pointer = {fp.original_filename: fp for fp in context_attachments}
 
-            for filename in requested_attachments:
-                if filename in filename_to_pointer:
-                    fp = filename_to_pointer[filename]
-                    attachments.append(
-                        {
-                            "id": fp.id,
-                            "storage_path": fp.storage_path,
-                            "original_filename": fp.original_filename,
-                            "mime_type": fp.mime_type,
-                            "size_bytes": fp.size_bytes,
-                            "created_at": fp.created_at,
-                        }
-                    )
-                else:
+            def _fp_dict(fp: Any) -> Dict[str, Any]:
+                return {
+                    "id": fp.id,
+                    "storage_path": fp.storage_path,
+                    "original_filename": fp.original_filename,
+                    "mime_type": fp.mime_type,
+                    "size_bytes": fp.size_bytes,
+                    "created_at": fp.created_at,
+                }
+
+            if requested_attachments:
+                if isinstance(requested_attachments, str):
+                    requested_attachments = [requested_attachments]
+                for filename in requested_attachments:
+                    if filename in filename_to_pointer:
+                        attachments.append(_fp_dict(filename_to_pointer[filename]))
+                    else:
+                        logger.warning(
+                            "[BrowserAgent] Attachment not found in context",
+                            agent_id=agent_id,
+                            filename=filename,
+                            available_files=list(filename_to_pointer.keys()),
+                        )
+                # Wrong/missing names previously left available_files empty so
+                # upload_file could never succeed. Fall back to every parent
+                # attachment when nothing matched.
+                if not attachments and filename_to_pointer:
                     logger.warning(
-                        "[BrowserAgent] Attachment not found in context",
+                        "[BrowserAgent] No requested attachments matched; "
+                        "falling back to all parent context attachments",
                         agent_id=agent_id,
-                        filename=filename,
+                        requested=requested_attachments,
                         available_files=list(filename_to_pointer.keys()),
                     )
+                    attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+            elif filename_to_pointer:
+                # Parent omitted attachments but context has files — forward them
+                # so upload tasks (e.g. tinypng) do not spawn with an empty set.
+                logger.info(
+                    "[BrowserAgent] No attachments requested; forwarding parent context files",
+                    agent_id=agent_id,
+                    available_files=list(filename_to_pointer.keys()),
+                )
+                attachments = [_fp_dict(fp) for fp in filename_to_pointer.values()]
+
 
         logger.info(
             "Browser agent starting (v3)",

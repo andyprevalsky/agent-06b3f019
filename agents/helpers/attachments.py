@@ -259,15 +259,35 @@ def extract_attachments_from_context(context: List[Dict]) -> List[FilePointer]:
     return attachments
 
 
-def build_attachment_metadata_text(file_pointer: FilePointer) -> str:
-    """Build metadata text for files that can't be read directly by LLM."""
+def build_attachment_metadata_text(
+    file_pointer: FilePointer,
+    *,
+    inlined: bool = False,
+) -> str:
+    """Build metadata text that always exposes ``original_filename``.
+
+    Spawn tools require exact ``original_filename`` values in ``attachments``.
+    When an image is inlined as ``image_url``, the bytes alone do not carry the
+    filename — without this label the parent agent invents names like
+    ``image.jpg`` and browser upload receives an empty available-files list.
+    """
     size_kb = file_pointer.size_bytes / 1024
     size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
+    if inlined:
+        note = (
+            "This file is shown inline above. When spawning browser_agent or "
+            "code_agent, pass this exact original_filename in attachments."
+        )
+    else:
+        note = (
+            "This file cannot be directly read by the AI, but browser_agent and "
+            "code_agent have full access to download and use it."
+        )
 
     return f"""[Attached file: {file_pointer.original_filename}]
 - Type: {file_pointer.mime_type}
 - Size: {size_str}
-- Note: This file cannot be directly read by the AI, but browser_agent and code_agent have full access to download and use it."""
+- Note: {note}"""
 
 
 async def resolve_attachments_for_llm(
@@ -303,11 +323,13 @@ async def resolve_attachments_for_llm(
                 file_cache[cache_key] = content
 
             if fp.is_image():
-                # Image: inject as image_url content block
+                # Image: inject as image_url content block AND keep the filename
+                # label so spawn_agent.attachments can use exact original_filename.
                 base64_data = base64.b64encode(content).decode("utf-8")
                 content_blocks.append(
                     {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
                 )
+                metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
             elif fp.is_pdf():
                 # PDF: inject as file content block (for capable models)
                 base64_data = base64.b64encode(content).decode("utf-8")
