@@ -696,6 +696,29 @@ def test_format_user_context_null_email_credentials_does_not_raise():
     assert "gmail" not in result
 
 
+def test_format_user_context_malformed_email_credentials_does_not_raise():
+    """Non-list containers and non-string emails must not abort formatting."""
+    from helpers.get_user_context import _format_user_context
+
+    result = _format_user_context(
+        authenticated_sites=[],
+        user_settings={},
+        recent_messages=[],
+        frequent_contacts=[],
+        integrations=[
+            {"name": "gmail", "status": "CONNECTED", "emailCredentials": 1},
+            {
+                "name": "yahoo",
+                "status": "CONNECTED",
+                "emailCredentials": [{"email": 123}, {"email": "ok@example.com"}, "skip"],
+            },
+        ],
+    )
+    assert "## Connected Integrations" in result
+    assert "yahoo: ok@example.com" in result
+    assert "gmail" in result
+
+
 def test_format_user_context_bad_timestamp():
     """Bad timestamp is handled gracefully."""
     from helpers.get_user_context import _format_user_context
@@ -1018,6 +1041,10 @@ async def run_all_tests():
     r.record(
         "fmt_ctx_null_email_credentials",
         test_format_user_context_null_email_credentials_does_not_raise,
+    )
+    r.record(
+        "fmt_ctx_malformed_email_credentials",
+        test_format_user_context_malformed_email_credentials_does_not_raise,
     )
     r.record("fmt_ctx_bad_ts", test_format_user_context_bad_timestamp)
     r.record("fmt_ctx_msg_truncate", test_format_user_context_recent_message_truncation)
