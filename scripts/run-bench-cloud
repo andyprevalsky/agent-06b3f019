@@ -433,35 +433,64 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
     fi
 }
 
-# Read GITHUB_TOKEN from back-end/.env (fallback agents/.env) for the git clone +
-# per-run fetches (private repo).
+# Resolve a GitHub token that can fetch this private repo for ephemeral
+# controller→guest git-sync (refresh-deps SSH snippet, boot-launch env).
+# Prefer the controller's live `gh auth token`, then exported GITHUB_TOKEN /
+# GH_TOKEN (same order as run-bench-fleet), then long-lived .env tokens via
+# resolve_durable_github_token (DISPATCH first). Never print the value.
 resolve_github_token() {
-    local t
-    t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    [ -z "$t" ] && t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-    echo "$t"
+    local t=""
+    t="$(gh auth token 2>/dev/null || true)"
+    if [ -z "$t" ]; then
+        t="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
+    fi
+    if [ -z "$t" ]; then
+        t="$(resolve_durable_github_token)"
+    fi
+    printf '%s' "$t"
+}
+
+# Long-lived token for Fly app secrets. Never use `gh auth token` here — those
+# expire and would leave the warm box unable to git-sync after the next hour.
+resolve_durable_github_token() {
+    local t=""
+    t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_DISPATCH_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    if [ -z "$t" ]; then
+        t="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
+    fi
+    printf '%s' "$t"
 }
 
 # Resolve the CONTROLLER GitHub token into an Authorization Basic header value.
 # Fail closed when no token is available — never fall back to an optional empty
 # box-side GITHUB_TOKEN secret (that produced `fatal: could not read Username
 # for 'https://github.com'` on non-TTY ssh and aborted fleet --refresh-deps).
+token_to_git_auth_header() {
+    printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$1" | base64 | tr -d '\n')"
+}
+
 resolve_controller_git_auth_header() {
     local token
-    token="$(gh auth token 2>/dev/null || resolve_github_token)"
+    token="$(resolve_github_token)"
     if [ -z "$token" ]; then
         echo "❌ No controller GitHub token for private-repo git-sync." >&2
         echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
         return 1
     fi
-    printf 'Authorization: Basic %s' "$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')"
+    token_to_git_auth_header "$token"
 }
 
 # Build a remote shell snippet that fetches+checks out $2 inside $1.
 # The returned script NEVER embeds the controller token. Delivery must set
-# AUTH_HDR (via ssh_exec_controller_git_sync stdin) and uses git's
-# GIT_CONFIG_* environment mechanism for http.extraheader so credentials never
-# appear in flyctl/ssh/git argv.
+# AUTH_HDR (and optional AUTH_HDR_DURABLE) via ssh_exec_controller_git_sync
+# stdin, and uses git's GIT_CONFIG_* environment mechanism for http.extraheader
+# so credentials never appear in flyctl/ssh/git argv.
 build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-marker]
     local remote_repo="$1" ref="$2" verify_marker="${3:-}"
     # Fail closed early if the controller has no token (same gate as delivery).
@@ -472,10 +501,33 @@ build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-m
     local cmd
     cmd="set -e
 [ -n \"\${AUTH_HDR:-}\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
-export GIT_CONFIG_COUNT=1
-export GIT_CONFIG_KEY_0=http.extraheader
-export GIT_CONFIG_VALUE_0=\"\$AUTH_HDR\"
-git -c safe.directory=$repo_q -C $repo_q fetch --quiet origin $ref_q
+_try_fetch() {
+  export GIT_CONFIG_COUNT=1
+  export GIT_CONFIG_KEY_0=http.extraheader
+  export GIT_CONFIG_VALUE_0=\"\$1\"
+  git -c safe.directory=$repo_q -C $repo_q fetch --quiet origin $ref_q
+}
+if ! _try_fetch \"\$AUTH_HDR\" 2>/tmp/cloudbench-git-fetch.err; then
+  _err=\$(cat /tmp/cloudbench-git-fetch.err 2>/dev/null || true)
+  rm -f /tmp/cloudbench-git-fetch.err
+  case \"\$_err\" in
+    *'could not read Username'*|*'Authentication failed'*|*'Invalid username or password'*|*'403'*|*'401'*)
+      if [ -n \"\${AUTH_HDR_DURABLE:-}\" ]; then
+        echo 'primary GitHub token auth failed; retrying with durable fallback'
+        _try_fetch \"\$AUTH_HDR_DURABLE\"
+      else
+        printf '%s\\n' \"\$_err\" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      printf '%s\\n' \"\$_err\" >&2
+      exit 1
+      ;;
+  esac
+else
+  rm -f /tmp/cloudbench-git-fetch.err
+fi
 FETCHED_REF=\$(git -c safe.directory=$repo_q -C $repo_q rev-parse FETCH_HEAD)
 case $ref_q in
   [0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*)
@@ -502,14 +554,28 @@ echo \"${verify_marker}\$REMOTE_REF\""
 }
 
 # Deliver a controller git-sync script over SSH without putting the token in
-# process arguments. Stdin layout: AUTH_HDR line, then base64(script). The -C
-# bootstrap only reads those streams — no credential appears in flyctl argv.
+# process arguments. Stdin layout: AUTH_HDR line, AUTH_HDR_DURABLE line (may be
+# empty), then base64(script). The -C bootstrap only reads those streams — no
+# credential appears in flyctl argv. Prefer the primary controller token; on
+# auth failure the remote script retries with the durable DISPATCH/GITHUB_TOKEN
+# header when it differs (main's refresh-deps durable fallback, argv-safe).
 ssh_exec_controller_git_sync() {  # <machine_id> <remote-shell-command>
-    local mid="$1" sync_cmd="$2" auth_hdr script_b64
-    auth_hdr="$(resolve_controller_git_auth_header)" || return 1
+    local mid="$1" sync_cmd="$2" primary durable primary_hdr durable_hdr="" script_b64
+    primary="$(resolve_github_token)"
+    [ -n "$primary" ] || {
+        echo "❌ No controller GitHub token for private-repo git-sync." >&2
+        echo "   Set GITHUB_TOKEN in back-end/.env / agents/.env, or authenticate gh." >&2
+        return 1
+    }
+    primary_hdr="$(token_to_git_auth_header "$primary")"
+    durable="$(resolve_durable_github_token)"
+    if [ -n "$durable" ] && [ "$durable" != "$primary" ]; then
+        durable_hdr="$(token_to_git_auth_header "$durable")"
+    fi
+    unset primary durable
     script_b64="$(printf '%s' "$sync_cmd" | base64 | tr -d '\n')"
-    printf '%s\n%s' "$auth_hdr" "$script_b64" | FLY ssh console -a "$APP" --machine "$mid" \
-        -C 'bash -lc "IFS= read -r AUTH_HDR; export AUTH_HDR GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.extraheader GIT_CONFIG_VALUE_0=\"\$AUTH_HDR\"; base64 -d | bash -l"'
+    printf '%s\n%s\n%s' "$primary_hdr" "$durable_hdr" "$script_b64" | FLY ssh console -a "$APP" --machine "$mid" \
+        -C 'bash -lc "IFS= read -r AUTH_HDR; IFS= read -r AUTH_HDR_DURABLE; export AUTH_HDR AUTH_HDR_DURABLE; base64 -d | bash -l"'
 }
 
 resolve_render_env_value() {
@@ -793,7 +859,7 @@ _inject_secrets_locked() {
     backend_b64="$(base64 < back-end/.env | tr -d '\n')"
     agents_sha="$(cloudbench_env_sha256 agents/.env)"
     backend_sha="$(cloudbench_env_sha256 back-end/.env)"
-    gh_token="$(resolve_github_token)"
+    gh_token="$(resolve_durable_github_token)"
     echo "   env provenance: Render backend + Fly workers → provider=$CLOUDBENCH_PROD_BROWSER_PROVIDER"
     echo "   agents/.env sha256=${agents_sha:0:12} ($(wc -l < agents/.env | tr -d ' ') lines)"
     echo "   back-end/.env sha256=${backend_sha:0:12} ($(wc -l < back-end/.env | tr -d ' ') lines)"
@@ -806,9 +872,9 @@ _inject_secrets_locked() {
     )
     if [ -n "$gh_token" ]; then
         set_args+=("GITHUB_TOKEN=$gh_token")
-        echo "   GITHUB_TOKEN present (for private-repo git-sync)"
+        echo "   GITHUB_TOKEN present (durable token for private-repo git-sync)"
     else
-        echo "   ⚠️  GITHUB_TOKEN not found — private-repo fetches will fail"
+        echo "   ⚠️  GITHUB_DISPATCH_TOKEN/GITHUB_TOKEN not found — private-repo fetches will fail"
     fi
     assert_app_environment_lock_ownership || exit 1
     FLY secrets set --stage -a "$APP" "${set_args[@]}" 2>&1 | sed 's/^/   /' || {
@@ -865,7 +931,13 @@ inject_secrets() {
 # secrets exist WITHOUT staging or activating anything, so concurrent
 # workstreams never race each other's environment. Staging/activation lives
 # only in the explicit maintenance ops (--refresh-secrets/--setup/--refresh-wmh).
-REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER"
+#
+# GITHUB_TOKEN must be present as an app secret name (on-box decode / legacy
+# paths). refresh-deps does NOT rely on that secret being non-empty in SSH —
+# it injects a controller-resolved token (gh auth / DISPATCH) into the sync
+# command — because Fly Status=Staged can persist on Machines-only apps even
+# after machine update, and a stale GITHUB_TOKEN secret may be empty or 401.
+REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"
 verify_app_environment() {
     local listing missing
     listing="$(FLY secrets list -a "$APP" --json 2>/dev/null)" || {
@@ -1464,6 +1536,8 @@ if [ "$MODE" = "refresh-deps" ]; then
     # Sync the repo to the ref whose manifests the trees must match. Auth via the
     # CONTROLLER's current GitHub token (never an optional empty box-side secret).
     # Credential is stdin-delivered — never embedded in flyctl/ssh argv.
+    # Token resolution already prefers gh auth then durable DISPATCH/GITHUB_TOKEN
+    # (see resolve_github_token → resolve_durable_github_token).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
     SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$EXPECTED_REF" '::CLOUDBENCH-REF::')" || exit 1
     SYNC_LOG="$(mktemp)"
