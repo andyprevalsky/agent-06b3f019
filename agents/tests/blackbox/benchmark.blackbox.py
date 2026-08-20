@@ -11493,6 +11493,7 @@ def test_agent_class_min_steps_contract_is_validated_and_defaulted():
     assert all(task.min_steps.get("browser", 0) >= 1 for task in browser_tasks)
     assert get_task_by_name("browser-agent-amazon-cookie-payment").min_steps == {"browser": 5}
     assert get_task_by_name("browser-smoke").min_steps == {"browser": 1}
+    assert get_task_by_name("cache-coverage").min_steps == {"browser": 2}
     assert get_task_by_name("chat-mode").min_steps == {}
 
     base = {"name": "min-steps-contract", "bench": "rose-bench"}
@@ -11557,6 +11558,71 @@ def test_browser_smoke_accepts_captured_single_step_trajectory():
     assert counts == {"browser": {"browser-task": 1}}
     assert task.min_steps == {"browser": 1}
     assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+
+
+def test_cache_coverage_accepts_captured_two_step_browser_trajectory():
+    """cache-coverage's example.com heading read is goto+evaluate; default min_steps=5 is wrong."""
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import (
+        _agent_class_step_counts,
+        _validate_agent_class_min_steps,
+    )
+
+    task = get_task_by_name("cache-coverage")
+    browser_id = "4eaa7d1f-fade-4db5-9fff-1a6bb9ab6891"
+    messages = [
+        {
+            "role": "ASSISTANT",
+            "metadata": {
+                "tool_calls": [
+                    {
+                        "tool": "spawn_browser_agent",
+                        "type": "browser",
+                        "tool_call_id": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                    }
+                ]
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "7c576756-34eb-455d-8ed0-33f5e8ad18e7",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "goto",
+                "steps_taken": 0,
+                "toolStatus": "FINISHED",
+                "title": "Navigated → https://example.com",
+            },
+        },
+        {
+            "role": "TOOL",
+            "metadata": {
+                "toolName": "spawn_browser_agent",
+                "toolCallId": "toolu_01Pv8PTgDN1gpibr4Uq98HRc",
+                "task_id": browser_id,
+                "subAgentId": browser_id,
+                "action_type": "evaluate",
+                "steps_taken": 1,
+                "toolStatus": "FINISHED",
+                "title": "evaluate",
+                "text": "Executed JS, result: Example Domain",
+            },
+        },
+    ]
+
+    counts = _agent_class_step_counts({"messages": messages})
+    assert counts == {"browser": {browser_id: 2}}
+    assert task.min_steps == {"browser": 2}
+    assert _validate_agent_class_min_steps(task.min_steps, counts) is None
+    assert (
+        _validate_agent_class_min_steps({"browser": 5}, counts)
+        == (
+            f"Browser agent {browser_id} recorded 2 trajectory step(s); "
+            "expected at least 5 per browser agent"
+        )
+    )
 
 
 def test_payment_abandonment_accepts_captured_two_step_trajectory():
@@ -14056,6 +14122,10 @@ async def run_all_tests():
     r.record(
         "browser_smoke_single_step_trajectory",
         test_browser_smoke_accepts_captured_single_step_trajectory,
+    )
+    r.record(
+        "cache_coverage_two_step_browser_trajectory",
+        test_cache_coverage_accepts_captured_two_step_browser_trajectory,
     )
     r.record(
         "payment_abandonment_two_step_trajectory",
