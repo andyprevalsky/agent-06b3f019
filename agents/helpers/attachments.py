@@ -264,30 +264,48 @@ def build_attachment_metadata_text(
     *,
     inlined: bool = False,
 ) -> str:
-    """Build metadata text that always exposes ``original_filename``.
+    """Build file_pointer metadata with an explicit ``original_filename`` key.
 
     Spawn tools require exact ``original_filename`` values in ``attachments``.
-    When an image is inlined as ``image_url``, the bytes alone do not carry the
-    filename — without this label the parent agent invents names like
-    ``image.jpg`` and browser upload receives an empty available-files list.
+    Emit that field as a keyed line (not a prose/body tag) so the parent can
+    copy it into spawn_agent.attachments without inventing names like
+    ``image.jpg``.
     """
     size_kb = file_pointer.size_bytes / 1024
     size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
     if inlined:
         note = (
-            "This file is shown inline above. When spawning browser_agent or "
-            "code_agent, pass this exact original_filename in attachments."
+            "Shown inline above. Pass this original_filename in spawn_agent.attachments "
+            "when the child needs the file."
         )
     else:
         note = (
-            "This file cannot be directly read by the AI, but browser_agent and "
-            "code_agent have full access to download and use it."
+            "Not inlined for the parent LLM; browser_agent and code_agent can still "
+            "download and use it when given this original_filename."
         )
 
-    return f"""[Attached file: {file_pointer.original_filename}]
-- Type: {file_pointer.mime_type}
-- Size: {size_str}
-- Note: {note}"""
+    return (
+        "file_pointer:\n"
+        f"  original_filename: {file_pointer.original_filename}\n"
+        f"  mime_type: {file_pointer.mime_type}\n"
+        f"  size: {size_str}\n"
+        f"  note: {note}"
+    )
+
+
+def build_file_pointer_label(original_filename: str) -> str:
+    """Minimal keyed file_pointer block (filename only)."""
+    return f"file_pointer:\n  original_filename: {original_filename}"
+
+
+def build_attachment_text_content(file_pointer: FilePointer, text_content: str) -> str:
+    """Keyed file_pointer block with inlined text body under ``content``."""
+    return (
+        "file_pointer:\n"
+        f"  original_filename: {file_pointer.original_filename}\n"
+        f"  mime_type: {file_pointer.mime_type}\n"
+        f"  content:\n```\n{text_content}\n```"
+    )
 
 
 async def resolve_attachments_for_llm(
@@ -343,10 +361,10 @@ async def resolve_attachments_for_llm(
                     }
                 )
             elif fp.is_text():
-                # Text: inject as text content
+                # Text: inject as text content with the same keyed filename field
                 try:
                     text_content = content.decode("utf-8")
-                    metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
+                    metadata_texts.append(build_attachment_text_content(fp, text_content))
                 except UnicodeDecodeError:
                     metadata_texts.append(build_attachment_metadata_text(fp))
 
