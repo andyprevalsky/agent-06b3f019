@@ -484,7 +484,10 @@ def valid(value):
 pids = set()
 if valid(data.get("run_sh_pid")):
     pids.add(data["run_sh_pid"])
-for service in data.get("services") or []:
+services = data.get("services")
+if not isinstance(services, list):
+    services = []
+for service in services:
     if isinstance(service, dict) and valid(service.get("pid")):
         pids.add(service["pid"])
 try:
