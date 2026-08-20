@@ -773,13 +773,19 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   '_refresh_gh_b64=' \
   "refresh-deps must inject a controller-resolved GitHub token into the warm-box git-sync SSH snippet"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "refresh-deps must retry git fetch with the durable token after primary auth failure"
 
 # Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
 # the only auth path for refresh-deps. The sync command must export a token
 # decoded from a controller-supplied base64 blob (same pattern as clone boot).
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  '_refresh_gh_b64'"'"' | base64 -d)' \
-  "refresh-deps SSH sync must export GITHUB_TOKEN from the controller blob"
+  '_try_fetch' \
+  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
