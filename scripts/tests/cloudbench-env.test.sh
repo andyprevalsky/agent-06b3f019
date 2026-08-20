@@ -1284,8 +1284,12 @@ if "--depth 1" not in cmd:
     raise SystemExit("authenticated sync cmd must use shallow --depth 1 fetch")
 if "timeout 180" not in cmd:
     raise SystemExit("authenticated sync cmd must bound fetch with timeout 180")
-if "timeout 180" not in cmd and "--depth 1" not in cmd:
-    raise SystemExit("authenticated sync cmd must bound fetch with timeout and --depth 1")
+if "already-at" not in cmd:
+    raise SystemExit("authenticated sync cmd must short-circuit when HEAD already matches ref")
+if "reset --hard" in cmd:
+    raise SystemExit("authenticated sync cmd must not always reset --hard (burns ssh budget on large trees)")
+if "chown -R" in cmd:
+    raise SystemExit("authenticated sync cmd must not full-tree chown (deps path re-chowns; hung e8)")
 if "GITHUB_TOKEN:-" in cmd:
     raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
 if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
