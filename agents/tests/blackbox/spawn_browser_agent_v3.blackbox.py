@@ -12159,31 +12159,25 @@ async def test_live_tab_looks_challenged_helpers():
 
 
 async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
-    """Dump-faithful: recover must run (not skip_clean); auth must not win.
+    """Dump-faithful: Bot or Not must classify challenged (same gate as probes).
 
     browser-hotel-booking agent fead82a5-791a-43b8-b807-5e71226da866:
 
-    - browser_use_step_13 called ``recover_from_challenge`` with reason naming
-      DataDome / Bot or Not — correct tool. Handler returned
-      ``recovery_action=skipped_clean_page`` ("Page already clear") — that is an
-      early no-op BEFORE solver/cookie/parallel Kernel+Steel proxy search, not
-      a passed proxy-rotation check.
-    - browser_use_step_16 (same interstitial still visible) called
-      ``request_user_assistance_for_authentication`` — evaluator saw
-      auth_assistance instead of write_lock / payment-card attention.
+    - browser_use_step_13 called recover_from_challenge (correct).
+    - live_tab_looks_challenged / page_looks_challenged false-cleaned the wall,
+      so the early skip returned skipped_clean_page — and that same classifier
+      is what candidate probes + post-promote live_verify use.
+    - browser_use_step_16 then called request_user_assistance_for_authentication.
 
-    Owning boundary after the no-skip fix: recover_from_challenge must not
-    contain skipped_clean_page, and the dump page must still classify challenged
-    so the auth-assistance guard refuses step_16.
+    Owning boundary: dump page snapshot must make page_looks_challenged /
+    live_tab_looks_challenged True so skip does not fire and probes/verify
+    would also reject the interstitial.
     """
     from domains.spawn_browser_agent_v3.challenge_recovery import (
         live_tab_looks_challenged,
         page_looks_challenged,
     )
-    import inspect
-    from domains.spawn_browser_agent_v3 import handler
 
-    # Exact signals from browser_use_step_13 / _16 user snapshots.
     title = "Bot or Not?"
     body = (
         "Show us your human side...\n"
@@ -12220,21 +12214,14 @@ async def test_expedia_bot_or_not_dump_forces_proxy_recovery_not_auth():
         async def content(self):
             return html
 
-    source = inspect.getsource(handler._spawn_browser_agent_activity_v3_real)
-    recover_start = source.index('if action_name == "recover_from_challenge":')
-    recover_end = source.index('if action_name == "send_message_to_user":', recover_start)
-    recover_block = source[recover_start:recover_end]
-    assert "skipped_clean_page" not in recover_block, (
-        "step_13 must not be able to short-circuit recover before parallel proxy search"
-    )
-    assert "await _capture_recovery_storage_state(" in recover_block
-
     assert page_looks_challenged(
         status=None, title=title, body_text=body, html=html
-    ), "step_13 dump page must classify challenged for the auth-assistance guard"
+    ), "dump page must classify challenged (shared skip/probe/live_verify classifier)"
     assert await live_tab_looks_challenged(_ExpediaBotOrNotPage()) is True, (
-        "step_16 auth guard must see the dump tab as challenged"
+        "dump live tab must look challenged so recover skip does not fire and "
+        "config probes/live_verify would also reject this interstitial"
     )
+
 
 def test_url_looks_like_api_surface_and_navigation_pin():
     """Shape-only API refuse + recovery pin + cross-origin handoff pin (no path allowlists)."""
@@ -12625,14 +12612,11 @@ def test_handoff_pin_is_sticky_in_handler():
     assert "navigation_pin_host = None" not in auto_fill_block
 
 
-def test_recover_from_challenge_always_runs_proxy_search():
-    """LLM-requested recover_from_challenge must run the tool body, not skip_clean.
+def test_recovery_skips_when_live_tab_already_clear():
+    """LLM-invented recovery on a clean page must no-op (no host special-cases).
 
-    skipped_clean_page was an early handler no-op when live_tab_looks_challenged
-    returned False — it never ran solver / cookie probes / parallel Kernel+Steel
-    proxy search. browser-hotel-booking step_13 hit that path on a real Bot or
-    Not wall. When the model calls recover_from_challenge, always enter the
-    capture → search pipeline (skipped_clean is not "passed proxy metrics").
+    Same page_looks_challenged classifier as probes/live_verify — keep the early
+    skip; correctness depends on the classifier, not on removing the gate.
     """
     import inspect
 
@@ -12643,27 +12627,23 @@ def test_recover_from_challenge_always_runs_proxy_search():
     end = source.index('if action_name == "send_message_to_user":', start)
     recovery_block = source[start:end]
 
-    assert "skipped_clean_page" not in recovery_block, (
-        "recover_from_challenge must not early-exit with skipped_clean_page"
-    )
-    assert "Page already clear — skip challenge recovery" not in recovery_block
-    assert "not await live_tab_looks_challenged" not in recovery_block, (
-        "must not gate the parallel proxy search on a local HTML clean check"
-    )    # Real tool body still runs: capture storage then parallel config search.
-    assert "await _capture_recovery_storage_state(" in recovery_block
-    assert "search_browser_configs" in recovery_block or "browser_config_search" in recovery_block
-    assert "recover_from_challenge(" in recovery_block or "recover_browser_challenge(" in recovery_block
+    assert "live_tab_looks_challenged" in recovery_block
+    assert "skipped_clean_page" in recovery_block
+    assert "provider_exit_rejected" in recovery_block
     assert "is_hosted_stripe_checkout_url" not in recovery_block
     assert "healthcheck_noise" not in recovery_block
     assert "api.stripe.com" not in recovery_block
     assert "target_looks_like_payment_document" not in recovery_block
+    skip_offset = recovery_block.index("skipped_clean_page")
+    capture_offset = recovery_block.index("await _capture_recovery_storage_state(")
+    assert skip_offset < capture_offset
 
 
 def test_auth_assistance_blocked_while_challenge_page_visible():
     """CAPTCHA walls must not escalate to auth_assistance attention.
 
     browser-hotel-booking observed auth_assistance on Expedia "Bot or Not?" after
-    recover_from_challenge was short-circuited (never searched proxies). The
+    the shared classifier false-cleaned the wall (skip + probes use it). The
     auth-assistance path must re-check live_tab_looks_challenged and refuse
     the handoff so the model is steered back to recover_from_challenge.
     """
@@ -17192,8 +17172,8 @@ async def run_all_tests():
         test_navigation_guard_has_no_endpoint_path_allowlists,
     )
     r.record(
-        "recover_always_runs_proxy_search",
-        test_recover_from_challenge_always_runs_proxy_search,
+        "recovery_skips_clean_live_tab",
+        test_recovery_skips_when_live_tab_already_clear,
     )
     r.record(
         "auth_assistance_blocked_on_challenge",

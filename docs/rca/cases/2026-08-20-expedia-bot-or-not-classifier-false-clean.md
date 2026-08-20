@@ -101,8 +101,7 @@ auth_assistance.
 
 ## Correction (2026-08-20)
 
-`skipped_clean_page` is **not** "passed proxy rotation metrics". It was an
-early handler no-op before `recover_from_challenge` ran solver → cookie probes
-→ parallel Kernel/Steel browser/IP search. Fix: remove that early-exit so an
-LLM-requested recover always runs the search; keep Bot or Not classifier +
-auth-assistance guard as secondary defenses.
+`skipped_clean_page` is an early no-op using the **same** `page_looks_challenged`
+classifier as candidate probes and post-promote live_verify — not a separate
+proxy-rotation score. Do **not** remove the early check; fix the classifier so
+Bot or Not / `#app-captcha-pwa` reads challenged for skip, probes, and verify alike.

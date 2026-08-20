@@ -7295,13 +7295,58 @@ async def _spawn_browser_agent_activity_v3_real(  # noqa: C901
                 recovery_call_id = _browser_action_tool_call_id(llm_result)
                 logger.info("Browser agent requested staged challenge recovery", reason=recovery_reason)
 
-                # Do NOT early-exit on a local HTML "looks clean" classifier.
-                # browser-hotel-booking (fead82a5-791…) called recover_from_challenge
-                # on Expedia Bot or Not; live_tab_looks_challenged false-negatived and
-                # short-circuited WITHOUT running the tool body (solver → cookie probes
-                # → parallel Kernel/Steel proxy search). When the LLM asks for
-                # recovery, always run that search — a local "clean page" no-op is
-                # not "passed proxy metrics", it is "never searched".
+                provider_exit_rejected = bool(
+                    unified_action.get("params", {}).get("provider_exit_rejected")
+                )
+                # Same page_looks_challenged classifier as candidate probes and
+                # post-promote live_verify. Keep this early skip for clean-page
+                # recovery loops, but the classifier must not false-clean real
+                # interstitials (Expedia Bot or Not) or probes/verify lie too.
+                if (
+                    not provider_exit_rejected
+                    and input_page is not None
+                    and not await live_tab_looks_challenged(input_page)
+                ):
+                    skip_message = (
+                        f"Current page does not look challenged"
+                        + (f" ({current_url})" if current_url else "")
+                        + ". Continue the task on this page — do not start "
+                        "challenge recovery unless the document itself is blocked."
+                    )
+                    await save_browser_action_message(
+                        agent_id=agent_id,
+                        title="Page already clear — skip challenge recovery",
+                        task_id=task_id,
+                        message=skip_message,
+                        status=MessageStatus.FINISHED,
+                        browser_url=browser_url,
+                        action_type="browser_challenge_recovery",
+                        tool_call_id=recovery_call_id,
+                        extra_metadata={
+                            "recoveryStage": "skipped_clean_page",
+                            "resumeUrl": current_url,
+                        },
+                    )
+                    action_result = {
+                        "success": True,
+                        "message": skip_message,
+                        "recovery_action": "skipped_clean_page",
+                        "current_url": current_url,
+                    }
+                    await _finalize_browser_recovery_action_result(
+                        action_result=action_result,
+                        dom_service=dom_service,
+                        action_history=action_history,
+                        thinking=thinking,
+                        recovery_reason=recovery_reason,
+                        browser_turn_messages=browser_turn_messages,
+                        task_prompt=task_prompt,
+                        browser_state=browser_state,
+                        unified_action=unified_action,
+                        recovery_call_id=recovery_call_id,
+                        browser_stream=browser_stream,
+                    )
+                    continue
 
                 progress_titles = {
                     "capture_browser_state": "Capturing browser state",
