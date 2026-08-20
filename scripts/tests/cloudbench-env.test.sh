@@ -1610,5 +1610,8 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT"' \
   "refresh-deps must bound warm_source_fetch_ref via CLOUDBENCH_SSH_EXEC_TIMEOUT"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'return "$sync_rc"' \
+  "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
 echo "All cloud benchmark environment checks passed."
