@@ -324,7 +324,9 @@ def test_cloudbench_dependency_rebuild_behavior_is_in_permanent_gate():
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "14 passed" in result.stdout
+    # Count tracks the -k filter above. New refresh_deps_ cases (I-03 token
+    # export, I-04 fetch-ref retry) raised this from 14 to 15.
+    assert "15 passed" in result.stdout
 
 
 def test_cloudbench_worktree_patch_includes_tracked_and_untracked_files():
