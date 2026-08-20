@@ -2491,3 +2491,4 @@
 {"task": "claude-code-agent", "duration_seconds": 85.2, "cost_cents": 3.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "30aa945b-e415-48f8-9bc5-6375cc4ac35b"}
 {"task": "chat-mode", "duration_seconds": 43.1, "cost_cents": 0.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "4ff6d195-0ce5-49a2-92c5-eab04f77da57"}
 {"task": "browser-smoke", "duration_seconds": 76.7, "cost_cents": 0.0, "timestamp": "2026-08-19T20:40:45.535481+00:00", "agent_id": "141a6068-aaf0-42de-93f6-71d028a59361"}
+{"task": "browser-doordash-usb-c-cable", "duration_seconds": 681.4, "cost_cents": 2.0, "timestamp": "2026-08-20T20:46:51.609350+00:00", "agent_id": "a85b55c7-1fc6-44b1-b153-134a4fb92579"}
