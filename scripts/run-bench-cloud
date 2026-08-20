@@ -442,11 +442,14 @@ sys.exit(0 if "'"$APP"'" in names else 1)' 2>/dev/null; then
 github_token_can_fetch_repo() {
     local token="$1" code
     [ -n "$token" ] || return 1
+    # Metadata-only fine-grained PATs can pass GET /repos while lacking Contents
+    # and failing git clone/fetch. Probe the contents root (no trailing slash) so
+    # acceptance requires Contents: read — the permission git operations need.
     code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
         -H "Authorization: Bearer ${token}" \
         -H 'Accept: application/vnd.github+json' \
         -H 'User-Agent: cloudbench' \
-        'https://api.github.com/repos/Rose-Ai-Labs/rose' 2>/dev/null)" || return 1
+        'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' 2>/dev/null)" || return 1
     [ "$code" = "200" ]
 }
 
@@ -458,9 +461,9 @@ resolve_github_token() {
     fi
     # Dispatch tokens are often fresher than the long-lived GITHUB_TOKEN copy in .env.
     [ -n "${GITHUB_DISPATCH_TOKEN:-}" ] && candidates+=("$GITHUB_DISPATCH_TOKEN")
-    # gh prefers ambient GITHUB_TOKEN over hosts.yml — unset it so a stale env
-    # override cannot mask a working CLI login.
-    gh_tok="$(env -u GITHUB_TOKEN gh auth token 2>/dev/null || true)"
+    # gh prefers ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST over hosts.yml — unset them
+    # so a stale env override cannot mask a working CLI login for github.com.
+    gh_tok="$(env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com 2>/dev/null || true)"
     [ -n "$gh_tok" ] && candidates+=("$gh_tok")
     env_tok="$(grep -E '^GITHUB_TOKEN=' back-end/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
     [ -z "$env_tok" ] && env_tok="$(grep -E '^GITHUB_TOKEN=' agents/.env 2>/dev/null | head -1 | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"

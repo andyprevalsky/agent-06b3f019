@@ -1089,14 +1089,14 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'github_token_can_fetch_repo()' \
   "cloudbench must validate GitHub tokens against the private rose repo"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'api.github.com/repos/Rose-Ai-Labs/rose' \
-  "token validation must hit the private rose repo endpoint"
+  'api.github.com/repos/Rose-Ai-Labs/rose/contents' \
+  "token validation must require Contents access (not metadata-only GET /repos)"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'GITHUB_DISPATCH_TOKEN' \
   "token resolver must consider GITHUB_DISPATCH_TOKEN before stale .env GITHUB_TOKEN"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'env -u GITHUB_TOKEN gh auth token' \
-  "token resolver must ignore a stale ambient GITHUB_TOKEN when reading gh auth"
+  'env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com' \
+  "token resolver must ignore ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST when reading gh auth"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'REFRESH_GITHUB_TOKEN_B64' \
   "refresh-deps must inject a request-scoped controller token for git-sync"
@@ -1124,8 +1124,8 @@ sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
     -H "Authorization: Bearer ${tok}" \
     -H 'Accept: application/vnd.github+json' \
     -H 'User-Agent: cloudbench-env-test' \
-    'https://api.github.com/repos/Rose-Ai-Labs/rose')"
-  [ "$code" = "200" ] || fail "resolve_github_token returned a token that cannot fetch rose (HTTP $code)"
+    'https://api.github.com/repos/Rose-Ai-Labs/rose/contents')"
+  [ "$code" = "200" ] || fail "resolve_github_token returned a token without Contents access to rose (HTTP $code)"
   # Ambient GITHUB_TOKEN in this environment is known-stale (401). The resolver
   # must not echo it when a fresher candidate exists.
   if [ -n "${GITHUB_TOKEN:-}" ]; then
@@ -1133,8 +1133,8 @@ sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
       -H "Authorization: Bearer ${GITHUB_TOKEN}" \
       -H 'Accept: application/vnd.github+json' \
       -H 'User-Agent: cloudbench-env-test' \
-      'https://api.github.com/repos/Rose-Ai-Labs/rose' || true)"
-    if [ "$stale_code" = "401" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
+      'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' || true)"
+    if [ "$stale_code" != "200" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
       fail "resolve_github_token returned the ambient stale GITHUB_TOKEN"
     fi
   fi
