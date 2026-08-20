@@ -7,7 +7,10 @@ import argparse
 import base64
 import html
 import json
+import os
 import re
+import shutil
+import sys
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +19,7 @@ from typing import Any
 
 SCREENSHOT_KEYS = {"screenshot", "image", "png", "jpeg", "jpg"}
 DEFAULT_OUTPUT_DIR = Path(".context/rendered-llm-dumps")
+DEFAULT_ARTIFACTS_DIR = Path(os.environ.get("CURSOR_ARTIFACTS_DIR", "/opt/cursor/artifacts"))
 SYSTEM_PROMPT_BOUNDARY = "__SYSTEM_PROMPT_DYNAMIC_BOUNDARY__"
 AVAILABLE_ACTIONS_HEADING = "# Available Actions"
 NEXT_SYSTEM_HEADING_RE = re.compile(r"\n# (?!Available Actions\b)")
@@ -2393,6 +2397,32 @@ def build_html(data: dict[str, Any], source_path: Path, output_path: Path) -> st
 """
 
 
+def sibling_assets_dir(html_path: Path) -> Path:
+    return html_path.parent / f"{html_path.stem}_assets"
+
+
+def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) -> Path | None:
+    """Copy the HTML plus its `_assets` sidecar to a viewer-reachable artifacts dir.
+
+    `file://` URLs only work on the machine that rendered the dump. Cursor Cloud
+    reviewers open artifacts from `/opt/cursor/artifacts`, so the renderer must
+    publish there (when the directory exists) instead of asking humans to click
+    a VM-local file URI.
+    """
+    target_root = artifacts_dir if artifacts_dir is not None else DEFAULT_ARTIFACTS_DIR
+    if not target_root.is_dir():
+        return None
+    dest = target_root / html_path.name
+    shutil.copy2(html_path, dest)
+    assets = sibling_assets_dir(html_path)
+    if assets.is_dir():
+        dest_assets = target_root / assets.name
+        if dest_assets.exists():
+            shutil.rmtree(dest_assets)
+        shutil.copytree(assets, dest_assets)
+    return dest
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Render an .llm-dumps JSON file into human-readable HTML."
@@ -2408,6 +2438,13 @@ def parse_args() -> argparse.Namespace:
         "--no-open",
         action="store_true",
         help="Write the HTML but do not open it in the default browser.",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        type=Path,
+        default=None,
+        help="Copy HTML + _assets here when the directory exists. "
+        "Defaults to $CURSOR_ARTIFACTS_DIR or /opt/cursor/artifacts.",
     )
     return parser.parse_args()
 
@@ -2426,10 +2463,17 @@ def main() -> int:
     output_path = args.output or DEFAULT_OUTPUT_DIR / f"{slug(dump_path.stem)}.html"
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(build_html(data, dump_path.resolve(), output_path.resolve()), encoding="utf-8")
-    url = output_path.resolve().as_uri()
-    print(url)
+    published = publish_rendered_dump(output_path.resolve(), args.artifacts_dir)
+    if published is not None:
+        print(str(published))
+    else:
+        print(output_path.resolve().as_uri())
+        print(
+            "warning: no artifacts directory; do not send a file:// link to a remote reviewer",
+            file=sys.stderr,
+        )
     if not args.no_open:
-        webbrowser.open(url)
+        webbrowser.open(published.as_uri() if published is not None else output_path.resolve().as_uri())
     return 0
 
 
