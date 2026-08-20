@@ -29,3 +29,16 @@ def test_production_agentcard_lifecycle_matches_non_admin_stripe_hold_contract()
     assert lifecycle["stripeRefund"]["amountCents"] == 100
     assert lifecycle["orgTransfer"]["livemode"] is True
     assert lifecycle["orgTransfer"]["status"] == "reclaimed"
+
+
+def test_wait_for_trigger_auto_approves_phone_call_attention():
+    """wait-for-trigger must auto-approve the post-trigger phone-call gate.
+
+    Epoch-9 fleet: wait_for fired on check 1/3, then request_user_approval for
+    the phone call; approval_handling was null so poll_agent never fetched or
+    resolved attention requests and the tree stalled for 518s (threshold 510s).
+    Sibling phone-call-* tasks already set auto_approve for the same gate.
+    """
+    task = get_task_by_name("wait-for-trigger")
+    assert task.approval_handling == "auto_approve"
+    assert "wait_for" in (task.expected_tools or [])

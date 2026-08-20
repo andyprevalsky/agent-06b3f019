@@ -53,6 +53,9 @@ require_text "$MEASUREMENT" \
     'victoria_seedmem_src_' \
     "system Postgres path must isolate source databases per measurement PID"
 require_text "$MEASUREMENT" \
+    'seed-mem-$$' \
+    "default OUT_DIR must be PID-scoped so concurrent measurements cannot share summary.txt"
+require_text "$MEASUREMENT" \
     'TIME_BIN' \
     "measurement must resolve an external time binary (not the shell builtin)"
 require_text "$BUDGET" \

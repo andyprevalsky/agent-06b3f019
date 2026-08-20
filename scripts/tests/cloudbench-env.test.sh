@@ -656,6 +656,42 @@ if cloudbench_wait_machine_startable read_machine_state machine-2 3 0 >/dev/null
   fail "a destroyed provisioning clone must fail closed"
 fi
 
+# Warm-source fleet gate: transitional donor states must wait for stopped, not
+# abort (observed: state=started / replacing → immediate fleet INFRA fail).
+printf 'replacing\nstopping\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-1 5 0 ||
+  fail "warm source wait must tolerate replacing→stopping→stopped"
+[ ! -s "$machine_states" ] || fail "the stopped-state wait must consume the transition sequence"
+
+printf 'creating\nupdating\nrestarting\nstopped\n' > "$machine_states"
+cloudbench_wait_machine_stopped read_machine_state warm-2 5 0 ||
+  fail "warm source wait must tolerate creating/updating/restarting as transitional"
+[ ! -s "$machine_states" ] || fail "creating/updating/restarting wait must consume the sequence"
+
+printf 'started\nstarted\nstarted\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-stuck 3 0 >/dev/null 2>&1; then
+  fail "warm source wait must fail closed when the donor never stops"
+fi
+
+printf 'started\ndestroyed\n' > "$machine_states"
+if cloudbench_wait_machine_stopped read_machine_state warm-gone 3 0 >/dev/null 2>&1; then
+  fail "warm source wait must fail closed when the donor is destroyed"
+fi
+
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"' \
+  "fleet must wait for the shared warm source to stop before cloning"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'stopping|replacing|starting)' \
+  "machine start must wait out Fly stopping/replacing before request_machine_start"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'build_controller_authenticated_git_sync_cmd' \
+  "refresh-deps must use controller GitHub token for private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec_controller_git_sync' \
+  "controller git-sync must deliver the auth header via stdin, not argv"
+
+
 cloudbench_validate_fresh_clone_id clone-2 warm-1 clone-1 ||
   fail "a unique non-source clone id must be accepted"
 if cloudbench_validate_fresh_clone_id warm-1 warm-1 clone-1; then
@@ -761,6 +797,34 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets list -a "$APP" --json' \
   "the environment preflight must be a read-only secrets listing"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REQUIRED_APP_SECRETS="AGENTS_ENV_B64 BACKEND_ENV_B64 AGENTS_ENV_SHA256 BACKEND_ENV_SHA256 CLOUDBENCH_BROWSER_PROVIDER GITHUB_TOKEN"' \
+  "environment preflight must require GITHUB_TOKEN for on-box private-repo git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'warm_source_fetch_ref' \
+  "refresh-deps/wmh must sync via warm_source_fetch_ref (controller token + fetch-ref.sh)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_controller_github_token' \
+  "warm-source git-sync must resolve the controller GitHub token helper"
+
+# Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
+# the only auth path for refresh-deps. warm_source_fetch_ref uses the controller
+# token + cloudbench-fetch-ref.sh (same as guest drivers).
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench-fetch-ref.sh' \
+  "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
@@ -881,6 +945,38 @@ if grep -Fq 'descend_steps.jsonl' "$prepared_patch"; then
   fail "the shippable patch must still exclude append-only history ledgers"
 fi
 
+# A commit that exists only on a pushed feature branch is NOT guest-fetchable.
+# Fly guests authenticate through the controller token helper; treating any
+# origin/* containment as "already fetchable" made --refresh-deps fetch a
+# feature SHA over unauthenticated HTTPS and abort the fleet
+# (could not read Username for 'https://github.com').
+feature_repo="$TMP_ROOT/fetchable-ref"
+git init -q "$feature_repo"
+git -C "$feature_repo" config user.email cloudbench-test@example.com
+git -C "$feature_repo" config user.name cloudbench-test
+printf 'main\n' > "$feature_repo/payload.txt"
+git -C "$feature_repo" add payload.txt
+git -C "$feature_repo" commit -qm main
+git -C "$feature_repo" branch -M main
+git init -q --bare "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" remote add origin "$TMP_ROOT/fetchable-origin.git"
+git -C "$feature_repo" push -q origin HEAD:main
+main_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" checkout -q -b cursor/example-53b6
+printf 'feature\n' >> "$feature_repo/payload.txt"
+git -C "$feature_repo" commit -qam feature
+git -C "$feature_repo" push -q origin HEAD:cursor/example-53b6
+feature_sha="$(git -C "$feature_repo" rev-parse HEAD)"
+git -C "$feature_repo" fetch -q origin
+resolved="$(cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1)"
+[ "$resolved" = "$main_sha" ] \
+  || fail "fetchable_ref must use origin/main for a feature-only SHA (got $resolved, want $main_sha)"
+if ! cloudbench_fetchable_ref "$feature_repo" "$feature_sha" 1 >/dev/null 2>"$TMP_ROOT/fetchable.err"; then
+  fail "allow-local-patch must succeed by falling back to origin/main"
+fi
+grep -Fq 'not on origin' "$TMP_ROOT/fetchable.err" \
+  || fail "fetchable_ref must explain that a feature-only SHA is not guest-fetchable"
+
 # A genuinely broken generation (unresolvable base ref) stays a hard failure.
 prepare_rc=0
 cloudbench_prepare_workspace_patch "$patch_repo" "definitely-not-a-ref" "$prepared_patch" \
@@ -985,8 +1081,8 @@ readiness_failures=0
     fail "start_machine must fail closed when the machine never reaches started (rc=$rc)"
 ) || readiness_failures=$((readiness_failures + 1))
 
-# A recoverable started→stopped race must re-assert the start once, then accept
-# the same bounded readiness proof used at run launch.
+# A recoverable started→stopped race must re-assert start (after waiting out
+# Fly stopping/replacing), then accept the bounded readiness proof.
 (
   function_body="$(readiness_function wait_for_ssh)"
   [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
@@ -1001,11 +1097,61 @@ readiness_failures=0
     restart_calls=$((restart_calls + 1))
     current_state=started
   }
+  date() { echo 1000; }
   sleep() { :; }
   wait_for_ssh mach-recovers >/dev/null 2>&1 ||
     fail "wait_for_ssh must recover one stopped→started transition"
   [ "$restart_calls" -eq 1 ] ||
-    fail "wait_for_ssh must re-assert a regressed machine start exactly once"
+    fail "wait_for_ssh must re-assert a regressed machine start (calls=$restart_calls)"
+) || readiness_failures=$((readiness_failures + 1))
+
+# If the machine is still stopping when SSH probes, wait — do not fire a bare
+# start into Fly's failed_precondition window (files-in-sub-agents fleet log).
+(
+  function_body="$(readiness_function wait_for_ssh)"
+  [ -n "$function_body" ] || fail "could not load production wait_for_ssh"
+  eval "$function_body"
+  CLOUDBENCH_SSH_WAIT_ATTEMPTS=5
+  CLOUDBENCH_SSH_WAIT_SLEEP_SECONDS=0
+  # machine_state runs in $(...), so the cursor must live on disk — a shell
+  # variable would reset every probe and never leave "stopping".
+  # Timeline: stopping → stopping → stopped → (start issued) → started
+  idx_file="$TMP_ROOT/wait-ssh-stopping-idx"
+  echo 0 > "$idx_file"
+  states_file="$TMP_ROOT/wait-ssh-stopping-states"
+  printf '%s\n' stopping stopping stopped started started > "$states_file"
+  restart_file="$TMP_ROOT/wait-ssh-stopping-restarts"
+  echo 0 > "$restart_file"
+  current_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    sed -n "$((idx + 1))p" "$states_file"
+  }
+  advance_state() {
+    local idx
+    idx="$(cat "$idx_file")"
+    if [ "$idx" -lt 4 ]; then
+      echo $((idx + 1)) > "$idx_file"
+    fi
+  }
+  ssh_ready() {
+    [ "$(current_state)" = "started" ]
+  }
+  machine_state() {
+    local s
+    s="$(current_state)"
+    advance_state
+    echo "$s"
+  }
+  request_machine_start() {
+    echo $(( $(cat "$restart_file") + 1 )) > "$restart_file"
+  }
+  date() { echo 1000; }
+  sleep() { :; }
+  wait_for_ssh mach-stopping-race >/dev/null 2>&1 ||
+    fail "wait_for_ssh must survive stopping→stopped→started before SSH ready"
+  [ "$(cat "$restart_file")" -eq 1 ] ||
+    fail "wait_for_ssh must start exactly once after stopping clears (calls=$(cat "$restart_file"))"
 ) || readiness_failures=$((readiness_failures + 1))
 
 # Exercise the maintenance gate itself: a failed start cannot reach the SSH
@@ -1166,14 +1312,6 @@ wait_call_sites="$(grep -c '^[[:space:]]*wait_for_ssh "' \
     fail "concurrent-update retries must reach success (calls=$(cat "$call_file"))"
 ) || fail "warm-source resize concurrent-update retry regression failed"
 
-# Fleet must wait/stop a non-stopped warm donor instead of hard-failing (I-04).
-grep -Fq 'warm source not stopped' "$ROOT_DIR/scripts/run-bench-fleet" ||
-  fail "fleet must wait/stop when warm source is not already stopped"
-grep -Fq 'CLOUDBENCH_WARM_STOP_ATTEMPTS' "$ROOT_DIR/scripts/run-bench-fleet" ||
-  fail "fleet warm-stop wait must be attempt-bounded"
-grep -Fq 'after ${warm_stop_attempts} attempts' "$ROOT_DIR/scripts/run-bench-fleet" ||
-  fail "fleet warm-stop exhaustion message must name the attempt budget"
-
 # ── refresh-deps / refresh-wmh git-sync must use controller token (descend I-01) ──
 # Observed fleet abort before any task machine was provisioned:
 #   🔄 git-syncing /data/repo → <sha> ...
@@ -1187,7 +1325,7 @@ grep -Fq 'after ${warm_stop_attempts} attempts' "$ROOT_DIR/scripts/run-bench-fle
 # Boot-launch already injects CLOUDBENCH_GITHUB_TOKEN_B64 from the controller;
 # maintenance git-sync must fail closed the same way and never allow empty auth.
 python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "refresh-deps/wmh controller-token git-sync contract failed"
-import base64, pathlib, re, subprocess, sys, textwrap
+import pathlib, re, subprocess, sys, textwrap
 
 src_path = pathlib.Path(sys.argv[1])
 src = src_path.read_text()
@@ -1205,120 +1343,184 @@ def mode_block(mode: str) -> str:
 
 deps = mode_block("refresh-deps")
 wmh = mode_block("refresh-wmh")
+# refresh-deps + refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
 for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
-    if "build_controller_authenticated_git_sync_cmd" not in block:
-        raise SystemExit(f"{name} must call build_controller_authenticated_git_sync_cmd")
-    if "GITHUB_TOKEN:-" in block:
+    if "warm_source_fetch_ref" not in block:
+        raise SystemExit(f"{name} must call warm_source_fetch_ref")
+    for line in block.splitlines():
+        if "warm_source_fetch_ref" in line and "|| true" in line:
+            raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
+    if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
         raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
-helper_match = re.search(
-    r"^build_controller_authenticated_git_sync_cmd\(\) \{.*?\n\}$",
-    src,
-    flags=re.M | re.S,
-)
-if not helper_match:
-    raise SystemExit("build_controller_authenticated_git_sync_cmd helper is missing")
-helper = helper_match.group(0)
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        # Allow a comment between ) and {
+        import re as _re
+        m = _re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=_re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
+
+helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
+
+auth_bits = [
+    extract_bash_function(src, name)
+    for name in (
+        "token_to_git_auth_header",
+        "resolve_durable_github_token",
+        "resolve_github_token",
+        "resolve_controller_git_auth_header",
+    )
+]
+auth_helper = "\n".join(auth_bits)
+
+deliver = extract_bash_function(src, "ssh_exec_controller_git_sync")
+if "AUTH_HDR_DURABLE" not in deliver:
+    raise SystemExit("stdin delivery must support durable AUTH_HDR_DURABLE retry")
+if "resolve_durable_github_token" not in deliver:
+    raise SystemExit("stdin delivery must resolve a durable fallback token")
+if "sftp put" not in deliver:
+    raise SystemExit("git-sync delivery must SFTP credentials (fly ssh -C does not forward stdin)")
+if "Authorization: Basic" in deliver.split("-C", 1)[-1]:
+    raise SystemExit("AUTH_HDR must not appear in the fly ssh -C argument")
+if "remote_auth" not in deliver and "cloudbench-git-sync-auth" not in deliver:
+    raise SystemExit("git-sync delivery must stage a remote auth file path")
 
 # Fail closed with no token.
-script = helper + textwrap.dedent(
+script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo ""; }
+    resolve_durable_github_token() { echo ""; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef
     """
 )
-proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+# Run via a tempfile — bash -c mangles the nested quotes inside the multi-line
+# helper body (syntax error EOF). File execution preserves the source exactly.
+import tempfile, os
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    fail_path = fh.name
+try:
+    proc = subprocess.run(["bash", fail_path], capture_output=True, text=True)
+finally:
+    os.unlink(fail_path)
 if proc.returncode == 0:
     raise SystemExit("helper must fail closed when no controller GitHub token is available")
 if "No controller GitHub token" not in (proc.stderr + proc.stdout):
     raise SystemExit("helper must name the missing controller GitHub token")
 
-# Poisoned GITHUB_TOKEN env must be cleared before gh runs. Prefix assignment
-# makes gh see empty GITHUB_TOKEN; when gh fails, fall back to resolve_github_token.
-script = helper + textwrap.dedent(
-    """
-    export GITHUB_TOKEN=poisoned_invalid_token
-    export GH_TOKEN=poisoned_invalid_token
-    resolve_github_token() { echo "ghp_fallback_from_dotenv"; }
-    gh() {
-      # Prove poison was cleared for this invocation.
-      if [ -n "${GITHUB_TOKEN:-}" ] || [ -n "${GH_TOKEN:-}" ]; then
-        echo "POISON_LEAKED" >&2
-        return 1
-      fi
-      return 1
-    }
-    build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
-    """
-)
-proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
-if proc.returncode != 0:
-    raise SystemExit(f"helper must fall back after clearing poisoned GITHUB_TOKEN: {proc.stderr}")
-if "POISON_LEAKED" in (proc.stderr + proc.stdout):
-    raise SystemExit("helper must clear GITHUB_TOKEN/GH_TOKEN before invoking gh")
-if "poisoned_invalid_token" in proc.stdout:
-    raise SystemExit("helper must not embed the poisoned GITHUB_TOKEN value")
-_m = re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", proc.stdout)
-if not _m:
-    raise SystemExit("could not parse AUTH_HDR after poison-clear fallback")
-_decoded = base64.b64decode(_m.group(1)).decode()
-if "ghp_fallback_from_dotenv" not in _decoded:
-    raise SystemExit(f"expected dotenv fallback token in AUTH_HDR, got {_decoded!r}")
-
-# With a token, embed non-optional auth header.
-script = helper + textwrap.dedent(
+# With a token, emit a script that consumes AUTH_HDR via GIT_CONFIG_* — never
+# embed the Basic auth header in the returned command (argv leak via fly -C).
+script = auth_helper + "\n" + helper + textwrap.dedent(
     """
     resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
     gh() { return 1; }
     build_controller_authenticated_git_sync_cmd /data/repo abcdef0123456789
     """
 )
-proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    ok_path = fh.name
+try:
+    proc = subprocess.run(["bash", ok_path], capture_output=True, text=True)
+finally:
+    os.unlink(ok_path)
 if proc.returncode != 0:
     raise SystemExit(f"helper must succeed with a controller token: {proc.stderr}")
 cmd = proc.stdout
-if "http.extraheader" not in cmd:
-    raise SystemExit("authenticated sync cmd must set http.extraheader")
-if "--depth 1" not in cmd:
-    raise SystemExit("authenticated sync cmd must use shallow --depth 1 fetch")
-if "timeout 180" not in cmd:
-    raise SystemExit("authenticated sync cmd must bound fetch with timeout 180")
-if "already-at" not in cmd:
-    raise SystemExit("authenticated sync cmd must short-circuit when HEAD already matches ref")
-if "reset --hard" in cmd:
-    raise SystemExit("authenticated sync cmd must not always reset --hard (burns ssh budget on large trees)")
-if "chown -R" in cmd:
-    raise SystemExit("authenticated sync cmd must not full-tree chown (deps path re-chowns; hung e8)")
+if "_try_fetch" not in cmd:
+    raise SystemExit("authenticated sync cmd must use _try_fetch for primary→durable retry")
+if "GIT_CONFIG_KEY_0=http.extraheader" not in cmd:
+    raise SystemExit("authenticated sync cmd must set http.extraheader via GIT_CONFIG_*")
+if "primary GitHub token auth failed; retrying with durable fallback" not in cmd:
+    raise SystemExit("authenticated sync cmd must retry with durable AUTH_HDR_DURABLE")
 if "GITHUB_TOKEN:-" in cmd:
     raise SystemExit("authenticated sync cmd must not optionally clear AUTH_HDR")
-if "Authorization:\\ Basic\\" not in cmd and "Authorization: Basic" not in cmd:
-    raise SystemExit("authenticated sync cmd must embed a Basic auth header from the controller token")
-# The Basic payload must decode to x-access-token:<token>
-m = re.search(r"AUTH_HDR=Authorization:\\ Basic\\ ([A-Za-z0-9+/=]+)", cmd)
-if not m:
-    m = re.search(r"AUTH_HDR='Authorization: Basic ([A-Za-z0-9+/=]+)'", cmd)
-if not m:
-    raise SystemExit(f"could not parse embedded AUTH_HDR from cmd: {cmd[:200]!r}")
-decoded = base64.b64decode(m.group(1)).decode()
-if not decoded.startswith("x-access-token:"):
-    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {decoded!r}")
+if "Authorization: Basic" in cmd or "x-access-token:" in cmd or "ghp_test_token" in cmd:
+    raise SystemExit("authenticated sync cmd must not embed the controller token/header")
+if "AUTH_HDR" not in cmd:
+    raise SystemExit("authenticated sync cmd must require AUTH_HDR from the delivery path")
+if "rev-parse FETCH_HEAD" not in cmd or 'checkout -f "$FETCHED_REF"' not in cmd:
+    raise SystemExit("authenticated sync cmd must check out FETCH_HEAD, not a stale local ref")
+if "checkout -f $ref_q" in cmd or "checkout -f \"$ref_q\"" in cmd:
+    raise SystemExit("authenticated sync cmd must not check out the possibly-stale local ref name")
+
+# Auth header resolver must produce x-access-token Basic payload separately.
+script = auth_helper + textwrap.dedent(
+    """
+    resolve_github_token() { echo "ghp_test_token_for_sync_cmd"; }
+    resolve_durable_github_token() { echo "ghp_durable_token_for_sync_cmd"; }
+    gh() { return 1; }
+    resolve_controller_git_auth_header
+    """
+)
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+    fh.write(script)
+    hdr_path = fh.name
+try:
+    proc = subprocess.run(["bash", hdr_path], capture_output=True, text=True)
+finally:
+    os.unlink(hdr_path)
+if proc.returncode != 0:
+    raise SystemExit(f"auth header helper must succeed with a controller token: {proc.stderr}")
+hdr = proc.stdout.strip()
+if not hdr.startswith("Authorization: Basic "):
+    raise SystemExit(f"auth header must be Authorization: Basic …, got {hdr!r}")
+import base64
+payload = base64.b64decode(hdr.split(" ", 2)[2]).decode()
+if payload != "x-access-token:ghp_test_token_for_sync_cmd":
+    raise SystemExit(f"AUTH_HDR payload must be x-access-token:…, got {payload!r}")
 print("controller-token git-sync contract ok")
 PY
 
 # ── ssh_exec must controller-bound flyctl (descend I-07) ──
-# Epoch-7: guest snippet used `timeout 180`, but `ssh_exec` invoked unbounded
-# `flyctl ssh console`. After warm machine stop mid-sync, flyctl never returned
-# (log frozen on "git-syncing" for 10+ minutes; controller had to be KILL'd).
+# Guest timeout alone is insufficient: flyctl ssh hung after warm machine stop.
 python3 - "$ROOT_DIR/scripts/run-bench-cloud" <<'PY' || fail "ssh_exec controller-side timeout contract failed"
 import pathlib, re, subprocess, sys, textwrap, time
 
 src = pathlib.Path(sys.argv[1]).read_text()
 
-ssh_exec_match = re.search(r"^ssh_exec\(\) \{.*?\n\}$", src, flags=re.M | re.S)
-if not ssh_exec_match:
-    raise SystemExit("ssh_exec helper missing")
-ssh_exec = ssh_exec_match.group(0)
+def extract_bash_function(source: str, name: str) -> str:
+    marker = f"{name}() {{"
+    start = source.find(marker)
+    if start < 0:
+        m = re.search(rf"^{name}\(\)[^\n]*\n\{{", source, flags=re.M)
+        if not m:
+            raise SystemExit(f"{name} helper is missing")
+        start = m.start()
+        brace_at = source.find("{", m.start())
+    else:
+        brace_at = source.find("{", start)
+    depth = 0
+    for idx in range(brace_at, len(source)):
+        ch = source[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : idx + 1]
+    raise SystemExit(f"{name} helper is missing closing brace")
+
+ssh_exec = extract_bash_function(src, "ssh_exec")
 if "_with_timeout" not in ssh_exec:
     raise SystemExit("ssh_exec must wrap flyctl ssh via _with_timeout")
 if "FLY ssh console" in ssh_exec:
@@ -1326,36 +1528,30 @@ if "FLY ssh console" in ssh_exec:
 if "flyctl ssh console" not in ssh_exec:
     raise SystemExit("ssh_exec must invoke flyctl ssh console")
 
-deps = src[src.find('if [ "$MODE" = "refresh-deps" ]; then'):]
-deps = deps[: deps.find('\nif [ "$MODE" = "') if '\nif [ "$MODE" = "' in deps[1:] else len(deps)]
-if 'CLOUDBENCH_GIT_SYNC_TIMEOUT' not in deps and 'GIT_SYNC_TO' not in deps:
-    raise SystemExit("refresh-deps must pass an explicit git-sync ssh_exec timeout")
-if 'ssh_exec "$mid" "$SYNC_CMD" "$GIT_SYNC_TO"' not in deps:
-    raise SystemExit("refresh-deps git-sync must call ssh_exec with GIT_SYNC_TO")
+ws = extract_bash_function(src, "warm_source_fetch_ref")
+if "CLOUDBENCH_GIT_SYNC_TIMEOUT" not in ws and "GIT_SYNC_TO" not in ws:
+    raise SystemExit("warm_source_fetch_ref must pass an explicit git-sync ssh_exec timeout")
+if '"$GIT_SYNC_TO"' not in ws:
+    raise SystemExit("warm_source_fetch_ref must call ssh_exec with GIT_SYNC_TO")
 
-# Owning-boundary repro: unbounded sleep would hang; _with_timeout must return 124.
-wt = re.search(r"^_with_timeout\(\) \{.*?\n\}$", src, flags=re.M | re.S)
-if not wt:
-    raise SystemExit("_with_timeout helper missing")
-script = wt.group(0) + textwrap.dedent(
+fetch_ref = (pathlib.Path(sys.argv[1]).parent / "cloudbench-fetch-ref.sh").read_text()
+if "already-at" not in fetch_ref:
+    raise SystemExit("cloudbench-fetch-ref.sh must short-circuit when HEAD already matches SHA")
+
+wt = extract_bash_function(src, "_with_timeout")
+script = wt + textwrap.dedent(
     """
-    start=$(date +%s)
     _with_timeout 2 sleep 30
-    rc=$?
-    end=$(date +%s)
-    echo "rc=$rc elapsed=$((end-start))"
-    exit $rc
+    exit $?
     """
 )
 t0 = time.time()
 proc = subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
 elapsed = time.time() - t0
 if proc.returncode != 124:
-    raise SystemExit(f"_with_timeout must exit 124 on overrun, got rc={proc.returncode} out={proc.stdout!r} err={proc.stderr!r}")
-if elapsed > 8:
-    raise SystemExit(f"_with_timeout took too long to kill hung child: {elapsed:.1f}s")
-if elapsed < 1.5:
-    raise SystemExit(f"_with_timeout returned too fast ({elapsed:.1f}s); expected ~2s bound")
+    raise SystemExit(f"_with_timeout must exit 124 on overrun, got rc={proc.returncode}")
+if elapsed > 8 or elapsed < 1.5:
+    raise SystemExit(f"_with_timeout wall {elapsed:.1f}s not ~2s")
 print("ssh_exec controller-side timeout contract ok")
 PY
 
@@ -1369,5 +1565,119 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
   fail "the in-app Hub key failure must distinguish a missing .env from an empty key"
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
+
+# Epoch 4: injected GITHUB_TOKEN is invalid (`gh auth status`: "The token in
+# GITHUB_TOKEN is invalid") but `gh auth token` still returns it. Warm-box
+# fetch-ref then 401s as `could not read Username for 'https://github.com'`.
+# The controller must ignore that env token and use gh's hosts.yml credential
+# (`env -u GITHUB_TOKEN gh auth token`) — the same ghs_ token git insteadOf uses.
+require_text "$HELPER_SRC" \
+  'cloudbench_controller_github_token() {' \
+  "controller GitHub token resolution must live in the shared helper"
+require_text "$HELPER_SRC" \
+  'env -u GITHUB_TOKEN gh auth token' \
+  "controller token resolution must ignore injected GITHUB_TOKEN when asking gh"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_controller_github_token' \
+  "warm-source git-sync must use the shared controller token helper"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_controller_github_token' \
+  "fleet worker token cache must use the shared controller token helper"
+
+GITHUB_TOKEN="github_pat_INVALID"
+resolved_token="$(cloudbench_controller_github_token)" \
+  || fail "controller token helper must succeed when gh hosts.yml or git insteadOf exists"
+[ "$resolved_token" != "$GITHUB_TOKEN" ] \
+  || fail "controller token helper must not return the injected invalid GITHUB_TOKEN"
+[ -n "$resolved_token" ] \
+  || fail "controller token helper must return a non-empty hosts.yml/insteadOf token"
+unset GITHUB_TOKEN
+
+# insteadOf fallback when gh cannot return a token
+instead_home="$TMP_ROOT/token-home"
+instead_bin="$TMP_ROOT/token-bin"
+mkdir -p "$instead_home" "$instead_bin"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$instead_bin/gh"
+chmod +x "$instead_bin/gh"
+printf '%s\n' \
+  '[url "https://x-access-token:ghs_INSTEADOF@github.com/"]' \
+  '	insteadOf = https://github.com/' \
+  > "$instead_home/.gitconfig"
+instead_token="$(
+  env -u GITHUB_TOKEN HOME="$instead_home" GIT_CONFIG_GLOBAL="$instead_home/.gitconfig" \
+    PATH="$instead_bin:/usr/bin:/bin" \
+    bash -c "source $(printf '%q' "$HELPER_SRC"); cloudbench_controller_github_token"
+)" || fail "insteadOf fallback must succeed when gh is unavailable"
+[ "$instead_token" = "ghs_INSTEADOF" ] \
+  || fail "insteadOf fallback must parse the rewrite token (got ${instead_token:-empty})"
+
+# Epoch 6: I-03 ignored the invalid injected token for fetch-ref but left
+# process $GITHUB_TOKEN and local .env on that github_pat_. Export must
+# overwrite both so children inherit the working hosts.yml / insteadOf token.
+require_text "$HELPER_SRC" \
+  'cloudbench_export_controller_github_token() {' \
+  "controller token export must live in the shared helper"
+require_text "$ROOT_DIR/scripts/cloud-init.sh" \
+  'cloudbench_export_controller_github_token agents/.env back-end/.env' \
+  "cloud-init must export a working GITHUB_TOKEN into process env and local .env"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'cloudbench_export_controller_github_token' \
+  "run-bench-cloud must export a working GITHUB_TOKEN into the controller env"
+require_text "$ROOT_DIR/scripts/run-bench-fleet" \
+  'cloudbench_export_controller_github_token' \
+  "run-bench-fleet must export a working GITHUB_TOKEN into the controller env"
+
+persist_a="$TMP_ROOT/persist-a.env"
+persist_b="$TMP_ROOT/persist-b.env"
+printf 'GITHUB_TOKEN=github_pat_STALE\nOTHER=keep-me\n' > "$persist_a"
+printf 'FOO=bar\n' > "$persist_b"
+GITHUB_TOKEN="github_pat_INVALID"
+export GITHUB_TOKEN
+cloudbench_export_controller_github_token "$persist_a" "$persist_b" >/dev/null \
+  || fail "export helper must succeed when a controller token exists"
+[ "$GITHUB_TOKEN" != "github_pat_INVALID" ] \
+  || fail "export helper must overwrite process GITHUB_TOKEN"
+[ -n "$GITHUB_TOKEN" ] \
+  || fail "export helper must set a non-empty process GITHUB_TOKEN"
+persisted_a="$(cloudbench_env_value "$persist_a" GITHUB_TOKEN)"
+persisted_b="$(cloudbench_env_value "$persist_b" GITHUB_TOKEN)"
+other="$(cloudbench_env_value "$persist_a" OTHER)"
+foo="$(cloudbench_env_value "$persist_b" FOO)"
+[ "$persisted_a" = "$GITHUB_TOKEN" ] \
+  || fail "export helper must persist the working token to the first dest"
+[ "$persisted_b" = "$GITHUB_TOKEN" ] \
+  || fail "export helper must persist the working token to the second dest"
+[ "$persisted_a" != "github_pat_STALE" ] \
+  || fail "export helper must replace a stale GITHUB_TOKEN in .env"
+[ "$other" = "keep-me" ] \
+  || fail "export helper must preserve other keys in the dest .env"
+[ "$foo" = "bar" ] \
+  || fail "export helper must preserve unrelated keys when appending GITHUB_TOKEN"
+unset GITHUB_TOKEN
+
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCH_NEEDS_PAYMENT_FIXTURE=0' \
+  "cloudbench-run must track whether a sandbox payment fixture is required"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)' \
+  "cloudbench-run must treat the four sandbox AgentCard lifecycle tasks as payment-fixture work"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCH_NEEDS_PAYMENT_FIXTURE=1' \
+  "sandbox AgentCard lifecycle tasks must request the isolated payment fixture"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1' \
+  "cloudbench-run must force the customer mint path for sandbox payment benches"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30' \
+  "cloudbench-run must run sandbox payment benches as the admin account"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'npx tsx scripts/setup-benchmark-payment.ts --user-id' \
+  "cloudbench-run must seed the isolated payment fixture after the stack is healthy"
+require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
+  'sh -c '\''cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"'\''' \
+  "cloudbench-run must pass payment fixture paths as argv instead of interpolating them into a shell string"
+if grep -Fq "bash -lc \"cd '\$REPO_DIR/back-end'" "$ROOT_DIR/scripts/cloudbench-run.sh"; then
+  fail "cloudbench-run must not interpolate REPO_DIR/PAYMENT_USER_ID into bash -lc"
+fi
 
 echo "All cloud benchmark environment checks passed."

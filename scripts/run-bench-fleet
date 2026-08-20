@@ -56,6 +56,12 @@ ROOT_DIR="${CLOUDBENCH_FLEET_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && p
 cd "$ROOT_DIR" || exit 1
 # shellcheck source=lib/cloudbench-env.sh
 source "${CLOUDBENCH_SCRIPT_SNAPSHOT:-$ROOT_DIR/scripts/lib}/cloudbench-env.sh"
+# Injected $GITHUB_TOKEN is often an invalid github_pat_. Overwrite process env
+# and local .env so children inherit the working hosts.yml / insteadOf token.
+cloudbench_export_controller_github_token \
+  "$ROOT_DIR/agents/.env" \
+  "$ROOT_DIR/back-end/.env" \
+  || echo "WARN: controller GITHUB_TOKEN export failed; fetch-ref still uses cloudbench_controller_github_token" >&2
 
 # ── Run from a script SNAPSHOT, never the live checkout ─────────────────────
 # bash reads scripts lazily from disk: editing run-bench-fleet/run-bench-cloud
@@ -3360,31 +3366,27 @@ warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID"
     echo "❌ could not read warm source shape" >&2; exit 1;
 }
 read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
-# A prior --refresh-deps / sibling controller can leave the donor in
-# starting|started|replacing. Hard-failing here aborted fleets before any task
-# machine existed (descend wait-for-trigger epoch 4). Wait+stop until stopped.
+# Concurrent maintenance (or a sibling fleet's park/update) can leave the shared
+# warm donor in started/stopping/replacing. Wait for stopped instead of aborting
+# the whole fleet on a transient race — clones still require a stopped source.
 if [ "$warm_state" != "stopped" ]; then
-    echo "⏳ warm source not stopped (state=$warm_state); waiting/stopping before provisioning ..."
-    warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-30}"
+    echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
+    warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
     warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"
-    for warm_stop_i in $(seq 1 "$warm_stop_attempts"); do
-        warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
-        warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
-            echo "❌ could not re-read warm source shape while waiting for stop" >&2; exit 1;
-        }
-        read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
-        if [ "$warm_state" = "stopped" ]; then
-            echo "✅ warm source stopped"
-            break
-        fi
-        echo "   attempt $warm_stop_i/$warm_stop_attempts: state=$warm_state — requesting stop"
-        fly_with_timeout 90 machine stop "$WARM_ID" -a "$APP" >/dev/null 2>&1 || true
-        sleep "$warm_stop_sleep"
-    done
-    if [ "$warm_state" != "stopped" ]; then
-        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state after ${warm_stop_attempts} attempts)" >&2
+    cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID" \
+        "$warm_stop_attempts" "$warm_stop_sleep" || {
+        echo "❌ warm source must be stopped before fleet provisioning (state=$(pool_machine_state "$WARM_ID" 2>/dev/null || echo unknown))" >&2
         exit 1
-    fi
+    }
+    warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo '[]')"
+    warm_shape="$(printf '%s' "$warm_json" | pool_machine_shape_from_json "$WARM_ID")" || {
+        echo "❌ could not re-read warm source shape after stop wait" >&2; exit 1;
+    }
+    read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
+    [ "$warm_state" = "stopped" ] || {
+        echo "❌ warm source must be stopped before fleet provisioning (state=$warm_state)" >&2
+        exit 1
+    }
 fi
 if [ "$warm_kind/$warm_cpus/$warm_memory" != "shared/1/$WARM_PARKED_VM_MEMORY" ]; then
     echo "🅿️  parking warm source at $WARM_PARKED_VM_SIZE/${WARM_PARKED_VM_MEMORY}MB for config headroom"
@@ -4112,23 +4114,12 @@ ready_workers_operational() {  # ready_workers_operational <bench-output-dir>
 
 CONTROLLER_GITHUB_TOKEN_B64_CACHE="${CLOUDBENCH_GITHUB_TOKEN_B64:-}"
 controller_github_token_b64() {
-    local token="" dotenv
+    local token=""
     if [ -n "$CONTROLLER_GITHUB_TOKEN_B64_CACHE" ]; then
         printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
         return 0
     fi
-    token="${GITHUB_TOKEN:-${GH_TOKEN:-}}"
-    if [ -z "$token" ] && command -v gh >/dev/null 2>&1; then
-        token="$(gh auth token 2>/dev/null || true)"
-    fi
-    if [ -z "$token" ]; then
-        for dotenv in "$ROOT_DIR/back-end/.env" "$ROOT_DIR/agents/.env"; do
-            [ -f "$dotenv" ] || continue
-            token="$(grep -E '^GITHUB_TOKEN=' "$dotenv" 2>/dev/null | head -1 \
-                | cut -d= -f2- | sed 's/^["'\'']//; s/["'\'']$//')"
-            [ -z "$token" ] || break
-        done
-    fi
+    token="$(cloudbench_controller_github_token)" || true
     [ -n "$token" ] || return 1
     CONTROLLER_GITHUB_TOKEN_B64_CACHE="$(printf '%s' "$token" | base64 | tr -d '\n')"
     printf '%s' "$CONTROLLER_GITHUB_TOKEN_B64_CACHE"
