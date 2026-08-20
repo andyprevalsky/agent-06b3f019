@@ -7,6 +7,7 @@ import { type Response, Router } from 'express';
 import { z } from 'zod';
 import { type HybridAuthRequest, hybridAuth } from '../../providers/hybridAuth';
 import { asyncHandler } from '../../utils/asyncHandler';
+import { isAdminUser } from '../../utils/adminAccess';
 import { createLogger } from '../../providers/logger';
 import { agentMessageUpload } from '../../providers/agentMessageUpload';
 import type { ResponseSchemaDirectAuth } from '../../providers/setResponseSchema';
@@ -130,7 +131,10 @@ router.get(
         res.status(401).json({ error: 'Unauthorized' });
         return;
       }
-      const result = await messageService.getAttachmentSignedUrl(req.userId, storagePath);
+      const result = await messageService.getAttachmentSignedUrl(req.userId, storagePath, {
+        agentId: req.params.id,
+        isAdmin: isAdminUser(req.userId),
+      });
       if ('error' in result) {
         res.status(result.status ?? 500).json({ error: result.error });
         return;
