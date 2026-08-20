@@ -49,6 +49,10 @@ require_text "$FORMAT" "reproduction command that failed before the change and n
   "Detail must name the unchanged failing-then-passing test"
 require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
+require_text "$FORMAT" '**What failed:** When <the agent doing the task goal>' \
+  "approval requests must frame the failure inside the agent's task"
+require_text "$FORMAT" "Invalid if deleting the task goal still leaves a grammatical sentence" \
+  "approval failure sentences must not stand without the task goal"
 require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
   "approval requests must include a concrete FE agent link"
 require_text "$FORMAT" '**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call `<call_site>` on `<agent_id>`' \
@@ -95,6 +99,8 @@ require_text "$DEPLOY" "bash scripts/tests/approval-format.test.sh" \
   "/deploy must cement the shared approval format in its no-skip structural gate"
 require_text "$DESCEND" "the canonical approval narrative" \
   "/descend approval stops must use the canonical approval narrative"
+require_text "$DESCEND" "**What failed:** When <the agent doing the task goal>" \
+  "/descend Stop 1 must frame the failure inside the agent's task"
 require_text "$DESCEND" "**Local repro (<wall-clock>):**" \
   "/descend Stop 1 must include local repro wall-clock"
 require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call \`<call_site>\` on \`<agent_id>\`" \
@@ -103,7 +109,7 @@ require_text "$DESCEND" "Tests: <one sentence naming the actual assertion>" \
   "/descend Stop 1 must describe what the local repro tests"
 require_text "$DESCEND" "**<how checked>**" \
   "/descend Stop 1 must name how each evaluator is checked"
-require_text "$RCA" "last-call rendered LLM dump, numbered local-repro" \
+require_text "$RCA" "task-framed \`What failed:\` sentence, the FE link, last-call" \
   "/rca approval output must require the Evidence pack"
 
 if grep -Fq "exact five-part RCA narrative" "$DESCEND"; then

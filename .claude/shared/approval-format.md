@@ -28,6 +28,18 @@ shape — labeled lines, not a prose paragraph. Do not bury these in Detail.
 Each field is required; when a field does not apply, keep the label and write
 `Not applicable — <reason>`. Inventing a URL or omitting the reason is invalid.
 
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, <it tried this>, and <this broke, with the measured result>.
+
+This is the sentence a human reads first. It must frame the failure inside the
+agent's goal, not as a free-floating metric. Required beats, in order: the task
+the agent was doing, the step in the trajectory (spawn, site, tool, LLM action),
+what it attempted, and how that failed. Example: `When the browser agent spawned
+to buy the three named products and hit /test_payment, the LLM tried to rotate
+proxies, and proxy generation returned HTTP 400 so the session never started.`
+Invalid if deleting the task goal still leaves a grammatical sentence (`proxy
+generation returned HTTP 400` is the smell). Do not start from the bug; start
+from the goal.
+
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
 The URL must open the concrete agent run that proves the reported failure or
@@ -129,8 +141,9 @@ End with one explicit approval question and unambiguous response syntax:
   `<approval-id> edit: <instruction>`
 
 An approval is invalid if any required section, Evidence field, in-scope file
-link, concrete FE agent link, last-call rendered LLM dump, local-repro `Tests:`
-sentence plus steps and measured wall-clock, or Environment triple (evaluators
-with how they are checked, fixtures, task prompt) is missing. `Not applicable — <reason>` counts as present; a blank field does
+link, **What failed:** task-framed sentence, concrete FE agent link, last-call
+rendered LLM dump, local-repro `Tests:` sentence plus steps and measured
+wall-clock, or Environment triple (evaluators with how they are checked,
+fixtures, task prompt) is missing. `Not applicable — <reason>` counts as present; a blank field does
 not. Approval remains snapshot-scoped: if an in-scope hunk changes, issue a new
 approval ID and present all six sections again.
