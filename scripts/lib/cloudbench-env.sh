@@ -816,6 +816,40 @@ cloudbench_wait_machine_startable() {
   return 1
 }
 
+# Warm-source clones require a fully stopped donor. Transitional states
+# (started/starting/stopping/replacing/created/creating/updating/restarting)
+# are normal during concurrent maintenance; aborting immediately turns a brief
+# race into a fleet-wide INFRA failure. Wait for stopped, fail closed on
+# destroy or timeout.
+cloudbench_wait_machine_stopped() {
+  local state_reader="$1" machine_id="$2" max_attempts="$3" retry_delay_seconds="$4"
+  local attempt state
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    state="$($state_reader "$machine_id" 2>/dev/null || true)"
+    case "$state" in
+      stopped) return 0 ;;
+      destroyed|destroying)
+        echo "Machine $machine_id became unavailable while waiting to stop (state=$state)" >&2
+        return 1
+        ;;
+      created|creating|replacing|started|starting|stopping|updating|restarting|"")
+        if [ "$attempt" -eq 1 ] || [ $((attempt % 5)) -eq 0 ]; then
+          echo "⏳ waiting for machine $machine_id to stop (state=${state:-unknown}, attempt $attempt/$max_attempts)"
+        fi
+        ;;
+      *)
+        echo "Machine $machine_id has unexpected state while waiting to stop (state=$state)" >&2
+        return 1
+        ;;
+    esac
+    [ "$attempt" -ge "$max_attempts" ] || sleep "$retry_delay_seconds"
+  done
+
+  echo "Machine $machine_id did not become stopped (last_state=${state:-unknown})" >&2
+  return 1
+}
+
 cloudbench_validate_fresh_clone_id() {
   local candidate="$1" source_id="$2"
   shift 2
