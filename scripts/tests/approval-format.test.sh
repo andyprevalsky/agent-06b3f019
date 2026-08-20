@@ -51,6 +51,10 @@ require_text "$FORMAT" "clickable file-and-line links" \
   "approval scope must include clickable file-and-line links"
 require_text "$FORMAT" '**What failed:** When <the agent doing the task goal>' \
   "approval requests must frame the failure inside the agent's task"
+require_text "$FORMAT" 'the LLM called `<tool>` to <attempt>' \
+  "the failure sentence must name the exact tool the LLM called"
+require_text "$FORMAT" "without the tool name" \
+  "a tool-less attempt description is invalid"
 require_text "$FORMAT" "Invalid if deleting the task goal still leaves a grammatical sentence" \
   "approval failure sentences must not stand without the task goal"
 require_text "$FORMAT" '**FE link:** [Open agent](<frontend-agent-url>) — <verification status>' \
@@ -101,6 +105,8 @@ require_text "$DESCEND" "the canonical approval narrative" \
   "/descend approval stops must use the canonical approval narrative"
 require_text "$DESCEND" "**What failed:** When <the agent doing the task goal>" \
   "/descend Stop 1 must frame the failure inside the agent's task"
+require_text "$DESCEND" "the LLM called \`<tool>\` to <attempt>" \
+  "/descend What failed must name the exact tool"
 require_text "$DESCEND" "**Local repro (<wall-clock>):**" \
   "/descend Stop 1 must include local repro wall-clock"
 require_text "$DESCEND" "**LLM dump:** [Open rendered dump](<rendered-html-url>) — last call \`<call_site>\` on \`<agent_id>\`" \

@@ -706,7 +706,7 @@ summarize, or paraphrase `task.prompt`, even when it is long or multiline:
 
 #### Evidence
 
-**What failed:** When <the agent doing the task goal>, <it reached this step or site>, <it tried this>, and <this broke, with the measured result>.
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
 
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
@@ -782,7 +782,7 @@ After the affected lifecycle rows, include:
 
 #### Evidence
 
-**What failed:** When <the agent doing the task goal>, <it reached this step or site>, <it tried this>, and <this broke, with the measured result>.
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
 
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 

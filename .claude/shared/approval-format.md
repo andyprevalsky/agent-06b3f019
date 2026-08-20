@@ -28,17 +28,23 @@ shape — labeled lines, not a prose paragraph. Do not bury these in Detail.
 Each field is required; when a field does not apply, keep the label and write
 `Not applicable — <reason>`. Inventing a URL or omitting the reason is invalid.
 
-**What failed:** When <the agent doing the task goal>, <it reached this step or site>, <it tried this>, and <this broke, with the measured result>.
+**What failed:** When <the agent doing the task goal>, <it reached this step or site>, the LLM called `<tool>` to <attempt>, and <this broke, with the measured result>.
 
 This is the sentence a human reads first. It must frame the failure inside the
 agent's goal, not as a free-floating metric. Required beats, in order: the task
-the agent was doing, the step in the trajectory (spawn, site, tool, LLM action),
-what it attempted, and how that failed. Example: `When the browser agent spawned
-to buy the three named products and hit /test_payment, the LLM tried to rotate
-proxies, and proxy generation returned HTTP 400 so the session never started.`
+the agent was doing, the step in the trajectory (spawn, site, page), the exact
+tool the LLM called (backticked name from the dump — `rotate_ip`, not a paraphrase
+like "tried to rotate proxies"), what that tool was for, and how it failed.
+
+Example:
+
+> When the browser agent spawned to buy the three named products and hit /test_payment, the LLM called `rotate_ip` to rotate proxies, and /api/browser-session/rotate-proxy returned HTTP 400 so the session never started.
+
 Invalid if deleting the task goal still leaves a grammatical sentence (`proxy
-generation returned HTTP 400` is the smell). Do not start from the bug; start
-from the goal.
+generation returned HTTP 400` is the smell). Invalid if the attempt is described
+without the tool name. Do not paraphrase the tool; copy it from the dump. If the
+LLM never called a tool, write `no tool call — the LLM <what it did instead of
+the expected tool>`. Do not start from the bug; start from the goal.
 
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
