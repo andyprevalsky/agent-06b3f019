@@ -477,7 +477,14 @@ build_controller_authenticated_git_sync_cmd() {  # <remote-repo> <ref> [verify-m
     cmd="set -e
 AUTH_HDR=$auth_q
 [ -n \"\$AUTH_HDR\" ] || { echo 'FATAL: missing controller git auth header' >&2; exit 1; }
-git -c safe.directory=$repo_q -C $repo_q -c http.extraheader=\"\$AUTH_HDR\" fetch --quiet origin $ref_q
+# Bounded shallow fetch: a full fetch into the warm volume's object store has
+# hung for 10+ minutes with no progress (descend wait-for-trigger epoch 6).
+# Depth-1 of the exact SHA is enough for --refresh-deps manifest fingerprinting.
+if command -v timeout >/dev/null 2>&1; then
+  timeout 180 git -c safe.directory=$repo_q -C $repo_q -c http.extraheader=\"\$AUTH_HDR\" fetch --depth 1 --quiet origin $ref_q
+else
+  git -c safe.directory=$repo_q -C $repo_q -c http.extraheader=\"\$AUTH_HDR\" fetch --depth 1 --quiet origin $ref_q
+fi
 git -c safe.directory=$repo_q -C $repo_q checkout -f $ref_q 2>/dev/null || git -c safe.directory=$repo_q -C $repo_q checkout -f FETCH_HEAD
 git -c safe.directory=$repo_q -C $repo_q reset --hard
 chown -R rose:rose $repo_q 2>/dev/null || true
