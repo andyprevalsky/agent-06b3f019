@@ -35,7 +35,11 @@ TARGET_DB="victoria_seedmem_tgt_$$"
 # does not depend on outbound reachability to prod (all .env hosts were
 # TCP-closed on 2026-07-29 and every run died in ~4s).
 DUMP="$(ls -t ../.context/benchmarks/seed-cache/*.dump 2>/dev/null | head -1)"
-OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem}"
+# Default to a PID-scoped directory so two concurrent /deploy worktrees (or a
+# controller + worker both hitting Step 4r) cannot append into one shared
+# summary.txt and poison `len(peaks) != requested_runs` (observed: interleaved
+# run lines → "got 9" after five real cold seeds).
+OUT_DIR="${SEED_MEM_OUT_DIR:-../.context/seed-mem-$$}"
 mkdir -p "$OUT_DIR"
 SUMMARY="$OUT_DIR/summary.txt"
 : > "$SUMMARY"
