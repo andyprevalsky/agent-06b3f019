@@ -1,6 +1,7 @@
 import { type CardProvider } from '../../providers/card-provider';
 import { type WalletFundingProvider } from '../../providers/wallet-funding';
 import { isAdminUser } from '../../utils/adminAccess';
+import { benchmarkForceCustomerPurchasePath } from './config';
 import {
   chargeAndIssueCard,
   mintCaptureAndIssue,
@@ -30,7 +31,9 @@ export async function resolveAndIssuePurchaseCard(
 ): Promise<MintPurchaseResult> {
   // A resumed purchase already holds a wallet-funding claim; only a fresh purchase transitions to
   // CHARGING here (a resume re-enters mid-flight). Mirrors the non-admin path below.
-  if (isAdminUser(input.userId)) {
+  // Benchmark-only: BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH keeps isAdminUser() true for
+  // credits/unlimited, but routes minting through the charged Stripe-hold path.
+  if (isAdminUser(input.userId) && !benchmarkForceCustomerPurchasePath()) {
     if (resumedPurchase === null) {
       await repo.updatePurchaseStatus(purchase.id, PurchaseSpendStatus.CHARGING);
     }
