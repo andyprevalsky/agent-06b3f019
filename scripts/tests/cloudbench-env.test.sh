@@ -1074,4 +1074,71 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
+# ── Validated GitHub token for private-repo git-sync (descend I-01) ───────────
+# Fleet run 20260820-202356-7298 aborted before any task machine:
+#   🔄 git-syncing /data/repo → ab0e002a9 ...
+#      fatal: could not read Username for 'https://github.com': No such device or address
+#   ❌ exact remote checkout failed
+#   ❌ central dep refresh failed; refusing to provision task machines
+# Root cause: resolve_github_token echoed a stale .env GITHUB_TOKEN (HTTP 401),
+# and --refresh-deps built AUTH_HDR only from the box-side secret — empty/invalid
+# auth → interactive username prompt → failure. Resolver must validate against the
+# private repo and prefer fresher controller credentials; refresh-deps must inject
+# a request-scoped controller token and fail closed when none validates.
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'github_token_can_fetch_repo()' \
+  "cloudbench must validate GitHub tokens against the private rose repo"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'api.github.com/repos/Rose-Ai-Labs/rose' \
+  "token validation must hit the private rose repo endpoint"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'GITHUB_DISPATCH_TOKEN' \
+  "token resolver must consider GITHUB_DISPATCH_TOKEN before stale .env GITHUB_TOKEN"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'env -u GITHUB_TOKEN gh auth token' \
+  "token resolver must ignore a stale ambient GITHUB_TOKEN when reading gh auth"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'REFRESH_GITHUB_TOKEN_B64' \
+  "refresh-deps must inject a request-scoped controller token for git-sync"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'FATAL: controller GitHub token unavailable for refresh-deps' \
+  "refresh-deps must fail closed when the controller token is missing"
+# Prove the live resolver rejects the ambient stale GITHUB_TOKEN and still
+# returns a credential that can fetch the private repo (requires network).
+resolve_snippet="$(mktemp)"
+awk '
+  /^github_token_can_fetch_repo\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^resolve_render_env_value\(\)/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud" | sed '$d' > "$resolve_snippet"
+# Drop the trailing resolve_render line if awk included it — keep only the two fns.
+# The awk above exits when it sees resolve_render, after printing that line; strip it.
+sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
+(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  source "$resolve_snippet"
+  tok="$(resolve_github_token)"
+  [ -n "$tok" ] || fail "resolve_github_token returned empty despite available controller credentials"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+    -H "Authorization: Bearer ${tok}" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: cloudbench-env-test' \
+    'https://api.github.com/repos/Rose-Ai-Labs/rose')"
+  [ "$code" = "200" ] || fail "resolve_github_token returned a token that cannot fetch rose (HTTP $code)"
+  # Ambient GITHUB_TOKEN in this environment is known-stale (401). The resolver
+  # must not echo it when a fresher candidate exists.
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    stale_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: cloudbench-env-test' \
+      'https://api.github.com/repos/Rose-Ai-Labs/rose' || true)"
+    if [ "$stale_code" = "401" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
+      fail "resolve_github_token returned the ambient stale GITHUB_TOKEN"
+    fi
+  fi
+) || fail "validated GitHub token resolver regression failed"
+rm -f "$resolve_snippet"
+
 echo "All cloud benchmark environment checks passed."
