@@ -1165,10 +1165,18 @@ ssh_exec() {  # ssh_exec <machine_id> <remote-shell-command>
     # sets CLOUDBENCH_SSH_EXEC_TIMEOUT so a stalled git-sync cannot block fleets
     # indefinitely (descend I-02).
     if [ -n "${CLOUDBENCH_SSH_EXEC_TIMEOUT:-}" ]; then
+        local ssh_rc=0
+        set +e
         _with_timeout "$CLOUDBENCH_SSH_EXEC_TIMEOUT" "${ssh_cmd[@]}"
-    else
-        "${ssh_cmd[@]}"
+        ssh_rc=$?
+        set -e
+        if [ "$ssh_rc" -eq 124 ]; then
+            echo "❌ ssh_exec timed out after ${CLOUDBENCH_SSH_EXEC_TIMEOUT}s" >&2
+            return 124
+        fi
+        return "$ssh_rc"
     fi
+    "${ssh_cmd[@]}"
 }
 
 # Retry-wrapped, QUIET ssh -C read. `flyctl ssh console -C` buffers stdout until
@@ -1724,38 +1732,20 @@ if [ "$MODE" = "refresh-deps" ]; then
     prepare_warm_source "$mid" || exit 1
     require_machine_ready "$mid" || exit 1
 
-    # Sync the repo to the ref whose manifests the trees must match. Auth via the
-    # CONTROLLER's current GitHub token (never an optional empty box-side secret).
-    # Credential is stdin-delivered — never embedded in flyctl/ssh argv.
-    # Token resolution already prefers gh auth then durable DISPATCH/GITHUB_TOKEN
-    # (see resolve_github_token → resolve_durable_github_token).
-    # Other git-sync paths (WMH refresh) use warm_source_fetch_ref.
+    # Sync the repo to the ref whose manifests the trees must match via the same
+    # controller-token + cloudbench-fetch-ref.sh path used by WMH / guest drivers.
+    # (Custom fly-ssh stdin/SFTP auth delivery hung on wedged warm SSH; this path
+    # is the proven shared helper.) Bound hung sessions so refresh-deps cannot
+    # sit on "git-syncing ..." forever (descend I-02).
     echo "🔄 git-syncing $REMOTE_REPO → $BENCH_REF ..."
-    SYNC_CMD="$(build_controller_authenticated_git_sync_cmd "$REMOTE_REPO" "$EXPECTED_REF" '::CLOUDBENCH-REF::')" || exit 1
-    SYNC_LOG="$(mktemp)"
-    # Bound hung flyctl ssh sessions (rate-limit / dead tunnel). Without this,
-    # refresh-deps can sit on "git-syncing ..." forever with no guest git
-    # process and never provision task machines (descend I-02).
     SYNC_SSH_TIMEOUT="${CLOUDBENCH_REFRESH_DEPS_SSH_TIMEOUT:-300}"
     set +e
     CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT" \
-      ssh_exec_controller_git_sync "$mid" "$SYNC_CMD" 2>&1 | grep -av '^Connecting to' | tee "$SYNC_LOG" | sed 's/^/   /'
-    sync_rc=${PIPESTATUS[0]}
+      warm_source_fetch_ref "$mid" "$EXPECTED_REF"
+    sync_rc=$?
     set -e
-    if [ "$sync_rc" -eq 124 ]; then
-        rm -f "$SYNC_LOG"
-        echo "❌ exact remote checkout failed: ssh_exec timed out after ${SYNC_SSH_TIMEOUT}s" >&2
-        exit 1
-    fi
     if [ "$sync_rc" -ne 0 ]; then
-        rm -f "$SYNC_LOG"
         echo "❌ exact remote checkout failed" >&2
-        exit 1
-    fi
-    REMOTE_REF="$(sed -n 's/^::CLOUDBENCH-REF:://p' "$SYNC_LOG" | tail -1)"
-    rm -f "$SYNC_LOG"
-    if [ "$REMOTE_REF" != "$EXPECTED_REF" ]; then
-        echo "❌ remote checkout mismatch: expected $EXPECTED_REF, got ${REMOTE_REF:-<missing>}" >&2
         exit 1
     fi
 
