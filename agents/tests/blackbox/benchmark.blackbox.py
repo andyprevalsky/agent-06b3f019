@@ -3115,6 +3115,92 @@ def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment(
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment():
+    """Antibot pinned-host escape refusals recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    cf706f38-081a-4210-81a7-0894433babcb reached grounded payment_approval ($95.94)
+    after multiple spawn_browser_agent ERRORs refusing close_tab/switch_tab/off-host
+    click while pinned on www.google.com, then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing to leave pinned page host 'www.google.com'. "
+                    "Current page URL: https://www.google.com/sorry/index?continue=..."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_wL49vzmazTALcV6B9QsYJS40",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing click that navigates off pinned host 'www.google.com' "
+                    "via 'https://www.amctheatres.com/'."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_9yvvvs5tlkaI5gnht72jcYim",
+                    "title": 'Clicked <a "AMC Theatres - movie times, mo">',
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_counts_unrecovered_pinned_host_refusal():
+    """Pinned-host refusals with no later browser recovery still fail closed."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Refusing to leave pinned page host 'www.google.com'. Current page URL: https://www.google.com/.",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_pin",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "spawn_browser_agent call_terminal_pin status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -14288,6 +14374,14 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
         test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_pinned_host_refusal",
+        test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_pinned_host_refusal",
+        test_no_tool_failures_counts_unrecovered_pinned_host_refusal,
     )
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
