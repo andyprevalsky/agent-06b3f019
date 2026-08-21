@@ -194,59 +194,77 @@ test('reconciler seals an agent whose workflow no longer exists', async () => {
   );
 });
 
-test('reconciler restores a retryable row when interrupted-tool cleanup fails', async () => {
+test('reconciler restores a retryable row and continues after one cleanup fails', async () => {
   const session = await createAnonymousSession('liveness-cleanup-failure');
-  const { agentId, workflowId } = await seedLivenessAgent(
+  const { agentId: failedAgentId, workflowId: failedWorkflowId } = await seedLivenessAgent(
     session.user.id,
     'cleanup-failure',
     'ACTIVE'
   );
-  let releasedAgentId: string | null = null;
+  const { agentId: healthyAgentId, workflowId: healthyWorkflowId } = await seedLivenessAgent(
+    session.user.id,
+    'cleanup-continues',
+    'ACTIVE'
+  );
+  const releasedAgentIds = new Set<string>();
   let cleanupAttempts = 0;
 
-  await makeEligible([agentId]);
-  let cleanupRejected = false;
-  try {
-    await reconcileWorkflowLiveness({
-      batchSize: 1000,
-      describeStatus: async (id: string) => (id === workflowId ? 'TERMINATED' : 'RUNNING'),
-      finalizeInterruptedTools: async () => {
+  await makeEligible([failedAgentId, healthyAgentId]);
+  const first = await reconcileWorkflowLiveness({
+    batchSize: 1000,
+    describeStatus: async (id: string) =>
+      id === failedWorkflowId || id === healthyWorkflowId ? 'TERMINATED' : 'RUNNING',
+    finalizeInterruptedTools: async (id: string) => {
+      if (id === failedAgentId) {
         cleanupAttempts++;
         throw new Error('tool cleanup failed');
-      },
-      releaseBrowserSessions: async (id: string) => {
-        releasedAgentId = id;
-      },
-    });
-  } catch (error) {
-    cleanupRejected = error instanceof Error && error.message === 'tool cleanup failed';
-  }
+      }
+      return { candidates: 0, interrupted: 0 };
+    },
+    releaseBrowserSessions: async (id: string) => {
+      releasedAgentIds.add(id);
+      return 0;
+    },
+  });
 
-  assert(cleanupRejected, 'expected interrupted-tool cleanup failure to remain observable');
   assert(
-    releasedAgentId === agentId,
-    `browser release must run after the row is sealed (released=${String(releasedAgentId)})`
+    releasedAgentIds.has(failedAgentId),
+    'browser release must still run after interrupted-tool cleanup rejects'
   );
   assert(
-    (await statusOf(agentId)) === 'ACTIVE',
+    releasedAgentIds.has(healthyAgentId),
+    'one cleanup failure must not abandon the next candidate in the worker cursor'
+  );
+  assert(
+    (await statusOf(failedAgentId)) === 'ACTIVE',
     'cleanup failure must restore the row so a later reconciliation can retry it'
   );
+  assert(
+    (await statusOf(healthyAgentId)) === 'FAILED',
+    'the later healthy candidate should still be sealed'
+  );
+  assert(first.inconclusive >= 1, 'the restored cleanup failure should be counted inconclusive');
+  assert(first.sealed >= 1, 'the healthy candidate should be counted sealed');
 
-  await makeEligible([agentId]);
+  await makeEligible([failedAgentId]);
   const retry = await reconcileWorkflowLiveness({
     batchSize: 1000,
-    describeStatus: async (id: string) => (id === workflowId ? 'TERMINATED' : 'RUNNING'),
+    describeStatus: async (id: string) => (id === failedWorkflowId ? 'TERMINATED' : 'RUNNING'),
     finalizeInterruptedTools: async () => {
       cleanupAttempts++;
       return { candidates: 0, interrupted: 0 };
     },
     releaseBrowserSessions: async (id: string) => {
-      releasedAgentId = id;
+      releasedAgentIds.add(id);
+      return 0;
     },
   });
   assert(cleanupAttempts === 2, `expected cleanup to retry once, got ${cleanupAttempts} attempts`);
   assert(retry.sealed >= 1, 'the successful retry should seal the restored row');
-  assert((await statusOf(agentId)) === 'FAILED', 'the row should seal after cleanup succeeds');
+  assert(
+    (await statusOf(failedAgentId)) === 'FAILED',
+    'the row should seal after cleanup succeeds'
+  );
 });
 
 test('reconciler is idempotent and never re-transitions a settled agent', async () => {

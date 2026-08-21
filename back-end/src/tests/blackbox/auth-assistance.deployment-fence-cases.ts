@@ -3,11 +3,13 @@ import {
   AUTH_ASSISTANCE_COMPLETED_RESPONSE,
   completeAuthAssistanceForUser,
 } from '../../providers/authAssistanceCompletion';
-import { prisma } from '../../providers/database';
+import { prisma, runTransactionWithRetry } from '../../providers/database';
 import {
+  closeInterruptedAttentionRequests,
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   finalizeInterruptedWorkflowTools,
 } from '../../providers/staleWorkflowTools';
+import { lockAgentWorkflowGeneration } from '../../providers/workflowGeneration';
 
 const BASE_URL = process.env.TEST_BASE_URL || 'http://localhost:3001';
 const API_KEY = process.env.BACKEND_API_KEY || '';
@@ -203,6 +205,24 @@ async function runDeployFenceCase(userId: string): Promise<void> {
     },
   });
 
+  // Corrupt/partial waiter entries are not live owners. Treating a missing id as
+  // foreign (`null !== agentId`) leaves an otherwise stale gate pending forever.
+  const malformedGateRequestId = randomUUID();
+  await prisma.agentAttentionRequest.create({
+    data: {
+      id: malformedGateRequestId,
+      userId,
+      agentId: agent.id,
+      workflowId: agent.id,
+      question: 'Connect Calendar',
+      gateKey: `source_connect:calendar:${randomUUID()}`,
+      metadata: {
+        attentionKind: 'gate',
+        gateWaiters: [{ agentId: randomUUID(), workflowId: '' }, { workflowId: randomUUID() }],
+      },
+    },
+  });
+
   // The deploy cutover claims a new generation, then seals the old one.
   await prisma.agent.update({
     where: { id: agent.id },
@@ -252,6 +272,14 @@ async function runDeployFenceCase(userId: string): Promise<void> {
   assert(
     soleGate !== null && soleGate.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
     `Deploy fence must close a gate it solely occupies, or the replacement can never raise a fresh one (userResponse=${String(soleGate?.userResponse)})`
+  );
+
+  const malformedGate = await prisma.agentAttentionRequest.findUnique({
+    where: { id: malformedGateRequestId },
+  });
+  assert(
+    malformedGate?.userResponse === DEPLOY_INTERRUPTED_TOOL_MESSAGE,
+    `Malformed waiter entries must not keep a stale gate pending (userResponse=${String(malformedGate?.userResponse)})`
   );
 }
 
@@ -392,6 +420,7 @@ async function testCompetingCompletionIsNotMisclassifiedAsDeployInterruption(): 
       },
       resumeAgent: async (id: string) => {
         resumedAgentId = id;
+        throw new Error('resume transport unavailable after commit');
       },
     });
 
@@ -403,6 +432,138 @@ async function testCompetingCompletionIsNotMisclassifiedAsDeployInterruption(): 
     );
     assert(resumedAgentId === agent.id, 'the agent should still be resumed after completion');
   } finally {
+    await cleanupFixture(userId);
+  }
+}
+
+async function testGateWaiterAppendWinsMetadataCas(): Promise<void> {
+  const agentId = randomUUID();
+  const originalMetadata = { attentionKind: 'gate' };
+  let currentMetadata: unknown = originalMetadata;
+  const client = {
+    agentAttentionRequest: {
+      findMany: async () => [
+        {
+          id: 'racing-gate',
+          gateKey: 'source_connect:racing',
+          metadata: originalMetadata,
+        },
+      ],
+      updateMany: async (args: { where: { metadata?: { equals?: unknown } } }) => {
+        // Model appendGateWaiter committing after cleanup's read but before its
+        // update reaches the row lock.
+        currentMetadata = {
+          ...originalMetadata,
+          gateWaiters: [{ agentId: randomUUID(), workflowId: randomUUID() }],
+        };
+        return {
+          count:
+            JSON.stringify(args.where.metadata?.equals) === JSON.stringify(currentMetadata) ? 1 : 0,
+        };
+      },
+    },
+  } as unknown as Parameters<typeof closeInterruptedAttentionRequests>[0];
+
+  const closed = await closeInterruptedAttentionRequests(client, agentId, agentId);
+  assert(closed === 0, 'cleanup metadata CAS must not erase a concurrently appended waiter');
+}
+
+async function testCompletionWaitsForDeploymentCleanupLock(): Promise<void> {
+  const userId = `auth-assist-cleanup-lock-${RUN_ID}-${randomUUID().slice(0, 8)}`;
+  await prisma.user.create({ data: { userId } });
+  let releaseCleanup = () => undefined;
+  const pending: Promise<unknown>[] = [];
+  try {
+    const agent = await prisma.agent.create({
+      data: { userId, goal: 'Serialize login completion with deploy cleanup', status: 'PAUSED' },
+    });
+    await prisma.agent.update({
+      where: { id: agent.id },
+      data: { temporalWorkflowId: agent.id },
+    });
+    const context = await prisma.browserContext.create({
+      data: { userId, contextId: `kernel-profile-${randomUUID()}` },
+    });
+    const browserSession = await prisma.browserSession.create({
+      data: {
+        contextId: context.id,
+        agentId: agent.id,
+        sessionId: `kernel-session-${randomUUID()}`,
+        debugUrl: 'https://debug.kernel.test/session/cleanup-lock',
+        status: 'ACTIVE',
+        provider: 'kernel',
+      },
+    });
+    const createRes = await request('/api/auth-assistance', userId, {
+      agentId: agent.id,
+      authRealm: 'https://example.com/login',
+      mode: 'live_view',
+      browserSessionId: browserSession.id,
+      steelSessionId: browserSession.sessionId,
+    });
+    assertStatus(createRes, 201);
+    const requestId = String(asRecord(asRecord(createRes.data).request).id);
+
+    let announceCleanupLocked = () => undefined;
+    const cleanupLocked = new Promise<void>((resolve) => {
+      announceCleanupLocked = resolve;
+    });
+    const cleanupMayContinue = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const cleanup = runTransactionWithRetry(async (tx) => {
+      await lockAgentWorkflowGeneration(tx, agent.id);
+      announceCleanupLocked();
+      await cleanupMayContinue;
+      return closeInterruptedAttentionRequests(tx, agent.id, agent.id);
+    });
+    pending.push(cleanup);
+    await cleanupLocked;
+
+    let announceCompletionBoundary = () => undefined;
+    const completionAtBoundary = new Promise<void>((resolve) => {
+      announceCompletionBoundary = resolve;
+    });
+    let signalCount = 0;
+    let resumeCount = 0;
+    const completion = completeAuthAssistanceForUser(requestId, userId, new Date(), {
+      beforeCompletionClaim: async () => {
+        announceCompletionBoundary();
+      },
+      signalCompleted: async () => {
+        signalCount++;
+      },
+      resumeAgent: async () => {
+        resumeCount++;
+      },
+    });
+    pending.push(completion);
+    await completionAtBoundary;
+
+    const completedWhileCleanupOwnedLock = await Promise.race([
+      completion.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 150)),
+    ]);
+    assert(
+      !completedWhileCleanupOwnedLock,
+      'auth completion claim must wait while deploy cleanup owns the generation lock'
+    );
+
+    releaseCleanup();
+    const [closed, result] = await Promise.all([cleanup, completion]);
+    assert(
+      closed === 1,
+      `deploy cleanup should close the pending attention row (closed=${closed})`
+    );
+    assert(
+      result.status === 'completed' && result.interrupted,
+      `completion after cleanup should preserve the interrupted result (status=${result.status})`
+    );
+    assert(signalCount === 0, 'completion must not signal the deploy-fenced workflow generation');
+    assert(resumeCount === 1, 'completion should still resume the replacement agent generation');
+  } finally {
+    releaseCleanup();
+    await Promise.allSettled(pending);
     await cleanupFixture(userId);
   }
 }
@@ -501,5 +662,10 @@ export const authAssistanceDeploymentFenceTests: TestCase[] = [
   [
     'concurrent completions run external side effects exactly once',
     testConcurrentCompletionsRunExternalSideEffectsOnce,
+  ],
+  ['gate cleanup preserves a concurrently appended waiter', testGateWaiterAppendWinsMetadataCas],
+  [
+    'auth completion waits for deployment cleanup generation lock',
+    testCompletionWaitsForDeploymentCleanupLock,
   ],
 ];

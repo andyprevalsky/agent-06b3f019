@@ -299,11 +299,17 @@ setup_db_teardown() {
     # are excluded by setup_db_pid_is_running; reap direct children below.
     force_started=$SECONDS
     while [ $((SECONDS - force_started)) -lt 2 ]; do
+        # A TERM-resistant wrapper can fork after the first escalation scan. Keep
+        # discovering and force-stopping late descendants until the whole tree is
+        # gone, otherwise the lock can be released while that new child still
+        # writes into the database.
+        current="$(setup_db_child_pids "$group")"
+        targets="$targets $current"
         any_running=false
         for pid in $targets; do
             if setup_db_pid_is_running "$pid"; then
                 any_running=true
-                break
+                kill -KILL "$pid" 2>/dev/null || true
             fi
         done
         $any_running || break

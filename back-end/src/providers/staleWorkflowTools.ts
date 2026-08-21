@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 import { prisma, runTransactionWithRetry } from './database';
 import { createMessage } from './messages';
 import { isTerminalToolStatus } from './toolLifecycleMessages';
@@ -77,16 +77,28 @@ export async function closeInterruptedAttentionRequests(
     where: scope,
     select: { id: true, gateKey: true, metadata: true },
   });
-  const closable = open
-    .filter((row) => row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId))
-    .map((row) => row.id);
+  const closable = open.filter(
+    (row) => row.gateKey === null || !hasForeignGateWaiter(row.metadata, agentId)
+  );
   if (closable.length === 0) return 0;
 
-  const { count } = await client.agentAttentionRequest.updateMany({
-    where: { id: { in: closable }, userResponse: null },
-    data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
-  });
-  return count;
+  let closed = 0;
+  for (const row of closable) {
+    // `appendGateWaiter` holds this row FOR UPDATE. Compare the metadata snapshot
+    // as well as the pending predicate so either cleanup wins first and the joiner
+    // observes the terminal response, or the joiner commits first and this CAS
+    // refuses to erase its newly appended waiter.
+    const { count } = await client.agentAttentionRequest.updateMany({
+      where: {
+        id: row.id,
+        userResponse: null,
+        metadata: { equals: row.metadata === null ? Prisma.DbNull : row.metadata },
+      },
+      data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
+    });
+    closed += count;
+  }
+  return closed;
 }
 
 /** True when a deduped gate is also holding a waiter belonging to another agent. */
@@ -96,7 +108,10 @@ function hasForeignGateWaiter(metadata: Prisma.JsonValue | null, agentId: string
   if (!Array.isArray(waiters)) return false;
   return waiters.some((waiter) => {
     const entry = metadataRecord(waiter as Prisma.JsonValue);
-    return entry !== null && metadataString(entry, 'agentId') !== agentId;
+    if (entry === null) return false;
+    const waiterAgentId = metadataString(entry, 'agentId');
+    const waiterWorkflowId = metadataString(entry, 'workflowId');
+    return waiterAgentId !== null && waiterWorkflowId !== null && waiterAgentId !== agentId;
   });
 }
 

@@ -6,11 +6,13 @@ import {
   assert,
   createAnonymousSession,
   createTestAgent,
+  trackedAgentIds,
   trackedUserIds,
   test,
   prisma,
   randomUUID,
 } from './agents-blackbox-harness';
+import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
 
 /**
  * A browser session is a rented remote browser that costs money for as long as it is
@@ -44,6 +46,44 @@ async function seedBrowserSession(userId: string, agentId: string): Promise<stri
   return session.id;
 }
 
+test('browser release attempts every session and reports provider failures', async () => {
+  const attempted: string[] = [];
+  let rejected = false;
+  try {
+    await releaseAgentBrowserSessions('provider-failure-agent', {
+      findActiveSessions: async () => [
+        { sessionId: 'session-that-fails' },
+        { sessionId: 'session-that-closes' },
+      ],
+      closeSession: async (sessionId: string) => {
+        attempted.push(sessionId);
+        if (sessionId === 'session-that-fails') throw new Error('provider close failed');
+      },
+    });
+  } catch (error) {
+    rejected = error instanceof AggregateError && error.errors.length === 1;
+  }
+  assert(rejected, 'provider close failures must remain observable to retrying callers');
+  assert(
+    attempted.join(',') === 'session-that-fails,session-that-closes',
+    `every browser session must be attempted before rejection (attempted=${attempted.join(',')})`
+  );
+});
+
+test('browser release propagates active-session query failures', async () => {
+  let rejected = false;
+  try {
+    await releaseAgentBrowserSessions('query-failure-agent', {
+      findActiveSessions: async () => {
+        throw new Error('browser session query failed');
+      },
+    });
+  } catch (error) {
+    rejected = error instanceof Error && error.message === 'browser session query failed';
+  }
+  assert(rejected, 'query failure must not be converted into a false zero-session success');
+});
+
 for (const status of ['COMPLETED', 'COST_LIMIT_REACHED'] as const) {
   test(`PATCH /:id/status ${status} releases the agent's browser sessions`, async () => {
     const session = await createAnonymousSession(`browser-release-${status.toLowerCase()}`);
@@ -76,3 +116,54 @@ for (const status of ['COMPLETED', 'COST_LIMIT_REACHED'] as const) {
     );
   });
 }
+
+test("a child agent's first terminal transition releases its browser sessions", async () => {
+  const session = await createAnonymousSession('child-browser-release');
+  trackedUserIds.add(session.user.id);
+  const rootAgentId = randomUUID();
+  const childAgentId = randomUUID();
+  trackedAgentIds.add(rootAgentId);
+  trackedAgentIds.add(childAgentId);
+  await prisma.agent.create({
+    data: {
+      id: rootAgentId,
+      userId: session.user.id,
+      goal: 'Parent for child browser release',
+      status: 'ACTIVE',
+      busId: rootAgentId,
+    },
+  });
+  await prisma.agent.create({
+    data: {
+      id: childAgentId,
+      userId: session.user.id,
+      goal: 'Child with a rented browser',
+      status: 'ACTIVE',
+      parentAgentId: rootAgentId,
+      parentWorkflowId: rootAgentId,
+      busId: rootAgentId,
+      depth: 1,
+    },
+  });
+  const browserSessionId = await seedBrowserSession(session.user.id, childAgentId);
+
+  const res = await request(`${BASE_URL}/api/agents/${childAgentId}/status`, {
+    method: 'PATCH',
+    headers: apiKeyHeaders(session.user.id),
+    body: JSON.stringify({
+      status: 'COMPLETED',
+      statusMessage: 'child terminal transition',
+      progress: 1,
+      tokenCount: 0,
+      contextSize: 0,
+      messageCount: 0,
+    }),
+  });
+  assertStatus(res.status, 200, res.data);
+
+  const released = await prisma.browserSession.findUnique({ where: { id: browserSessionId } });
+  assert(
+    released?.status === 'CLOSED' && released.closedAt !== null,
+    `Terminal child left its browser rental open (status=${String(released?.status)})`
+  );
+});
