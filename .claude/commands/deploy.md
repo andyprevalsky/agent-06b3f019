@@ -296,7 +296,7 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
 2. **Sequential mutators** (they write files — cannot parallelize): Step 1 (`prettier --write`) → Step 2a (`eslint --fix`) → Step 1m (`mac-app format + lint --fix`, skip if `CHANGED_MAC_APP` is empty). Commit any resulting changes once.
 3. **Parallel Group 3** (all read-only after the mutators; start every applicable
    lane in one assistant message with separate Bash tool calls, using the worker
-   budgets computed above). Every repository
+   budgets computed above, except for the Step 4cb ordering rule below). Every repository
    coverage command executes its blackbox suite under instrumentation, so that
    one command satisfies both the Coverage and Runtime blackbox rows. Never run
    the same blackbox suite again without coverage. Before the combined lanes,
@@ -318,7 +318,10 @@ Only this exact flag (or `--mandatory-human-approval-retrieved=true`) satisfies 
    - Step 4: structural tests (skip if `CHANGED_TS` is empty)
    - Step 4s: deploy environment + command structural tests (no skip)
    - Step 4m-lint: mac-app format:check + lint + type-check (skip if `CHANGED_MAC_APP` is empty)
-   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty)
+   - Step 4cb: cloud benchmark controller regressions (skip if `CHANGED_CLOUDBENCH` is empty). If
+     `CHANGED_AGENTS` is also non-empty, defer this lane until Step 4g exits; the agents
+     `benchmark` domain and these controller suites share local controller locks and fixture
+     state. This deferred lane remains inside the `runtime-blackbox` boundary.
 
    **Coverage + Runtime blackbox (one execution, reported in both rows):**
    - Step 4a: back-end blackbox + unit tests under coverage (skip if
@@ -437,6 +440,7 @@ their assertions or test counts:
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/canonical-seed-whatsapp-content.test.sh`,
 `bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
@@ -452,8 +456,9 @@ their assertions or test counts:
 `bash scripts/tests/run-process-cleanup.test.sh`,
 `bash scripts/tests/run-isolated-cloud-kill.test.sh`,
 `bash scripts/tests/run-seed-exit-code.test.sh`,
-`bash scripts/tests/run-public-tunnel-routing.test.sh`, and
-`bash scripts/tests/setup-db-concurrency.test.sh`.
+`bash scripts/tests/run-public-tunnel-routing.test.sh`,
+`bash scripts/tests/setup-db-concurrency.test.sh`, and
+`bash scripts/tests/run-port-collision.test.sh`.
 
 This list is deliberately explicit, not a registry pointer: several of these
 suites assert that their own command still appears here, which is how a gate
@@ -466,12 +471,16 @@ bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
 bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
   bash scripts/tests/seed-cache-decision.test.sh
+bash scripts/run-deploy-stage canonical-seed-whatsapp-content --reuse-passed -- \
+  bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 ```
 
 These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
-runner.
+runner. `canonical-seed-whatsapp-content.test.sh` pins that the whatsapp-v2
+canonical base restores reviewed WhatsApp rows (and that publish refuses a
+cold-sync substitute).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 
@@ -552,13 +561,24 @@ Cloud benchmark scripts own Fly lifecycle, local proxy ports, synchronized barri
 bash scripts/tests/cloudbench-env.test.sh
 bash scripts/tests/cloudbench-acceptance-autoscale.test.sh
 bash scripts/tests/cloudbench-multi-workstream.test.sh
+bash scripts/tests/cloudbench-github-token.test.sh
 bash scripts/tests/seed-dump-toolchain.test.sh
 agents/venv/bin/python -m pytest -q agents/benchmarks/cloudbench_dependency_sync_test.py \
   -k 'prisma_client or local_sync_and_stack_wire_prisma_freshness or cloud_patch_includes_tracked_and_untracked_changes or cloud_patch_detection_and_payload_include_staged_only_changes or worktree_patch_ignores_append_only_history_ledgers or patch_delivery_clears_stale_base64_configuration or shared_patch_digest_is_pinned_and_verified or declared_patch_payload_cannot_be_missing_or_empty or empty_local_patch_cleanup_is_nounset_safe or central_hub_runs_in_own_session_after_launcher_exit or boot_launch_delivers_the_exact_worktree_patch_to_every_guest or boot_launch_runs_the_current_driver_before_applying_the_patch or autoscaled_worker_failure_publishes_durable_failure_marker or data_plane_proxies_retry_machine_dns_and_restart_if_lost or status_polled_over_data_plane_proxy_not_ssh or cloud_runner_avoids_live_run_port_collisions or fleet_barrier_reads_the_authoritative_rotated_status_port or data_plane_barrier_release_at_full_fleet_width or storage_readiness_inventory_reads_are_bounded or fleet_cleanup_releases_emergency_disk_reserve_before_provider_teardown or isolated_backend or local_predeploy_skips_wmh or cloud_agentcard_payment_tasks_provide_onboarding_callback_env or fleet_shared_patch_remains_authoritative_until_transport_selection or fleet_patch_packages_clean_unpushed_head_from_fetchable_base or autoscaler_scale_down_cancels_pending_worker or fleet_registry_release_id_is_idempotent_with_other_records or refresh_deps_tracks_exact_created_snapshot or exact_volume_ownership_survives_delayed_visibility_and_failed_delete'
-cd agents && python scripts/run_blackbox_tests.py benchmark
+if [ -z "$CHANGED_AGENTS" ]; then
+  cd agents && python scripts/run_blackbox_tests.py benchmark
+fi
 ```
 
-All six commands must pass. This operational verification wiring is pre-authorized by Step 0p and must never pause for human approval.
+The six controller commands must pass. The agents `benchmark` blackbox domain
+must also pass exactly once: Step 4g's agents coverage already runs it whenever
+`$CHANGED_AGENTS` is non-empty, so Step 4cb runs it directly only when agents
+coverage was skipped. Never launch the same controller-owning domain in both
+parallel lanes; they share local lock and fixture state. When `$CHANGED_AGENTS`
+is non-empty, wait for Step 4g to finish before starting the six controller
+commands above. This operational
+verification wiring is pre-authorized by Step 0p and must never pause for human
+approval.
 
 ## Step 4c: Credential health check (runs unless explicitly overridden)
 
@@ -682,6 +702,17 @@ BENCHMARK_BUNDLED_FRONTEND=true DISABLE_GMAIL_SYNC=1 \
   BENCHMARK_SKIP_WMH_BUILD=1 WORKER_PROCESSES=8 TRACE_ARCHIVE_ENABLED=0 \
   bash scripts/run.sh --benchmark > .context/deploy-smoke.log 2>&1
 ```
+
+This stack is deliberately **capture-only** (`run.sh` defaults
+`BLACKBOX_TEST_REPLAY_OUTBOUND` to `0`), and
+`scripts/tests/semantic-deploy-gate.test.sh` fails the build if `/deploy` adds
+the replay opt-in back. Do not point a `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`
+blackbox run at it: `back-end/scripts/run-blackbox-tests.sh` rejects a
+capture-only existing backend by design (pinned by
+`scripts/tests/blackbox-existing-replay-gate.test.sh`), so such a run fails
+before it starts with `❌ Existing-backend blackbox requires outbound capture and
+replay`. Blackbox lanes that need replay own their own backend instead — see
+Step 6c.
 
 Poll the background Bash call at least every 30 seconds while Steps 5-6b run. This keeps the managed process session active without streaming the high-volume service logs; use `.context/deploy-smoke.log` only for targeted diagnosis. `BENCHMARK_BUNDLED_FRONTEND=true` builds and serves the frontend so the browser-agent lifecycle gates have a stable target.
 
@@ -1092,12 +1123,21 @@ With the full stack from Step 5 still running (backend on `$CONDUCTOR_PORT`, DB 
 against the existing backend:
 
 ```bash
-cd back-end && BLACKBOX_SMOKE=1 BLACKBOX_TEST_USE_EXISTING_BACKEND=1 \
-  TEST_BASE_URL="http://localhost:$CONDUCTOR_PORT" \
+cd back-end && BLACKBOX_SMOKE=1 \
   BLACKBOX_TEST_DATABASE_URL="postgresql://postgres:postgres@localhost:$LOCAL_DB_PORT/victoria" \
   bash ../scripts/run-deploy-stage claude-code-e2b-smoke -- \
   bash scripts/run-blackbox-tests.sh claude-code
 ```
+
+This lane launches **its own** backend on purpose. It must not be pointed at the
+Step 5 semantic stack with `BLACKBOX_TEST_USE_EXISTING_BACKEND=1`: that stack is
+capture-only by contract, and `run-blackbox-tests.sh` rejects a capture-only
+existing backend before any database work
+(`scripts/tests/blackbox-existing-replay-gate.test.sh` pins that rejection, and
+`scripts/tests/semantic-deploy-gate.test.sh` forbids re-adding the replay opt-in
+to the shared stack). The two contracts are only satisfiable together by letting
+this lane own its backend, which also keeps it runnable when the shared stack is
+busy or down. It still reuses the workspace Postgres, so it stays cheap.
 
 ### Pass criteria
 

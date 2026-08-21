@@ -172,8 +172,9 @@ AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 }
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -199,15 +200,13 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
-# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
-# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
-# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
-# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
-# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
-# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
-# back-end/scripts/setup-benchmark-payment.ts. Must equal
-# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
-AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox AgentCard lifecycle benches run as the default admin account so the
+# credit gate uses unlimited admin credits. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+# (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+# resolveAndIssuePurchaseCard onto chargeAndIssueCard so stripeHold remains
+# reachable. Must equal BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in
+# back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
@@ -1404,10 +1403,12 @@ async def _update_world_model_before_simulation(args) -> None:
 
 
 def _extract_agent_payment_output_blob(data: dict) -> str:
-    """Collect the browser sub-agent's populated structured output(s) — key-agnostic — as a JSON blob
-    for the reusable semantic output judge. The browser agent's output_schema is LLM-synthesized per
-    run, so the confirmation id may land under order_id, order_confirmation_id, payment_confirmation_id,
-    receipt_id, etc.; the judge maps it by meaning, so we keep every populated structured response."""
+    """Collect terminal browser output — key-agnostic — as a JSON blob for semantic judging.
+
+    Prefer populated structured responses. When a completed browser task used its user-message
+    terminal path, the manager has no structured metadata even though the same grounded result is
+    preserved in the terminal tool message; retain that text as the fallback evidence channel.
+    """
     blobs: List[dict] = []
     for message in data.get("messages", []) or []:
         if not isinstance(message, dict) or message.get("role") != "TOOL":
@@ -1420,6 +1421,14 @@ def _extract_agent_payment_output_blob(data: dict) -> str:
         structured = metadata.get("structured_response") or metadata.get("structuredResponse")
         if isinstance(structured, dict):
             blobs.append(structured)
+            continue
+        message_text = message.get("message")
+        if (
+            metadata.get("action_type") == "task_complete"
+            and isinstance(message_text, str)
+            and message_text.strip()
+        ):
+            blobs.append({"browser_result_text": message_text})
     return json.dumps(blobs, default=str) if blobs else ""
 
 
@@ -1552,8 +1561,9 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
         if base_url is not None and not _is_local_base_url(base_url):
             return None
-        # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
-        # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
+        # Sandbox lifecycle benches run as the default admin account. The backend
+        # keeps admin credits (unlimited) and BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+        # forces the charged Stripe-hold mint path.
         return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
@@ -1570,15 +1580,17 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
 
     Single source of truth for the run-user override so the mapping can be asserted directly
     instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
-    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
-    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    sandbox payment-lifecycle tasks assert a Stripe hold. They run as the admin
+    account with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH so credits stay
+    unlimited while minting still authorizes a hold. Production tasks stay on
+    the dedicated non-admin live identity.
     """
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
-        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_LIFECYCLE_USER_ID
     if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     return None
@@ -4989,6 +5001,29 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _prod_source_database_url_for_fixture(target_database_url: str) -> Optional[str]:
+    """Resolve a remote/prod DB URL for one-shot fixture freezes.
+
+    Isolated local runs set process ``DATABASE_URL`` to the per-run Victoria
+    database. Reading that process value as the freeze *source* makes
+    ``source == target``, so ``BENCHMARK_*_SOURCE_DATABASE_URL`` is never set
+    and a missing frozen fixture file fails closed with "no source URL".
+    Always read the backend ``.env`` file (not process env), preferring
+    direct URLs when present.
+    """
+    source_database_url = (
+        load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not source_database_url:
+        return None
+    source_database_url = _psql_compatible_database_url(source_database_url)
+    if source_database_url == target_database_url:
+        return None
+    return source_database_url
+
+
 def _plaid_transactions_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -4996,11 +5031,9 @@ def _plaid_transactions_fixture_env() -> dict:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["BENCHMARK_USER_ID"] = USER_ID
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5060,11 +5093,9 @@ def _user_data_fixture_env() -> dict:
     env["BENCHMARK_USER_ID"] = USER_ID
     # Source (prod) URL lets the fixture freeze real documents once if the frozen
     # file is missing. When the frozen file already exists, apply is fully offline.
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5412,6 +5443,41 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
+def _sync_email_credentials() -> bool:
+    """Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential from prod.
+
+    The canonical base-image dump can freeze abandoned OAuth rows (null email /
+    null accessToken). Connected Integrations then omits every send-from address
+    and ``message_person`` fails closed with ``Missing from_email`` before any
+    email_send approval can fire. Same pattern as ``_sync_compute_tokens``.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Email credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts", "--email-credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Email credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Email credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Email credential sync failed: {_seed_sync_error_detail(result)}")
+        return False
+    print("    ✉️  Refreshed email credentials from prod")
+    return True
+
+
 def _sync_passkeys() -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
@@ -5689,6 +5755,8 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_email_credentials():
+        raise RuntimeError("Live fixture could not refresh email credentials")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
@@ -5751,29 +5819,25 @@ async def _refresh_local_compute_tokens_for_run(
     # Blanket pre-flight: the agent runtime uses claude_code, so a quota-blocked
     # Codex (gpt_code) must not fail the whole run when claude_code is healthy.
     # Codex-dependent tasks keep their own strict credential gates downstream.
-    # Claude-Code-required tasks must not inherit the Anthropic API-key
-    # tolerance — spawn_claude_code_agent cannot use that fallback.
-    tolerate_missing_claude = False
+    #
+    # Claude Code sessions DO use the shared ANTHROPIC_API_KEY when no OAuth
+    # envelope is available (see resolveClaudeCodeAuthEnvs). Tolerate a missing
+    # claude_code sync only when that funded-key path is confirmed healthy —
+    # otherwise require_claude_code tasks would start, discover an unfunded key
+    # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
+    tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
-    # Probed at most ONCE per run and reused for the cost warning below. Asking
-    # again is a second live HTTP round-trip and breaks the awaited-once contract
-    # its tests pin.
-    has_anthropic_key_fallback = False
-    if require_claude_code:
+    if require_claude_code and not has_anthropic_key_fallback:
         required_token_types = ("claude",)
-    else:
-        has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
-        tolerate_missing_claude = has_anthropic_key_fallback
+        tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
         tolerate_claude_code_unavailable=tolerate_missing_claude,
         required_token_types=required_token_types,
     ):
         raise RuntimeError("Benchmark run could not refresh local compute tokens")
-    # Only meaningful on the tolerant path: a `require_claude_code` run hard-gates
-    # on a real claude token above, so it always has a claudeAuth path and this
-    # warning would be false.
-    if not require_claude_code and not has_anthropic_key_fallback:
+    if not has_anthropic_key_fallback:
         print(
             "    ⚠️  No claudeAuth compute path (expired/rate-limited claude_code and no funded "
             "Anthropic key): this run bills the paid waterfall. Cost figures are NOT comparable "
@@ -7035,6 +7099,72 @@ def _webdecoy_exact_score_from_recordings(data: dict) -> Optional[float]:
     return scores[-1]
 
 
+def _webdecoy_parse_score_value(raw_score: object) -> Optional[float]:
+    """Parse a structured FCaptcha risk score (numeric or numeric string)."""
+    if isinstance(raw_score, bool):
+        return None
+    if isinstance(raw_score, (int, float)):
+        return float(raw_score)
+    if isinstance(raw_score, str):
+        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*", raw_score)
+        if match is not None:
+            return float(match.group(1))
+    return None
+
+
+def _webdecoy_structured_score(data: dict) -> Optional[float]:
+    """Read the terminal browser task's grounded FCaptcha score."""
+    scores: List[float] = []
+    for message in data.get("messages", []) or []:
+        if not isinstance(message, dict) or message.get("role") != "TOOL":
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if (
+            metadata.get("toolName") != "spawn_browser_agent"
+            or metadata.get("toolStatus") != "FINISHED"
+            or metadata.get("action_type") != "task_complete"
+        ):
+            continue
+        structured = metadata.get("structured_response") or metadata.get("structuredResponse")
+        if not isinstance(structured, dict):
+            continue
+        # Schema field is fcaptcha_risk_score; risk_score kept for older fixtures.
+        raw_score = structured.get("fcaptcha_risk_score")
+        if raw_score is None:
+            raw_score = structured.get("risk_score")
+        parsed = _webdecoy_parse_score_value(raw_score)
+        if parsed is not None:
+            scores.append(parsed)
+    if not scores:
+        return None
+    return scores[-1]
+
+
+def _webdecoy_visible_risk_scores(text: str) -> list[float]:
+    """Extract visible FCaptcha risk scores from agent transcript text.
+
+    Rejects numbered-list false positives like "(3) Risk score: ..." where the
+    list ordinal would otherwise become scores[-1] and fail the ratchet gate.
+    """
+    score_patterns = (
+        # "Risk Score (lower = human): 0.00" / "risk score:** 0.09"
+        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
+        # "0.09 risk score" — require a decimal so list ordinals ("3) Risk score")
+        # cannot match.
+        r"([0-9]+\.[0-9]+)\s*[^a-z0-9]{0,12}risk\s*score",
+    )
+    scores: list[float] = []
+    for pattern in score_patterns:
+        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+            try:
+                scores.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return scores
+
+
 def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str]]:
     text = _agent_data_search_text(data)
     if "webdecoy.com/product/fcaptcha-demo" not in text and "fcaptcha" not in text:
@@ -7044,24 +7174,22 @@ def _evaluate_webdecoy_biometrics_result(data: dict) -> Tuple[bool, Optional[str
     if not any(marker in text for marker in ("benchmark-human@example.com", "invisible mode", "submit")):
         return False, "No grounded evidence of invisible-mode form interaction"
 
-    score_patterns = (
-        r"risk\s*score[^0-9]{0,24}([0-9]+(?:\.[0-9]+)?)",
-        r"([0-9]+(?:\.[0-9]+)?)\s*[^a-z0-9]{0,12}risk\s*score",
-    )
-    scores: list[float] = []
-    for pattern in score_patterns:
-        for match in re.finditer(pattern, text, flags=re.IGNORECASE):
-            try:
-                scores.append(float(match.group(1)))
-            except ValueError:
-                continue
+    scores = _webdecoy_visible_risk_scores(text)
 
     exact_score = _webdecoy_exact_score_from_recordings(data)
-    if exact_score is None and not scores:
+    structured_score = _webdecoy_structured_score(data)
+    if exact_score is None and structured_score is None and not scores:
         return False, "No FCaptcha risk score was reported"
 
-    final_score = exact_score if exact_score is not None else scores[-1]
-    score_source = "captured API" if exact_score is not None else "visible"
+    if exact_score is not None:
+        final_score = exact_score
+        score_source = "captured API"
+    elif structured_score is not None:
+        final_score = structured_score
+        score_source = "structured output"
+    else:
+        final_score = scores[-1]
+        score_source = "visible"
     # RATCHET gate (lower = more human). Literal 0.00 is unreachable while Steel's
     # managed proxy injects x-forwarded-for/x-real-ip/cf-connecting-ip headers
     # (the `bot` 0.30 signal) — that needs a clean residential BYOP proxy, which
@@ -7803,7 +7931,6 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
-        message_text = str(message.get("message") or "") if isinstance(message, dict) else ""
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -7824,7 +7951,7 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_session_id")
                 or candidate.get("browser_url")
             )
-            if _is_intermediate_browser_protocol_noise(candidate, message=message_text):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8004,10 +8131,63 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
+    """Join transcript + metadata error surfaces for intermediate-failure classifiers.
+
+    Agent GET payloads use `text` (see `extract_message_transcript`); archived
+    run JSON often remaps that to `message`. Read both so live eval and offline
+    replay classify the same ERROR rows.
+    """
+    parts: list[str] = []
+    if isinstance(message, dict):
+        parts.append(
+            str(
+                message.get("text")
+                or message.get("message")
+                or message.get("content")
+                or ""
+            )
+        )
+    for key in ("error", "title", "detail", "details", "message"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value:
+            parts.append(value)
+    return "\n".join(parts)
+
+
+def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """Stale DOM indexes / invalid CDP backendNodeIds ERROR then the browser agent retries.
+
+    SPA remounts (Amazon checkout re-auth, etc.) invalidate selector-map indexes. Humanize
+    then refuses click/TypeTextEvent with `Cannot humanize … no coordinates available`
+    (CDP often reports `No node found for given backend id` underneath). The browser
+    agent is expected to re-observe and retry; counting those rows in `no_tool_failures`
+    / `no_browser_agent_failures` fails closed on expected retry noise after a later
+    grounded write-lock / payment boundary.
+    """
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    is_browser = tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+    if not is_browser:
+        return False
+    blob = _message_failure_text(message, candidate).lower()
+    if "cannot humanize" in blob and "no coordinates available" in blob:
+        return True
+    return (
+        "no node found for given backend id" in blob
+        or "no node with given id found" in blob
+    )
+
+
 def _is_intermediate_navigation_pin_guard_failure(
     candidate: dict,
-    *,
-    message: str = "",
+    message: Optional[dict] = None,
 ) -> bool:
     """Host-pin refusals ERROR then continue; those are coaching, not terminal failures.
 
@@ -8018,28 +8198,18 @@ def _is_intermediate_navigation_pin_guard_failure(
     action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
     if action_type == "navigation_pin_guard":
         return True
-    blob = " ".join(
-        str(part or "")
-        for part in (
-            candidate.get("title"),
-            message,
-            candidate.get("error"),
-            candidate.get("message"),
-        )
-    ).lower()
+    blob = _message_failure_text(message, candidate).lower()
     if "refusing" not in blob:
         return False
     return "pinned host" in blob or "pinned page host" in blob
 
 
-def _is_intermediate_browser_protocol_noise(
-    candidate: dict,
-    *,
-    message: str = "",
-) -> bool:
-    """Return True for browser ERROR rows that are expected mid-trajectory protocol."""
-    return _is_intermediate_challenge_recovery_failure(candidate) or (
-        _is_intermediate_navigation_pin_guard_failure(candidate, message=message)
+def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
+    """True when a browser-agent ERROR is expected recovery / retry noise."""
+    return (
+        _is_intermediate_challenge_recovery_failure(candidate)
+        or _is_intermediate_stale_dom_node_failure(candidate, message)
+        or _is_intermediate_navigation_pin_guard_failure(candidate, message)
     )
 
 
@@ -8050,7 +8220,6 @@ def _tool_runtime_failures(data: dict) -> list[str]:
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
-        message_text = str(message.get("message") or "") if isinstance(message, dict) else ""
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8058,7 +8227,7 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             tool_name = candidate.get("toolName") or candidate.get("tool_name")
             if not tool_name:
                 continue
-            if _is_intermediate_browser_protocol_noise(candidate, message=message_text):
+            if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -9831,9 +10000,10 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
     """Mirror the backend's funded-fallback selection without probing the key.
 
     Credential health owns the live Anthropic request. The benchmark preflight
-    owns runtime selection: the key must be configured and the backend's shared
-    out-of-credits circuit breaker must be clear. Any unavailable check fails
-    closed and leaves Claude OAuth mandatory.
+    owns runtime selection: either the shared ANTHROPIC_API_KEY is configured
+    and clear of its out-of-credits cooldown, OR OpenRouter is configured so
+    Claude Code can use the Anthropic-compatible gateway (same path as
+    resolveClaudeCodeSandboxApiKey when the shared org is on cooldown).
     """
     try:
         headers = await _api_headers()
@@ -9846,11 +10016,11 @@ async def _has_usable_anthropic_api_key_fallback(base_url: str) -> bool:
         if response.status_code != 200:
             return False
         availability = response.json()
-        return (
-            isinstance(availability, dict)
-            and availability.get("configured") is True
-            and availability.get("onCooldown") is False
-        )
+        if not isinstance(availability, dict):
+            return False
+        if availability.get("configured") is True and availability.get("onCooldown") is False:
+            return True
+        return availability.get("openrouterConfigured") is True
     except Exception:
         return False
 
@@ -9886,13 +10056,11 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
     """Check whether Claude Code can actually create a code session.
 
     A GPT/Codex compute token is not sufficient for a task that explicitly calls
-    ``spawn_claude_code_agent``. The runtime may have valid GPT credentials for
-    ordinary agent turns while Claude Code still has no user token or pool token.
-    Do not treat the shared Anthropic API-key fallback as sufficient here:
-    credential-health is the live funded-key probe, and Anthropic failures are
-    intentionally warn-only. This smoke gate is skippable when there is no real
-    Claude Code credential, so it should not launch a task that may discover an
-    unfunded or cooled-down fallback only after the benchmark starts.
+    ``spawn_claude_code_agent``. Prefer a live OAuth access token when present.
+    When OAuth is absent, accept the shared ANTHROPIC_API_KEY only if the
+    backend reports it configured and not on cooldown — that is the same funded
+    fallback ``resolveClaudeCodeAuthEnvs`` uses inside E2B. Do not launch when
+    both are missing; discovering an unfunded key mid-run burns the suite.
     """
     try:
         headers = await _api_headers()
@@ -9904,8 +10072,9 @@ async def _check_claude_code_credentials(base_url: str) -> bool:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                return bool(data.get("accessToken"))
-        return False
+                if bool(data.get("accessToken")):
+                    return True
+        return await _has_usable_anthropic_api_key_fallback(base_url)
     except Exception:
         return False
 
@@ -10172,6 +10341,15 @@ async def main_async(args):
             require_claude_code=bool(claude_code_tasks_for_refresh)
             and not allow_claude_code_credential_skip,
         )
+        # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
+        # that must send email (message_person) needs a fresh credential overlay
+        # or Connected Integrations never lists a from_email and the harness
+        # fails before an email_send approval can fire.
+        if any("message_person" in (t.expected_tools or []) for t in tasks):
+            if not _sync_email_credentials():
+                raise RuntimeError(
+                    "Benchmark run could not refresh email credentials for message_person tasks"
+                )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required

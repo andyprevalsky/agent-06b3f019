@@ -148,7 +148,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           `expected readiness failure, got "${errorMessage}"`
         );
         const integration = await prisma.integration.findUnique({
-          where: { userId_name: { userId, name: 'agentcard' } },
+          where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
         });
         assert(integration === null, 'unverified cardholder must not be marked CONNECTED');
       } finally {
@@ -190,7 +190,7 @@ const tests: Array<[string, () => Promise<void>]> = [
           'expected connected setup state'
         );
         const integration = await prisma.integration.findUnique({
-          where: { userId_name: { userId, name: 'agentcard' } },
+          where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
         });
         assert(integration?.status === 'CONNECTED', 'expected persisted connected integration');
         assert(integration?.isActive === true, 'expected active connected integration');

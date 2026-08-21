@@ -17,8 +17,16 @@ import assert from 'node:assert/strict';
 import {
   CODE_AGENT_CREDENTIALS_UNAVAILABLE,
   CodeAgentCredentialError,
+  isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
+  resolveClaudeCodeSandboxApiKey,
   resolveCodexCodeAuthEnvs,
+  resolveHostAnthropicBaseUrl,
+  shouldIgnoreAnthropicApiKeyCooldownForSandbox,
+  shouldPreferSandboxAnthropicBaseUrlOverFastMode,
+  shouldEnableClaudeCodeFastMode,
+  shouldInjectClaudeCodeFastModeProxy,
+  shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -108,6 +116,238 @@ function main(): void {
     assert.ok(!error.message.includes('sk-'), 'a raw key prefix must never reach the client');
     assert.ok(!error.detail.includes('sk-'), 'a raw key prefix must never reach the logs either');
   }
+
+  assert.equal(resolveHostAnthropicBaseUrl(undefined), undefined);
+  assert.equal(resolveHostAnthropicBaseUrl(''), undefined);
+  assert.equal(resolveHostAnthropicBaseUrl('  '), undefined);
+  assert.equal(
+    resolveHostAnthropicBaseUrl(' https://openrouter.ai/api '),
+    'https://openrouter.ai/api'
+  );
+
+  assert.equal(isRefreshOnlyOauthEnvelope(null), false);
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_token',
+      accessToken: 'tok',
+      source: 'user',
+      userId: 'u1',
+    }),
+    false
+  );
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_envelope',
+      credentials: '{"claudeAiOauth":{}}',
+      source: 'user',
+      userId: 'u1',
+    }),
+    true
+  );
+  assert.equal(
+    isRefreshOnlyOauthEnvelope({
+      credentialMode: 'oauth_envelope',
+      credentials: '{"claudeAiOauth":{}}',
+      accessToken: 'still-present',
+      source: 'user',
+      userId: 'u1',
+    }),
+    false
+  );
+
+  assert.equal(resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared').apiKey, 'sk-ant-shared');
+  assert.equal(
+    resolveClaudeCodeSandboxApiKey('sk-or-gateway', 'sk-ant-shared').apiKey,
+    'sk-or-gateway'
+  );
+  assert.equal(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://openrouter.ai/api',
+      openrouterApiKey: 'sk-or-gateway',
+    }).apiKey,
+    'sk-or-gateway'
+  );
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      openrouterApiKey: 'sk-or-gateway',
+      sharedKeyOnCooldown: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  // Fleet Fast Mode path: OpenRouter present, no host base → always prefer
+  // OpenRouter (even without cooldown / preferOpenRouterGateway).
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      openrouterApiKey: 'sk-or-gateway',
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      openrouterApiKey: 'sk-or-gateway',
+      preferOpenRouterGateway: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  // Cooldown / Fast Mode must not keep a shared Anthropic key when OpenRouter is available —
+  // even if ANTHROPIC_BASE_URL points at api.anthropic.com.
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+      sharedKeyOnCooldown: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+      preferOpenRouterGateway: true,
+    }),
+    { apiKey: 'sk-or-gateway', baseUrl: 'https://openrouter.ai/api' }
+  );
+  // Without cooldown / Fast Mode preference, honor an explicit Anthropic host base.
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      openrouterApiKey: 'sk-or-gateway',
+    }),
+    { apiKey: 'sk-ant-shared', baseUrl: 'https://api.anthropic.com' }
+  );
+  // Dedicated OpenRouter key without ANTHROPIC_BASE_URL still gets OpenRouter base.
+  assert.deepEqual(resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared'), {
+    apiKey: 'sk-or-dedicated',
+    baseUrl: 'https://openrouter.ai/api',
+  });
+  // sk-or-* must ignore a host base that points at api.anthropic.com (HTTP 403).
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+    }),
+    { apiKey: 'sk-or-dedicated', baseUrl: 'https://openrouter.ai/api' }
+  );
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-or-gateway',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: undefined,
+    }),
+    true
+  );
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: undefined,
+    }),
+    false
+  );
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: 'https://openrouter.ai/api',
+    }),
+    true
+  );
+  // Explicit api.anthropic.com must keep the shared-key cooldown active.
+  assert.equal(
+    shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+      sandboxApiKey: 'sk-ant-shared',
+      sharedAnthropicApiKey: 'sk-ant-shared',
+      sandboxBaseUrl: 'https://api.anthropic.com',
+    }),
+    false
+  );
+
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'), true);
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://api.anthropic.com'), false);
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
+
+  // Andy write-through + OpenRouter must still disable Fast Mode for Claude Code
+  // unless CLAUDE_CODE_FAST_MODE_ENABLED is explicitly on.
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      openrouterApiKey: 'sk-or-gateway',
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '1',
+    }),
+    false
+  );
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '1',
+    }),
+    true
+  );
+  // Default (no opt-in): Fast Mode off even for Andy write-through.
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      fastModeCacheEnabled: true,
+      fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: '',
+    }),
+    false
+  );
+  assert.equal(
+    shouldEnableClaudeCodeFastMode({
+      openrouterApiKey: '  ',
+      fastModeWriteEnabled: true,
+      claudeCodeFastModeEnabled: undefined,
+    }),
+    false
+  );
+
+  // Proxy injection must track the opt-in gate — Andy write-through alone must
+  // not inject when Fast Mode is off (files-in-sub-agents k=5 t5, 2026-08-21).
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: false,
+      preferSandboxBase: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: true,
+      preferSandboxBase: false,
+    }),
+    true
+  );
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: true,
+      preferSandboxBase: true,
+    }),
+    false
+  );
+
+  // OAuth must not ride OpenRouter / funded gateway base URLs.
+  assert.equal(shouldSkipSandboxAnthropicGatewayForOauth(null), false);
+  assert.equal(
+    shouldSkipSandboxAnthropicGatewayForOauth({
+      credentials: '{"claudeAiOauth":{}}',
+      accessToken: 'oauth-access',
+      source: 'user',
+      poolTokenId: null,
+      credentialMode: 'oauth_token',
+    } as never),
+    true
+  );
+  assert.equal(
+    shouldSkipSandboxAnthropicGatewayForOauth({
+      credentials: '{"claudeAiOauth":{"refreshToken":"r"}}',
+      accessToken: undefined,
+      source: 'user',
+      poolTokenId: null,
+      credentialMode: 'oauth_envelope',
+    } as never),
+    true
+  );
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
 }

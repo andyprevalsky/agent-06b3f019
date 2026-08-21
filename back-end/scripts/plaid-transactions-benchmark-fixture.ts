@@ -81,7 +81,7 @@ async function integrationId(): Promise<string> {
     update: {},
   });
   const integration = await prisma.integration.upsert({
-    where: { userId_name: { userId: USER_ID, name: 'plaid' } },
+    where: { userId_name_accountId: { userId: USER_ID, name: 'plaid', accountId: '' } },
     create: {
       userId: USER_ID,
       type: 'DATA_SOURCE',

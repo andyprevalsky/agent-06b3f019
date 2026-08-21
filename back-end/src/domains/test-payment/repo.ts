@@ -8,7 +8,7 @@ export async function resetBenchmarkAgentCardSetup(userId: string): Promise<void
     onboardingSetupUrl: 'https://example.invalid/agentcard/benchmark-onboarding',
   };
   await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'agentcard' } },
+    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
       userId,
       name: 'agentcard',
@@ -32,7 +32,7 @@ export async function completeBenchmarkAgentCardSetup(
   cardholderId: string
 ): Promise<void> {
   await prisma.integration.upsert({
-    where: { userId_name: { userId, name: 'agentcard' } },
+    where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     create: {
       userId,
       name: 'agentcard',

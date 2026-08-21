@@ -53,8 +53,17 @@ require_text "$MEASUREMENT" \
     'victoria_seedmem_src_' \
     "system Postgres path must isolate source databases per measurement PID"
 require_text "$MEASUREMENT" \
+    'seed-mem-$$' \
+    "default OUT_DIR must be PID-scoped so concurrent measurements cannot share summary.txt"
+require_text "$MEASUREMENT" \
     'TIME_BIN' \
     "measurement must resolve an external time binary (not the shell builtin)"
+require_text "$MEASUREMENT" \
+    'docker rm -fv "$CONTAINER"' \
+    "cold target cleanup must remove postgres anonymous volumes"
+require_text "$MEASUREMENT" \
+    'docker rm -fv "$SRC_CONTAINER"' \
+    "cold source cleanup must remove its postgres anonymous volume"
 require_text "$BUDGET" \
     'SEED_PEAK_RSS_BUDGET_MB = 230' \
     "budget must remain cemented to ceil(191MB * 1.20)"
@@ -116,5 +125,8 @@ require_text "$MEASUREMENT" \
 require_text "$MEASUREMENT" \
     'SRC_RESTORE_STATUS' \
     "pg_restore exit status must be preserved, never discarded with || true"
+require_text "$MEASUREMENT" \
+    'restore that original mode before measuring' \
+    "restore validation must not leave errexit enabled for the measured seed"
 
 echo "PASS: /deploy enforces five fidelity-verified cold seeds at the measured 230MB ratchet"

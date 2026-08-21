@@ -54,6 +54,9 @@ export function validateUpdateAgentPayload(payload: unknown): string | null {
   }
   // UPDATE payloads are partial - all fields optional, but if present must be correct type
   const p = payload as Record<string, unknown>;
+  if (p.title !== undefined && p.title !== null && typeof p.title !== 'string') {
+    return `Invalid 'title' type (got ${typeof p.title})`;
+  }
   if (p.progress !== undefined && typeof p.progress !== 'number') {
     return `Invalid 'progress' type (got ${typeof p.progress})`;
   }

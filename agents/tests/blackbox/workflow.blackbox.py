@@ -707,6 +707,7 @@ async def mock_set_response_schema_activity(
     user_messages: List[str],
     compute_auth: Any = None,
     fast_mode_cache_enabled: bool = False,
+    include_title: bool = False,
     *args: Any,
     **kwargs: Any,
 ) -> Optional[Dict[str, Any]]:
@@ -4024,6 +4025,7 @@ async def test_workflow_run_covers_chat_agent_startup_and_completion():
             "rootAgentId": "agent-run-1",
             "fastCacheAffinityKey": None,
         }
+        assert schema_calls[0][1][4] is True
         assert "mark_finished" in activity_names
         init_posts = [
             c for c in fake.activity_calls if c[0] == "post_agent_message" and c[1][3].get("toolName") == "agent_init"

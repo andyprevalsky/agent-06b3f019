@@ -302,9 +302,10 @@ async function testPersistOutput_coolsBothCredentialsAfterFailedFallback() {
 
     const cooldown = await prisma.integration.findUnique({
       where: {
-        userId_name: {
+        userId_name_accountId: {
           userId: '00000000-0000-0000-0000-000000000000',
           name: 'gpt_api_key_cooldown',
+          accountId: '',
         },
       },
     });

@@ -65,6 +65,10 @@ require_text "$FORMAT" "last LLM call in the entire trajectory" \
   "approval LLM dumps must be the last call across the whole agent tree"
 require_text "$FORMAT" "python3 scripts/render_llm_dump.py" \
   "approval requests must render LLM dumps before presenting"
+require_text "$FORMAT" "Never link a \`file://\` URL" \
+  "approval LLM dumps must not use file:// links a remote reviewer cannot open"
+require_text "$FORMAT" "/opt/cursor/artifacts" \
+  "approval LLM dumps must publish into the artifacts directory"
 require_text "$FORMAT" "**Local repro (<wall-clock>):**" \
   "approval requests must include local repro steps with measured wall-clock"
 require_text "$FORMAT" "Tests: <one sentence naming the actual assertion" \

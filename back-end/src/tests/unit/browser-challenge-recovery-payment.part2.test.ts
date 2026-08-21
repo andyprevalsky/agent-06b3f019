@@ -30,11 +30,7 @@ function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
 
 type ProbeArg = { url: string; hostKey: string; loadAsScript: boolean };
 
-function makeProbePage(opts: {
-  fetchOk?: boolean;
-  scriptOk?: boolean;
-  title?: string;
-}): {
+function makeProbePage(opts: { fetchOk?: boolean; scriptOk?: boolean; title?: string }): {
   goto: () => Promise<{ status: () => number }>;
   waitForTimeout: () => Promise<undefined>;
   evaluate: (fn: unknown, arg?: ProbeArg) => Promise<Record<string, boolean> | undefined>;
@@ -274,7 +270,11 @@ async function testCfOnlyProbeSkipsPaymentCdn(): Promise<void> {
     close: async () => undefined,
   } as unknown as Browser;
   const session = {
-    ...fakeSession({ key: 'kernel_residential_city', provider: 'kernel', proxyMode: 'residential' }),
+    ...fakeSession({
+      key: 'kernel_residential_city',
+      provider: 'kernel',
+      proxyMode: 'residential',
+    }),
     validationBrowser: browser,
   };
   const result = await probeCandidateBrowser(session, 'https://shop.example.com/item/1', {});

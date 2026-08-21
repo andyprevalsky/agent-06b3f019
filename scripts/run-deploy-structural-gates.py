@@ -43,6 +43,10 @@ GATES = (
         ("bash", "scripts/tests/deploy-worktree-preflight.test.sh"),
     ),
     Gate("seed-cache-decision", ("bash", "scripts/tests/seed-cache-decision.test.sh")),
+    Gate(
+        "canonical-seed-whatsapp-content",
+        ("bash", "scripts/tests/canonical-seed-whatsapp-content.test.sh"),
+    ),
     Gate("seed-memory-ratchet", ("bash", "scripts/tests/seed-memory-ratchet.test.sh")),
     Gate("semantic-deploy", ("bash", "scripts/tests/semantic-deploy-gate.test.sh")),
     Gate(
@@ -80,6 +84,14 @@ GATES = (
     Gate(
         "setup-db-concurrency",
         ("bash", "scripts/tests/setup-db-concurrency.test.sh"),
+    ),
+    # Pins run.sh's per-workspace port/bundle isolation and its Docker-vs-system
+    # Postgres selection. It was never wired into any suite, so a regression in
+    # the Docker probe (which silently downgrades an isolated benchmark stack to
+    # the shared system Postgres) could not be caught by any gate.
+    Gate(
+        "run-port-collision",
+        ("bash", "scripts/tests/run-port-collision.test.sh"),
     ),
 )
 

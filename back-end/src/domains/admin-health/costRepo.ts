@@ -69,7 +69,13 @@ async function findLiveRootAgentRunUsageBetween(
           COALESCE(
             NULLIF(item.value->>'model', ''),
             CASE
-              WHEN usage."toolName" IN ('chat_router', 'chat_generator') THEN 'zai-glm-4.7'
+              -- Cerebras chat primary cutover 2026-08-20 (zai-glm-4.7 archived → gemma-4-31b).
+              -- Model-less chat rows inherit the primary that was live at usage.createdAt.
+              WHEN usage."toolName" IN ('chat_router', 'chat_generator')
+                AND usage."createdAt" < TIMESTAMPTZ '2026-08-20 00:00:00+00'
+                THEN 'zai-glm-4.7'
+              WHEN usage."toolName" IN ('chat_router', 'chat_generator')
+                THEN 'gemma-4-31b'
               ELSE 'unknown'
             END
           ) AS model,

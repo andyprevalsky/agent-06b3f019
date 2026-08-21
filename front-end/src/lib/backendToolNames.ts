@@ -71,6 +71,18 @@ export const BACKEND_EMITTED_TOOL_NAMES = [
  * lifecycle `action_type="..."` literals the handler emits directly.
  * Append-only, so historical transcripts keep their icons.
  */
+// Action types that announce a live browser session. Single source of truth:
+// the terminal panel derivation and the browser status bar both read this, so a
+// new init action type cannot be added to one consumer and missed by the other
+// (useBrowserStatusBarState previously hardcoded its own list and never cleared
+// isDisconnected on a resumed session_init).
+export const BROWSER_INIT_ACTION_TYPES: ReadonlySet<string> = new Set([
+  'browser',
+  'system',
+  'session_started',
+  'session_init',
+]);
+
 export const BROWSER_EMITTED_ACTION_TYPES = [
   'attempt_completion',
   'browser',
@@ -93,6 +105,7 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'navback',
   'network_recording',
   'open_new_tab',
+  'payment_card_ready',
   'press_key',
   'purchase',
   'read_network_requests',
@@ -107,6 +120,7 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'send_message_to_user',
   'session_init',
   'session_paused',
+  'session_starting',
   'social_post',
   'supervisor_recovery',
   'switch_tab',
@@ -115,4 +129,5 @@ export const BROWSER_EMITTED_ACTION_TYPES = [
   'task_started',
   'upload_file',
   'wait',
+  'write_lock_granted',
 ] as const;

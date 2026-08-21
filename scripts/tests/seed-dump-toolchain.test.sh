@@ -116,6 +116,45 @@ print("done")
   echo "FAIL: status-prefixed listing should report found, got: $parse_out" >&2
   exit 1
 }
+# Behavioral cement: pagination cursor extraction must survive bash single-quoting
+# of the python -c body (single-quoted ['id'] terminates the shell string early).
+paginated_listing='200 OK
+{"next_page_uri": "https://api.ngrok.com/reserved_domains?before_id=rd_page&limit=100", "reserved_domains": [{"id": "rd_page", "domain": "rose-page-one.ngrok.app"}]}'
+page_parse=$(printf '%s\n' "$paginated_listing" | python3 -c '
+import json, sys
+requested_domain = sys.argv[1]
+raw = sys.stdin.read()
+brace = raw.find("{")
+if brace < 0:
+    print("malformed:no JSON object in reserved-domains listing", file=sys.stderr)
+    sys.exit(2)
+data = json.loads(raw[brace:])
+reserved_domains = data.get("reserved_domains") or []
+if any(item.get("domain") == requested_domain for item in reserved_domains if isinstance(item, dict)):
+    print("found")
+    sys.exit(0)
+if data.get("next_page_uri"):
+    if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
+        print("malformed:missing before_id cursor", file=sys.stderr)
+        sys.exit(2)
+    print("next:" + reserved_domains[-1]["id"])
+else:
+    print("done")
+' "rose-missing.ngrok.app") || {
+  echo "FAIL: paginated ngrok listing must parse" >&2
+  exit 1
+}
+[ "$page_parse" = "next:rd_page" ] || {
+  echo "FAIL: paginated listing should report next cursor, got: $page_parse" >&2
+  exit 1
+}
+echo "$ensure_fn" | grep -Fq 'print("next:" + reserved_domains[-1]["id"])' \
+  || { echo "FAIL: ensure_ngrok_domain_reserved must use bash-safe next-cursor print" >&2; exit 1; }
+if echo "$ensure_fn" | grep -vE '^[[:space:]]*#' | grep -Fq "['id']"; then
+  echo "FAIL: ensure_ngrok_domain_reserved still embeds bash-breaking ['id'] inside single quotes" >&2
+  exit 1
+fi
 echo "PASS: run.sh reserved-domain listing uses env key and fails closed on bad JSON"
 echo "PASS: run.sh reserved-domain listing tolerates ngrok CLI HTTP status prefixes"
+echo "PASS: run.sh reserved-domain pagination cursor survives bash single-quoting"
 

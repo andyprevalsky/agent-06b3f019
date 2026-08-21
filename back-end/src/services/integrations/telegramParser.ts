@@ -101,7 +101,7 @@ export async function parseTelegramData(
   }
 
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'telegram' } },
+    where: { userId_name_accountId: { userId, name: 'telegram', accountId: '' } },
   });
 
   if (!integration) {

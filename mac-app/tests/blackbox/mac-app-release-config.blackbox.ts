@@ -33,6 +33,27 @@ function sha512Base64(filePath: string): string {
 }
 
 describe('mac app release config', () => {
+  it('notarizes and staples the app before packaging the updater ZIP and DMG', () => {
+    const workflow = fs.readFileSync(
+      path.join(ROOT, '..', '.github', 'workflows', 'release-mac-app.yml'),
+      'utf8'
+    );
+    const notarizeApp = workflow.indexOf('node scripts/notarize.js --app "$APP"');
+    const validateApp = workflow.indexOf('xcrun stapler validate "$APP"');
+    const packageArtifacts = workflow.indexOf(
+      'npx electron-builder --prepackaged "$APP" --mac dmg zip --publish=never'
+    );
+
+    expect(notarizeApp, 'the signed .app must be submitted for notarization').toBeGreaterThan(-1);
+    expect(validateApp, 'the .app ticket must be stapled and validated').toBeGreaterThan(
+      notarizeApp
+    );
+    expect(
+      packageArtifacts,
+      'distribution artifacts must be built only after the inner app is stapled'
+    ).toBeGreaterThan(validateApp);
+  });
+
   it('stays on the Electron 31 line until native dependencies are upgraded deliberately', () => {
     const pkg = readPackageJson();
     expect(pkg.devDependencies.electron).toBe('^31.0.0');

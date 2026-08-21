@@ -111,6 +111,12 @@ export const handlers = [
     });
   }),
 
+  // Sidebar search returns only server-side matches. Components union these
+  // with their already-loaded list so title/goal matches remain instantaneous.
+  http.get(`${API_BASE}/agents/search`, () => {
+    return HttpResponse.json({ agents: [] });
+  }),
+
   http.get(`${API_BASE}/agents/:agentId`, ({ params }) => {
     return HttpResponse.json({
       agent: {
