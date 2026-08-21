@@ -1678,4 +1678,18 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'return "$sync_rc"' \
   "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
+# --single-box must print the parallel-safety rejection even in a scripts-only
+# sandbox (no agents/), matching cloudbench-multi-workstream scenario 14.
+single_box_root="$TMP_ROOT/scripts-only-sandbox"
+mkdir -p "$single_box_root"
+cp -R "$ROOT_DIR/scripts" "$single_box_root/scripts"
+single_box_log="$TMP_ROOT/single-box.log"
+set +e
+bash "$single_box_root/scripts/run-bench" --single-box some-bench >"$single_box_log" 2>&1
+single_box_ec=$?
+set -e
+[ "$single_box_ec" -ne 0 ] || fail "--single-box must be rejected in a scripts-only sandbox"
+grep -qiF "parallel-safe" "$single_box_log" ||
+  fail "--single-box rejection must explain the parallel-safety hazard without requiring agents/"
+
 echo "All cloud benchmark environment checks passed."
