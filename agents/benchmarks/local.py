@@ -68,6 +68,11 @@ BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 TEST_PAYMENT_FRONTEND_TASK_NAMES = AGENT_PAYMENT_TASK_NAMES | {
     "gate-subscription-card-mint",
     "gate-kyc-card-mint",
+    # Must include admin-bypass: it opens a public Kernel tunnel to /test_payment.
+    # Omitting it left BENCHMARK_BUNDLED_FRONTEND unset so run.sh served Vite DEV;
+    # five concurrent remote browsers then fetched the unbundled module graph over
+    # ngrok and sat on blank #root until the task budget burned.
+    "gate-subscription-card-mint-admin-bypass",
 }
 # Sandbox lifecycle benches run as the default admin account so credit checks
 # stay unlimited. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH (set below, honored
