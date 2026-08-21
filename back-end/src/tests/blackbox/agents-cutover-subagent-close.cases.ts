@@ -268,4 +268,48 @@ test('deploy seal is call-scoped so the top-level chip can terminate', async () 
       `subAgentId=${String(meta.subAgentId)} task_id=${String(meta.task_id)} ` +
       `action_type=${String(meta.action_type)}`
   );
+
+  // ...and a sub-step call that NEVER opened at parent scope must KEEP its
+  // identity. Stripping every seal gave each in-flight sub-step call its own
+  // top-level card -- 3 identical "Browser Agent / Done" chips for one agent.
+  const subStepCallId = `${randomUUID()}`;
+  await prisma.message.create({
+    data: {
+      agentId,
+      workflowGeneration: agentId,
+      role: 'TOOL',
+      text: '',
+      timestamp: new Date(),
+      metadata: {
+        toolCallId: subStepCallId,
+        toolName: 'spawn_browser_agent',
+        toolStatus: 'IN_PROGRESS',
+        workflowGeneration: agentId,
+        subAgentId,
+        task_id: subAgentId,
+        action_type: 'recording',
+      },
+    },
+  });
+  await prisma.agent.update({
+    where: { id: agentId },
+    data: { temporalWorkflowId: agentId, status: 'ACTIVE' },
+  });
+  await prepareAgentWorkflowReplacement(agentId, session.user.id);
+
+  const subSeal = await prisma.message.findFirstOrThrow({
+    where: {
+      agentId,
+      role: 'TOOL',
+      metadata: { path: ['toolCallId'], equals: subStepCallId },
+      AND: [{ metadata: { path: ['errorCode'], equals: 'DEPLOY_INTERRUPTED' } }],
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+  const subMeta = (subSeal.metadata ?? {}) as Record<string, unknown>;
+  assert(
+    subMeta.subAgentId === subAgentId,
+    `a sub-step seal must keep its subAgentId so it does not render as its own ` +
+      `top-level chip, got subAgentId=${String(subMeta.subAgentId)}`
+  );
 });

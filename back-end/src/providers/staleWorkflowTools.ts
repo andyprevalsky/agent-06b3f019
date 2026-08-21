@@ -180,6 +180,40 @@ export async function captureInProgressWorkflowTools(
 }
 
 /**
+ * Which of these tool calls ever emitted a row at PARENT scope (no subAgentId)?
+ *
+ * Only those own a top-level chip in the UI. A browser agent reuses its parent
+ * `toolCallId` for sub-steps, and separate sub-step calls (recording,
+ * network_recording) never open at parent scope at all — so stripping sub-step
+ * identity from EVERY seal turned each one into its own top-level card
+ * (3 identical "Browser Agent / Done" chips for one agent).
+ */
+async function parentScopedCallIds(
+  agentId: string,
+  workflowGeneration: string,
+  toolCallIds: string[]
+): Promise<Set<string>> {
+  if (toolCallIds.length === 0) return new Set();
+  const rows = await prisma.message.findMany({
+    where: { agentId, role: 'TOOL' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+  });
+  const wanted = new Set(toolCallIds);
+  const parentScoped = new Set<string>();
+  for (const row of rows) {
+    if (messageWorkflowGeneration(row) !== workflowGeneration) continue;
+    const metadata = metadataRecord(row.metadata);
+    if (metadata === null) continue;
+    const callId = metadataString(metadata, 'toolCallId');
+    if (callId === null || !wanted.has(callId)) continue;
+    if (metadata.subAgentId === undefined || metadata.subAgentId === null) {
+      parentScoped.add(callId);
+    }
+  }
+  return parentScoped;
+}
+
+/**
  * Close unresolved calls left by a terminated workflow. The durable replacement
  * claim seals the old generation before this runs. Each append shares that claim's
  * advisory lock, so a success committed before the seal wins; any later old-run
@@ -199,6 +233,10 @@ export async function finalizeInterruptedWorkflowTools(
     candidates.set(candidate.toolCallId, candidate);
   }
 
+  const parentScoped = await parentScopedCallIds(agentId, workflowGeneration, [
+    ...candidates.keys(),
+  ]);
+
   let interrupted = 0;
   for (const [toolCallId, candidate] of candidates) {
     // A deployment seal terminates the WHOLE tool call, so it must be emitted at
@@ -212,12 +250,12 @@ export async function finalizeInterruptedWorkflowTools(
     // "in progress" forever next to the replacement's new card — two live-looking
     // browser agents. Strip the sub-step identity; the sub-agent's own rows keep
     // theirs.
-    const {
-      subAgentId: _subAgentId,
-      task_id: _taskId,
-      action_type: _actionType,
-      ...callScoped
-    } = candidate.metadata;
+    // Only a call that owns a top-level chip may be re-scoped; a sub-step seal
+    // keeps its identity so it renders inside the trajectory, not as its own card.
+    const { subAgentId, task_id, action_type, ...stripped } = candidate.metadata;
+    const callScoped = parentScoped.has(toolCallId)
+      ? stripped
+      : { ...stripped, subAgentId, task_id, action_type };
     const terminal = await createMessage({
       agentId,
       role: 'TOOL',
