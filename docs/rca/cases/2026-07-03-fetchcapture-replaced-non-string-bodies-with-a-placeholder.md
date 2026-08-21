@@ -110,6 +110,29 @@ tee-proxy/flags still engaged.
 **Fix:** `shouldEnableClaudeCodeFastMode` returns false whenever
 `OPENROUTER_API_KEY` is set — no `CLAUDE_CODE_FAST_MODE` flags, no proxy inject.
 
+
+### Recurrence (2026-08-21 k=5 t5) — opt-in gate did not block tee injection
+
+Fleet trial `20260821-025529-889656` / agent `bd4cd666-…` timed out at soft
+cap ~900s (`Agent status: ACTIVE`) with red/yellow lineages PAUSED mid-recovery.
+Transcripts showed repeated `HTTP 403` / `Agentic loop finished: 0 interactions`
+plus classic `369,851`-byte UTF-8-corrupted attachment narratives (stale Fast
+Mode cache fingerprints). Blue+green completed; yellow eventually recovered via
+external download; red never joined before the soft timeout.
+
+`shouldEnableClaudeCodeFastMode` correctly returned false without
+`CLAUDE_CODE_FAST_MODE_ENABLED=1`, but `createClaudeCodeSession` still called
+`buildFastModeAnthropicEnv(...)` whenever `preferSandboxBase` was false — Andy
+write-through / `fast_mode_cache_enabled` alone re-injected the public tee-proxy
+and stale cache hits. Separately, a dedicated `sk-or-*` key with
+`ANTHROPIC_BASE_URL=https://api.anthropic.com` kept the Anthropic host (403) and
+flipped `preferSandboxBase` false.
+
+**Fix:** `shouldInjectClaudeCodeFastModeProxy` — tee/flags only when opt-in Fast
+Mode is active AND not on a funded non-Anthropic base; `sk-or-*` keys always get
+the OpenRouter base. Cemented in `code-agent-credential-redaction.test.ts` +
+`fast-cache-code-agent.test.ts`.
+
 ## Reusable lesson
 
 A capture/replay wrapper may serialize a request to build its cache key, but must

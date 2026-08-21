@@ -25,6 +25,7 @@ import {
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldEnableClaudeCodeFastMode,
+  shouldInjectClaudeCodeFastModeProxy,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -192,6 +193,13 @@ function main(): void {
     resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared'),
     { apiKey: 'sk-or-dedicated', baseUrl: 'https://openrouter.ai/api' }
   );
+  // sk-or-* must ignore a host base that points at api.anthropic.com (HTTP 403).
+  assert.deepEqual(
+    resolveClaudeCodeSandboxApiKey('sk-or-dedicated', 'sk-ant-shared', {
+      anthropicBaseUrl: 'https://api.anthropic.com',
+    }),
+    { apiKey: 'sk-or-dedicated', baseUrl: 'https://openrouter.ai/api' }
+  );
   assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
     sandboxApiKey: 'sk-or-gateway',
     sharedAnthropicApiKey: 'sk-ant-shared',
@@ -251,6 +259,30 @@ function main(): void {
       openrouterApiKey: '  ',
       fastModeWriteEnabled: true,
       claudeCodeFastModeEnabled: undefined,
+    }),
+    false
+  );
+
+  // Proxy injection must track the opt-in gate — Andy write-through alone must
+  // not inject when Fast Mode is off (files-in-sub-agents k=5 t5, 2026-08-21).
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: false,
+      preferSandboxBase: false,
+    }),
+    false
+  );
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: true,
+      preferSandboxBase: false,
+    }),
+    true
+  );
+  assert.equal(
+    shouldInjectClaudeCodeFastModeProxy({
+      codeAgentFastModeActive: true,
+      preferSandboxBase: true,
     }),
     false
   );
