@@ -274,27 +274,41 @@ for _ in \$(seq 1 200); do
 done
 STUB
 chmod +x "$TMP/fake-repo/back-end/scripts/long-seed.sh"
-SETUP_DB_TEST_SEED_COMMAND="$TMP/fake-repo/back-end/scripts/long-seed.sh" \
-  run_setup_db F term-ws &
-term_runner=$!
-term_pid=""
+# Launch setup-db as a real process-group leader. This is the production branch
+# that used to signal itself before it could release the workspace lock.
+(
+  cd "$TMP/fake-repo"
+  exec env \
+    PATH="$TMP/bin:$PATH" \
+    SETUP_DB_TEST_TAG=F \
+    CONDUCTOR_PORT=59000 \
+    CONDUCTOR_WORKSPACE_NAME=term-ws \
+    CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
+    ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
+    ROSE_USE_SYSTEM_PG=false \
+    SETUP_DB_TEST_SEED_COMMAND="$TMP/fake-repo/back-end/scripts/long-seed.sh" \
+    python3 -c 'import os, sys; os.setsid(); os.execv("/bin/bash", ["bash", sys.argv[1]])' \
+      "$TMP/fake-repo/scripts/setup-db.sh"
+) > "$TMP/F.out" 2>&1 &
+term_pid=$!
 for _ in $(seq 1 200); do
-  term_pid="$(pgrep -f "$TMP/fake-repo/scripts/setup-db.sh" | head -1 || true)"
-  [ -n "$term_pid" ] && [ -f "$CHILD_MARKER" ] && break
+  [ -f "$CHILD_MARKER" ] && break
   sleep 0.05
 done
-if [ -n "$term_pid" ] && [ -f "$CHILD_MARKER" ]; then
+if [ -f "$CHILD_MARKER" ]; then
   kill -TERM "$term_pid" 2>/dev/null || true
-  wait "$term_runner" 2>/dev/null || true
+  wait "$term_pid" 2>/dev/null || true
   rm -f "$CHILD_MARKER"
   sleep 1
   [ ! -f "$CHILD_MARKER" ] || fail \
     "case 6: a TERM'd setup-db.sh left its seed child running — it keeps writing to a
 database the next holder already claimed"
+  [ ! -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
+    "case 6: process-group teardown exited before releasing the workspace DB lock"
   pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
 else
-  kill -TERM "$term_runner" 2>/dev/null || true
-  wait "$term_runner" 2>/dev/null || true
+  kill -TERM "$term_pid" 2>/dev/null || true
+  wait "$term_pid" 2>/dev/null || true
   pkill -f "$TMP/fake-repo/back-end/scripts/long-seed.sh" 2>/dev/null || true
   echo "case 6: skipped (could not observe a live seed child on this host)" >&2
 fi

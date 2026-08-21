@@ -205,13 +205,22 @@ setup_db_teardown() {
     local exit_code=$?
     trap - EXIT INT TERM
     local group
+    local ignored_self_term=false
     group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
+        # Signalling the whole group includes this shell. Keep TERM ignored until
+        # the destructive-section lock is released; otherwise the shell can die
+        # here and strand the lock before cleanup reaches the release below.
+        trap '' TERM
+        ignored_self_term=true
         kill -TERM -"$group" 2>/dev/null || true
     else
         pkill -TERM -P $$ 2>/dev/null || true
     fi
     release_workspace_db_lock
+    if $ignored_self_term; then
+        trap - TERM
+    fi
     exit "$exit_code"
 }
 trap setup_db_teardown EXIT INT TERM
