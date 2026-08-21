@@ -67,7 +67,7 @@ class StructuralGateDocumentationTests(unittest.TestCase):
         deploy_md = DEPLOY_MD.read_text()
         step = deploy_md.split("## Step 4cb:", 1)[1].split("## Step 4c:", 1)[0]
         self.assertIn('if [ -z "$CHANGED_AGENTS" ]; then', step)
-        self.assertIn("python scripts/run_blackbox_tests.py benchmark", step)
+        self.assertIn("./venv/bin/python scripts/run_blackbox_tests.py benchmark", step)
         self.assertIn("Step 4g's agents coverage already runs it", step)
         self.assertIn("wait for Step 4g to finish before starting", step)
 

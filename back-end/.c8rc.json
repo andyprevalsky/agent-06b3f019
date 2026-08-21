@@ -33,6 +33,7 @@
     "src/domains/auth-options/types.ts",
     "src/domains/admin-health/types.ts",
     "src/domains/test-payment/types.ts",
+    "src/domains/admin-health/types.ts",
     "src/types/person.ts",
     "src/domains/upload/types.ts",
     "src/domains/browser-session/repo.ts",
