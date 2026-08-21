@@ -3632,25 +3632,7 @@ warm_deps_preflight() {
             echo "✅ central refresh done — forking from its exact proven snapshot $SNAP_ID"
             return 0
         fi
-        if bash "$RUN_BENCH_CLOUD_BIN" --refresh-deps --ref "$BENCH_REF" 2>&1 | while IFS= read -r _l; do printf '   %s\n' "$_l"; done; then
-            s_node=""; s_py=""; s_epoch=""; new_snap=""
-            [ -f "$state" ] && read -r s_node s_py s_epoch new_snap < "$state" || true
-            snap_epoch="$(snapshot_created_epoch "$new_snap")"
-            if [ "$s_node" = "$node_fp" ] && [ "$s_py" = "$py_fp" ] \
-                && [ -n "$new_snap" ] && snapshot_is_complete_exact "$new_snap" \
-                && [ "${snap_epoch:-0}" -ge $(( ${s_epoch:-0} - 60 )) ]; then
-                SNAP_ID="$new_snap"
-                echo "✅ central refresh done — forking from its exact proven snapshot $SNAP_ID"
-                refresh_ok=1
-                break
-            fi
-            echo "❌ central refresh returned without a matching exact snapshot proof" >&2
-        else
-            echo "❌ central dep refresh command failed (attempt $refresh_attempt)" >&2
-        fi
-    done
-    if [ "$refresh_ok" -eq 1 ]; then
-        return 0
+        echo "❌ central refresh returned without a matching exact snapshot proof" >&2
     fi
     echo "❌ central dep refresh failed; refusing to provision task machines" >&2
     return 1
