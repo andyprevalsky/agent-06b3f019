@@ -13,22 +13,27 @@ done
 # scripts/cloud-build.sh during Cord's build phase). When .cloud-env exists,
 # it is authoritative for the shared worktree identity — always source it so
 # the cloud-generated workspace name cannot be overridden by stale env vars.
-# Isolated benchmark runs are the exception: local.py assigns a unique
-# CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME per run. Re-sourcing .cloud-env
-# must not clobber those, or every isolated stack collapses onto the shared
-# ports and SIGTERMs the Step 5 /deploy stack (observed as smoke exit 143).
+# Exceptions that must keep a pre-set CONDUCTOR_PORT + CONDUCTOR_WORKSPACE_NAME:
+# - Isolated benchmark runs (local.py / AgentCard / run-bench): unique per-run
+#   ports. Re-sourcing .cloud-env must not clobber those, or every isolated
+#   stack collapses onto the shared ports and SIGTERMs the Step 5 /deploy
+#   stack (observed as smoke exit 143).
+# - Strict Conductor port mode (RUN_SH_STRICT_CONDUCTOR_PORT=1 from
+#   configure_deploy_local_env): /deploy Step 5 pins an explicit port range
+#   and forbids reassignment; .cloud-env must not silently move it to 3001.
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 if [ -f "$SCRIPT_DIR/../.cloud-env" ]; then
     _cloud_env_saved_port="${CONDUCTOR_PORT:-}"
     _cloud_env_saved_workspace="${CONDUCTOR_WORKSPACE_NAME:-}"
     _cloud_env_isolated="${BENCHMARK_ISOLATED_RUN:-false}"
+    _cloud_env_strict="${RUN_SH_STRICT_CONDUCTOR_PORT:-0}"
     . "$SCRIPT_DIR/../.cloud-env"
-    if [ "$_cloud_env_isolated" = "true" ]; then
+    if [ "$_cloud_env_isolated" = "true" ] || [ "$_cloud_env_strict" = "1" ]; then
         [ -n "$_cloud_env_saved_port" ] && CONDUCTOR_PORT="$_cloud_env_saved_port"
         [ -n "$_cloud_env_saved_workspace" ] && CONDUCTOR_WORKSPACE_NAME="$_cloud_env_saved_workspace"
     fi
-    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated
+    unset _cloud_env_saved_port _cloud_env_saved_workspace _cloud_env_isolated _cloud_env_strict
 elif [ -z "${CONDUCTOR_PORT:-}" ]; then
     echo '❌ CONDUCTOR_PORT not set. Run via Conductor, or run scripts/cloud-build.sh first on cloud envs.'
     exit 1
