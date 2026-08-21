@@ -1830,8 +1830,8 @@
   {
     "name": "browser-hotel-booking",
     "title": "Hotel Kabuki One-Night Booking",
-    "description": "Reserve a one-night hotel stay while comparing room price and completing checkout.",
-    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday. Choose the lowest-priced non-smoking room, keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Complete the reservation.",
+    "description": "Reserve a one-night hotel stay on hotels.com through guest checkout until the payment-card request.",
+    "prompt": "Book a one-night stay for one adult at Hotel Kabuki in San Francisco from this Saturday to Sunday on hotels.com (https://www.hotels.com/). Choose the lowest-priced non-smoking room, keep the room rate under $400 before taxes and fees, and do not select a package, room upgrade, or add-on. Use guest checkout — do not sign in or create an account. Proceed through checkout until the payment credentials / payment-card request; do not complete the charge.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
     "expected_tools": [
@@ -1848,11 +1848,44 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kinds": [
-      "write_lock"
-    ],
+    "expected_attention_kind": "payment_approval",
+    "expected_payment_receipt": {
+      "merchant": "Hotels.com (hotels.com)",
+      "merchantBusinessAliases": [
+        "Hotels.com",
+        "Hotel Kabuki",
+        "Hotel Kabuki, part of JdV by Hyatt"
+      ],
+      "currency": "USD",
+      "requiredFields": [
+        "merchant",
+        "currency",
+        "lineItems",
+        "fees",
+        "subtotalCents",
+        "totalCents",
+        "fingerprint",
+        "userId",
+        "agentId"
+      ],
+      "requiredLineItemFields": [
+        "name",
+        "imageUrl",
+        "productUrl",
+        "rating",
+        "reviewCount",
+        "unitPriceCents",
+        "quantity",
+        "lineTotalCents"
+      ],
+      "requiredFeeFields": [
+        "label",
+        "amountCents"
+      ]
+    },
+    "success_on_payment_card_request": true,
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1869,26 +1902,27 @@
         "live"
       ],
       "services": [
-        "booking.com",
-        "write_lock"
+        "hotels.com",
+        "request_payment_card"
       ],
       "secrets": [],
       "live_targets": [
-        "https://www.booking.com"
+        "https://www.hotels.com/",
+        "https://www.hotels.com/ho129640/hotel-kabuki-part-of-jdv-by-hyatt-san-francisco-united-states-of-america/"
       ],
-      "context_notes": "Live lodging inventory and rate rules. The benchmark fixes hotel, occupancy, relative dates, smoking preference, and price cap while allowing room inventory and cancellation terms to vary, and auto-approves one write boundary to require a confirmed reservation.",
+      "context_notes": "Live lodging inventory on hotels.com for Hotel Kabuki. Guest checkout is available without an account. Success is the single unresolved payment-card approval grounded to hotels.com after guest checkout; the harness never approves it or completes the charge. Do not require a completed reservation or write-lock.",
       "live_cookie_domains": [
-        "booking.com"
+        "hotels.com"
       ]
     },
     "evaluators": [
       {
-        "id": "refundable-hotel-runtime-contract",
+        "id": "hotel-kabuki-runtime-contract",
         "method": "static_check",
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved write-lock",
+          "The run stops after exactly one unresolved payment-card approval on the grounded hotels.com checkout",
           "The approval identifies Hotel Kabuki, both stay dates, and the total amount"
         ],
         "checks": [
@@ -1901,25 +1935,32 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
+            "type": "expected_payment_receipt"
           },
           {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "Kabuki"
+            ],
+            "require_date": true,
+            "require_amount": true
           }
         ]
       },
       {
-        "id": "refundable-hotel-booking-semantics",
+        "id": "hotel-kabuki-payment-boundary-semantics",
         "method": "single_turn_llm_judge",
         "criteria": [
-          "The completed reservation is for Hotel Kabuki, one adult, Saturday to Sunday, in a non-smoking room",
+          "The pending payment approval is for Hotel Kabuki on hotels.com, one adult, Saturday to Sunday, in a non-smoking room",
           "Grounded comparison evidence shows the selected rate is the lowest-priced available non-smoking option under $400 before taxes and fees",
-          "No package, upgrade, or add-on is selected, and the single approval describes the selected room or rate, cancellation terms as shown, both dates, and total amount",
-          "The trajectory reaches a grounded final reservation confirmation after approval; checkout, an approval request, or a write-lock alone is not completion"
+          "No package, upgrade, or add-on is selected; checkout used guest flow on hotels.com without signing in or creating an account",
+          "The trajectory ends at exactly one unresolved payment-card approval grounded to hotels.com; the harness does not approve it, and a completed reservation or generic write-lock alone is not success"
         ],
-        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and attention request. Pass only if grounded evidence proves the exact hotel, dates, occupancy, room constraints, lowest-price selection, price cap, well-formed approval, and completed reservation confirmation. Do not require free cancellation or reject a nonrefundable rate."
+        "judge_prompt": "Review the full room/rate comparison, browser trajectory, and pending payment request. Pass only if grounded evidence proves hotels.com guest checkout, the exact hotel, dates, occupancy, room constraints, lowest-price selection, price cap, and one unresolved payment-card approval. Do not require or accept an approved charge, completed reservation confirmation, or generic write-lock."
       }
     ],
     "enforce_declared_evaluators": true,
