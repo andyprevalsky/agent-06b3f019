@@ -66,31 +66,87 @@ def _tool_messages(messages: List[Dict[str, Any]], tool_name: str) -> List[Dict[
 
 
 def _live_subagent_ids(messages: List[Dict[str, Any]], tool_name: str) -> set[str]:
-    """sub-agent/task ids that have started but not reached a terminal status."""
+    """sub-agent/task ids that have started but not reached a terminal status.
+
+    Liveness is tracked across EVERY message the sub-agent writes, not just the
+    ones tagged with the spawning tool. An explore agent's own `spawn_agent`
+    lifecycle row reaches FINISHED early while its inner web_search/web_fetch
+    steps keep running under the same subAgentId — filtering on toolName alone
+    made a very-much-alive sub-agent look terminal.
+    """
+    owned: set[str] = set()
+    for message in messages:
+        meta = _metadata(message)
+        if meta.get("toolName") == tool_name:
+            sub_id = meta.get("subAgentId") or meta.get("task_id")
+            if isinstance(sub_id, str):
+                owned.add(sub_id)
+
+    latest: Dict[str, str] = {}
+    for message in messages:
+        meta = _metadata(message)
+        sub_id = meta.get("subAgentId") or meta.get("task_id")
+        status = meta.get("toolStatus")
+        if isinstance(sub_id, str) and sub_id in owned and isinstance(status, str):
+            latest[sub_id] = status.upper()
+    return {sub_id for sub_id, status in latest.items() if status == "IN_PROGRESS"}
+
+
+def _live_tool_calls(messages: List[Dict[str, Any]], tool_name: str) -> set[str]:
+    """toolCallId of every `tool_name` call whose LATEST lifecycle row is IN_PROGRESS.
+
+    This is the identity that actually matters. The row that STARTS a sub-agent
+    carries no subAgentId (only intermediate rows do), so subAgentId-based
+    tracking silently misses the parent chip — which is exactly how a dangling
+    "Browser Agent In Progress" chip escaped the previous version of this test.
+    """
     latest: Dict[str, str] = {}
     for message in messages:
         meta = _metadata(message)
         if meta.get("toolName") != tool_name:
             continue
-        sub_id = meta.get("subAgentId") or meta.get("task_id")
+        call_id = meta.get("toolCallId")
         status = meta.get("toolStatus")
-        if isinstance(sub_id, str) and isinstance(status, str):
-            latest[sub_id] = status.upper()
-    return {sub_id for sub_id, status in latest.items() if status == "IN_PROGRESS"}
+        if isinstance(call_id, str) and isinstance(status, str):
+            latest[call_id] = status.upper()
+    return {call_id for call_id, status in latest.items() if status == "IN_PROGRESS"}
 
 
-async def _wait_for_live_subagent(agent_id: str, tool_name: str, timeout: int) -> tuple[set[str], str]:
-    """Block until the agent has a genuinely in-flight sub-agent. Returns (ids, generation)."""
+def _deploy_killed_calls(messages: List[Dict[str, Any]], tool_name: str) -> set[str]:
+    """toolCallIds whose terminal row says a DEPLOYMENT ended them.
+
+    Terminality alone proves nothing: a sub-agent that simply FINISHED its work
+    before the cutover landed is terminal too. Only `errorCode:
+    DEPLOY_INTERRUPTED` proves the deploy is what stopped it.
+    """
+    killed: set[str] = set()
+    for message in messages:
+        meta = _metadata(message)
+        if meta.get("toolName") != tool_name:
+            continue
+        call_id = meta.get("toolCallId")
+        if isinstance(call_id, str) and meta.get("errorCode") == "DEPLOY_INTERRUPTED":
+            killed.add(call_id)
+    return killed
+
+
+async def _wait_for_live_subagent(
+    agent_id: str, tool_name: str, timeout: int
+) -> tuple[set[str], set[str], str]:
+    """Block until the sub-agent is genuinely mid-flight. Returns (subIds, callIds, generation)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         data = await get_agent_status(agent_id)
         agent = data.get("agent", data)
         messages = data.get("messages", [])
         live = _live_subagent_ids(messages, tool_name)
+        live_calls = _live_tool_calls(messages, tool_name)
         generation = agent.get("temporal_workflow_id") or ""
         status = agent.get("status")
-        if live and generation:
-            return live, generation
+        # Require BOTH: a live inner sub-agent AND its parent tool call still
+        # open. Either alone can be true while the work is already finishing.
+        if live and live_calls and generation:
+            return live, live_calls, generation
         if status in {"COMPLETED", "FAILED", "OUT_OF_CREDITS", "COST_LIMIT_REACHED"}:
             raise AssertionError(
                 f"agent reached {status} before a {tool_name} sub-agent was in flight — "
@@ -139,7 +195,7 @@ async def _run_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bo
     agent_id: Optional[str] = None
     try:
         agent_id = await spawn_agent(goal, start_phase="execute", timeout=timeout)
-        live_before, generation_before = await _wait_for_live_subagent(
+        live_before, calls_before, generation_before = await _wait_for_live_subagent(
             agent_id, tool_name, SUBAGENT_START_TIMEOUT
         )
         live_browsers_before = set()
@@ -164,7 +220,26 @@ async def _run_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bo
         data = await get_agent_status(agent_id)
         messages = data.get("messages", [])
 
-        # 1. the OLD sub-agent must be closed, not still stepping
+        # 1a. THE REQUIREMENT: every call that was mid-flight at cutover must be
+        # sealed BY THE DEPLOY. A call that merely FINISHED naturally proves
+        # nothing — the previous version of this test passed exactly that way,
+        # because the browser agent completed ~30s before the cutover landed.
+        killed = _deploy_killed_calls(messages, tool_name)
+        not_killed = calls_before - killed
+        if not_killed:
+            still_open = _live_tool_calls(messages, tool_name) & not_killed
+            return (
+                False,
+                f"WRONG: {tool_name} call(s) {sorted(not_killed)} were mid-flight at the cutover "
+                f"but carry no DEPLOY_INTERRUPTED terminal row"
+                + (
+                    f" and {sorted(still_open)} are STILL IN_PROGRESS — dangling chip"
+                    if still_open
+                    else " (they finished on their own; the deploy never killed them)"
+                ),
+            )
+
+        # 1b. the OLD sub-agent must be closed, not still stepping
         still_live = _live_subagent_ids(messages, tool_name) & live_before
         if still_live:
             return (
@@ -198,9 +273,23 @@ async def _run_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bo
                 f"cutover — the rented browser is orphaned and still billing",
             )
 
+        # 4. nothing may be left rendering as in-flight once the agent settles
+        final = await get_agent_status(agent_id)
+        final_agent = final.get("agent", final)
+        if final_agent.get("status") in {"COMPLETED", "FAILED"}:
+            dangling = _live_tool_calls(final.get("messages", []), tool_name)
+            if dangling:
+                return (
+                    False,
+                    f"WRONG: agent reported {final_agent.get('status')} while {tool_name} call(s) "
+                    f"{sorted(dangling)} are still IN_PROGRESS — a task cannot complete with live "
+                    f"sub-agents",
+                )
+
         return (
             True,
-            f"cutover closed the live {tool_name} sub-agent and moved "
+            f"deploy killed {len(calls_before)} mid-flight {tool_name} call(s) "
+            f"{sorted(calls_before)} (DEPLOY_INTERRUPTED), released their browsers, and moved "
             f"{generation_before} -> {generation_after}",
         )
     finally:

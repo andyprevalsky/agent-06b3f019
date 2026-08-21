@@ -46,14 +46,21 @@ TEST_PROMPTS: dict[str, TestPrompt] = {
     # Excluded from --basic by requires_browser_agent; reach with --test.
     "browser-cutover": TestPrompt(
         name="browser-cutover",
-        title="Deploy cutover closes a live browser agent",
+        title="Browser Agent Survives Deploy Cutover",
         description=(
-            "Starts a long browser task, triggers a real workflow replacement mid-flight, "
-            "and asserts the old browser sub-agent is closed and its rented session released"
+            "A deploy mid-run must KILL the live browser agent (DEPLOY_INTERRUPTED) "
+            "and release its browser, not leave it stepping."
         ),
+        # Deliberately long. The first version of this test used a 9-step Hacker
+        # News read; the browser agent finished ~30s BEFORE the cutover landed, so
+        # the test passed without ever exercising a kill. The task must still be
+        # running minutes in. No login: auth walls stall on approval instead of
+        # producing the steady stream of steps this test needs.
         prompt=(
-            "Use a browser agent to go to https://news.ycombinator.com and read the titles "
-            "of the top 20 stories one at a time, then summarize the themes."
+            "Use a browser agent to go to instacart.com and collect 30 DIFFERENT "
+            "grocery items with their name and price, one at a time. Do NOT log in "
+            "or create an account — if asked to sign in, dismiss it and keep "
+            "browsing as a guest. Report all 30 items."
         ),
         timeout=900,
         requires_browser_agent=True,
