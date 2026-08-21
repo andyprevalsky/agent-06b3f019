@@ -221,6 +221,39 @@ export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): st
 }
 
 /**
+ * API key injected into the Claude Code sandbox.
+ *
+ * Prefer `CLAUDE_CODE_ANTHROPIC_API_KEY` when set so a gateway key (e.g.
+ * OpenRouter) can back the sandbox without replacing the process-wide
+ * `ANTHROPIC_API_KEY` that Rose uses against api.anthropic.com — swapping those
+ * put the shared key on cooldown and blocked every later Claude Code session.
+ */
+export function resolveClaudeCodeSandboxApiKey(
+  claudeCodeAnthropicApiKey: string | undefined,
+  anthropicApiKey: string | undefined
+): string | undefined {
+  const dedicated = claudeCodeAnthropicApiKey?.trim();
+  if (dedicated) return dedicated;
+  const shared = anthropicApiKey?.trim();
+  return shared || undefined;
+}
+
+/**
+ * When the sandbox uses a dedicated gateway key or a non-default Anthropic base
+ * URL, the shared Anthropic-org cooldown must not block session creation.
+ */
+export function shouldIgnoreAnthropicApiKeyCooldownForSandbox(params: {
+  sandboxApiKey: string | undefined;
+  sharedAnthropicApiKey: string | undefined;
+  sandboxBaseUrl: string | undefined;
+}): boolean {
+  if (params.sandboxBaseUrl) return true;
+  const sandbox = params.sandboxApiKey?.trim();
+  const shared = params.sharedAnthropicApiKey?.trim();
+  return Boolean(sandbox && shared && sandbox !== shared);
+}
+
+/**
  * True when credential lookup returned only a refreshable OAuth envelope
  * (no access token) — the post-auth_error path that hopes the CLI will refresh.
  */
@@ -378,24 +411,40 @@ export async function createClaudeCodeSession(
     credentialMeta = await fetchClaudeCodeCredentialsWithMeta(userId);
   }
 
-  const anthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  const sharedAnthropicApiKey = process.env.ANTHROPIC_API_KEY;
+  const sandboxApiKey = resolveClaudeCodeSandboxApiKey(
+    process.env.CLAUDE_CODE_ANTHROPIC_API_KEY,
+    sharedAnthropicApiKey
+  );
+  const sandboxBaseUrl = envs.ANTHROPIC_BASE_URL;
+  const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey,
+    sharedAnthropicApiKey,
+    sandboxBaseUrl,
+  });
   // A refreshable OAuth envelope after direct-token auth_error must not block the
   // funded API-key path when the envelope's refresh_token is also dead
   // (invalid_grant): Claude Code would 401 in-sandbox instead of using the key.
-  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && anthropicApiKey) {
-    const apiKeyOnCooldownForEnvelope = await isAnthropicApiKeyOnCooldown();
-    if (!apiKeyOnCooldownForEnvelope) {
+  if (credentialMeta && isRefreshOnlyOauthEnvelope(credentialMeta) && sandboxApiKey) {
+    // Dedicated gateway keys / ANTHROPIC_BASE_URL overrides are never gated by
+    // the shared Anthropic-org cooldown (that cooldown tracks api.anthropic.com).
+    const envelopeBlockedBySharedCooldown =
+      !ignoreSharedCooldown && (await isAnthropicApiKeyOnCooldown());
+    if (!envelopeBlockedBySharedCooldown) {
       log.info(
-        `Preferring ANTHROPIC_API_KEY over refresh-only OAuth envelope for agent ${agentId}`
+        `Preferring sandbox Anthropic API key over refresh-only OAuth envelope for agent ${agentId}`
       );
       credentialMeta = null;
     }
   }
 
-  // Only consult the shared cooldown when we'd actually need the fallback.
+  // Only consult the shared Anthropic-org cooldown when the sandbox would use
+  // that same shared key against api.anthropic.com.
   const apiKeyOnCooldown =
-    !credentialMeta && anthropicApiKey ? await isAnthropicApiKeyOnCooldown() : false;
-  Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, anthropicApiKey, apiKeyOnCooldown));
+    !credentialMeta && sandboxApiKey && !ignoreSharedCooldown
+      ? await isAnthropicApiKeyOnCooldown()
+      : false;
+  Object.assign(envs, resolveClaudeCodeAuthEnvs(credentialMeta, sandboxApiKey, apiKeyOnCooldown));
   const claudeTokenSource = resolveClaudeCodeTokenSource(credentialMeta);
 
   if (credentialMeta) {
@@ -403,7 +452,9 @@ export async function createClaudeCodeSession(
       `Using ${credentialMeta.source} Claude Code credentials for agent ${agentId} (integration ${credentialMeta.poolTokenId ?? 'user-owned'}, mode ${credentialMeta.credentialMode})`
     );
   } else {
-    log.info(`Using ANTHROPIC_API_KEY funded fallback for Claude Code agent ${agentId}`);
+    log.info(
+      `Using ${ignoreSharedCooldown ? 'dedicated Claude Code' : 'ANTHROPIC_API_KEY'} funded fallback for agent ${agentId}`
+    );
   }
 
   // Add GitHub config if repo specified

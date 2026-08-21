@@ -19,8 +19,10 @@ import {
   CodeAgentCredentialError,
   isRefreshOnlyOauthEnvelope,
   resolveClaudeCodeAuthEnvs,
+  resolveClaudeCodeSandboxApiKey,
   resolveCodexCodeAuthEnvs,
   resolveHostAnthropicBaseUrl,
+  shouldIgnoreAnthropicApiKeyCooldownForSandbox,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -148,6 +150,27 @@ function main(): void {
     }),
     false
   );
+
+  assert.equal(resolveClaudeCodeSandboxApiKey(undefined, 'sk-ant-shared'), 'sk-ant-shared');
+  assert.equal(
+    resolveClaudeCodeSandboxApiKey('sk-or-gateway', 'sk-ant-shared'),
+    'sk-or-gateway'
+  );
+  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey: 'sk-or-gateway',
+    sharedAnthropicApiKey: 'sk-ant-shared',
+    sandboxBaseUrl: undefined,
+  }), true);
+  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey: 'sk-ant-shared',
+    sharedAnthropicApiKey: 'sk-ant-shared',
+    sandboxBaseUrl: undefined,
+  }), false);
+  assert.equal(shouldIgnoreAnthropicApiKeyCooldownForSandbox({
+    sandboxApiKey: 'sk-ant-shared',
+    sharedAnthropicApiKey: 'sk-ant-shared',
+    sandboxBaseUrl: 'https://openrouter.ai/api',
+  }), true);
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
 }
