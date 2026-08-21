@@ -130,6 +130,38 @@ def _test_abort_survives_blanket_handlers() -> List[str]:
     return failures
 
 
+# Deferred-post queues that gather() their writes. `return_exceptions=True`
+# turns a raised WorkflowGenerationSealed into a VALUE, so unless the caller
+# inspects the results and re-raises, the stop signal is downgraded to a log
+# line and the worker keeps running on a replaced generation. This is how the
+# explore agent went quiet 1s after a cutover and then emitted one more fenced
+# write 17s later.
+QUEUE_PATHS = [
+    DOMAINS_ROOT / "spawn_agent" / "service.py",
+]
+
+
+def _test_gather_reraises_sealed() -> List[str]:
+    """A gather(return_exceptions=True) over agent writes must re-raise the seal."""
+    failures: List[str] = []
+    for path in QUEUE_PATHS:
+        source = path.read_text(encoding="utf-8")
+        if "return_exceptions=True" not in source:
+            continue
+        if "WorkflowGenerationSealed" not in source:
+            failures.append(
+                f"{path.name}: gathers agent writes with return_exceptions=True but never "
+                f"mentions WorkflowGenerationSealed — a sealed generation would be swallowed"
+            )
+            continue
+        if "raise sealed" not in source and "raise result" not in source:
+            failures.append(
+                f"{path.name}: inspects results for WorkflowGenerationSealed but never "
+                f"re-raises it — the abort is downgraded to a log line"
+            )
+    return failures
+
+
 async def run_all_tests() -> Dict[str, Any]:
     passed = 0
     failed = 0
@@ -140,6 +172,7 @@ async def run_all_tests() -> Dict[str, Any]:
         ("every /messages POST sends the generation header", _test_message_posts_send_the_header),
         ("every /messages POST aborts on a sealed generation", _test_message_posts_abort_on_409),
         ("the sealed-generation abort is never swallowed", _test_abort_survives_blanket_handlers),
+        ("gather(return_exceptions) never downgrades the abort", _test_gather_reraises_sealed),
     ):
         problems = case()
         if problems:

@@ -31,6 +31,7 @@ from domains.spawn_agent.repo import (
 )
 from domains.spawn_agent.types import VALID_AGENT_TYPES
 from helpers.tracing import span, traced
+from helpers.workflow_generation import WorkflowGenerationSealed
 from tools.base import MessageStatus
 from utils.prompts import EXPLORE_AGENT_SYSTEM_PROMPT
 from utils.tool_schemas import EXPLORE_AGENT_TOOLS
@@ -466,9 +467,20 @@ async def spawn_explore_agent_activity(
             for key, task in list(_fe_post_chain.items()):
                 if task in drained:
                     _fe_post_chain.pop(key, None)
+            sealed: Optional[BaseException] = None
             for result in results:
                 if isinstance(result, BaseException):
                     logger.warning("Explore FE post failed during drain", error=str(result))
+                    if isinstance(result, WorkflowGenerationSealed):
+                        sealed = result
+            if sealed is not None:
+                # A deploy replaced this generation. `return_exceptions=True`
+                # turns every failure into a value, so the stop signal used to be
+                # downgraded to a log line and the explore activity kept working
+                # -- it went quiet 1s after the seal, then emitted one more fenced
+                # write 17s later from this queue. Re-raise so the activity dies
+                # here, exactly as a direct post does.
+                raise sealed
 
     async def _maybe_drain_pending_fe_posts() -> None:
         if len(_pending_fe_posts) >= _FE_POST_DRAIN_THRESHOLD:
