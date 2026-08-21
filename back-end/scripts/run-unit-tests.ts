@@ -43,8 +43,13 @@ function resolveLocalDatabaseEnv(): Record<string, string> | undefined {
   const explicit = process.env.BACKEND_UNIT_DATABASE_URL?.trim();
   if (explicit) return { DATABASE_URL: explicit, DIRECT_URL: explicit };
 
-  const workspace =
-    process.env.CONDUCTOR_WORKSPACE_NAME?.trim() || basename(resolve(backendDir, '..'));
+  // The worktree DIRECTORY BASENAME is the canonical local-resource identity, not
+  // CONDUCTOR_WORKSPACE_NAME. `scripts/lib/workspace-env.sh:normalize_conductor_workspace_env`
+  // deliberately overrides a mismatched env var with the basename (a stale Conductor display name
+  // is common), and run-coverage.sh / run-blackbox-tests.sh name the container from that. Trusting
+  // the env var here resolves `victoria-db-<stale-name>`, finds nothing, and falls through to the
+  // remote DB this redirect exists to avoid.
+  const workspace = basename(resolve(backendDir, '..'));
 
   // Resolve by CONTAINER NAME, never by CONDUCTOR_PORT+5 arithmetic. Ports collide across
   // worktrees — in this repo CONDUCTOR_PORT+5 has resolved to a SIBLING workspace's
