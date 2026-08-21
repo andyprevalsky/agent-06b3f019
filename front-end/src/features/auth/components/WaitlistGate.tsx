@@ -2,7 +2,9 @@
  * STATE MACHINE: WaitlistGate
  *
  * [HIDDEN] <-- auth loading, signed out, anonymous, fully signed in, OR an
- *              admin is impersonating (the gate must never trap an operator)
+ *              admin is impersonating (the gate must never trap an operator),
+ *              OR the route is /test_payment (local benchmark merchant — must
+ *              stay reachable without invite redemption so payment gates can run)
  *     |
  *     v (authenticated non-anonymous user without a redeemed invite code)
  * [WAITLIST] -- "You're On The Waitlist!" + invite code entry
@@ -18,6 +20,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
 import { useInviteCode as redeemInviteCode } from '@/lib/api';
@@ -63,6 +66,7 @@ const WaitlistGate = () => {
     passive: true,
   });
   const impersonating = useIsImpersonating();
+  const { pathname } = useLocation();
   const [code, setCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -73,7 +77,19 @@ const WaitlistGate = () => {
   // guards and overlay make the admin switcher pill unreachable, hide admin
   // views, and block the terminal — so the admin cannot act as the account they
   // switched into, and cannot switch back either.
-  const open = !loading && isAuthenticated && !isAnonymous && !isFullySignedIn && !impersonating;
+  //
+  // /test_payment is the local benchmark merchant. Steel profiles often carry a
+  // waitlisted phone session; gating that route blanks the shop and turns
+  // payment gates into waitlist/sign-out thrash (observed 2026-08-21 on
+  // gate-subscription-card-mint-admin-bypass).
+  const isBenchmarkMerchant = pathname === '/test_payment';
+  const open =
+    !loading &&
+    isAuthenticated &&
+    !isAnonymous &&
+    !isFullySignedIn &&
+    !impersonating &&
+    !isBenchmarkMerchant;
   if (!open) return null;
 
   const handleSubmit = (e: React.FormEvent) => {
