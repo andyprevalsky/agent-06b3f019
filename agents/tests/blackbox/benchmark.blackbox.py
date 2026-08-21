@@ -3119,6 +3119,133 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment():
+    """Stale DOM index ERRORs recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    fdd449b5-2288-4890-b001-dfae973097a6 reached grounded payment_approval after
+    spawn_browser_agent ERROR "Element with index 0 not found" (title Scrolled down
+    600px), then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_Zp8HUD74TFWqfl2xUnbDeHXg",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment():
+    """Antibot pinned-host escape refusals recovered before payment must not fail closed.
+
+    Local repro: browser-imax-group-tickets agent
+    cf706f38-081a-4210-81a7-0894433babcb reached grounded payment_approval ($95.94)
+    after multiple spawn_browser_agent ERRORs refusing close_tab/switch_tab/off-host
+    click while pinned on www.google.com, then failed only on no_tool_failures.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing to leave pinned page host 'www.google.com'. "
+                    "Current page URL: https://www.google.com/sorry/index?continue=..."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_wL49vzmazTALcV6B9QsYJS40",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": (
+                    "Refusing click that navigates off pinned host 'www.google.com' "
+                    "via 'https://www.amctheatres.com/'."
+                ),
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_9yvvvs5tlkaI5gnht72jcYim",
+                    "title": 'Clicked <a "AMC Theatres - movie times, mo">',
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_counts_unrecovered_pinned_host_refusal():
+    """Pinned-host refusals with no later browser recovery still fail closed."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Refusing to leave pinned page host 'www.google.com'. Current page URL: https://www.google.com/.",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_pin",
+                    "title": "close_tab",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data) == [
+        "spawn_browser_agent call_terminal_pin status=ERROR"
+    ]
+    assert _run_declared_static_check(evaluator, data)[0] is False
+
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -3203,6 +3330,77 @@ def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     assert _tool_runtime_failures(still_fails) == [
         "spawn_browser_agent call_real_failure status=ERROR"
     ]
+
+
+def test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field():
+    """Live agent API exposes body as `text`; ignore must not require artifact `message`.
+
+    Local repro: browser-imax-group-tickets agent
+    00479d10-d10a-46d9-8103-631bf8586ffa reached payment_approval after the same
+    Element with index 0 not found ERROR, but live evaluation still failed
+    no_tool_failures because `_tool_runtime_failures` only read `message` while
+    GET /api/agents/:id returns `text`.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_7LpBdNsmsuxr9qlZcJNKey7Q",
+                    "title": "Scrolled down 450px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card_api",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
+def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
+    """A terminal unrecovered DOM index miss remains a grounded tool failure."""
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_terminal_index_miss",
+                    "title": "Scrolled down 600px",
+                    "error": True,
+                },
+            }
+        ]
+    }
+    failures = _tool_runtime_failures(data)
+    assert failures == ["spawn_browser_agent call_terminal_index_miss status=ERROR"]
+    passed, reason = _run_declared_static_check(evaluator, data)
+    assert passed is False
+    assert "tool failure" in reason.lower()
 
 
 def test_completion_summary_and_sms_static_checks_are_fail_closed():
@@ -4069,7 +4267,8 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     expecting a bare write_lock could never be satisfied. Rather than requiring
     both approvals in order — which would mean the benchmark actually buys three
     tickets every run — the task now terminates at exactly one unresolved
-    payment approval, and the judge owns what that approval must say.
+    payment approval. Pass criteria are static_check only (same shape as
+    browser-event-ticket); no LLM adjacency/earliest-showtime judge.
     """
     from benchmarks.benchmark_tasks import get_task_by_name
 
@@ -4082,17 +4281,57 @@ async def test_imax_poll_requires_payment_then_purchase_write_lock():
     assert task.success_on_payment_card_request is True
     assert getattr(task, "expected_attention_kinds", None) in (None, [], ["payment_approval"])
 
-    semantic = next(e for e in task.evaluators if e["method"] != "static_check")
-    criteria = " ".join(semantic["criteria"]).lower()
-    # Approval contents stay judge-owned, never substring-matched.
-    static_types = {c["type"] for e in task.evaluators if e["method"] == "static_check" for c in e["checks"]}
+    assert [e["method"] for e in task.evaluators] == ["static_check"]
+    assert not any(e.get("id") == "imax-group-ticket-adjacency-semantics" for e in task.evaluators)
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    static_types = {c["type"] for c in static["checks"]}
     assert "approval_request_details" not in static_types
-    for required in ("venue", "date", "showtime", "seat", "total amount"):
+    # Payment-terminal stop leaves the root ACTIVE awaiting ignored approval —
+    # requiring COMPLETED fails closed after a grounded payment_approval (agent
+    # 5bcb4a80-9c0e-4521-ab9a-a7ae0e471181). Align with browser-event-ticket.
+    assert "agent_status" not in static_types
+    assert any(
+        "unresolved payment-card approval" in line.lower() for line in static.get("criteria", [])
+    )
+    criteria = " ".join(static.get("criteria", [])).lower()
+    for required in ("metreon", "date", "showtime", "seat", "total amount"):
         assert required in criteria
-    assert "unresolved payment approval" in criteria
 
-    prompt = semantic["judge_prompt"].lower()
-    assert "do not require or accept an approved charge or completed purchase" in prompt
+
+def test_imax_runtime_contract_allows_active_after_payment_approval():
+    """Declared static checks must not require COMPLETED on payment-terminal stop.
+
+    Local repro: browser-imax-group-tickets agent
+    5bcb4a80-9c0e-4521-ab9a-a7ae0e471181 reached payment_approval (~$95.94) with
+    no tool failures, then failed only on agent_status ACTIVE vs COMPLETED.
+    """
+    from benchmarks.benchmark_tasks import get_task_by_name
+    from benchmarks.run_benchmark import _run_declared_static_check
+
+    task = get_task_by_name("browser-imax-group-tickets")
+    static = next(e for e in task.evaluators if e["method"] == "static_check")
+    data = {
+        "agent": {"status": "ACTIVE", "progress": 0.01},
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment",
+                    "title": "Payment card requested ($95.94)",
+                },
+            }
+        ],
+        "_benchmark": {"approvals_triggered": 1},
+    }
+    assert "agent_status" not in {c["type"] for c in static["checks"]}
+    assert _run_declared_static_check(task, static, data) == (
+        True,
+        "All declared static checks passed",
+    )
 
 async def test_invalid_payment_receipt_still_records_typed_attention_observation():
     """Receipt validation failures must retain the payment attention that carried them."""
@@ -14270,6 +14509,26 @@ async def run_all_tests():
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
     )
     r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_pinned_host_refusal",
+        test_no_tool_failures_ignores_recoverable_pinned_host_refusal_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_counts_unrecovered_pinned_host_refusal",
+        test_no_tool_failures_counts_unrecovered_pinned_host_refusal,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field,
+    )
+    r.record(
+        "declared_static_no_tool_failures_rejects_unrecovered_element_index_miss",
+        test_no_tool_failures_still_rejects_unrecovered_element_index_miss,
+    )
+    r.record(
         "declared_static_no_tool_failures_ignores_stale_dom_node",
         test_no_tool_failures_ignores_intermediate_stale_dom_node_errors,
     )
@@ -14340,6 +14599,10 @@ async def run_all_tests():
     await r.record_async(
         "imax_payment_then_purchase_write_lock",
         test_imax_poll_requires_payment_then_purchase_write_lock,
+    )
+    r.record(
+        "imax_runtime_contract_allows_active_after_payment",
+        test_imax_runtime_contract_allows_active_after_payment_approval,
     )
     await r.record_async(
         "invalid_payment_receipt_records_attention",
