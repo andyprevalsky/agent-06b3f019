@@ -28,9 +28,11 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../database';
-import { startAgentWorkflow } from '../temporal';
+import { startAgentWorkflowExecution } from '../temporal';
 import { normalizeWorldModelMode } from '../worldModelMode';
 import { createMessage } from '../messages';
+import { acceptChatWorkflowExecution } from '../workflowGeneration';
+import { terminateStaleTemporalWorkflow } from '../workflowReplacement';
 import { callRouterLlm, RouterDecision, type ChatLlmUsage } from './routerLlm';
 import { callGeneratorLlm } from './generatorLlm';
 import { selectChatPhaseModels } from './phaseModels';
@@ -373,23 +375,24 @@ async function startTemporalWorkflowForChat(
   userId: string,
   goal: string,
   startPhase: 'plan' | 'execute' = 'plan'
-): Promise<void> {
+): Promise<boolean> {
   // Fetch agent to get model and verifier
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
     include: { verifier: true },
   });
 
-  if (!agent) {
+  if (agent === null) {
     throw new Error(`Agent ${agentId} not found`);
   }
 
-  if (!agent.verifier) {
+  if (agent.verifier === null) {
     throw new Error(`Agent ${agentId} has no verifier`);
   }
+  if (agent.temporalWorkflowId !== null || agent.status !== 'ACTIVE') return false;
 
   // Start Temporal workflow (existing function)
-  const workflowId = await startAgentWorkflow(
+  const execution = await startAgentWorkflowExecution(
     buildChatTemporalStartParams({
       agentId,
       userId,
@@ -406,21 +409,21 @@ async function startTemporalWorkflowForChat(
       },
     })
   );
-
-  // Update agent with workflow ID
-  await prisma.agent.update({
-    where: { id: agentId },
-    data: { temporalWorkflowId: workflowId },
-  });
+  const accepted = await acceptChatWorkflowExecution(agentId, execution);
+  if (!accepted) {
+    await terminateStaleTemporalWorkflow(execution, agentId);
+    return false;
+  }
 
   // Broadcast that agent mode started (FE can show different UI)
   await broadcastAgentModeStarted(agentId);
 
   log.info('[ChatHandler] Escalated to agent mode', {
     agentId,
-    workflowId,
+    workflowId: execution.workflowId,
     goal: goal.substring(0, 100),
   });
+  return true;
 }
 
 function recordChatUsage(
