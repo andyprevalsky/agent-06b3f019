@@ -11399,6 +11399,7 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 

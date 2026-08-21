@@ -437,6 +437,7 @@ their assertions or test counts:
 `bash scripts/tests/kill-services.test.sh`,
 `bash scripts/tests/deploy-worktree-preflight.test.sh`,
 `bash scripts/tests/seed-cache-decision.test.sh`,
+`bash scripts/tests/canonical-seed-whatsapp-content.test.sh`,
 `bash scripts/tests/seed-memory-ratchet.test.sh`,
 `bash scripts/tests/semantic-deploy-gate.test.sh`,
 `bash scripts/tests/check-agent-behavior-approval.test.sh`,
@@ -467,12 +468,16 @@ bash scripts/run-deploy-stage deploy-command-structural --reuse-passed -- \
   python3 scripts/run-deploy-structural-gates.py
 bash scripts/run-deploy-stage seed-cache-decision --reuse-passed -- \
   bash scripts/tests/seed-cache-decision.test.sh
+bash scripts/run-deploy-stage canonical-seed-whatsapp-content --reuse-passed -- \
+  bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 ```
 
 These tests execute the workspace identity boundary with a stale Conductor display name and verify that the DB container, DB volume, and Temporal queue all use the normalized worktree identity. `setup-db-concurrency.test.sh` pins that two concurrent `scripts/setup-db.sh` invocations for one workspace serialize their destructive reset/push/seed instead of wiping each other's in-flight prod sync. They also enforce that `/deploy` keeps this gate and the bounded production workflow migration wired into every run. `check-agent-behavior-approval.test.sh` pins the Step 0b guard's detection logic (it fires on recovery/terminal-semantics hunks, passes on comment/logging noise and unwatched files).
 The separately logged seed-cache decision suite preserves the atomic shared-dump
 and Prisma-freshness contract introduced before the concurrent structural
-runner.
+runner. `canonical-seed-whatsapp-content.test.sh` pins that the whatsapp-v2
+canonical base restores reviewed WhatsApp rows (and that publish refuses a
+cold-sync substitute).
 
 ## Step 4a: Back-end coverage + blackbox (skip if no back-end/ changes)
 

@@ -3381,6 +3381,8 @@ read -r warm_state warm_kind warm_cpus warm_memory <<< "$warm_shape"
 # Concurrent maintenance (or a sibling fleet's park/update) can leave the shared
 # warm donor in started/stopping/replacing. Wait for stopped instead of aborting
 # the whole fleet on a transient race — clones still require a stopped source.
+# Never stop the warm machine ourselves (another workspace may own an in-flight
+# prepare_warm_source); only poll via cloudbench_wait_machine_stopped.
 if [ "$warm_state" != "stopped" ]; then
     echo "⏳ warm source is $warm_state; waiting until stopped before fleet provisioning"
     warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"
