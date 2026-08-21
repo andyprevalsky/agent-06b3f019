@@ -174,28 +174,37 @@ export async function handleChatMessage(config: {
 
     // Start Temporal workflow immediately - NO more LLM calls
     // Pass mode to determine whether to skip PLAN phase
-    const started = await startTemporalWorkflowForChat(
-      config.agentId,
-      config.userId,
-      decision.goal,
-      decision.mode // 'plan' or 'execute'
-    );
+    let started: boolean;
+    try {
+      started = await startTemporalWorkflowForChat(
+        config.agentId,
+        config.userId,
+        decision.goal,
+        decision.mode // 'plan' or 'execute'
+      );
+    } catch (error) {
+      // Acceptance can fail after IN_PROGRESS is persisted (and after Temporal
+      // start + terminate cleanup). Finish the tool so the UI never spins forever.
+      log.error('[ChatHandler] Cloud Agent escalation failed after tool start', {
+        agentId: config.agentId,
+        error,
+      });
+      await finishRejectedCloudAgentTool({
+        agentId: config.agentId,
+        toolCallId: cloudAgentToolCallId,
+        startPhase: decision.mode,
+        text: 'Could not start Cloud Agent — workflow acceptance failed',
+      });
+      return { status: 'complete', decision };
+    }
     if (!started) {
       // Agent became ineligible between router decision and start (already has a
       // workflow, or left ACTIVE). Do not report escalation that did not occur.
-      await createMessage({
+      await finishRejectedCloudAgentTool({
         agentId: config.agentId,
-        role: 'TOOL',
+        toolCallId: cloudAgentToolCallId,
+        startPhase: decision.mode,
         text: 'Could not start Cloud Agent — agent is no longer eligible to escalate',
-        skipDuplicateToolCheck: true,
-        metadata: {
-          toolCallId: cloudAgentToolCallId,
-          toolName: CLOUD_AGENT_TOOL_NAME,
-          toolStatus: 'FINISHED',
-          title: CREATING_CLOUD_AGENT_TITLE,
-          startPhase: decision.mode,
-          error: true,
-        },
       });
       return { status: 'complete', decision };
     }
@@ -353,6 +362,31 @@ export async function handleChatMessage(config: {
   });
 
   return { status: 'complete', decision };
+}
+
+// ============================================
+// Helper: Terminalize a rejected Cloud Agent tool
+// ============================================
+async function finishRejectedCloudAgentTool(params: {
+  agentId: string;
+  toolCallId: string;
+  startPhase: 'plan' | 'execute';
+  text: string;
+}): Promise<void> {
+  await createMessage({
+    agentId: params.agentId,
+    role: 'TOOL',
+    text: params.text,
+    skipDuplicateToolCheck: true,
+    metadata: {
+      toolCallId: params.toolCallId,
+      toolName: CLOUD_AGENT_TOOL_NAME,
+      toolStatus: 'FINISHED',
+      title: CREATING_CLOUD_AGENT_TITLE,
+      startPhase: params.startPhase,
+      error: true,
+    },
+  });
 }
 
 // ============================================
