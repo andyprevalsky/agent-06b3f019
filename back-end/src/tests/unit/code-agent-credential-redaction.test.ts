@@ -26,6 +26,7 @@ import {
   shouldPreferSandboxAnthropicBaseUrlOverFastMode,
   shouldEnableClaudeCodeFastMode,
   shouldInjectClaudeCodeFastModeProxy,
+  shouldSkipSandboxAnthropicGatewayForOauth,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -288,6 +289,29 @@ function main(): void {
       preferSandboxBase: true,
     }),
     false
+  );
+
+  // OAuth must not ride OpenRouter / funded gateway base URLs.
+  assert.equal(shouldSkipSandboxAnthropicGatewayForOauth(null), false);
+  assert.equal(
+    shouldSkipSandboxAnthropicGatewayForOauth({
+      credentials: '{"claudeAiOauth":{}}',
+      accessToken: 'oauth-access',
+      source: 'user',
+      poolTokenId: null,
+      credentialMode: 'oauth_token',
+    } as never),
+    true
+  );
+  assert.equal(
+    shouldSkipSandboxAnthropicGatewayForOauth({
+      credentials: '{"claudeAiOauth":{"refreshToken":"r"}}',
+      accessToken: undefined,
+      source: 'user',
+      poolTokenId: null,
+      credentialMode: 'oauth_envelope',
+    } as never),
+    true
   );
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
