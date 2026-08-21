@@ -14,7 +14,7 @@ import { basename, dirname } from 'path';
 import { existsSync, watch, type FSWatcher } from 'fs';
 import { logConsole, logConsoleError } from '../../base/logger';
 import { AuthService } from '../../services/auth';
-import { accessTokenIsImpersonated } from '../auth/impersonation';
+import { accessTokenIsImpersonated } from '../../base/impersonation';
 import { IMessageSync } from '../../services/iMessageSync';
 import { BrowserStateSync } from '../../services/browserStateSync';
 import { ClaudeCredentialSync } from '../../services/claudeCredentialSync';

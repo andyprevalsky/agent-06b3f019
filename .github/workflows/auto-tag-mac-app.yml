@@ -7,12 +7,21 @@ on:
 permissions:
   contents: write
 
+# Two PRs merging at once would otherwise both read the same latest tag and
+# compute the same next version — the second push then fails and that merge
+# never ships. Serialize tag creation instead of racing for it.
+concurrency:
+  group: auto-tag-mac-app
+  cancel-in-progress: false
+
 jobs:
   auto-tag:
-    # Only run when a PR with 'MAC-APP-RELEASE' label is merged
+    # Every merge into main is evaluated; the decision script below decides
+    # whether this merge actually changed the shipped Mac surface. The
+    # MAC-APP-RELEASE label is still honored as an explicit override.
     if: >-
       github.event.pull_request.merged == true &&
-      contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE')
+      github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
 
     steps:
@@ -23,8 +32,40 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GH_UPDATE_TOKEN }}
 
-      - name: Create and push tag
+      - name: Decide whether this merge ships the Mac app
+        id: decide
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          MAC_APP_RELEASE_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'MAC-APP-RELEASE') }}
         run: |
+          set -euo pipefail
+
+          # First parent of the merge commit is the previous main, so this diff
+          # is exactly what the PR added to main.
+          git diff --name-only "${MERGE_SHA}^1" "${MERGE_SHA}" > changed-files.txt
+          echo "Changed files in this merge:"
+          cat changed-files.txt
+
+          DECISION="$(scripts/mac-app-release-decision < changed-files.txt)"
+          echo "$DECISION"
+          echo "$DECISION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        if: steps.decide.outputs.ship == 'true'
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          REASON: ${{ steps.decide.outputs.reason }}
+        run: |
+          set -euo pipefail
+
+          # A rerun of this workflow must not cut a second release for a commit
+          # that already has one.
+          EXISTING="$(git tag --points-at "$MERGE_SHA" | head -1)"
+          if [ -n "$EXISTING" ]; then
+            echo "Commit $MERGE_SHA already tagged as $EXISTING — nothing to ship."
+            exit 0
+          fi
+
           LATEST_TAG=$(git tag --sort=-v:refname | head -1)
           V="${LATEST_TAG#v}"
           MAJOR=$(echo "$V" | cut -d. -f1)
@@ -33,8 +74,14 @@ jobs:
           NEW_PATCH=$((PATCH + 1))
           TAG="v${MAJOR}.${MINOR}.${NEW_PATCH}"
 
+          echo "Release reason: $REASON"
           echo "Latest tag: $LATEST_TAG"
           echo "New tag: $TAG"
 
           git tag "$TAG"
           git push origin "$TAG"
+
+      - name: Explain a skipped release
+        if: steps.decide.outputs.ship != 'true'
+        run: |
+          echo "No shipped Mac surface changed (reason: ${{ steps.decide.outputs.reason }}) — skipping release."

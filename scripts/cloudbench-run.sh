@@ -198,6 +198,7 @@ read -r -a BENCH_TASK_LIST <<< "$(printf '%s' "$BENCH_TASKS" | tr ',' ' ')"
 TASK_WORKER_ENV=()
 BENCH_NEEDS_BUNDLED_FRONTEND=0
 BENCH_NEEDS_AGENTCARD_ONBOARDING=0
+BENCH_NEEDS_PAYMENT_FIXTURE=0
 TASK_GATE_PYTHON="${CLOUDBENCH_TASK_GATE_PYTHON:-}"
 if [ -z "$TASK_GATE_PYTHON" ] && [ -x "$REPO_DIR/agents/venv/bin/python" ]; then
     TASK_GATE_PYTHON="$REPO_DIR/agents/venv/bin/python"
@@ -230,7 +231,12 @@ case "$task_gate_status" in
 esac
 for task_name in "${BENCH_TASK_LIST[@]}"; do
     case "$task_name" in
-        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume|gate-subscription-card-mint|gate-kyc-card-mint)
+        agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)
+            BENCH_NEEDS_BUNDLED_FRONTEND=1
+            BENCH_NEEDS_AGENTCARD_ONBOARDING=1
+            BENCH_NEEDS_PAYMENT_FIXTURE=1
+            ;;
+        gate-subscription-card-mint|gate-kyc-card-mint)
             BENCH_NEEDS_BUNDLED_FRONTEND=1
             BENCH_NEEDS_AGENTCARD_ONBOARDING=1
             ;;
@@ -642,11 +648,26 @@ fi
 if [ "$BENCH_NEEDS_AGENTCARD_ONBOARDING" = "1" ]; then
     STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")
 fi
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    STACK_ENV+=(
+        "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1"
+        "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30"
+    )
+fi
 if [ -n "$FRONTEND_SUPABASE_URL" ]; then
     STACK_ENV+=("VITE_SUPABASE_URL=$FRONTEND_SUPABASE_URL")
 fi
 if [ -n "$FRONTEND_SUPABASE_ANON_KEY" ]; then
     STACK_ENV+=("VITE_SUPABASE_ANON_KEY=$FRONTEND_SUPABASE_ANON_KEY")
+fi
+# Resolve catalog target before stack launch. Production-only tasks run with
+# --prod against roselabs.ai — they must not depend on trycloudflare/ngrok for
+# stack health (NXDOMAIN / missing ngrok on clones was killing fleets before
+# the start barrier even though the public tunnel was never used as {frontend_url}).
+BENCH_TARGET_MODE_FOR_STACK=""
+if BENCH_TARGET_PLAN_FOR_STACK="$(python3 "$BENCHMARK_TARGET_SCRIPT" \
+    "$REPO_DIR/agents/benchmarks/tasks.json" "$BASE_PORT" "${BENCH_TASK_LIST[@]}" 2>/dev/null)"; then
+    BENCH_TARGET_MODE_FOR_STACK="$(printf '%s\n' "$BENCH_TARGET_PLAN_FOR_STACK" | head -1)"
 fi
 if [ "$BENCH_SIMULATE" = "1" ]; then
     STACK_ENV+=(
@@ -655,6 +676,12 @@ if [ "$BENCH_SIMULATE" = "1" ]; then
         "BENCHMARK_SKIP_BROWSER_AUTH_SYNC=1"
         "BENCHMARK_WMH_FALLBACK_ON_UNAVAILABLE=1"
         "WMH_BASE_URL=http://localhost:$WMH_PORT"
+    )
+elif [ "$BENCH_TARGET_MODE_FOR_STACK" = "prod" ]; then
+    log "production-only target — skipping public tunnel (frontend is production)"
+    STACK_ENV+=(
+        "BENCHMARK_SKIP_WMH_BUILD=1"
+        "BENCHMARK_SKIP_PUBLIC_TUNNEL=1"
     )
 else
     STACK_ENV+=(
@@ -761,6 +788,32 @@ if ! $STACK_READY; then
     finish 1
 fi
 log "stack healthy — backend :$BACKEND_PORT, WMH :$WMH_PORT, dashboard :$BENCH_DASHPORT"
+if [ "$BENCH_NEEDS_PAYMENT_FIXTURE" = "1" ]; then
+    PAYMENT_USER_ID="${BENCHMARK_AGENT_PAYMENT_USER_ID:-1f85ff25-6e29-4c1b-8739-f917bd101a30}"
+    STACK_DB_URL="$(python3 - "$MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+manifest = json.loads(Path(sys.argv[1]).read_text())
+database = manifest.get("database") or {}
+url = (database.get("url") or "").strip()
+if not url:
+    port = database.get("port") or (manifest.get("ports") or {}).get("local_db") or 5432
+    name = database.get("name") or "victoria"
+    url = f"postgresql://postgres:postgres@localhost:{port}/{name}"
+print(url)
+PY
+)"
+    log "seeding isolated payment fixture for $PAYMENT_USER_ID"
+    if ! gosu "$APP_USER" env \
+        DATABASE_URL="$STACK_DB_URL" \
+        DIRECT_URL="$STACK_DB_URL" \
+        BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1 \
+        sh -c 'cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"' \
+          sh "$REPO_DIR/back-end" "$PAYMENT_USER_ID"; then
+        log "FATAL: setup-benchmark-payment.ts failed for $PAYMENT_USER_ID"
+        finish 1
+    fi
+fi
 wait_for_benchmark_frontend_url || finish 1
 
 # Fleet batches hold every task here until every isolated stack is healthy.
@@ -875,6 +928,10 @@ if [ '$BENCH_NEEDS_AGENTCARD_ONBOARDING' = '1' ]; then
   export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'
 else
   unset AGENTCARD_ONBOARDING_RETURN_URL
+fi
+if [ '$BENCH_NEEDS_PAYMENT_FIXTURE' = '1' ]; then
+  export BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1
+  export BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30
 fi
 $TASK_WORKER_EXPORTS
 if [ '$BENCH_SIMULATE' = '1' ]; then

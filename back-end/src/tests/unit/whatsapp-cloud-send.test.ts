@@ -6,7 +6,7 @@
  * contract the SMS supervisor's delivery loop depends on.
  */
 import assert from 'node:assert';
-import { sendWhatsAppMessage } from '../../providers/whatsappCloud';
+import { sendWhatsAppMessage, sendWhatsAppTemplate } from '../../providers/whatsappCloud';
 
 type FetchArgs = { url: string; init: RequestInit };
 
@@ -143,8 +143,29 @@ async function testNotConfigured(): Promise<void> {
 }
 
 async function testRecipientUnreachableCodes(): Promise<void> {
-  // Meta deliverability codes → recipientUnreachable (stop mirroring to this number).
-  for (const code of [131026, 131030, 131047, 470]) {
+  // Only 131026 (recipient is not a valid WhatsApp user) flags recipientUnreachable.
+  await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ error: { message: 'x', code: 131026 } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppMessage('+15551234567', 'hi');
+      assert.strictEqual(result.success, false, 'code 131026 is a failure');
+      assert.strictEqual(
+        result.recipientUnreachable,
+        true,
+        'code 131026 must flag recipientUnreachable'
+      );
+    }
+  );
+  // Test-allow-list (131030) and closed-window re-engagement (131047/470) are
+  // message-level failures against a still-reachable recipient: they fail the
+  // send but must NOT flip whatsappReachable (the number is reachable via a
+  // template), so recipientUnreachable stays false.
+  for (const code of [131030, 131047, 470]) {
     await withMockedFetch(
       () =>
         new Response(JSON.stringify({ error: { message: 'x', code } }), {
@@ -155,10 +176,10 @@ async function testRecipientUnreachableCodes(): Promise<void> {
       async () => {
         const result = await sendWhatsAppMessage('+15551234567', 'hi');
         assert.strictEqual(result.success, false, `code ${code} is a failure`);
-        assert.strictEqual(
+        assert.notStrictEqual(
           result.recipientUnreachable,
           true,
-          `code ${code} must flag recipientUnreachable`
+          `code ${code} must NOT flag recipientUnreachable (reachable via template)`
         );
       }
     );
@@ -198,6 +219,73 @@ async function testNetworkThrow(): Promise<void> {
   );
 }
 
+async function testTemplateSendShape(): Promise<void> {
+  const calls = await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ messages: [{ id: 'wamid.TMPL' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppTemplate('+15551234567', 'onboarding_welcome', 'en_US', [
+        'Andy',
+      ]);
+      assert.strictEqual(result.success, true, 'template send success');
+      assert.strictEqual(result.messageSid, 'wamid.TMPL', 'messageSid from messages[0].id');
+    }
+  );
+  assert.strictEqual(calls.length, 1, 'exactly one Graph API call');
+  const body = JSON.parse(String(calls[0].init.body)) as Record<string, unknown>;
+  assert.strictEqual(body.type, 'template', 'type is template (bypasses 24h window)');
+  assert.strictEqual(body.to, '15551234567', "recipient strips the leading '+'");
+  const template = body.template as Record<string, unknown>;
+  assert.strictEqual(template.name, 'onboarding_welcome', 'template name');
+  assert.deepStrictEqual(template.language, { code: 'en_US' }, 'template language');
+  assert.deepStrictEqual(
+    template.components,
+    [{ type: 'body', parameters: [{ type: 'text', text: 'Andy' }] }],
+    'body variable {{1}} filled with first name'
+  );
+}
+
+async function testTemplateOmitsEmptyComponents(): Promise<void> {
+  const calls = await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ messages: [{ id: 'wamid.X' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      await sendWhatsAppTemplate('+15551234567', 'no_vars', 'en_US');
+    }
+  );
+  const template = (JSON.parse(String(calls[0].init.body)) as Record<string, unknown>)
+    .template as Record<string, unknown>;
+  assert.ok(!('components' in template), 'no components key when there are no body params');
+}
+
+async function testTemplateRecipientUnreachable(): Promise<void> {
+  // The template path reuses the shared POST helper, so a Meta deliverability
+  // code must still surface recipientUnreachable (onboarding mirror -> mark false).
+  await withMockedFetch(
+    () =>
+      new Response(JSON.stringify({ error: { message: 'x', code: 131026 } }), {
+        status: 400,
+        headers: { 'content-type': 'application/json' },
+      }),
+    CONFIGURED,
+    async () => {
+      const result = await sendWhatsAppTemplate('+15551234567', 'onboarding_welcome', 'en_US', [
+        'Andy',
+      ]);
+      assert.strictEqual(result.success, false, 'undeliverable template is a failure');
+      assert.strictEqual(result.recipientUnreachable, true, 'flags recipientUnreachable');
+    }
+  );
+}
+
 async function main(): Promise<void> {
   await testSendSuccess();
   await testSendApiError();
@@ -205,7 +293,10 @@ async function main(): Promise<void> {
   await testTransientNotDefinitive();
   await testNotConfigured();
   await testNetworkThrow();
-  process.stdout.write('PASS sendWhatsAppMessage request shape + result contract\n');
+  await testTemplateSendShape();
+  await testTemplateOmitsEmptyComponents();
+  await testTemplateRecipientUnreachable();
+  process.stdout.write('PASS sendWhatsAppMessage/Template request shape + result contract\n');
 }
 
 void main();

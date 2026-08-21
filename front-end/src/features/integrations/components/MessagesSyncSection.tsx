@@ -14,7 +14,6 @@ import { Button } from '@/components/ui/button';
 
 import { hasDamagedGmailAccount } from '../hooks/useIntegrationData';
 import type { ConnectedIntegration, MessageSyncType } from '../types';
-import ConnectedAccountChip from './ConnectedAccountChip';
 import DropdownIconFrame, { DropdownIconPreset, warningGlowGradient } from './DropdownIconFrame';
 import GmailRow from './GmailRow';
 import {
@@ -22,19 +21,21 @@ import {
   IMessageIcon,
   MessengerIcon,
   TelegramIcon,
-  WhatsAppIcon,
 } from './MessageSyncIcons';
 import SectionToggleButton from './SectionToggleButton';
+import WhatsAppRow from './WhatsAppRow';
 import SyncItemButton from './SyncItemButton';
 
 interface MessagesSyncSectionProps {
   expanded: boolean;
   onToggle: () => void;
   isIMessageAvailable: boolean;
+  isWhatsAppAvailable: boolean;
   iMessageSynced: boolean;
   whatsAppConnected: boolean;
   messageSyncLoading: MessageSyncType | null;
   onIMessageSync: () => void;
+  onWhatsAppConnect: () => void;
   connectedIntegrations: ConnectedIntegration[];
   connectingProvider: 'gmail' | null;
   disconnectingEmail: string | null;
@@ -120,48 +121,16 @@ function IMessageRow({
   );
 }
 
-function WhatsAppRow({ connected }: { connected: boolean }) {
-  if (connected) {
-    return (
-      <div className="px-4 py-2 flex items-center justify-between border-b border-border/50">
-        <div className="flex items-center gap-3">
-          <DropdownIconFrame {...DropdownIconPreset.whatsapp} isSynced>
-            <WhatsAppIcon />
-          </DropdownIconFrame>
-          <span className="truncate text-sm">WhatsApp</span>
-        </div>
-        <ConnectedAccountChip label="Synced" tone="synced" />
-      </div>
-    );
-  }
-  return (
-    <div className="px-4 py-2 flex items-center justify-between flex-wrap gap-2 border-b border-border/50">
-      <div className="flex items-center gap-3">
-        <DropdownIconFrame {...DropdownIconPreset.whatsapp}>
-          <WhatsAppIcon />
-        </DropdownIconFrame>
-        <div className="flex items-center gap-2">
-          <span className="text-sm">WhatsApp</span>
-          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-            Desktop Only
-          </span>
-        </div>
-      </div>
-      <Button size="sm" variant="outline" asChild>
-        <a href="/download">Download for Mac</a>
-      </Button>
-    </div>
-  );
-}
-
 export default function MessagesSyncSection({
   expanded,
   onToggle,
   isIMessageAvailable,
+  isWhatsAppAvailable,
   iMessageSynced,
   whatsAppConnected,
   messageSyncLoading,
   onIMessageSync,
+  onWhatsAppConnect,
   connectedIntegrations,
   connectingProvider,
   disconnectingEmail,
@@ -213,7 +182,12 @@ export default function MessagesSyncSection({
             onGmailDisconnect={onGmailDisconnect}
             onGmailResync={onGmailResync}
           />
-          <WhatsAppRow connected={whatsAppConnected} />
+          <WhatsAppRow
+            connected={whatsAppConnected}
+            isAvailable={isWhatsAppAvailable}
+            isLoading={messageSyncLoading === 'whatsapp'}
+            onConnect={onWhatsAppConnect}
+          />
           <ComingSoonRow
             icon={<TelegramIcon />}
             iconFrameProps={DropdownIconPreset.telegram}

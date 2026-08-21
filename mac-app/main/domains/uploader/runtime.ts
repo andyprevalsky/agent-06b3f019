@@ -21,7 +21,7 @@ import {
 import {
   accessTokenIsImpersonated,
   IMPERSONATED_MACHINE_DATA_MESSAGE,
-} from '../auth/impersonation';
+} from '../../base/impersonation';
 import { getErrorMessageOrFallback } from '../../../shared/utils/error';
 import { postWhatsAppConnect } from './repo';
 import { dispatchUploadWithTransportRetry, resolveStrategy } from './service';

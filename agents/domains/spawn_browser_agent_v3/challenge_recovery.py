@@ -331,20 +331,42 @@ async def verify_live_page_cleared_challenge(
     )
 
 
-_PAYMENT_DOCUMENT_URL_MARKERS = (
-    "checkout",
-    "payment",
-    "billing",
-    "/pay",
-    "purchase",
-    "/cart",
-)
+async def live_tab_looks_challenged(page: Any) -> bool:
+    """True when the live tab's current document still looks challenged.
+
+    Used to no-op LLM-requested ``recover_from_challenge`` when the page is
+    already clean — avoids burning the step budget on recovery loops that the
+    model invents from network noise. Does NOT replace provider-exit recovery:
+    callers must still run full recovery when ``provider_exit_rejected`` is set
+    (page shell can look clean while a critical third-party resource is blocked).
+    """
+    try:
+        snapshot = await asyncio.wait_for(
+            asyncio.gather(
+                page.title(),
+                page.locator("body").inner_text(timeout=2_000),
+                page.content(),
+                return_exceptions=True,
+            ),
+            timeout=15,
+        )
+    except Exception:
+        # Unknown page state — do not claim "clean" and skip recovery.
+        return True
+    title = snapshot[0] if isinstance(snapshot[0], str) else ""
+    body_text = snapshot[1] if isinstance(snapshot[1], str) else ""
+    html = snapshot[2] if isinstance(snapshot[2], str) else ""
+    return page_looks_challenged(
+        status=None,
+        title=title[:1_000],
+        body_text=body_text[:20_000],
+        html=html[:100_000],
+    )
 
 
-def target_looks_like_payment_document(url: str) -> bool:
-    """URL heuristic for payment/checkout documents (network-exit scoping)."""
-    lowered = (url or "").lower()
-    return any(marker in lowered for marker in _PAYMENT_DOCUMENT_URL_MARKERS)
+def target_looks_like_payment_document(_url: str) -> bool:
+    """Deprecated: path allowlists are forbidden. Always False."""
+    return False
 
 
 def blocked_resource_urls_for_verify(urls: Sequence[str] | None) -> Tuple[str, ...]:
@@ -451,10 +473,8 @@ async def verify_live_blocked_resources(
 
 
 async def verify_live_stripe_js_loads(page: Any, *, timeout_ms: int = 12_000) -> bool:
-    """Deprecated Stripe helper — prefer verify_live_blocked_resources."""
-    return await verify_live_blocked_resources(
-        page, ("https://js.stripe.com/v3",), timeout_ms=timeout_ms
-    )
+    """Deprecated — prefer verify_live_blocked_resources with the blocked URL."""
+    return await verify_live_blocked_resources(page, (), timeout_ms=timeout_ms)
 
 
 async def commit_cookie_removals(

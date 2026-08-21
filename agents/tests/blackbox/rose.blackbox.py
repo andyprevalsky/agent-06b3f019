@@ -120,9 +120,47 @@ def test_pool_for_model_fuzzy():
     assert pool_for_model("rose-labs/something-ultra-new") == "rose-1-ultra"
     assert pool_for_model("rose-labs/something-mini") == "rose-1-mini"
     assert pool_for_model("rose-labs/new-browser-use") == "rose-1-browser-use"
+    assert pool_for_model("rose-labs/rose-1-oss") == "rose-1-oss"
+    assert pool_for_model("rose-labs/something-oss") == "rose-1-oss"
     assert pool_for_model("rose-labs/something-else") == "rose-1-lite"
     assert pool_for_model("openai/gpt-4") is None
     assert pool_for_model("") is None
+
+
+def test_oss_pool_is_open_weights_only():
+    """rose-1-oss must serve ONLY its open-weights waterfall.
+
+    The pool exists so a task whose prompt the frontier primaries decline can be
+    pinned to an open-source model. If a direct-token (claudeAuth / gptAuth)
+    route could serve it, that pin would silently resolve back to the very model
+    that declined, and the pool would be decorative.
+    """
+    oss = POOL_REGISTRY["rose-1-oss"]
+    assert oss.direct_auth_enabled is False
+    assert oss.waterfall == ("moonshotai/kimi-k3",)
+    assert not any("anthropic/" in m or "openai/" in m for m in oss.waterfall)
+    # Every other pool keeps direct-token routing.
+    for name, spec in POOL_REGISTRY.items():
+        if name != "rose-1-oss":
+            assert spec.direct_auth_enabled is True, f"{name} lost direct auth"
+
+    # EVERY proprietary route must consult the flag -- not just the OAuth ones.
+    # Gating only OAuth left the funded ANTHROPIC_API_KEY / OPENAI_API_KEY
+    # routes reachable, so a pinned run could still be served by a proprietary
+    # model while the pool claimed otherwise.
+    client_src = (
+        Path(__file__).resolve().parents[2] / "providers" / "rose" / "client.py"
+    ).read_text()
+    for marker in (
+        "openai_api_key = _openai_api_key() if pool_spec.direct_auth_enabled else \"\"",
+        "pool_spec.direct_auth_enabled",
+    ):
+        assert marker in client_src, f"missing direct_auth_enabled gate: {marker}"
+    # The Anthropic funded-key branch must be gated too.
+    anthropic_branch = client_src.split("anthropic_api_key = (load_config()")[1][:400]
+    assert "pool_spec.direct_auth_enabled" in anthropic_branch, (
+        "ANTHROPIC_API_KEY route is not gated by direct_auth_enabled"
+    )
 
 
 def test_claude_auth_from_token_returns_none_when_falsy():
@@ -179,10 +217,35 @@ def test_pool_registry_lookup():
     assert ultra.name == "rose-1-ultra"
     assert ultra.claude_auth_model.startswith("claude-")
     assert ultra.gpt_auth_model == "gpt-5.6-sol"
-    assert ultra.waterfall[-1] == "openai/gpt-5.6-sol"
+    # Anthropic dropped: sol leads (cheaper AND higher-scoring than opus-4.8),
+    # kimi-k3 backs it from a different vendor.
+    assert ultra.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
     assert browser_use.gpt_auth_model == "gpt-5.6-sol"
-    assert browser_use.waterfall[-1] == "openai/gpt-5.6-sol"
+    assert browser_use.waterfall == ("openai/gpt-5.6-sol", "moonshotai/kimi-k3")
+    assert not any(m.startswith("anthropic/") for m in ultra.waterfall)
+    assert not any(m.startswith("anthropic/") for m in browser_use.waterfall)
     assert lite.waterfall != ultra.waterfall
+
+
+def test_every_waterfall_model_is_vision_capable():
+    """Every pool waterfall model must be in VISION_MODELS.
+
+    `transform_messages_for_vision` only runs when `is_vision_capable(model)`
+    is True; a waterfall model missing from the allowlist SILENTLY DROPS the
+    screenshot rather than raising, so a browser agent would fly blind on that
+    fallback layer with no error to trace. This invariant caught
+    moonshotai/kimi-k3, google/gemini-3.6-flash and google/gemini-3-flash-preview
+    all missing while already sitting in live waterfalls.
+    """
+    from providers.rose.transforms import VISION_MODELS
+
+    missing = [
+        (name, model)
+        for name, spec in POOL_REGISTRY.items()
+        for model in spec.waterfall
+        if model not in VISION_MODELS
+    ]
+    assert missing == [], f"waterfall models absent from VISION_MODELS: {missing}"
 
 
 def test_all_pool_names_matches_registry():
@@ -788,7 +851,15 @@ def test_is_vision_capable_membership():
     assert is_vision_capable("openai/gpt-5.6-terra")
     assert is_vision_capable("openai/gpt-5.6-sol")
     assert is_vision_capable("anthropic/claude-sonnet-4.5")
-    assert not is_vision_capable("google/gemini-3-flash-preview")
+    # Every live waterfall layer must be vision-capable. gemini-3-flash-preview
+    # was previously asserted NON-vision here while sitting in rose-1-mini's
+    # waterfall — OpenRouter reports it as text+image+file+audio+video->text,
+    # so the old assertion was stale and that layer silently dropped screenshots.
+    assert is_vision_capable("google/gemini-3-flash-preview")
+    assert is_vision_capable("google/gemini-3.6-flash")
+    assert is_vision_capable("moonshotai/kimi-k3")
+    # gpt-oss-20b is genuinely text->text on OpenRouter.
+    assert not is_vision_capable("openai/gpt-oss-20b")
     assert not is_vision_capable("rose-labs/rose-1-lite")
 
 
@@ -828,8 +899,8 @@ def test_get_messages_for_model_routes_by_vision():
     # Vision-capable → expanded
     out_vision = get_messages_for_model(msgs, "openai/gpt-4o")
     assert len(out_vision) == 2
-    # Non-vision → passthrough
-    out_no = get_messages_for_model(msgs, "google/gemini-3-flash-preview")
+    # Non-vision → passthrough (gpt-oss-20b is text->text on OpenRouter)
+    out_no = get_messages_for_model(msgs, "openai/gpt-oss-20b")
     assert out_no == msgs
 
 
@@ -3060,7 +3131,10 @@ async def test_waterfall_skips_anthropic_for_response_format():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini, not ultra: ultra's waterfall no longer contains an
+            # Anthropic layer, so it cannot exercise the skip. mini still leads
+            # with anthropic/claude-haiku-4.5.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             response_format={"type": "json_schema", "json_schema": {"schema": {"type": "object"}}},
             openrouter_key="ork-test",
@@ -3068,7 +3142,7 @@ async def test_waterfall_skips_anthropic_for_response_format():
         )
     )
 
-    assert models_seen == ["openai/gpt-5.6-terra"]
+    assert models_seen == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3108,7 +3182,9 @@ async def test_waterfall_uses_anthropic_with_native_tools():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini leads with anthropic/claude-haiku-4.5 — the only
+            # remaining pool with an Anthropic waterfall layer.
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "finish"}],
             tools=[
                 {
@@ -3123,7 +3199,7 @@ async def test_waterfall_uses_anthropic_with_native_tools():
         )
     )
 
-    assert [body["model"] for body in bodies] == ["anthropic/claude-opus-4.8"]
+    assert [body["model"] for body in bodies] == ["anthropic/claude-haiku-4.5"]
     assert "response_format" not in bodies[0]
     assert bodies[0]["tool_choice"] == {
         "type": "function",
@@ -3151,7 +3227,9 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
     set_mock_handler(handler)
     chunks = await _drain(
         waterfall_complete(
-            pool_spec=get_pool("rose-1-ultra"),
+            # rose-1-mini: the only pool that still has an Anthropic waterfall
+            # layer to exclude (ultra/browser-use are now Anthropic-free).
+            pool_spec=get_pool("rose-1-mini"),
             messages=[{"role": "user", "content": "hi"}],
             openrouter_key="ork-test",
             request_id="r-exclude-anthropic",
@@ -3159,7 +3237,7 @@ async def test_waterfall_excludes_anthropic_family_when_requested():
         )
     )
 
-    assert models_seen == ["openai/gpt-5.6-terra"]
+    assert models_seen == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3769,7 +3847,8 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
     try:
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-ultra",
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
+                pool="rose-1-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 _exclude_anthropic_family=True,
             )
@@ -3782,7 +3861,7 @@ async def test_client_exclude_anthropic_family_skips_api_key_and_anthropic_water
         rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
+    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -3820,7 +3899,8 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     ):
         chunks = await _drain(
             RoseClient(openrouter_key="ork-x").complete(
-                pool="rose-1-ultra",
+                # rose-1-mini: still has an Anthropic waterfall layer to skip.
+                pool="rose-1-mini",
                 messages=[{"role": "user", "content": "hi"}],
                 claude_auth=ClaudeAuthContext(
                     token="sk-ant-oat01-test",
@@ -3832,7 +3912,7 @@ async def test_client_env_exclude_anthropic_family_applies_to_every_call():
     rc._reset_anthropic_api_key_cooldown_cache()
 
     assert seen["anthropic"] == 0
-    assert seen["openrouter_models"] == ["openai/gpt-5.6-terra"]
+    assert seen["openrouter_models"] == ["google/gemini-3-flash-preview"]
     assert any(c.kind == "content" for c in chunks)
 
 
@@ -5137,10 +5217,20 @@ async def test_client_normalizes_inclusive_cache_usage_for_downstream_costing():
 def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization():
     """Replay the complete LLM usage from failed parallel-tool-calls agent 58a04e8d.
 
-    Three native-tool explore leaves completed successfully, but legacy accounting
-    reported 113.57c and paused the root before synthesis. OpenAI's prompt counter
-    already contained both cache buckets; normalizing it restores the actual 62.65c
-    trace cost without weakening the benchmark's 100c product limit.
+    Three native-tool explore leaves completed successfully, but legacy
+    accounting double-counted the cache buckets and paused the root before
+    synthesis. OpenAI's prompt counter already contains both buckets, so adding
+    them again inflates the trace ~2.04x; normalizing it restores the real cost.
+
+    Figures updated 2026-08-19. Every call here carries the `-openai` suffix
+    (the DIRECT OpenAI API route), and the direct terra/luna rates were stale on
+    the high side -- $2.50/$15 and $1.00/$6.00 against actual $2/$12 and
+    $0.20/$1.20. Under corrected rates the same trace costs 87.89c legacy, i.e.
+    it would NOT have crossed the 100c product limit; the historical 113.57c
+    pause was therefore part real cache double-counting and part over-pricing.
+    The double-counting is still real and still worth guarding, which is why the
+    2.04x inflation ratio is asserted alongside the absolute figures -- the
+    ratio is rate-table independent and keeps testing the defect itself.
     """
     # model suffix, inclusive prompt, completion, cache read, cache write
     captured_usage = [
@@ -5198,10 +5288,15 @@ def test_parallel_explore_trace_stays_below_cost_limit_after_cache_normalization
     legacy_trace_cost = legacy_llm_cost + service_cost_cents
     normalized_trace_cost = normalized_llm_cost + service_cost_cents
 
-    assert abs(legacy_trace_cost - 113.567325) < 0.000001
-    assert legacy_trace_cost > 100
-    assert abs(normalized_trace_cost - 62.648575) < 0.000001
+    assert abs(legacy_trace_cost - 87.890300) < 0.000001
+    assert abs(normalized_trace_cost - 48.911800) < 0.000001
     assert normalized_trace_cost < 100
+    # The defect itself: double-counted cache buckets inflate the LLM spend.
+    # Asserted as a ratio because it is rate-table independent -- the absolute
+    # figures above move whenever provider pricing is corrected, and an
+    # absolute-limit assertion silently stops testing anything when they do.
+    assert normalized_llm_cost < legacy_llm_cost
+    assert abs(legacy_llm_cost / normalized_llm_cost - 2.0426) < 0.001
 
 
 async def test_claude_auth_stream_reports_cache_hit_rate():
@@ -5771,6 +5866,7 @@ async def run_all_tests():
 
     r.record("is_rose_model_variants", test_is_rose_model_variants)
     r.record("pool_for_model_fuzzy", test_pool_for_model_fuzzy)
+    r.record("oss_pool_is_open_weights_only", test_oss_pool_is_open_weights_only)
     r.record("claude_auth_from_token_none", test_claude_auth_from_token_returns_none_when_falsy)
     r.record("claude_auth_from_token_builds", test_claude_auth_from_token_builds_context)
     r.record("gpt_auth_from_token_builds", test_gpt_auth_from_token_builds_context)
@@ -5779,6 +5875,10 @@ async def run_all_tests():
     r.record("pool_registry_lookup", test_pool_registry_lookup)
     r.record("all_pool_names_matches", test_all_pool_names_matches_registry)
     r.record("get_pool_unknown_raises", test_get_pool_unknown_raises)
+    r.record(
+        "every_waterfall_model_is_vision_capable",
+        test_every_waterfall_model_is_vision_capable,
+    )
 
     r.record("is_anthropic_model", test_is_anthropic_model_substring)
     r.record("transform_block_passthrough", test_transform_content_block_passthrough_for_text)

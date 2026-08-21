@@ -271,23 +271,14 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
       return { status: () => 200 };
     },
     waitForTimeout: async () => undefined,
-    evaluate: async (pageFunction: () => Promise<unknown>) => {
-      const source = Function.prototype.toString.call(pageFunction);
-      if (source.includes('js.stripe.com') && source.includes('createElement')) {
-        return {
-          'js.stripe.com': true,
-          'api.stripe.com': true,
-          'm.stripe.com': true,
-          'stripe.js': true,
-        };
-      }
-      if (source.includes('js.stripe.com') || source.includes('api.stripe.com')) {
-        return {
-          'js.stripe.com': false,
-          'api.stripe.com': false,
-          'm.stripe.com': false,
-          'stripe.js': false,
-        };
+    evaluate: async (
+      pageFunction: unknown,
+      arg?: { url: string; hostKey: string; loadAsScript: boolean }
+    ) => {
+      if (arg?.url) {
+        const hosts: Record<string, boolean> = { [arg.hostKey]: true };
+        if (arg.loadAsScript) hosts['script.load'] = true;
+        return hosts;
       }
       assert.ok(initScripts.some((script) => script.includes('signedInCart')));
       assert.strictEqual(
@@ -303,7 +294,7 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
         originAuthVisible = true;
       };
       try {
-        await pageFunction();
+        await (pageFunction as () => Promise<void>)();
       } finally {
         delete recoveryGlobal.__naviRestoreRecoveryStorage;
       }
@@ -367,7 +358,10 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
         },
       ],
     },
-    { requirePaymentCdn: true }
+    {
+      requirePaymentCdn: true,
+      blockedResourceUrl: 'https://js.cdn.example/v3',
+    }
   );
 
   assert.deepStrictEqual(addedCookies, cookies, 'full auth cookies must be loaded before probing');
@@ -384,10 +378,8 @@ async function testCandidateProbeUsesThePromotedDefaultContext(): Promise<void> 
     latencyMs: result.latencyMs,
     paymentCdnOk: true,
     paymentCdnHosts: {
-      'js.stripe.com': true,
-      'api.stripe.com': true,
-      'm.stripe.com': true,
-      'stripe.js': true,
+      'js.cdn.example': true,
+      'script.load': true,
     },
   });
 }

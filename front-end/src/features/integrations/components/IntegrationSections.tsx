@@ -25,6 +25,7 @@ interface IntegrationSectionsProps {
   isBrowserCookiesAvailable: boolean;
   isPasskeysAvailable: boolean;
   isIMessageAvailable: boolean;
+  isWhatsAppAvailable: boolean;
   isClaudeCodeAvailable: boolean;
   isGptCodeAvailable: boolean;
   isFullySignedIn: boolean;
@@ -82,10 +83,51 @@ function ComputeIntegrationSection({
   );
 }
 
+function MessagesIntegrationSection({
+  isIMessageAvailable,
+  isWhatsAppAvailable,
+  accordion,
+  data,
+  messages,
+  gmail,
+  actions,
+}: Pick<
+  IntegrationSectionsProps,
+  | 'isIMessageAvailable'
+  | 'isWhatsAppAvailable'
+  | 'accordion'
+  | 'data'
+  | 'messages'
+  | 'gmail'
+  | 'actions'
+>) {
+  return (
+    <MessagesSyncSection
+      expanded={accordion.messagesSyncExpanded}
+      onToggle={() => accordion.toggleSection('messagesSync')}
+      isIMessageAvailable={isIMessageAvailable}
+      isWhatsAppAvailable={isWhatsAppAvailable}
+      iMessageSynced={data.iMessageSynced}
+      whatsAppConnected={data.whatsAppConnected}
+      messageSyncLoading={messages.messageSyncLoading}
+      onIMessageSync={() => void actions.onIMessageSync()}
+      onWhatsAppConnect={() => void actions.onWhatsAppConnect()}
+      connectedIntegrations={data.connectedIntegrations}
+      connectingProvider={gmail.connectingProvider}
+      disconnectingEmail={gmail.disconnectingEmail}
+      resyncingEmail={gmail.resyncingEmail}
+      onGmailConnect={() => void actions.onGmailConnect()}
+      onGmailDisconnect={(email) => void actions.onGmailDisconnect(email)}
+      onGmailResync={(email) => void actions.onGmailResync(email)}
+    />
+  );
+}
+
 export default function IntegrationSections({
   isBrowserCookiesAvailable,
   isPasskeysAvailable,
   isIMessageAvailable,
+  isWhatsAppAvailable,
   isClaudeCodeAvailable,
   isGptCodeAvailable,
   isFullySignedIn,
@@ -126,21 +168,14 @@ export default function IntegrationSections({
         onAtlasPasswordsOpen={() => passwords.setAtlasPasswordsModalOpen(true)}
       />
 
-      <MessagesSyncSection
-        expanded={accordion.messagesSyncExpanded}
-        onToggle={() => accordion.toggleSection('messagesSync')}
+      <MessagesIntegrationSection
         isIMessageAvailable={isIMessageAvailable}
-        iMessageSynced={data.iMessageSynced}
-        whatsAppConnected={data.whatsAppConnected}
-        messageSyncLoading={messages.messageSyncLoading}
-        onIMessageSync={() => void actions.onIMessageSync()}
-        connectedIntegrations={data.connectedIntegrations}
-        connectingProvider={gmail.connectingProvider}
-        disconnectingEmail={gmail.disconnectingEmail}
-        resyncingEmail={gmail.resyncingEmail}
-        onGmailConnect={() => void actions.onGmailConnect()}
-        onGmailDisconnect={(email) => void actions.onGmailDisconnect(email)}
-        onGmailResync={(email) => void actions.onGmailResync(email)}
+        isWhatsAppAvailable={isWhatsAppAvailable}
+        accordion={accordion}
+        data={data}
+        messages={messages}
+        gmail={gmail}
+        actions={actions}
       />
 
       {isFullySignedIn && (

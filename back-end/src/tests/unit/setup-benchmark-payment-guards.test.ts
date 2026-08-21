@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import Stripe from 'stripe';
-import {
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
-  BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
-} from '../../domains/purchases/config';
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../../providers/benchmarkPaymentIdentity';
+import { BENCHMARK_PAYMENT_LIFECYCLE_USER_ID } from '../../domains/purchases/config';
 import {
   assertLiveCardholderReady,
   assertSandboxDatabaseIsLocal,
@@ -13,6 +14,19 @@ import {
   requireLiveCardholderId,
   requireStripeLiveKey,
 } from '../../../scripts/setup-benchmark-payment-guards';
+
+const guardsSrc = readFileSync(
+  join(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../../scripts/setup-benchmark-payment-guards.ts'
+  ),
+  'utf8'
+);
+assert.match(
+  guardsSrc,
+  /from '\.\.\/src\/providers\/benchmarkPaymentIdentity'/,
+  'sandbox/live identity crossing must read the production id from its canonical home'
+);
 
 const malformedKey = 'sk_test_sensitive-key-material';
 assert.throws(

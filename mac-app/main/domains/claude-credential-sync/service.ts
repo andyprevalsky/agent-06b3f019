@@ -21,7 +21,7 @@ import { AuthService } from '../../services/auth';
 import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
   sessionForLocalMachineData,
-} from '../auth/impersonation';
+} from '../../base/impersonation';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
 import { RSA_PUBLIC_KEY_PEM } from './config';
 import {

@@ -18,7 +18,7 @@ import {
   type BrowserSessionCreationDependencies,
 } from '../../providers/browser';
 import { kernelCaptchaTelemetryConfig } from '../../providers/browser/captchaTelemetry';
-import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/session';
+import { buildSteelRecoveryBrowserOptions } from '../../providers/steel/sessionRecovery';
 import { recoverChallengeSchema } from '../../domains/browser-session/types';
 
 function fakeSession(config: BrowserRecoveryConfig): RecoveryCandidateSession {
@@ -99,16 +99,9 @@ function testConfigSearchUsesHiddenRemoteSessionsOnly(): void {
     /browserSession\.create\s*\(/,
     'Kernel recovery candidates must remain remote-only'
   );
-  const steelSource = readFileSync(
-    new URL('../../providers/steel/session.ts', import.meta.url),
+  const steelRecoveryFactory = readFileSync(
+    new URL('../../providers/steel/sessionRecovery.ts', import.meta.url),
     'utf8'
-  );
-  const steelRecoveryFactory = steelSource.slice(
-    steelSource.indexOf('export async function createSteelRecoverySession'),
-    steelSource.indexOf(
-      '/**\n * Close a browser session',
-      steelSource.indexOf('createSteelRecoverySession')
-    )
   );
   assert.doesNotMatch(
     steelRecoveryFactory,
@@ -335,10 +328,16 @@ function testChallengeDetection(): void {
   );
 }
 
-function testSteelPreferredForKernelBlacklistedHosts(): void {
-  assert.ok(shouldPreferSteelForChallengeTarget('https://checkout.stripe.com/c/pay/cs_live_x'));
-  assert.ok(shouldPreferSteelForChallengeTarget('https://pay.stripe.com/b/session'));
-  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.roselabs.ai/test_payment'));
+function testSteelPreferredWhenCdnHardFilterActive(): void {
+  assert.ok(
+    !shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x')
+  );
+  assert.ok(
+    shouldPreferSteelForChallengeTarget('https://checkout.example.com/c/pay/cs_live_x', {
+      requirePaymentCdn: true,
+    })
+  );
+  assert.ok(!shouldPreferSteelForChallengeTarget('https://www.example.com/shop'));
   assert.ok(!shouldPreferSteelForChallengeTarget('not-a-url'));
 
   const preferred = browserRecoveryCandidates(
@@ -347,10 +346,11 @@ function testSteelPreferredForKernelBlacklistedHosts(): void {
   );
   assert.deepStrictEqual(
     preferred.map((candidate) => candidate.key),
-    ['kernel_direct', 'steel_managed', 'steel_fixed']
+    ['steel_managed', 'steel_fixed']
   );
-  assert.ok(preferred[0]?.omitManagedProxy === true);
+  assert.ok(preferred.every((candidate) => candidate.provider === 'steel'));
 }
+
 
 function testPreferredConfigCompatibility(): void {
   const preferred = {
@@ -575,6 +575,8 @@ async function testUnavailableLearnedConfigFallsBackToDeploymentDefault(): Promi
   assert.deepStrictEqual(steelOptions, [{ proxyMode: 'fixed' }]);
 }
 
+
+
 function testRecoveryRequestSchema(): void {
   const parsed = recoverChallengeSchema.parse({
     task_id: '00000000-0000-4000-8000-000000000001',
@@ -605,9 +607,10 @@ async function main(): Promise<void> {
   await testPartialStableCandidateIsPromotedWhenNoneFullyStable();
   // Payment-CDN / Stripe.js ranking + hard gates live in
   // browser-challenge-recovery-payment.test.ts (max-lines split).
+  // Steel recovery city-drop retry: browser-challenge-recovery-steel.test.ts.
   testRecoveryConfigKeyForSession();
   testChallengeDetection();
-  testSteelPreferredForKernelBlacklistedHosts();
+  testSteelPreferredWhenCdnHardFilterActive();
   testPreferredConfigCompatibility();
   await testLearnedConfigSeedsTheNextSession();
   await testLearnedSteelFixedConfigSeedsTheNextSession();
