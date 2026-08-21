@@ -13086,6 +13086,102 @@ async def test_wait_for_navigation_ready_reloads_blank_spa_shell_once():
     assert page.reloads == 1
     assert page.evaluations >= 2
 
+
+async def test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload():
+    """Persistent blank SPA shells must emit script/preload mount diagnostics."""
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    class FakePage:
+        def __init__(self):
+            self.reloads = 0
+            self.codes = []
+
+        async def wait_for_load_state(self, *_args, **_kwargs):
+            return None
+
+        async def evaluate(self, code):
+            self.codes.append(code)
+            if "performance.getEntriesByType" in code:
+                return {
+                    "href": "https://x.com/test_payment",
+                    "readyState": "interactive",
+                    "rootChildren": 0,
+                    "scriptCount": 1,
+                    "scripts": [{"type": "module", "src": "https://x.com/src/main.tsx"}],
+                    "preloadCount": 2,
+                    "preloads": [
+                        {"as": "video", "href": "https://x.com/navi-features.webm"},
+                        {"as": "video", "href": "https://x.com/navi-features-hevc.mov"},
+                    ],
+                    "resourceCount": 1,
+                    "scriptResourceCount": 0,
+                    "scriptResources": [],
+                    "preloadResources": [
+                        {
+                            "name": "https://x.com/navi-features.webm",
+                            "initiatorType": "link",
+                            "transferSize": 66000000,
+                            "encodedBodySize": 66000000,
+                            "durationMs": 12000,
+                            "responseEndMs": 13000,
+                        }
+                    ],
+                    "mainScript": {"type": "module", "src": "https://x.com/src/main.tsx"},
+                    "mainResource": None,
+                    "largestPreloadBytes": 66000000,
+                }
+            return {
+                "hasAppRoot": True,
+                "appRootReady": False,
+                "plainPageReady": False,
+                "bodyTextLength": 0,
+                "rootChildren": 0,
+                "blankSpaShell": True,
+                "readyState": "interactive",
+            }
+
+        async def reload(self):
+            self.reloads += 1
+            return None
+
+    page = FakePage()
+    session = _fake_session_with_event_bus()
+    session.get_current_page = AsyncMock(return_value=page)
+    dom = MagicMock()
+    dom.session = session
+    monotonic_time = 0.0
+    logged = []
+
+    async def advance_clock(_seconds):
+        nonlocal monotonic_time
+        monotonic_time += 1.0
+
+    def capture_warning(event, **kwargs):
+        logged.append((event, kwargs))
+
+    with (
+        patch.object(service_actions.asyncio, "sleep", advance_clock),
+        patch.object(service_actions.time_module, "monotonic", lambda: monotonic_time),
+        patch.object(service_actions.logger, "warning", side_effect=capture_warning),
+    ):
+        out = await service_actions.wait_for_navigation_ready(
+            dom_service=dom,
+            url="https://x.com/test_payment",
+            timeout_seconds=0.001,
+        )
+
+    assert out["ready"] is False
+    assert page.reloads == 1
+    diag_events = [item for item in logged if item[0] == "Blank SPA mount diagnostics"]
+    assert len(diag_events) >= 2
+    assert any(item[1].get("phase") == "before_reload" for item in diag_events)
+    assert any(item[1].get("phase") == "after_reload" for item in diag_events)
+    after = next(item[1] for item in diag_events if item[1].get("phase") == "after_reload")
+    assert after["diagnostics"]["mainResource"] is None
+    assert after["diagnostics"]["largestPreloadBytes"] == 66000000
+    assert any("performance.getEntriesByType" in code for code in page.codes)
+
+
 async def test_wait_for_navigation_ready_regotos_stuck_loading_document_once():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -17589,6 +17685,10 @@ async def run_all_tests():
     await r.record_async(
         "navigation_ready_reloads_blank_spa",
         test_wait_for_navigation_ready_reloads_blank_spa_shell_once,
+    )
+    await r.record_async(
+        "navigation_ready_logs_blank_spa_mount_diagnostics",
+        test_wait_for_navigation_ready_logs_blank_spa_mount_diagnostics_after_failed_reload,
     )
     await r.record_async(
         "navigation_ready_regotos_loading_doc",
