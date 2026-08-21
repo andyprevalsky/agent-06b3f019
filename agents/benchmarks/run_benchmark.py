@@ -7969,6 +7969,13 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 message_index=message_index,
             ):
                 continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
             if status in {"CANCELLED", "ERROR", "FAILED"} or event_data.get("success") is False:
@@ -8270,6 +8277,65 @@ def _is_recoverable_pinned_host_refusal_failure(
     return _has_later_browser_recovery(messages, message_index)
 
 
+_PAGE_EVALUATE_UNCAUGHT_RE = re.compile(
+    r"^Uncaught(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_page_evaluate_uncaught(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a page ``evaluate`` action failed with a truncated JS Uncaught error.
+
+    Kernel/CDP often surfaces page-script exceptions as the bare token ``Uncaught``
+    (or ``Uncaught TypeError: …``) on ``action_type=error`` rows whose title is
+    ``evaluate``. That is page-side noise the browser agent is expected to retry
+    around — not a harness/tool crash.
+    """
+    if not _browser_tool_candidate(candidate):
+        return False
+    title = str(candidate.get("title") or "").strip().lower()
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "").strip().lower()
+    # ERROR lifecycle rewrites action_type to ``error``; title keeps ``evaluate``.
+    if title != "evaluate" and action_type != "evaluate":
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    for key in ("error", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    return any(bool(text) and _PAGE_EVALUATE_UNCAUGHT_RE.match(text) for text in texts)
+
+
+def _is_recoverable_browser_evaluate_uncaught_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Page-evaluate Uncaught ERRORs recovered before payment are not tool failures.
+
+    Local repro: browser-imax-group-tickets agent
+    ``482d6aa2-90f0-4173-95a4-f51bfbce2055`` reached grounded payment_approval
+    ($89.94 AMC) after ``spawn_browser_agent`` ERROR message ``Uncaught``
+    (title ``evaluate``), then failed only on ``no_tool_failures``. Unrecovered
+    terminal Uncaught rows still count.
+    """
+    if not _is_browser_page_evaluate_uncaught(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
 def _tool_message_body(message: dict) -> str:
     """Return tool/user-visible body text from either API (`text`) or artifact (`message`)."""
     return str(message.get("text") or message.get("message") or "")
@@ -8362,6 +8428,13 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             ):
                 continue
             if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
                 candidate,
                 message_text=message_text,
                 messages=messages,
