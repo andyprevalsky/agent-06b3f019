@@ -624,6 +624,13 @@ Each turn you will receive a snapshot of the current browser environment which i
 - Scroll with direction and a pixel amount; about 600 pixels is roughly one page
 - If you fill an input field and the action is interrupted, suggestions may have appeared
 
+- When the goal requires choosing among ordered options (earliest/latest showtime,
+  cheapest rate, first available slot, etc.), capture the full filtered option set
+  in the trajectory before selecting. Enumerate every option in display order.
+  For scrollable or virtualized lists, scroll through every position and record
+  each option, or evaluate all matching DOM nodes when they are available.
+  Do not select until the complete set and the selected option are recorded.
+
 # Output Format
 
 You must call exactly one available browser action tool. Do not write a JSON
