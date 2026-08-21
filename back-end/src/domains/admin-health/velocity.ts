@@ -1,7 +1,7 @@
 import { createLogger } from '../../providers/logger';
 import {
   GITHUB_REPO,
-  GITHUB_TOKEN,
+  githubApiTokenCandidates,
   LINEAR_ANDY_NAMES,
   LINEAR_API_KEY,
   LINEAR_GRAPHQL_URL,
@@ -33,6 +33,7 @@ interface PageInfo {
 }
 
 const GITHUB_MAX_COMMIT_PAGES = 500;
+const GITHUB_AUTH_FAILURE = /^GitHub (401|403)$/;
 
 function unavailableSeries(label: string, detail: string, count: number): MetricSeries {
   return {
@@ -135,9 +136,13 @@ async function fetchLinearItems(
   return items;
 }
 
-async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
-  const [owner, repoName] = GITHUB_REPO.split('/');
-  if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
+async function fetchGithubItemsWithToken(
+  token: string,
+  owner: string,
+  repoName: string,
+  start: Date,
+  end: Date
+): Promise<DatedValue[]> {
   const items: DatedValue[] = [];
   for (let page = 1; page <= GITHUB_MAX_COMMIT_PAGES; page += 1) {
     const url = new URL(`https://api.github.com/repos/${owner}/${repoName}/commits`);
@@ -147,7 +152,7 @@ async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
     url.searchParams.set('page', String(page));
     const response = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${GITHUB_TOKEN}`,
+        Authorization: `Bearer ${token}`,
         Accept: 'application/vnd.github+json',
         'X-GitHub-Api-Version': '2022-11-28',
       },
@@ -172,6 +177,33 @@ async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
     }
   }
   return items;
+}
+
+async function fetchGithubItems(start: Date, end: Date): Promise<DatedValue[]> {
+  const [owner, repoName] = GITHUB_REPO.split('/');
+  if (!owner || !repoName) throw new Error(`Invalid ADMIN_HEALTH_GITHUB_REPO: ${GITHUB_REPO}`);
+  const candidates = githubApiTokenCandidates();
+  if (candidates.length === 0) {
+    throw new Error('GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.');
+  }
+  let lastAuthError: Error | null = null;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const token = candidates[index];
+    try {
+      return await fetchGithubItemsWithToken(token, owner, repoName, start, end);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!GITHUB_AUTH_FAILURE.test(message)) throw error;
+      lastAuthError = error instanceof Error ? error : new Error(message);
+      const hasFallback = index < candidates.length - 1;
+      log.warn('GitHub token rejected for commits fetch', {
+        status: message,
+        attemptingFallback: hasFallback,
+      });
+      if (!hasFallback) break;
+    }
+  }
+  throw lastAuthError ?? new Error('GitHub auth failed');
 }
 
 function bucketItems(periods: AdminHealthPeriod[], items: DatedValue[]): number[] {
@@ -227,8 +259,8 @@ export async function fetchVelocityByPeriod(periods: AdminHealthPeriod[]): Promi
       'GitHub commits landed',
       periods,
       () => fetchGithubItems(start, end),
-      GITHUB_TOKEN !== '',
-      'GITHUB_TOKEN is not configured.'
+      githubApiTokenCandidates().length > 0,
+      'GITHUB_TOKEN / GITHUB_DISPATCH_TOKEN is not configured.'
     ),
   ]);
   return {

@@ -634,6 +634,20 @@ def _benchmark_context_path() -> Path:
     return REPO_ROOT / path
 
 
+DURABLE_BENCHMARK_FRONTEND_URL = "https://roselabs.ai"
+
+
+def _is_ephemeral_frontend_url(url: str) -> bool:
+    """Localhost / tunnel hosts die when the stack that minted them tears down."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return True
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    return host.endswith((".ngrok.app", ".ngrok-free.app", ".trycloudflare.com", ".loca.lt"))
+
+
 def _frontend_url_for_benchmark(base_url: str) -> str:
     explicit = os.environ.get("BENCHMARK_FRONTEND_URL", "").strip()
     if explicit:
@@ -646,7 +660,7 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
     # prod run to an unreachable tunnel.
     parsed = urlparse(base_url)
     if parsed.hostname not in {"localhost", "127.0.0.1"}:
-        return "https://roselabs.ai"
+        return DURABLE_BENCHMARK_FRONTEND_URL
     # Stable public URL assigned by run.sh at startup (reserved ngrok domain → frontend port).
     # This is the only URL the cloud browser agent can actually reach, so prefer it over any
     # localhost fallback. run.sh exports PUBLIC_BASE_URL and records it in services.json.
@@ -667,14 +681,30 @@ def _frontend_url_for_benchmark(base_url: str) -> str:
         return f"http://localhost:{int(conductor_port) + 1}"
     if parsed.hostname in {"localhost", "127.0.0.1"} and parsed.port:
         return f"{parsed.scheme}://{parsed.hostname}:{parsed.port + 1}"
-    return "https://roselabs.ai"
+    return DURABLE_BENCHMARK_FRONTEND_URL
 
 
 def _report_frontend_url_for_benchmark(base_url: str) -> str:
+    """Human-facing agent links for report cards / RCA / descend evidence.
+
+    These links must outlive the ephemeral stack that produced the run. Prefer
+    the always-on prod viewer (hub archive fallback via findAgentAcrossRuns).
+    Ephemeral hosts (localhost, ngrok, trycloudflare) are rejected even when
+    set via BENCHMARK_REPORT_FRONTEND_URL unless
+    BENCHMARK_REPORT_ALLOW_EPHEMERAL=1 is set for an intentional live-only view.
+    """
+    _ = base_url  # report links are host-stable; prompt URLs use _frontend_url_for_benchmark
     explicit = os.environ.get("BENCHMARK_REPORT_FRONTEND_URL", "").strip()
+    allow_ephemeral = os.environ.get("BENCHMARK_REPORT_ALLOW_EPHEMERAL", "").strip() == "1"
     if explicit:
-        return explicit.rstrip("/")
-    return _frontend_url_for_benchmark(base_url)
+        if allow_ephemeral or not _is_ephemeral_frontend_url(explicit):
+            return explicit.rstrip("/")
+    return DURABLE_BENCHMARK_FRONTEND_URL
+
+
+def durable_agent_frontend_url(agent_id: str) -> str:
+    """Canonical persistent FE deep link for an agent (live or hub-archived)."""
+    return f"{DURABLE_BENCHMARK_FRONTEND_URL}/?agent-id={agent_id}"
 
 
 def _payment_receipt_from_attention_request(req: dict) -> dict:
@@ -1118,6 +1148,15 @@ def _validate_payment_receipt(
     receipt = _payment_receipt_from_attention_request(req)
     if not receipt:
         return "missing requestPaymentCard metadata"
+
+    # Catalog `expected_payment_receipt: true` means "any well-formed payment-card request"
+    # (e.g. gate-subscription-card-mint-admin-bypass). Calling `.get` on the bool raised
+    # AttributeError, which the poll loop swallowed as "Approval check error" and delayed
+    # auto-approve + never set expected_payment_receipt_seen on that first sighting.
+    if expected is True:
+        return None
+    if not isinstance(expected, dict):
+        return f"invalid expected_payment_receipt type: {type(expected).__name__}"
 
     required_fields = expected.get("requiredFields", [])
     for field in required_fields:
@@ -5825,11 +5864,16 @@ async def _refresh_local_compute_tokens_for_run(
     # claude_code sync only when that funded-key path is confirmed healthy —
     # otherwise require_claude_code tasks would start, discover an unfunded key
     # mid-run, and burn the suite. Never pair this with credential-skip-as-PASS.
+    #
+    # Code-agent tasks (requires_claude_code) can also run via Codex: the
+    # spawn_claude_code_agent tool selects provider=codex when the workflow holds
+    # a GPT compute token. Without a funded Anthropic key, require *either*
+    # claude_code or gpt_code rather than hard-requiring Claude OAuth alone.
     has_anthropic_key_fallback = await _has_usable_anthropic_api_key_fallback(base_url)
     tolerate_missing_claude = has_anthropic_key_fallback
     required_token_types: tuple[str, ...] | None = None
     if require_claude_code and not has_anthropic_key_fallback:
-        required_token_types = ("claude",)
+        required_token_types = ("any",)
         tolerate_missing_claude = False
     if not _sync_compute_tokens(
         tolerate_gpt_code_unavailable=True,
@@ -7927,10 +7971,12 @@ Judge-specific instruction: {evaluator.get("judge_prompt", "")}
 def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
     """Return distinct browser attempts and grounded failed lifecycle events."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -7952,6 +7998,27 @@ def _browser_agent_runtime_facts(data: dict) -> tuple[int, list[str]]:
                 or candidate.get("browser_url")
             )
             if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -8131,6 +8198,193 @@ def _is_intermediate_challenge_recovery_failure(candidate: dict) -> bool:
     return call_id.startswith("provider-exit-recovery-")
 
 
+_ELEMENT_INDEX_NOT_FOUND_RE = re.compile(
+    r"^Element with index \d+ not found\.?$",
+    re.IGNORECASE,
+)
+
+
+def _browser_tool_candidate(candidate: dict) -> bool:
+    tool_name = candidate.get("toolName") or candidate.get("tool_name")
+    return tool_name == "spawn_browser_agent" or (
+        tool_name == "spawn_agent" and candidate.get("agentType") == "browser"
+    )
+
+
+def _is_browser_element_index_miss(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a browser action failed only because a DOM index was stale."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    return any(bool(text) and _ELEMENT_INDEX_NOT_FOUND_RE.fullmatch(text) for text in texts)
+
+
+def _has_later_browser_recovery(messages: list, start_index: int) -> bool:
+    """True when a later browser event proves the session continued usefully."""
+    for message in messages[start_index + 1 :]:
+        if not isinstance(message, dict):
+            continue
+        metadata = message.get("metadata")
+        if not isinstance(metadata, dict):
+            continue
+        if not _browser_tool_candidate(metadata):
+            continue
+        status = str(metadata.get("toolStatus") or metadata.get("tool_status") or "").upper()
+        action_type = str(metadata.get("action_type") or metadata.get("actionType") or "")
+        if action_type in {"request_payment_card", "requestPaymentCard"} and status in {
+            "FINISHED",
+            "IN_PROGRESS",
+        }:
+            return True
+        if status == "FINISHED" and action_type not in {"", "error"}:
+            return True
+    return False
+
+
+def _is_recoverable_browser_element_miss_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Stale DOM index ERRORs often happen mid-run; recovered ones are not tool failures.
+
+    Browser agents frequently hit `Element with index N not found` after a DOM refresh,
+    then continue (scroll/click/payment). Counting those recovered ERRORs in
+    `no_tool_failures` / `no_browser_agent_failures` fails closed payment-terminal benches
+    that still reach `requestPaymentCard`. Unrecovered terminal misses still count.
+    """
+    if not _is_browser_element_index_miss(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+_PINNED_HOST_REFUSAL_RE = re.compile(
+    r"Refusing (?:to leave pinned page host|click that navigates off pinned host|"
+    r"key chord .+ that would leave pinned host|"
+    r"evaluate that would navigate away from pinned host)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_pinned_host_refusal(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when the browser guard refused leaving an antibot-pinned host."""
+    if not _browser_tool_candidate(candidate):
+        return False
+    parts = [str(message_text or "").strip()]
+    for key in ("error", "title", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    for key in ("error", "message", "detail"):
+        value = event_data.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    return bool(_PINNED_HOST_REFUSAL_RE.search("\n".join(parts)))
+
+
+def _is_recoverable_pinned_host_refusal_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Pinned-host guard ERRORs during challenge pin are retry noise when later recovered.
+
+    While a Google/Cloudflare (etc.) page is pinned, escape attempts (close_tab,
+    switch_tab, off-host click, navback, Ctrl+W, evaluate navigate) ERROR with
+    `Refusing … pinned host`. Agents often recover and still reach payment.
+    Counting those recovered refusals in `no_tool_failures` fails closed
+    payment-terminal benches. Unrecovered terminal refusals still count.
+    """
+    if not _is_browser_pinned_host_refusal(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+_PAGE_EVALUATE_UNCAUGHT_RE = re.compile(
+    r"^Uncaught(?:\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _is_browser_page_evaluate_uncaught(
+    candidate: dict,
+    *,
+    message_text: str = "",
+) -> bool:
+    """True when a page ``evaluate`` action failed with a truncated JS Uncaught error.
+
+    Kernel/CDP often surfaces page-script exceptions as the bare token ``Uncaught``
+    (or ``Uncaught TypeError: …``) on ``action_type=error`` rows whose title is
+    ``evaluate``. That is page-side noise the browser agent is expected to retry
+    around — not a harness/tool crash.
+    """
+    if not _browser_tool_candidate(candidate):
+        return False
+    title = str(candidate.get("title") or "").strip().lower()
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "").strip().lower()
+    # ERROR lifecycle rewrites action_type to ``error``; title keeps ``evaluate``.
+    if title != "evaluate" and action_type != "evaluate":
+        return False
+    texts = [str(message_text or "").strip()]
+    event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
+    err = event_data.get("error")
+    if err is not None:
+        texts.append(str(err).strip())
+    for key in ("error", "detail", "details"):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            texts.append(value.strip())
+    return any(bool(text) and _PAGE_EVALUATE_UNCAUGHT_RE.match(text) for text in texts)
+
+
+def _is_recoverable_browser_evaluate_uncaught_failure(
+    candidate: dict,
+    *,
+    message_text: str = "",
+    messages: list | None = None,
+    message_index: int | None = None,
+) -> bool:
+    """Page-evaluate Uncaught ERRORs recovered before payment are not tool failures.
+
+    Local repro: browser-imax-group-tickets agent
+    ``482d6aa2-90f0-4173-95a4-f51bfbce2055`` reached grounded payment_approval
+    ($89.94 AMC) after ``spawn_browser_agent`` ERROR message ``Uncaught``
+    (title ``evaluate``), then failed only on ``no_tool_failures``. Unrecovered
+    terminal Uncaught rows still count.
+    """
+    if not _is_browser_page_evaluate_uncaught(candidate, message_text=message_text):
+        return False
+    if messages is None or message_index is None:
+        return False
+    return _has_later_browser_recovery(messages, message_index)
+
+
+def _tool_message_body(message: dict) -> str:
+    """Return tool/user-visible body text from either API (`text`) or artifact (`message`)."""
+    return str(message.get("text") or message.get("message") or "")
+
+
 def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
     """Join transcript + metadata error surfaces for intermediate-failure classifiers.
 
@@ -8148,7 +8402,7 @@ def _message_failure_text(message: Optional[dict], candidate: dict) -> str:
                 or ""
             )
         )
-    for key in ("error", "title", "detail", "details"):
+    for key in ("error", "title", "detail", "details", "message"):
         value = candidate.get(key)
         if isinstance(value, str) and value:
             parts.append(value)
@@ -8185,20 +8439,45 @@ def _is_intermediate_stale_dom_node_failure(candidate: dict, message: Optional[d
     )
 
 
+def _is_intermediate_navigation_pin_guard_failure(
+    candidate: dict,
+    message: Optional[dict] = None,
+) -> bool:
+    """Explicit `navigation_pin_guard` action rows are intermediate coaching only.
+
+    Textual `Refusing … pinned host` ERRORs are handled by
+    `_is_recoverable_pinned_host_refusal_failure` (requires a later browser
+    recovery). Do not treat every pinned-host refusal string as retry noise —
+    unrecovered terminal refusals must still fail `no_tool_failures`.
+
+    Local repro: browser-doordash-usb-c-cable agent
+    b1eb2afd-bb3a-4d79-9cd9-dcce8142fd4b reached an unresolved Place Order write_lock
+    after an evaluate pin-guard ERROR; recovery-gated pinned-host classification
+    covers that path.
+    """
+    _ = message  # signature matches sibling intermediate classifiers
+    action_type = str(candidate.get("action_type") or candidate.get("actionType") or "")
+    return action_type == "navigation_pin_guard"
+
+
 def _is_intermediate_browser_retry_failure(candidate: dict, message: Optional[dict] = None) -> bool:
     """True when a browser-agent ERROR is expected recovery / retry noise."""
-    return _is_intermediate_challenge_recovery_failure(candidate) or _is_intermediate_stale_dom_node_failure(
-        candidate, message
+    return (
+        _is_intermediate_challenge_recovery_failure(candidate)
+        or _is_intermediate_stale_dom_node_failure(candidate, message)
+        or _is_intermediate_navigation_pin_guard_failure(candidate, message)
     )
 
 
 def _tool_runtime_failures(data: dict) -> list[str]:
     """Return grounded failed tool lifecycle events from the root trajectory."""
     failures: list[str] = []
-    for message in data.get("messages", []) or []:
+    messages = data.get("messages", []) or []
+    for message_index, message in enumerate(messages):
         metadata = message.get("metadata") if isinstance(message, dict) else None
         if not isinstance(metadata, dict):
             continue
+        message_text = _tool_message_body(message)
         candidates = [metadata]
         if isinstance(metadata.get("auxiliary"), dict):
             candidates.append(metadata["auxiliary"])
@@ -8207,6 +8486,27 @@ def _tool_runtime_failures(data: dict) -> list[str]:
             if not tool_name:
                 continue
             if _is_intermediate_browser_retry_failure(candidate, message if isinstance(message, dict) else None):
+                continue
+            if _is_recoverable_browser_element_miss_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_pinned_host_refusal_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
+                continue
+            if _is_recoverable_browser_evaluate_uncaught_failure(
+                candidate,
+                message_text=message_text,
+                messages=messages,
+                message_index=message_index,
+            ):
                 continue
             status = str(candidate.get("toolStatus") or candidate.get("tool_status") or "").upper()
             event_data = candidate.get("data") if isinstance(candidate.get("data"), dict) else {}
@@ -10479,7 +10779,6 @@ async def main_async(args):
 
     def _report_snapshot(running_names: set[str]) -> RunState:
         finished = {r.name for r in run.task_results}
-        fe = _report_frontend_url_for_benchmark(base_url)
         try:
             peak_fly_raw = os.environ.get("BENCHMARK_PEAK_FLY_MACHINES")
             peak_fly_machines = int(peak_fly_raw) if peak_fly_raw else None
@@ -10495,7 +10794,7 @@ async def main_async(args):
                     status=status,
                     duration_s=r.duration_seconds,
                     cost_usd=(r.cost_cents / 100.0) if r.cost_cents is not None else None,
-                    agent_url=f"{fe}/?agent-id={r.agent_id}" if r.agent_id else None,
+                    agent_url=durable_agent_frontend_url(r.agent_id) if r.agent_id else None,
                     llm_call_count=r.llm_call_count,
                     tree_agent_count=r.tree_agent_count,
                     tokens_in=r.tokens_in,
@@ -10512,7 +10811,7 @@ async def main_async(args):
                     TaskCard(
                         name=name,
                         status="running",
-                        agent_url=f"{fe}/?agent-id={live_agent_id}" if live_agent_id else None,
+                        agent_url=durable_agent_frontend_url(live_agent_id) if live_agent_id else None,
                         world_model_mode=task_world_model_modes.get(name),
                     )
                 )

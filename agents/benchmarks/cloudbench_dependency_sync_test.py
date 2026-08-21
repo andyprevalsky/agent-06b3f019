@@ -9572,11 +9572,15 @@ def test_cloud_dashboard_mirror_does_not_override_benchmark_frontend_url() -> No
     dashboard mode exports BENCHMARK_FRONTEND_URL=http://localhost:<mirror>, the
     {frontend_url} prompt placeholder points browser tasks at an unreachable URL
     even though the child stack has already published a public tunnel.
+
+    Report-card / RCA agent links must also stay durable (roselabs.ai), not the
+    ephemeral localhost dashboard mirror that dies when the stack tears down.
     """
     cloud = CLOUD_SCRIPT.read_text()
 
     assert "BENCHMARK_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" not in cloud
-    assert "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" in cloud
+    assert "BENCHMARK_REPORT_FRONTEND_URL=http://localhost:$LOCAL_DASH_PORT" not in cloud
+    assert "BENCHMARK_REPORT_FRONTEND_URL=https://roselabs.ai" in cloud
     assert "BENCHMARK_REPORT_FRONTEND_URL" in DRIVER_SCRIPT.read_text()
 
 

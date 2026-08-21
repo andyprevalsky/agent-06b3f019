@@ -157,7 +157,11 @@ if (requestedSeedModes.length > 1) {
 }
 
 const remote = new PrismaClient({ datasources: { db: { url: REMOTE_URL } } });
-const local = new PrismaClient(); // uses process.env.DATABASE_URL (local)
+// Pin the local URL the same way as remote. Relying on process.env.DATABASE_URL
+// at query time fails under --compute-tokens-only when Prisma re-validates
+// schema env("DATABASE_URL") and the engine no longer sees the parent-injected
+// value (AgentCard lifecycle: "Environment variable not found: DATABASE_URL").
+const local = new PrismaClient({ datasources: { db: { url: LOCAL_URL } } });
 /**
  * Deterministic ordering is what makes `skip`/`take` paging safe — without it
  * Postgres may return overlapping or missing rows across pages.
@@ -468,16 +472,17 @@ async function syncEmailIntegrations(): Promise<Map<string, string>> {
   const remoteToLocal = new Map<string, string>();
   for (const integration of emailIntegrations) {
     const { id: remoteId, ...updateData } = integration;
+    const accountId = integration.accountId ?? '';
     const synced = await local.integration.upsert({
       where: {
         userId_name_accountId: {
           userId: integration.userId,
           name: integration.name,
-          accountId: integration.accountId,
+          accountId,
         },
       },
-      create: integration,
-      update: updateData,
+      create: { ...integration, accountId },
+      update: { ...updateData, accountId },
       select: { id: true },
     });
     remoteToLocal.set(remoteId, synced.id);
@@ -730,13 +735,19 @@ function hasEncryptedCredentials(config: unknown): boolean {
 
 function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' | 'gpt'> {
   const value = raw?.trim() || 'claude,gpt';
+  // "any" = at least one of claude_code / gpt_code must be usable. Used by
+  // code-agent benchmarks (spawn_claude_code_agent selects Claude Code or
+  // Codex from whichever compute token the run actually holds).
+  if (value.toLowerCase() === 'any') {
+    return new Set<'claude' | 'gpt'>(['claude', 'gpt']);
+  }
   const types = new Set<'claude' | 'gpt'>();
   for (const part of value.split(',')) {
     const token = part.trim().toLowerCase();
     if (token === '') continue;
     if (token !== 'claude' && token !== 'gpt') {
       throw new Error(
-        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt; received ${JSON.stringify(
+        `SEED_REQUIRE_COMPUTE_TOKEN_TYPES must contain only claude,gpt,any; received ${JSON.stringify(
           raw
         )}`
       );
@@ -749,6 +760,10 @@ function parseComputeTokenRequiredTypes(raw: string | undefined): Set<'claude' |
     );
   }
   return types;
+}
+
+function requireAnyComputeTokenType(): boolean {
+  return (process.env.SEED_REQUIRE_COMPUTE_TOKEN_TYPES || '').trim().toLowerCase() === 'any';
 }
 
 interface GptCodeAvailability {
@@ -841,6 +856,30 @@ async function syncComputeTokensWithRetries(): Promise<void> {
       await poolRequiredDevComputeTokensForSyntheticUsers();
       const { usable: usableClaudeCodeCount, rateLimited: rateLimitedClaudeCodeCount } =
         await inspectClaudeCodeIntegrations();
+      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
+        await inspectGptCodeIntegrations();
+      // Code-agent tasks accept Claude Code OR Codex (gpt_code). Fail only when
+      // neither provider is usable (rate-limited rows still proceed — same as
+      // the per-provider external-quota policy below).
+      if (requireAnyComputeTokenType()) {
+        if (usableClaudeCodeCount > 0 || usableGptCodeCount > 0) {
+          console.log(
+            `  ✅ Compute Tokens (integrations): ${count} synced, ` +
+              `${usableClaudeCodeCount} usable claude_code, ${usableGptCodeCount} usable gpt_code ` +
+              '(SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any)'
+          );
+          return;
+        }
+        if (rateLimitedClaudeCodeCount > 0 || rateLimitedGptCodeCount > 0) {
+          console.warn(
+            `  ⚠️  Compute Tokens (integrations): ${count} synced, 0 usable code-agent tokens ` +
+              `(claude_rate_limited=${rateLimitedClaudeCodeCount}, gpt_rate_limited=${rateLimitedGptCodeCount}) — ` +
+              'proceeding under SEED_REQUIRE_COMPUTE_TOKEN_TYPES=any; runtime surfaces quota errors'
+          );
+          return;
+        }
+        throw new Error('No usable claude_code or gpt_code integrations after sync');
+      }
       if (usableClaudeCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('claude')) {
           console.warn(
@@ -880,8 +919,6 @@ async function syncComputeTokensWithRetries(): Promise<void> {
           throw new Error('No usable claude_code integrations after sync');
         }
       }
-      const { usable: usableGptCodeCount, rateLimited: rateLimitedGptCodeCount } =
-        await inspectGptCodeIntegrations();
       if (usableGptCodeCount === 0) {
         if (!COMPUTE_TOKEN_REQUIRED_TYPES.has('gpt')) {
           console.warn(

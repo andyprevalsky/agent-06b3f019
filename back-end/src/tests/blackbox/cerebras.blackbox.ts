@@ -133,26 +133,43 @@ async function run(): Promise<void> {
       stream: false,
     };
     delete (probeBody as { stream_options?: unknown }).stream_options;
-    const started = Date.now();
-    const live = await fetch(CEREBRAS_API_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${liveKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(probeBody),
-    });
-    const elapsedMs = Date.now() - started;
-    const liveText = await live.text();
+    const maxAttempts = 5;
+    let liveStatus = 0;
+    let liveText = '';
+    let elapsedMs = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const started = Date.now();
+      const live = await fetch(CEREBRAS_API_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${liveKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(probeBody),
+      });
+      elapsedMs = Date.now() - started;
+      liveStatus = live.status;
+      liveText = await live.text();
+      const queueExceeded =
+        liveStatus === 429 || /too_many_requests|queue_exceeded|high traffic/i.test(liveText);
+      if (live.ok || liveStatus === 404 || !queueExceeded || attempt === maxAttempts) {
+        break;
+      }
+      const backoffMs = 1_000 * attempt * attempt;
+      process.stdout.write(
+        `WARN Cerebras chat probe attempt ${attempt}/${maxAttempts} got HTTP ${liveStatus}; retrying in ${backoffMs}ms\n`
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
     assert.notEqual(
-      live.status,
+      liveStatus,
       404,
-      `chat model must not be archived: HTTP ${live.status} ${liveText.slice(0, 200)}`
+      `chat model must not be archived: HTTP ${liveStatus} ${liveText.slice(0, 200)}`
     );
     assert.equal(
-      live.ok,
+      liveStatus >= 200 && liveStatus < 300,
       true,
-      `chat model probe must succeed: HTTP ${live.status} ${liveText.slice(0, 200)}`
+      `chat model probe must succeed: HTTP ${liveStatus} ${liveText.slice(0, 200)}`
     );
     assert.ok(
       elapsedMs < 5_000,
