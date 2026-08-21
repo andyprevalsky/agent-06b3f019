@@ -4421,11 +4421,13 @@ def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
 
     captured: dict = {}
     original_compute = bench._sync_compute_tokens
+    original_email = bench._sync_email_credentials
     original_sync = bench._sync_browser_credentials
     original_mode = os.environ.get("BENCHMARK_WORLD_MODEL_MODE")
     try:
         os.environ["BENCHMARK_WORLD_MODEL_MODE"] = "real"
         bench._sync_compute_tokens = lambda **_kwargs: True
+        bench._sync_email_credentials = lambda: True
 
         def capture_browser_sync(domains=(), *, user_id=None):
             captured.update(user_id=user_id, cookie_domains=domains)
@@ -4441,6 +4443,7 @@ def test_tamy_identity_fixture_seeds_the_run_identity_not_the_dev_user():
         )
     finally:
         bench._sync_compute_tokens = original_compute
+        bench._sync_email_credentials = original_email
         bench._sync_browser_credentials = original_sync
         if original_mode is None:
             os.environ.pop("BENCHMARK_WORLD_MODEL_MODE", None)

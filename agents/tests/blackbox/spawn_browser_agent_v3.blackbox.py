@@ -12745,6 +12745,7 @@ def test_url_looks_like_api_surface_and_navigation_pin():
     )
 
     ctx = _ActionContext(
+        user_id="user-1",
         dom_service=None,  # type: ignore[arg-type]
         action_history=None,  # type: ignore[arg-type]
         session=None,

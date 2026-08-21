@@ -406,7 +406,7 @@ async function syncIntegrations(): Promise<number> {
 const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
 
 /**
- * Sync only Gmail/Yahoo integration rows for the dev user. Unlike
+ * Sync only Gmail/Yahoo integration rows for the selected seed user. Unlike
  * `syncIntegrations`, this never imports pool tokens and never deletes
  * `claude_code` / `gpt_code` rows — email overlay must not disturb compute
  * tokens already present in an isolated benchmark DB.
@@ -417,7 +417,7 @@ const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
 async function syncEmailIntegrations(): Promise<Map<string, string>> {
   const emailIntegrations = await remote.integration.findMany({
     where: {
-      userId: DEV_USER_ID,
+      userId: SEED_USER_ID,
       name: { in: [...EMAIL_INTEGRATION_NAMES] },
     },
     select: PROD_INTEGRATION_COLUMNS,
@@ -460,7 +460,7 @@ function remapEmailCredentialIntegrationIds<
 async function emailIntegrationIdMap(): Promise<Map<string, string>> {
   const remoteRows = await remote.integration.findMany({
     where: {
-      userId: DEV_USER_ID,
+      userId: SEED_USER_ID,
       name: { in: [...EMAIL_INTEGRATION_NAMES] },
     },
     select: { id: true, userId: true, name: true },
@@ -1081,7 +1081,7 @@ async function sync() {
     });
     await syncTable('Email Credentials', async () => {
       const creds = await remote.emailIntegrationCredential.findMany({
-        where: { userId: DEV_USER_ID },
+        where: { userId: SEED_USER_ID },
       });
       return upsertById(
         local.emailIntegrationCredential,
