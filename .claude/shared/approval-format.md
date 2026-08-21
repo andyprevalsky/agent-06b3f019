@@ -49,7 +49,10 @@ the expected tool>`. Do not start from the bug; start from the goal.
 **FE link:** [Open agent](<frontend-agent-url>) — <verification status>
 
 The URL must open the concrete agent run that proves the reported failure or
-outcome, not a generic dashboard. Check it immediately before presenting the
+outcome, not a generic dashboard. Prefer the durable always-on viewer
+`https://roselabs.ai/?agent-id=<id>` (hub archive fallback) — never a
+localhost, ngrok, trycloudflare, or ephemeral hub URL that dies when the stack
+tears down. Check it immediately before presenting the
 approval and report `verified rendered`, `verified reachable` (when only an HTTP
 and agent-data probe is available), or `expired/unreachable` honestly.
 Never omit the FE link, substitute a run JSON path, or imply that a dead localhost
@@ -64,7 +67,10 @@ ids, sort by the millisecond prefix in the filename, and render the latest
 file with `python3 scripts/render_llm_dump.py <dump> --no-open`. Link the
 path the renderer prints. That command copies the HTML plus its `_assets`
 sidecar into `/opt/cursor/artifacts` when that directory exists so a remote
-reviewer can open it. Never link a `file://` URL — those only exist on the
+reviewer can open it. The published HTML must be self-contained: browser
+recording frames are copied into `_assets` (never `file://` paths). If frames
+are missing or unreadable, omit the recording player entirely — never attach an
+invalid/broken recording section. Never link a `file://` URL — those only exist on the
 render machine and show `ERR_FILE_NOT_FOUND` in the reviewer's browser. Never
 pick an earlier failing call, a directory listing, or raw JSON. If there was
 no LLM call, write `**LLM dump:** Not applicable — <reason>`.

@@ -52,6 +52,8 @@ def test_output_section_embeds_browser_recording_at_action_timestamp():
                 }
             )
         )
+        output_path = Path(tmp) / "rendered" / "dump.html"
+        output_path.parent.mkdir(parents=True)
 
         html = renderer.render_output_section(
             {
@@ -61,15 +63,18 @@ def test_output_section_embeds_browser_recording_at_action_timestamp():
                     "browser_recording_manifest_path": str(manifest_path),
                     "iteration": 4,
                 },
-            }
+            },
+            output_path=output_path,
         )
 
-    assert "Browser Recording" in html
-    assert "Defaulted to click for step 4 at 1.2s" in html
-    assert "frame_00002.jpg" in html
-    assert "cursorByFrame" in html
-    assert 'value="1"' in html
-    assert "<option selected>4</option>" in html
+        assert "Browser Recording" in html
+        assert "Defaulted to click for step 4 at 1.2s" in html
+        assert "frame_00002.jpg" in html
+        assert "file://" not in html
+        assert "cursorByFrame" in html
+        assert 'value="1"' in html
+        assert "<option selected>4</option>" in html
+        assert (output_path.parent / f"{output_path.stem}_assets").exists()
 
 
 def test_token_overview_uses_raw_input_and_infers_gpt_cache_write():
@@ -123,6 +128,8 @@ def test_finished_browser_tool_result_embeds_recording_by_task_id():
             )
         )
         (root / "frame.jpg").write_bytes(b"fake-image")
+        output_path = Path(tmp) / "rendered" / "dump.html"
+        output_path.parent.mkdir(parents=True)
 
         html = renderer.render_browser_recording_for_tool_message(
             {
@@ -141,14 +148,122 @@ def test_finished_browser_tool_result_embeds_recording_by_task_id():
             {"agent_id": "agent-1"},
             root / "dump.json",
             3,
+            output_path,
         )
 
     assert "Browser Recording" in html
     assert "recording-player" in html
     assert "data-canvas" in html
     assert "open standalone" in html
+    assert "file://" not in html
     assert "Proxy City" in html
     assert "DALLAS" in html
+
+
+def test_published_dump_never_embeds_file_uri_recordings():
+    """Published dump HTML must stay playable after the source recording dir is gone."""
+    renderer = _load_renderer()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        recording_dir = tmp_path / "recording"
+        frames_dir = recording_dir / "frames"
+        frames_dir.mkdir(parents=True)
+        (frames_dir / "frame_00001.jpg").write_bytes(b"\xff\xd8\xff\xe0frame-one")
+        (frames_dir / "frame_00002.jpg").write_bytes(b"\xff\xd8\xff\xe0frame-two")
+        (recording_dir / "index.html").write_text("<html>recording</html>")
+        manifest_path = recording_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "frames": [
+                        {
+                            "src": "frames/frame_00001.jpg",
+                            "ts_ms": 100,
+                            "label": "idle",
+                            "action": "idle",
+                            "metadata": {},
+                        },
+                        {
+                            "src": "frames/frame_00002.jpg",
+                            "ts_ms": 1234,
+                            "label": "Clicking Submit",
+                            "action": "click",
+                            "cursor": {"x": 10, "y": 20},
+                            "metadata": {"step": 4, "phase": "start", "action": "click"},
+                        },
+                    ]
+                }
+            )
+        )
+
+        dump_data = {
+            "call_site": "browser_use_step_4",
+            "agent_id": "agent-repro",
+            "model": "test",
+            "messages": [],
+            "output": {"action": {"action": "click", "index": 7}},
+            "extra": {
+                "browser_recording_manifest_path": str(manifest_path),
+                "iteration": 4,
+                "output": {"action": {"action": "click"}},
+            },
+        }
+        out = tmp_path / "rendered" / "llm_dump_browser_use_step_4.html"
+        out.parent.mkdir(parents=True)
+        source = tmp_path / "dump.json"
+        source.write_text(json.dumps(dump_data))
+        out.write_text(renderer.build_html(dump_data, source, out), encoding="utf-8")
+
+        artifacts_dir = tmp_path / "artifacts"
+        artifacts_dir.mkdir()
+        published = renderer.publish_rendered_dump(out, artifacts_dir)
+        assert published is not None
+        pub_html = published.read_text(encoding="utf-8")
+        assert "file://" not in pub_html
+        assert "Browser Recording" in pub_html
+        assert "_assets/" in pub_html or "data:image/" in pub_html
+
+        # Wipe the original recording tree — published dump must still have assets.
+        import shutil
+
+        shutil.rmtree(recording_dir)
+        asset_frames = list((artifacts_dir / "llm_dump_browser_use_step_4_assets").rglob("frame_*.jpg"))
+        assert asset_frames, "published dump must copy recording frames into _assets"
+
+
+def test_missing_recording_frames_omits_player_instead_of_invalid_section():
+    renderer = _load_renderer()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        recording_dir = Path(tmp) / "recording"
+        recording_dir.mkdir()
+        manifest_path = recording_dir / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "frames": [
+                        {
+                            "src": "frames/missing.jpg",
+                            "ts_ms": 100,
+                            "label": "gone",
+                            "action": "click",
+                            "metadata": {},
+                        }
+                    ]
+                }
+            )
+        )
+        html = renderer.render_browser_recording_player_from_manifest(
+            manifest_path,
+            action_name="click",
+            iteration=1,
+            player_seed="broken",
+            output_path=Path(tmp) / "out.html",
+        )
+
+    assert html == ""
+    assert "Browser Recording" not in html
 
 
 def test_split_system_prompt_drops_all_dynamic_boundaries():
@@ -262,6 +377,14 @@ async def run_all_tests():
     r.record(
         "finished_browser_tool_result_embeds_recording_by_task_id",
         test_finished_browser_tool_result_embeds_recording_by_task_id,
+    )
+    r.record(
+        "published_dump_never_embeds_file_uri_recordings",
+        test_published_dump_never_embeds_file_uri_recordings,
+    )
+    r.record(
+        "missing_recording_frames_omits_player_instead_of_invalid_section",
+        test_missing_recording_frames_omits_player_instead_of_invalid_section,
     )
     r.record(
         "split_system_prompt_drops_all_dynamic_boundaries",
