@@ -8,6 +8,7 @@ import { getX402Endpoints } from '../../providers/x402Endpoints';
 import { handleChatMessage, broadcastAgentModeStarted } from '../../providers/chat';
 import { cleanupAgentSessions } from '../../providers/agentCleanup';
 import { createGithubRepo } from '../../providers/github';
+import { generateAgentTitle } from '../../providers/generateAgentTitle';
 import { createLogger } from '../../providers/logger';
 import type { CreateAgentBody } from './types';
 import { getPromptSecret } from './config';
@@ -44,6 +45,30 @@ export function resolvePromptSecrets(text: string): string {
     log.warn(`Unresolved prompt secret: {{${varName}}} (env var PROMPT_SECRET_${varName} not set)`);
     return `{{${varName}}}`;
   });
+}
+
+/**
+ * Post-create work that must not block the create response.
+ *
+ * Both are fire-and-forget by design: the archive fixture is diagnostic, and a
+ * slow or failed title is cosmetic (the UI falls back to the goal). Titles are
+ * root-only — sub-agents never render in the sidebar, so generating one for
+ * them would be pure spend.
+ */
+function runPostCreateSideEffects(
+  agentDbId: string,
+  isSubAgent: boolean,
+  archiveStartFixture: (() => Promise<void>) | null
+): void {
+  // Both settle on their own; failures are logged inside each and must never
+  // surface as an unhandled rejection on the create path.
+  archiveStartFixture?.().catch((error: unknown) => {
+    log.warn('Trace archive start fixture failed', {
+      agent_id: agentDbId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  });
+  if (!isSubAgent) void generateAgentTitle(agentDbId);
 }
 
 /* c8 ignore start -- startSubAgentWorkflow, startDirectWorkflow, startChatMode require Temporal/GitHub/LLM infrastructure */
@@ -202,12 +227,13 @@ export async function createAgent(
 
   const workflowId = await launchAgentWorkflow(body, agent, userId, isSubAgent, agentId, verifier);
 
-  void archiveStartFixture?.();
+  runPostCreateSideEffects(agent.agent.id, isSubAgent, archiveStartFixture);
 
   return {
     agent_id: agent.agent.id,
     progress: agent.agent.progress,
     goal: agent.agent.goal,
+    title: agent.agent.title,
     model: agent.agent.model,
     source: body.source,
     reasoning_max_tokens: body.reasoning_max_tokens,
@@ -320,5 +346,22 @@ export async function deleteAgent(agentId: string, userId?: string): Promise<boo
     return false;
   }
   await deleteAgentRecursive(agentId);
+  return true;
+}
+
+/**
+ * Un-archive a soft-deleted agent (and its archived descendants) after
+ * verifying ownership. Returns true if an archived agent was found.
+ *
+ * The run is NOT resumed: archiving terminated the Temporal workflow and tore
+ * down browser/sandbox sessions, so the agent returns readable and stopped.
+ */
+export async function unarchiveAgent(agentId: string, userId?: string): Promise<boolean> {
+  const agent = await repo.findArchivedAgent(agentId, userId);
+  if (!agent) {
+    return false;
+  }
+  await repo.restoreAgentAndDescendants(agentId);
+  log.info('Unarchived agent', { agent_id: agentId });
   return true;
 }

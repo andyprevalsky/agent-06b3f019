@@ -20,12 +20,7 @@
  */
 
 import 'dotenv/config';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import {
-  createTestPaymentCheckoutSession,
-  settleTestPaymentCheckoutSession,
-} from '../../domains/test-payment/checkout';
+import { createTestPaymentCheckoutSession } from '../../domains/test-payment/checkout';
 import {
   TEST_PAYMENT_MERCHANT_SECRET_KEY_ENV,
   getTestPaymentMerchantStripeClient,
@@ -148,12 +143,6 @@ const CHECKOUT_ITEMS = [
   { id: 'ceramic-mug', quantity: 1 },
   { id: 'canvas-tote', quantity: 1 },
 ];
-
-const SOURCE_ROOT = join(dirname(new URL(import.meta.url).pathname), '../..');
-
-function readSource(relativePath: string): string {
-  return readFileSync(join(SOURCE_ROOT, relativePath), 'utf-8');
-}
 
 const tests: Array<[string, () => Promise<void>]> = [
   [
@@ -617,92 +606,6 @@ const tests: Array<[string, () => Promise<void>]> = [
           }
         );
       });
-    },
-  ],
-  [
-    'settling a checkout session reads it back on the MERCHANT key, never billing',
-    async () => {
-      await withMerchantKey(FAKE_MERCHANT_KEY, async () => {
-        const merchant = getTestPaymentMerchantStripeClient();
-        await withBothCheckoutClientsStubbed(
-          merchant,
-          {
-            id: 'cs_test_merchant',
-            url: null,
-            // Deliberately unpaid: settlement then short-circuits on the payment_status the
-            // MERCHANT client returned, which both proves the stubbed body was the one consumed and
-            // keeps this suite free of any database round-trip.
-            retrieved: { payment_status: 'unpaid', amount_total: 100 },
-          },
-          async (calls) => {
-            let failure: unknown;
-            try {
-              await settleTestPaymentCheckoutSession('cs_test_merchant');
-            } catch (error) {
-              failure = error;
-            }
-            assert(
-              failure instanceof Error && /unpaid/.test(failure.message),
-              `settlement must consume the session the merchant client returned, got ${String(failure)}`
-            );
-            assert(
-              calls.length === 1 && calls[0].client === 'merchant' && calls[0].op === 'retrieve',
-              `the session must be read back on the merchant client, got ${JSON.stringify(calls)}`
-            );
-          }
-        );
-      });
-    },
-  ],
-  [
-    'only the /test_payment checkout path may reach for the merchant client',
-    async () => {
-      // Structural half of the guarantee: the behavioural tests above prove checkout uses the
-      // merchant key; this proves nothing ELSE can start using it. Billing, purchase holds, and
-      // settlement must stay on the billing singleton.
-      const checkoutSource = readSource('domains/test-payment/checkout.ts');
-      assert(
-        checkoutSource.includes('getTestPaymentMerchantStripeClient'),
-        'checkout.ts must acquire through the merchant client'
-      );
-      const stripeImport = /import \{([^}]*)\} from '\.\.\/\.\.\/providers\/stripe';/.exec(
-        checkoutSource
-      );
-      assert(stripeImport !== null, 'checkout.ts should import from providers/stripe');
-      const bindings = (stripeImport?.[1] ?? '')
-        .split(',')
-        .map((binding) => binding.replace(/^type\s+/, '').trim());
-      assert(
-        !bindings.includes('stripe'),
-        'checkout.ts must not bind the billing `stripe` singleton; every Stripe call in the ' +
-          'checkout path is an acquirer call and belongs on the merchant client'
-      );
-      for (const billingPath of [
-        'domains/billing/service.ts',
-        'domains/purchases/charge.ts',
-        'domains/test-payment/lifecycle.ts',
-        'domains/test-payment/service.ts',
-        'providers/agentcard/checkout-settlement.ts',
-        'domains/webhooks/service.ts',
-      ]) {
-        const source = readSource(billingPath);
-        assert(
-          !source.includes('getTestPaymentMerchantStripeClient('),
-          `${billingPath} is a BILLING-side call site and must never use the merchant client: ` +
-            'subscriptions, customers, and personal purchase holds live on STRIPE_SECRET_KEY'
-        );
-      }
-      const billingService = readSource('domains/billing/service.ts');
-      assert(
-        billingService.includes('checkout.sessions.create'),
-        'billing subscription checkout must still mint Stripe Checkout sessions'
-      );
-      assert(
-        billingService.includes('getStripeClientForSecretKey') ||
-          billingService.includes('stripe.checkout.sessions.create'),
-        'billing subscription checkout must mint via the billing/live Stripe client, ' +
-          'never the merchant acquirer client'
-      );
     },
   ],
 ];

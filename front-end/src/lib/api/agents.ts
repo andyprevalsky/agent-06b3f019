@@ -21,6 +21,23 @@ export async function getAllAgents(): Promise<Agent[]> {
   return data.agents;
 }
 
+/** Search active chats by title, goal, or message content. */
+export async function searchAgents(query: string, signal?: AbortSignal): Promise<Agent[]> {
+  const headers = getAuthHeaders();
+  const params = new URLSearchParams({ q: query });
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/search?${params}`, {
+    headers,
+    signal,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to search agents');
+  }
+
+  const data = await response.json();
+  return data.agents;
+}
+
 // Get agent details with messages
 export async function getAgent(agentId: string, before?: string): Promise<AgentDetailResponse> {
   const headers = getAuthHeaders();
@@ -83,6 +100,41 @@ export async function deleteAgent(agentId: string): Promise<void> {
 
   if (!response.ok) {
     throw new Error('Failed to delete agent');
+  }
+}
+
+/**
+ * Archive an agent. This IS the soft delete — DELETE /agents/:id sets
+ * `deletedAt` rather than removing the row, so the agent reappears under
+ * `getArchivedAgents()` and can be restored.
+ */
+export const archiveAgent = deleteAgent;
+
+// List archived (soft-deleted) agents, newest archive first.
+export async function getArchivedAgents(): Promise<Agent[]> {
+  const headers = getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/archived`, { headers });
+
+  if (!response.ok) {
+    throw new Error('Failed to fetch archived agents');
+  }
+
+  const data = await response.json();
+  return data.agents;
+}
+
+// Restore an archived agent (does not resume its run)
+export async function unarchiveAgent(agentId: string): Promise<void> {
+  const headers = getAuthHeaders();
+
+  const response = await fetch(`${API_BASE_WITH_PATH}/agents/${agentId}/unarchive`, {
+    method: 'POST',
+    headers,
+  });
+
+  if (!response.ok) {
+    throw new Error('Failed to unarchive agent');
   }
 }
 
@@ -152,6 +204,8 @@ export async function resumeAgent(agentId: string): Promise<void> {
 export async function updateAgent(
   agentId: string,
   updates: {
+    title?: string | null; // Sidebar rename; null clears back to the generated title
+    pinned?: boolean; // Pin/unpin in the sidebar
     model?: string;
     tool_ids?: string[];
     verifier_prompt?: string;

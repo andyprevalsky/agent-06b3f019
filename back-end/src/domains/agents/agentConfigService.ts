@@ -21,6 +21,13 @@ interface UpdateAgentConfigDependencies {
 /** Build the agent update data from the request body. */
 function buildAgentUpdateData(body: UpdateAgentBody): Record<string, unknown> {
   const data: Record<string, unknown> = {};
+  // Rename: an explicit null clears the override so the UI falls back to `goal`.
+  if (body.title !== undefined) {
+    data.title = body.title;
+  }
+  if (body.pinned !== undefined) {
+    data.pinnedAt = body.pinned ? new Date() : null;
+  }
   if (body.model !== undefined && body.model !== '') {
     data.model = body.model;
   }
@@ -87,6 +94,9 @@ function formatAgentResponse(
     agent: {
       agent_id: agent.id,
       goal: agent.goal,
+      title: agent.title,
+      pinned_at: agent.pinnedAt,
+      archived_at: agent.deletedAt,
       model: agent.model,
       reasoning_max_tokens: agent.reasoningMaxTokens,
       progress: agent.progress,
