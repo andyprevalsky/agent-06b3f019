@@ -1,4 +1,5 @@
 import { Sandbox } from 'e2b';
+import { Prisma } from '@prisma/client';
 import { prisma } from './database';
 import { createLogger } from './logger';
 import { cleanupAgentPurchaseCards } from './purchaseCleanup';
@@ -11,18 +12,89 @@ export interface BrowserSessionReleaseDependencies {
   closeSession: (sessionId: string, pause: boolean) => Promise<void>;
 }
 
+export interface TerminalBrowserReleaseDependencies {
+  findTerminalAgentIds: () => Promise<string[]>;
+  releaseBrowserSessions: typeof releaseAgentBrowserSessions;
+}
+
+export interface TerminalBrowserReleaseSummary {
+  discovered: number;
+  released: number;
+  failed: number;
+}
+
 function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies {
   return {
     findActiveSessions: async (agentId: string) =>
       prisma.browserSession.findMany({
         where: {
           agentId,
-          status: { in: ['ACTIVE', 'PAUSED'] },
+          // ERROR is the durable retry marker written when a provider release
+          // fails. Excluding it would turn the first transient provider outage
+          // into a permanent paid-browser leak.
+          status: { in: ['ACTIVE', 'PAUSED', 'ERROR'] },
         },
         select: { sessionId: true },
       }),
     closeSession,
   };
+}
+
+function terminalBrowserReleaseDependencies(): TerminalBrowserReleaseDependencies {
+  return {
+    findTerminalAgentIds: async () => {
+      const agents = await prisma.$queryRaw<Array<{ agentId: string }>>(Prisma.sql`
+        SELECT DISTINCT browser_session."agentId" AS "agentId"
+        FROM "BrowserSession" AS browser_session
+        INNER JOIN "Agent" AS agent ON agent.id = browser_session."agentId"
+        WHERE browser_session.status::text IN ('ACTIVE', 'PAUSED', 'ERROR')
+          AND agent.status::text IN ('COMPLETED', 'FAILED', 'OUT_OF_CREDITS', 'COST_LIMIT_REACHED')
+      `);
+      return agents.map((agent) => agent.agentId);
+    },
+    releaseBrowserSessions: releaseAgentBrowserSessions,
+  };
+}
+
+/**
+ * Retry browser releases for terminal agents independently of workflow liveness.
+ * COMPLETED and FAILED agents are intentionally absent from liveness scans, so a
+ * failed terminal-transition release needs its own durable retry path.
+ */
+export async function reconcileTerminalAgentBrowserSessions(
+  overrides: Partial<TerminalBrowserReleaseDependencies> = {}
+): Promise<TerminalBrowserReleaseSummary> {
+  const dependencies = { ...terminalBrowserReleaseDependencies(), ...overrides };
+  const agentIds = await dependencies.findTerminalAgentIds();
+  let released = 0;
+  let failed = 0;
+  let next = 0;
+  const workerCount = Math.min(8, agentIds.length);
+
+  const workerResults = await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      let workerReleased = 0;
+      let workerFailed = 0;
+      while (next < agentIds.length) {
+        const agentId = agentIds[next++];
+        try {
+          workerReleased += await dependencies.releaseBrowserSessions(agentId);
+        } catch (error) {
+          workerFailed += 1;
+          log.warn(`Failed to retry browser release for terminal agent ${agentId}`, {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+      return { released: workerReleased, failed: workerFailed };
+    })
+  );
+  for (const result of workerResults) {
+    released += result.released;
+    failed += result.failed;
+  }
+
+  return { discovered: agentIds.length, released, failed };
 }
 
 /**
@@ -38,8 +110,8 @@ function browserSessionReleaseDependencies(): BrowserSessionReleaseDependencies 
  *
  * Every session is attempted before failures are reported. Terminal callers catch
  * the aggregate so a provider outage cannot block the status transition, while the
- * liveness reconciler can restore the row and retry instead of falsely considering
- * a leaked rental fully cleaned up.
+ * provider keeps an ERROR row and terminal-browser reconciliation retries instead
+ * of falsely considering a leaked rental fully cleaned up.
  */
 export async function releaseAgentBrowserSessions(
   agentId: string,

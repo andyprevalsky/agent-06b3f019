@@ -126,19 +126,25 @@ export async function completeAuthAssistanceForUser(
       };
     }
 
-    let steelSessionAuthId: string | null = null;
+    const liveViewSession =
+      request.mode === 'live_view'
+        ? await tx.browserSession.findFirst({
+            where: {
+              ...(request.browserSessionId !== null
+                ? { id: request.browserSessionId }
+                : { sessionId: request.steelSessionId }),
+              context: { userId },
+            },
+            include: { context: true },
+          })
+        : null;
+    let liveViewSteelContextId: string | null = null;
 
+    // Validate the browser credential source before taking the completion claim,
+    // but do not mutate credential/profile rows yet. Those writes must belong only
+    // to the invocation that owns the generation lock and wins completedAt.
     if (request.mode === 'live_view') {
-      const session = await tx.browserSession.findFirst({
-        where: {
-          ...(request.browserSessionId !== null
-            ? { id: request.browserSessionId }
-            : { sessionId: request.steelSessionId }),
-          context: { userId },
-        },
-        include: { context: true },
-      });
-      if (session === null || session === undefined) {
+      if (liveViewSession === null || liveViewSession === undefined) {
         return {
           status: 'missing_steel_context' as const,
           request,
@@ -146,8 +152,8 @@ export async function completeAuthAssistanceForUser(
         };
       }
 
-      if (session.provider === 'steel') {
-        const steelContextId = session.providerProfileId;
+      if (liveViewSession.provider === 'steel') {
+        const steelContextId = liveViewSession.providerProfileId;
         if (typeof steelContextId !== 'string' || steelContextId === '') {
           return {
             status: 'missing_steel_context' as const,
@@ -155,72 +161,8 @@ export async function completeAuthAssistanceForUser(
             workflowId: request.attentionRequest.workflowId,
           };
         }
-
-        const steelAuth = await tx.steelSessionAuth.upsert({
-          where: {
-            userId_contextId_authRealm: {
-              userId,
-              contextId: steelContextId,
-              authRealm: request.authRealm,
-            },
-          },
-          create: {
-            userId,
-            contextId: steelContextId,
-            authRealm: request.authRealm,
-            authenticatedAt: now,
-            disabledAt: null,
-            disabledReason: null,
-          },
-          update: {
-            authenticatedAt: now,
-            disabledAt: null,
-            disabledReason: null,
-          },
-        });
-        // Release this Steel context from any OTHER row before claiming it.
-        // `BrowserContext.contextId` is @unique and BrowserProviderProfile has
-        // @@unique([provider, profileId]), so a stale binding elsewhere makes
-        // the next two writes throw — and that rolls the whole transaction
-        // back, discarding a sign-in the user actually completed.
-        await tx.browserContext.updateMany({
-          where: { contextId: steelContextId, id: { not: session.context.id } },
-          data: { contextId: null },
-        });
-        await tx.browserProviderProfile.deleteMany({
-          where: {
-            provider: 'steel',
-            profileId: steelContextId,
-            contextId: { not: session.context.id },
-          },
-        });
-        await tx.browserContext.update({
-          where: { id: session.context.id },
-          data: { contextId: steelContextId },
-        });
-        await tx.browserProviderProfile.upsert({
-          where: {
-            contextId_provider: {
-              contextId: session.context.id,
-              provider: 'steel',
-            },
-          },
-          create: {
-            contextId: session.context.id,
-            provider: 'steel',
-            profileId: steelContextId,
-          },
-          update: { profileId: steelContextId },
-        });
-        await tx.browserSession.update({
-          where: { id: session.id },
-          data: {
-            providerProfileSource: 'steel_session_auth',
-            providerProfilePersist: true,
-          },
-        });
-        steelSessionAuthId = steelAuth.id;
-      } else if (session.provider !== 'kernel') {
+        liveViewSteelContextId = steelContextId;
+      } else if (liveViewSession.provider !== 'kernel') {
         return {
           status: 'missing_steel_context' as const,
           request,
@@ -234,7 +176,8 @@ export async function completeAuthAssistanceForUser(
     // generation lock used by `finalizeInterruptedWorkflowTools`, completion can
     // claim `completedAt` while cleanup owns the agent and then race its attention
     // CAS, producing a committed credential whose resume path observed the wrong
-    // generation boundary.
+    // generation boundary. Take this before any credential/profile writes as well:
+    // a losing concurrent completion must not hold those rows while waiting here.
     await lockAgentWorkflowGeneration(tx, request.agentId);
     const completionClaim = await tx.userAuthAssistanceRequest.updateMany({
       where: { id, completedAt: null },
@@ -257,6 +200,75 @@ export async function completeAuthAssistanceForUser(
         retrySideEffects: false,
         workflowId: persisted.attentionRequest.workflowId,
       };
+    }
+
+    let steelSessionAuthId: string | null = null;
+    if (liveViewSession !== null && liveViewSteelContextId !== null) {
+      const steelContextId = liveViewSteelContextId;
+      const steelAuth = await tx.steelSessionAuth.upsert({
+        where: {
+          userId_contextId_authRealm: {
+            userId,
+            contextId: steelContextId,
+            authRealm: request.authRealm,
+          },
+        },
+        create: {
+          userId,
+          contextId: steelContextId,
+          authRealm: request.authRealm,
+          authenticatedAt: now,
+          disabledAt: null,
+          disabledReason: null,
+        },
+        update: {
+          authenticatedAt: now,
+          disabledAt: null,
+          disabledReason: null,
+        },
+      });
+      // Release this Steel context from any OTHER row before claiming it.
+      // `BrowserContext.contextId` is @unique and BrowserProviderProfile has
+      // @@unique([provider, profileId]), so a stale binding elsewhere makes
+      // the next two writes throw — and that rolls the whole transaction
+      // back, discarding a sign-in the user actually completed.
+      await tx.browserContext.updateMany({
+        where: { contextId: steelContextId, id: { not: liveViewSession.context.id } },
+        data: { contextId: null },
+      });
+      await tx.browserProviderProfile.deleteMany({
+        where: {
+          provider: 'steel',
+          profileId: steelContextId,
+          contextId: { not: liveViewSession.context.id },
+        },
+      });
+      await tx.browserContext.update({
+        where: { id: liveViewSession.context.id },
+        data: { contextId: steelContextId },
+      });
+      await tx.browserProviderProfile.upsert({
+        where: {
+          contextId_provider: {
+            contextId: liveViewSession.context.id,
+            provider: 'steel',
+          },
+        },
+        create: {
+          contextId: liveViewSession.context.id,
+          provider: 'steel',
+          profileId: steelContextId,
+        },
+        update: { profileId: steelContextId },
+      });
+      await tx.browserSession.update({
+        where: { id: liveViewSession.id },
+        data: {
+          providerProfileSource: 'steel_session_auth',
+          providerProfilePersist: true,
+        },
+      });
+      steelSessionAuthId = steelAuth.id;
     }
     const completed = await tx.userAuthAssistanceRequest.findUniqueOrThrow({ where: { id } });
     // Compare-and-swap on the pending predicate, exactly like every other

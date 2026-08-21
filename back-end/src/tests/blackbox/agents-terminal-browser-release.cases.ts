@@ -12,7 +12,10 @@ import {
   prisma,
   randomUUID,
 } from './agents-blackbox-harness';
-import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
+import {
+  reconcileTerminalAgentBrowserSessions,
+  releaseAgentBrowserSessions,
+} from '../../providers/agentCleanup';
 
 /**
  * A browser session is a rented remote browser that costs money for as long as it is
@@ -28,8 +31,10 @@ import { releaseAgentBrowserSessions } from '../../providers/agentCleanup';
  * cannot fail to reach.
  */
 async function seedBrowserSession(userId: string, agentId: string): Promise<string> {
-  const context = await prisma.browserContext.create({
-    data: { userId, contextId: `steel-profile-${randomUUID()}` },
+  const context = await prisma.browserContext.upsert({
+    where: { userId },
+    create: { userId, contextId: `steel-profile-${randomUUID()}` },
+    update: {},
   });
   const session = await prisma.browserSession.create({
     data: {
@@ -45,6 +50,67 @@ async function seedBrowserSession(userId: string, agentId: string): Promise<stri
   });
   return session.id;
 }
+
+test('browser release retries sessions durably marked ERROR', async () => {
+  const session = await createAnonymousSession('browser-release-error-retry');
+  trackedUserIds.add(session.user.id);
+  const agentId = await createTestAgent(session.user.id);
+  const browserSessionId = await seedBrowserSession(session.user.id, agentId);
+  await prisma.browserSession.update({
+    where: { id: browserSessionId },
+    data: { status: 'ERROR', closedAt: null },
+  });
+
+  const attempted: string[] = [];
+  const released = await releaseAgentBrowserSessions(agentId, {
+    closeSession: async (sessionId) => {
+      attempted.push(sessionId);
+    },
+  });
+  assert(released === 1, `expected one ERROR session retry, got ${released}`);
+  assert(attempted.length === 1, 'durable ERROR session was omitted from release retry query');
+});
+
+test('terminal browser release reconciliation includes COMPLETED and FAILED agents', async () => {
+  const session = await createAnonymousSession('terminal-browser-release-reconcile');
+  trackedUserIds.add(session.user.id);
+  const completedAgentId = await createTestAgent(session.user.id);
+  const failedAgentId = await createTestAgent(session.user.id);
+  await Promise.all([
+    prisma.agent.update({ where: { id: completedAgentId }, data: { status: 'COMPLETED' } }),
+    prisma.agent.update({ where: { id: failedAgentId }, data: { status: 'FAILED' } }),
+  ]);
+  // BrowserContext.userId is unique; create/reuse it before seeding the second
+  // session instead of racing two upserts for the same user's context.
+  await seedBrowserSession(session.user.id, completedAgentId);
+  await seedBrowserSession(session.user.id, failedAgentId);
+
+  const attempted = new Set<string>();
+  await reconcileTerminalAgentBrowserSessions({
+    releaseBrowserSessions: async (agentId) => {
+      attempted.add(agentId);
+      return 0;
+    },
+  });
+  assert(attempted.has(completedAgentId), 'COMPLETED agent was excluded from release retry');
+  assert(attempted.has(failedAgentId), 'FAILED agent was excluded from release retry');
+});
+
+test('terminal browser release reconciliation isolates provider failures', async () => {
+  const attempted: string[] = [];
+  const summary = await reconcileTerminalAgentBrowserSessions({
+    findTerminalAgentIds: async () => ['failed-release-agent', 'healthy-release-agent'],
+    releaseBrowserSessions: async (agentId) => {
+      attempted.push(agentId);
+      if (agentId === 'failed-release-agent') throw new Error('provider unavailable');
+      return 2;
+    },
+  });
+  assert(attempted.length === 2, 'one provider failure prevented another agent retry');
+  assert(summary.discovered === 2, `expected two candidates, got ${summary.discovered}`);
+  assert(summary.failed === 1, `expected one failed agent retry, got ${summary.failed}`);
+  assert(summary.released === 2, `expected two released sessions, got ${summary.released}`);
+});
 
 test('browser release attempts every session and reports provider failures', async () => {
   const attempted: string[] = [];

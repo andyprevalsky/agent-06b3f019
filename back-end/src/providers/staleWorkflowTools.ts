@@ -93,7 +93,9 @@ export async function closeInterruptedAttentionRequests(
       where: {
         id: row.id,
         userResponse: null,
-        metadata: { equals: row.metadata === null ? Prisma.DbNull : row.metadata },
+        // Prisma represents both SQL NULL and JSON null as `null` when reading a
+        // nullable JSON field. AnyNull is therefore the only faithful CAS value.
+        metadata: { equals: row.metadata === null ? Prisma.AnyNull : row.metadata },
       },
       data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
     });

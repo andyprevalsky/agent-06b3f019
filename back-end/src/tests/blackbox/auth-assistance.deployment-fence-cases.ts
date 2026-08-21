@@ -575,17 +575,19 @@ async function testConcurrentCompletionsRunExternalSideEffectsOnce(): Promise<vo
       where: { id: agent.id },
       data: { temporalWorkflowId: agent.id },
     });
+    const steelContextId = `steel-profile-${randomUUID()}`;
     const context = await prisma.browserContext.create({
-      data: { userId, contextId: `kernel-profile-${randomUUID()}` },
+      data: { userId, contextId: steelContextId },
     });
     const browserSession = await prisma.browserSession.create({
       data: {
         contextId: context.id,
         agentId: agent.id,
-        sessionId: `kernel-session-${randomUUID()}`,
-        debugUrl: 'https://debug.kernel.test/session/concurrent-completion',
+        sessionId: `steel-session-${randomUUID()}`,
+        debugUrl: 'https://debug.steel.test/session/concurrent-completion',
         status: 'ACTIVE',
-        provider: 'kernel',
+        provider: 'steel',
+        providerProfileId: steelContextId,
       },
     });
     const createRes = await request('/api/auth-assistance', userId, {
@@ -637,6 +639,8 @@ async function testConcurrentCompletionsRunExternalSideEffectsOnce(): Promise<vo
     );
     assert(signalCount === 1, `completion signaling must run once, got ${signalCount}`);
     assert(resumeCount === 1, `workflow resume must run once, got ${resumeCount}`);
+    const credentials = await prisma.steelSessionAuth.count({ where: { userId } });
+    assert(credentials === 1, `completion must persist one credential, got ${credentials}`);
   } finally {
     await cleanupFixture(userId);
   }

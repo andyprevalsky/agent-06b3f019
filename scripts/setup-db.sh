@@ -288,6 +288,24 @@ setup_db_remember_records() {
     done <<< "$records"
 }
 
+setup_db_term_records() {
+    local records="$1"
+    local record pid
+    while IFS= read -r record; do
+        [ -n "$record" ] || continue
+        setup_db_pid_matches_record "$record" || continue
+        pid="${record%%|*}"
+        kill -TERM "$pid" 2>/dev/null || true
+    done <<< "$records"
+}
+
+SETUP_DB_TEARDOWN_SIGNAL=""
+
+setup_db_signal_teardown() {
+    SETUP_DB_TEARDOWN_SIGNAL="$1"
+    setup_db_teardown
+}
+
 setup_db_teardown() {
     local exit_code=$?
     local group targets current record pid reap_pids any_running
@@ -298,6 +316,9 @@ setup_db_teardown() {
     # signals masked until descendants are gone and the lock is released.
     trap '' INT TERM
     trap - EXIT
+    if [ -n "$SETUP_DB_TEARDOWN_SIGNAL" ]; then
+        exit_code=$((128 + SETUP_DB_TEARDOWN_SIGNAL))
+    fi
     case "$grace" in
         ''|*[!0-9]*) grace=10 ;;
     esac
@@ -312,18 +333,23 @@ setup_db_teardown() {
         # reaches every current descendant and any child spawned during cleanup.
         kill -TERM -"$group" 2>/dev/null || true
     else
-        while IFS= read -r record; do
-            [ -n "$record" ] || continue
-            setup_db_pid_matches_record "$record" || continue
-            pid="${record%%|*}"
-            kill -TERM "$pid" 2>/dev/null || true
-        done <<< "$targets"
+        setup_db_term_records "$targets"
     fi
 
     grace_started=$SECONDS
     while [ $((SECONDS - grace_started)) -lt "$grace" ]; do
         current="$(setup_db_child_records "$group")"
         setup_db_remember_records "$current"
+        if [ -n "$group" ] && [ "$group" = "$$" ]; then
+            # Re-signal the private group so children spawned during teardown get
+            # the same graceful window as the descendants found initially.
+            kill -TERM -"$group" 2>/dev/null || true
+        else
+            # A TERM-resistant wrapper can fork after the initial snapshot. Give
+            # each newly discovered descendant TERM now instead of remembering it
+            # only to jump straight to KILL after the grace window.
+            setup_db_term_records "$current"
+        fi
         any_running=false
         while IFS= read -r record; do
             [ -n "$record" ] || continue
@@ -376,7 +402,9 @@ setup_db_teardown() {
     trap - INT TERM
     exit "$exit_code"
 }
-trap setup_db_teardown EXIT INT TERM
+trap setup_db_teardown EXIT
+trap 'setup_db_signal_teardown 2' INT
+trap 'setup_db_signal_teardown 15' TERM
 
 # Reset local schema, push schema, then sync data. This must be a true reset,
 # not an upsert-only refresh, so removed/disabled remote rows disappear locally.
