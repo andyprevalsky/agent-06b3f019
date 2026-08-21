@@ -11068,6 +11068,80 @@ async def test_execute_input_text_element_humanizer_missing_coords_refuses_typet
     hu.type_text.assert_not_called()
     session.event_bus.dispatch.assert_not_called()
 
+async def test_execute_input_text_password_secret_ref_resolves_visible_password_coords():
+    """Password secret-ref typing must locate a visible password field when the index has no rect.
+
+    Regression for browser-amazon-return k=5 agent fbc36706: after Switch accounts →
+    account pick, indexed password coords were None and humanize refused TypeTextEvent,
+    posting toolStatus=ERROR that failed no_tool_failures even though the agent later
+    recovered to an unresolved write lock.
+    """
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    session = _fake_session_with_event_bus()
+    session.highlight_interaction_element = AsyncMock()
+    dom = MagicMock()
+    dom.get_browser_state = AsyncMock(return_value={})
+    dom.get_element_coordinates = AsyncMock(return_value=None)
+    element = MagicMock()
+    ah = MagicMock()
+    ah.record_action = AsyncMock()
+    hu = MagicMock()
+    hu.click_at_coords = AsyncMock()
+    hu.press_key = AsyncMock()
+    hu.type_text = AsyncMock()
+    hu.input_page = None
+
+    with (
+        patch("browser_tools.write_lock.is_payment_field", AsyncMock(return_value=False)),
+        patch.object(
+            service_actions,
+            "_resolve_password_field_coordinates",
+            AsyncMock(return_value=(44, 55)),
+        ) as resolve_password,
+    ):
+        out = await service_actions._execute_input_text(
+            session=session,
+            dom_service=dom,
+            action_history=ah,
+            element=element,
+            index=770,
+            coords=None,
+            params={"text": "pwd-ref-1"},
+            thinking=None,
+            humanizer=hu,
+            secret_refs={"pwd-ref-1": "secret-password"},
+            password_origins={"pwd-ref-1": "https://www.amazon.com"},
+            credential_refs_by_secret_ref={"pwd-ref-1": {"kind": "password", "id": "pwd-row"}},
+            current_url="https://www.amazon.com/ap/signin",
+            write_lock_enabled=True,
+            write_lock_approvals=None,
+            system_name="Rose",
+        )
+
+    assert out["success"] is True
+    assert out.get("credential_ref") == {"kind": "password", "id": "pwd-row"}
+    resolve_password.assert_awaited()
+    hu.click_at_coords.assert_awaited_once_with(44, 55)
+    hu.type_text.assert_awaited_once_with("secret-password")
+    session.event_bus.dispatch.assert_not_called()
+
+async def test_resolve_password_field_coordinates_uses_visible_password_input():
+    from domains.spawn_browser_agent_v3 import service_actions
+
+    page = MagicMock()
+    page.evaluate = AsyncMock(
+        return_value={"x": 120, "y": 340, "selector": 'input[name="password"]'}
+    )
+    session = SimpleNamespace(get_current_page=AsyncMock(return_value=page))
+
+    coords = await service_actions._resolve_password_field_coordinates(session, input_page=None)
+    assert coords == (120, 340)
+    page.evaluate.assert_awaited()
+    script = page.evaluate.await_args.args[0]
+    assert 'input[type="password"]' in script
+    assert 'name="password"' in script
+
 async def test_execute_input_text_payment_secret_ref_bypasses_payment_warning():
     from domains.spawn_browser_agent_v3 import service_actions
 
@@ -17191,6 +17265,14 @@ async def run_all_tests():
     await r.record_async(
         "execute_input_text_el_humanizer_missing_coords",
         test_execute_input_text_element_humanizer_missing_coords_refuses_typetext_fallback,
+    )
+    await r.record_async(
+        "execute_input_text_password_secret_ref_resolves_visible_password_coords",
+        test_execute_input_text_password_secret_ref_resolves_visible_password_coords,
+    )
+    await r.record_async(
+        "resolve_password_field_coordinates_uses_visible_password_input",
+        test_resolve_password_field_coordinates_uses_visible_password_input,
     )
     await r.record_async(
         "execute_input_text_payment_secret_ref_bypasses_warning",

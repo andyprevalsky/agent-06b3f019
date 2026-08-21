@@ -1921,6 +1921,62 @@ async def _resolve_payment_ref_coordinates(
     return None
 
 
+_PASSWORD_FIELD_LOCATE_JS = """
+(_unused) => {
+    const candidates = Array.from(document.querySelectorAll(
+        'input[type="password"], input[name="password"], input[autocomplete="current-password"], input[autocomplete="new-password"]'
+    ));
+    for (const el of candidates) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+            continue;
+        }
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) continue;
+        el.scrollIntoView({ block: 'center', inline: 'nearest' });
+        const after = el.getBoundingClientRect();
+        if (after.width < 2 || after.height < 2) continue;
+        return {
+            x: Math.round(after.left + after.width / 2),
+            y: Math.round(after.top + after.height / 2),
+            selector: el.id
+                ? ('#' + el.id)
+                : (el.getAttribute('name') ? ('input[name="' + el.getAttribute('name') + '"]') : 'input[type="password"]'),
+        };
+    }
+    return null;
+}
+"""
+
+
+async def _resolve_password_field_coordinates(
+    session: Any,
+    *,
+    input_page: Any = None,
+) -> Optional[tuple[int, int]]:
+    """Resolve coordinates for a visible password input when the indexed node has no rect.
+
+    Account-switch / sign-in transitions often leave the LLM's password index
+    without a bounding box even though a visible ``input[type=password]`` is on
+    the page. Mirror the payment semantic-locate path so humanized typing can
+    continue without falling back to TypeTextEvent.
+    """
+    if not session:
+        return None
+    for label, target in await _iter_payment_fill_targets(session, input_page):
+        result = await _evaluate_on_payment_fill_target(target, _PASSWORD_FIELD_LOCATE_JS, None)
+        if not result:
+            continue
+        if isinstance(result.get("x"), (int, float)) and isinstance(result.get("y"), (int, float)):
+            logger.debug(
+                "Resolved password field coordinates",
+                target=label,
+                selector=result.get("selector"),
+            )
+            return int(result["x"]), int(result["y"])
+    return None
+
+
 _PAYMENT_METHOD_EXPAND_JS = """
 (_unused) => {
     const pattern = /\\b(card|credit|debit|pay with card|card information|payment method)\\b/i;
@@ -2761,6 +2817,14 @@ async def _execute_indexed_input_text(
         coord_tuple = await _resolve_payment_ref_coordinates(
             session,
             secret_ref_name or "",
+            input_page=_humanizer_input_page(humanizer),
+        )
+    is_password_credential = bool(
+        credential_ref and str(credential_ref.get("kind") or "") == "password"
+    )
+    if humanizer and not coord_tuple and is_password_credential:
+        coord_tuple = await _resolve_password_field_coordinates(
+            session,
             input_page=_humanizer_input_page(humanizer),
         )
     element_coords = {"x": coord_tuple[0], "y": coord_tuple[1]} if coord_tuple else None
