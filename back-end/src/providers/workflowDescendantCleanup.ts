@@ -4,6 +4,7 @@ import { WorkflowNotFoundError } from '@temporalio/client';
 import { prisma, runTransactionWithRetry } from './database';
 import {
   captureInProgressWorkflowTools,
+  closeInterruptedAttentionRequests,
   DEPLOY_INTERRUPTED_TOOL_MESSAGE,
   finalizeInterruptedWorkflowTools,
   type InterruptedWorkflowToolsResult,
@@ -238,14 +239,7 @@ export async function sealDescendantWorkflow(
 async function completeDescendantCleanup(snapshot: DescendantWorkflowSnapshot): Promise<void> {
   await runTransactionWithRetry(async (tx) => {
     await lockAgentWorkflowGeneration(tx, snapshot.agentId);
-    await tx.agentAttentionRequest.updateMany({
-      where: {
-        agentId: snapshot.agentId,
-        workflowId: snapshot.workflowGeneration,
-        userResponse: null,
-      },
-      data: { userResponse: DEPLOY_INTERRUPTED_TOOL_MESSAGE },
-    });
+    await closeInterruptedAttentionRequests(tx, snapshot.agentId, snapshot.workflowGeneration);
     await tx.agent.updateMany({
       where: {
         id: snapshot.agentId,

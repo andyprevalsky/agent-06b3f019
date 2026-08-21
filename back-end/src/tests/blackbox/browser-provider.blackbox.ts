@@ -24,6 +24,7 @@ import {
 import {
   assertFixedRotationLadder,
   deleteKernelResource,
+  isSteelCapacityRateLimit,
   runCrossProviderRotationLadderOrSkipOnSteelOutage,
 } from './browser-provider-rotation.support';
 
@@ -88,6 +89,31 @@ const tests: Array<[string, () => void]> = [
   [
     'rotate_ip uses the fixed Kernel residential, Kernel mobile, Steel, Steel ladder',
     assertFixedRotationLadder,
+  ],
+  [
+    'live ladder retries only Steel concurrent-capacity 429 responses',
+    () => {
+      assert(
+        isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"steel","message":"Browser session rate limit exceeded. Retry after delay."}'
+          )
+        ),
+        'expected the explicit Steel capacity response to be retryable'
+      );
+      assert(
+        !isSteelCapacityRateLimit(
+          new Error(
+            '/rotate-proxy 429: {"error":"browser_provider_rate_limit","provider":"kernel"}'
+          )
+        ),
+        'another provider rate limit must fail closed'
+      );
+      assert(
+        !isSteelCapacityRateLimit(new Error('/rotate-proxy 403: Steel authentication rejected')),
+        'Steel authentication failures must fail closed'
+      );
+    },
   ],
   [
     'Kernel residential proxies fall back from city to state to country',
@@ -164,6 +190,9 @@ async function runLiveProviderParity(): Promise<void> {
   const userId = `kernel-provider-${randomUUID()}`;
   const agentId = randomUUID();
   let liveSessionId: string | undefined;
+  // Every provider session the cross-provider ladder allocates, so `finally` can
+  // release the ones this scope never learned about (see its loop below).
+  const allocatedSessionIds: string[] = [];
   let profileId: string | undefined;
   let proxyId: string | undefined;
   const headers = { 'content-type': 'application/json', 'x-api-key': apiKey };
@@ -259,44 +288,53 @@ async function runLiveProviderParity(): Promise<void> {
     assert(proxyId !== undefined, 'Kernel browser did not use the managed proxy');
 
     // ----- rotate_ip: real IP rotation on the same profile (residential tier) -----
-    const readExitIp = async (wsUrl: string): Promise<string> =>
-      // Kernel/ipify can return non-JSON bodies under parallel blackbox load
-      // (proxy interstitial, truncated response). Retry the whole CDP probe.
+    const readExitIp = async (wsUrl: string): Promise<string> => {
+      // Production workers add the Steel key only at this process-local CDP
+      // boundary. The live parity harness must exercise that same contract;
+      // persisted/API ws_url values are deliberately secret-free.
+      const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
+      try {
+        const ctx = b.contexts()[0];
+        const p = ctx.pages()[0] ?? (await ctx.newPage());
+        await navigateKernelPage(
+          p,
+          `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
+        );
+        const raw = await p.evaluate(() => document.body.innerText);
+        // A rented exit node that is not serving yet answers with its own error page
+        // (observed: a body starting "egress-pro…") instead of ipify's JSON. Report
+        // that as a named transient carrying the real body: a bare JSON.parse throw
+        // surfaces `Unexpected token 'e'`, which names neither the proxy nor the
+        // response and is undiagnosable from a CI log.
+        try {
+          return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
+        } catch (error) {
+          throw new Error(
+            `exit-IP probe returned non-JSON body: ${raw
+              .slice(0, 120)
+              .replace(/\s+/g, ' ')} (${error instanceof Error ? error.message : String(error)})`
+          );
+        }
+      } finally {
+        await b.close();
+      }
+    };
+    // Same transient tolerance as the post-rotation reads below. This baseline read
+    // was the one unprotected call site, so a single not-ready exit node failed the
+    // whole live-parity domain (seen twice under BLACKBOX_TEST_CONCURRENCY=4 while
+    // the domain passed standalone).
+    const readExitIpWithRetry = (wsUrl: string): Promise<string> =>
       retryWithBackoff(
         async () => {
-          // Production workers add the Steel key only at this process-local CDP
-          // boundary. The live parity harness must exercise that same contract;
-          // persisted/API ws_url values are deliberately secret-free.
-          const b = await chromium.connectOverCDP(steelCdpConnectionUrl(wsUrl));
-          try {
-            const ctx = b.contexts()[0];
-            const p = ctx.pages()[0] ?? (await ctx.newPage());
-            await navigateKernelPage(
-              p,
-              `https://api.ipify.org?format=json&nonce=${encodeURIComponent(randomUUID())}`
-            );
-            const raw = await p.evaluate(() => document.body.innerText);
-            try {
-              return String((JSON.parse(raw) as { ip?: string }).ip ?? '');
-            } catch (error) {
-              throw new Error(
-                `exit-IP probe returned non-JSON body: ${raw.slice(0, 80)} (${
-                  error instanceof Error ? error.message : String(error)
-                })`
-              );
-            }
-          } finally {
-            await b.close();
-          }
+          const ip = await readExitIp(wsUrl);
+          if (ip === '') throw new Error('proxy returned an empty exit IP');
+          return ip;
         },
         {
           maxRetries: 3,
           fixedDelays: [500, 1_000, 1_500],
-          isRetryable: (error: unknown) => {
-            const message = error instanceof Error ? error.message : String(error);
-            return message.includes('non-JSON body') || message.includes('Unexpected token');
-          },
-          component: 'browser-provider:exit-ip-read',
+          isRetryable: () => true,
+          component: 'browser-provider:exit-ip-baseline',
         }
       );
     const readDifferentExitIp = (wsUrl: string, previousIp: string): Promise<string> =>
@@ -319,7 +357,7 @@ async function runLiveProviderParity(): Promise<void> {
         }
       );
 
-    const ipBefore = await readExitIp(String(init.ws_url));
+    const ipBefore = await readExitIpWithRetry(String(init.ws_url));
     assert(ipBefore !== '', 'could not read exit IP before rotation');
 
     const rotated = await postWithKernelConnectionRetry('/rotate-proxy', { task_id: init.task_id });
@@ -557,6 +595,7 @@ async function runLiveProviderParity(): Promise<void> {
       retrieveKernelBrowser: (sessionId) =>
         kernel.browsers.retrieve(sessionId, { include_deleted: true }),
       retrieveSteelBrowser: (sessionId) => steel.sessions.retrieve(sessionId),
+      allocatedSessionIds,
     });
     if (crossProvider === null) return;
     liveSessionId = crossProvider.finalSessionId;
@@ -570,6 +609,15 @@ async function runLiveProviderParity(): Promise<void> {
   } finally {
     if (liveSessionId) {
       await post('/close', { session_id: liveSessionId, pause: false }).catch(() => {});
+    }
+    // Release every session the ladder allocated, not just the one this scope
+    // happens to hold. `liveSessionId` is only advanced to the ladder's final id on
+    // the SUCCESS path, so a mid-ladder throw (Steel 429 on call 4) otherwise leaves
+    // a live, billing Steel session behind with its DB row already deleted below.
+    // Closing an already-closed session is a no-op, so this is safe to repeat.
+    for (const sessionId of allocatedSessionIds) {
+      if (sessionId === liveSessionId) continue;
+      await post('/close', { session_id: sessionId, pause: false }).catch(() => {});
     }
     if (profileId) await deleteKernelResource(`/profiles/${profileId}`).catch(() => {});
     if (proxyId) await deleteKernelResource(`/proxies/${proxyId}`).catch(() => {});

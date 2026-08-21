@@ -2203,6 +2203,51 @@ def test_agent_payment_accepts_current_payment_confirmation_schema_key():
     assert "Aurora Notebook" in blob
 
 
+def test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata():
+    """A completed browser result remains evidence when its structured metadata is absent."""
+    from benchmarks.run_benchmark import _extract_agent_payment_output_blob
+
+    browser_result = {
+        "role": "TOOL",
+        "message": (
+            "Checkout complete on the Rose Labs Test Payment page.\n"
+            "Order confirmation ID: tp_74fcd5b4\n"
+            "Total amount paid: 43.96"
+        ),
+        "metadata": {
+            "action_type": "task_complete",
+            "title": "Browser automation complete",
+            "toolName": "spawn_browser_agent",
+            "toolStatus": "FINISHED",
+        },
+    }
+
+    blob = _extract_agent_payment_output_blob({"messages": [browser_result]})
+    assert "tp_74fcd5b4" in blob
+
+    invalid_terminal_markers = (
+        {**browser_result, "role": "ASSISTANT"},
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolName": "spawn_agent"},
+        },
+        {
+            **browser_result,
+            "metadata": {**browser_result["metadata"], "toolStatus": "IN_PROGRESS"},
+        },
+        {
+            **browser_result,
+            "metadata": {
+                key: value
+                for key, value in browser_result["metadata"].items()
+                if key != "action_type"
+            },
+        },
+    )
+    for invalid_result in invalid_terminal_markers:
+        assert _extract_agent_payment_output_blob({"messages": [invalid_result]}) == ""
+
+
 def test_production_payment_lifecycle_refuses_sandbox_target():
     import pytest
 
@@ -14131,6 +14176,10 @@ async def run_all_tests():
     r.record(
         "agent_payment_current_payment_confirmation_key",
         test_agent_payment_accepts_current_payment_confirmation_schema_key,
+    )
+    r.record(
+        "agent_payment_grounded_finished_browser_text",
+        test_agent_payment_accepts_grounded_finished_browser_text_without_structured_metadata,
     )
     r.record(
         "production_payment_rejects_sandbox_target",

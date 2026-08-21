@@ -476,10 +476,12 @@ export async function closeKernelSession(
   pause = false,
   currentUrl?: string
 ): Promise<void> {
+  let releaseError: unknown = null;
   try {
     await releaseKernelRemoteSession(sessionId);
   } catch (error) {
-    log.warn('Failed to delete Kernel session; finalizing local session state', {
+    releaseError = error;
+    log.warn('Failed to delete Kernel session; retaining retryable local session state', {
       sessionId,
       error: error instanceof Error ? error.message : String(error),
     });
@@ -488,11 +490,13 @@ export async function closeKernelSession(
   await prisma.browserSession.update({
     where: { sessionId },
     data: {
-      status: pause ? 'PAUSED' : 'CLOSED',
-      closedAt: pause ? undefined : new Date(),
+      status: releaseError === null ? (pause ? 'PAUSED' : 'CLOSED') : pause ? 'ACTIVE' : 'ERROR',
+      closedAt: releaseError === null && !pause ? new Date() : null,
       currentUrl: currentUrl || undefined,
     },
   });
+
+  if (releaseError !== null) throw releaseError;
 }
 
 /**

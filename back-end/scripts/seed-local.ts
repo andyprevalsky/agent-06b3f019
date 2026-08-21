@@ -10,7 +10,7 @@
 
 import { writeFileSync } from 'node:fs';
 
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, type Prisma } from '@prisma/client';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import dotenv from 'dotenv';
@@ -38,6 +38,7 @@ import {
 } from './cookie-domain-scope';
 import { selectRemoteDatabaseUrl } from './seed-remote-database-url';
 import { streamCookies, streamJsonbOrigins, type JsonbOriginTable } from './seed-jsonb-stream';
+import { createRetryableProbe } from './retryable-probe';
 import {
   SEED_PEAK_RSS_BUDGET_MB,
   SEED_RSS_REPORT_ENV,
@@ -359,15 +360,69 @@ const PROD_INTEGRATION_COLUMNS = {
   updatedAt: true,
 } as const;
 
-async function syncIntegrations(): Promise<number> {
-  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
-  const userIntegrations = await remote.integration.findMany({
-    where: { userId: DEV_USER_ID },
+const PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT = {
+  ...PROD_INTEGRATION_COLUMNS,
+  accountId: true,
+  accountEmail: true,
+} as const;
+
+type ProdIntegrationRow = Prisma.IntegrationGetPayload<{
+  select: typeof PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT;
+}>;
+
+const remoteHasIntegrationAccountColumns = createRetryableProbe(async () => {
+  const rows = await remote.$queryRaw<Array<{ columnCount: number }>>`
+      SELECT COUNT(*)::int AS "columnCount"
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'Integration'
+        AND column_name IN ('accountId', 'accountEmail')
+    `;
+  return rows[0]?.columnCount === 2;
+});
+
+async function findProdIntegrations(
+  where: Prisma.IntegrationWhereInput
+): Promise<ProdIntegrationRow[]> {
+  if (await remoteHasIntegrationAccountColumns()) {
+    return remote.integration.findMany({
+      where,
+      select: PROD_INTEGRATION_COLUMNS_WITH_ACCOUNT,
+    });
+  }
+  const rows = await remote.integration.findMany({
+    where,
     select: PROD_INTEGRATION_COLUMNS,
   });
-  const poolIntegrations = await remote.integration.findMany({
-    where: { poolingEnabled: true, userId: { not: DEV_USER_ID } },
-    select: PROD_INTEGRATION_COLUMNS,
+  return rows.map((row) => ({ ...row, accountId: '', accountEmail: null }));
+}
+
+// Keep production reads on the columns that existed before the newest local
+// migration. A deploy seeds from production before that migration is live, so
+// an implicit SELECT * would request the new health columns and fail with P2022.
+const PROD_EMAIL_CREDENTIAL_COLUMNS = {
+  id: true,
+  userId: true,
+  integrationId: true,
+  provider: true,
+  pkceVerifier: true,
+  stateToken: true,
+  accessToken: true,
+  refreshToken: true,
+  expiresAt: true,
+  scopes: true,
+  metadata: true,
+  createdAt: true,
+  updatedAt: true,
+  email: true,
+} as const;
+
+async function syncIntegrations(): Promise<number> {
+  // Sync dev user's integrations + all pool tokens (needed for Claude Code benchmarks)
+  const userIntegrations = await findProdIntegrations({ userId: DEV_USER_ID });
+  const poolIntegrations = await findProdIntegrations({
+    poolingEnabled: true,
+    userId: { not: DEV_USER_ID },
   });
   const all = [...userIntegrations, ...poolIntegrations];
   // Pool tokens reference foreign users — ensure those User records exist locally
@@ -406,12 +461,9 @@ const EMAIL_INTEGRATION_NAMES = ['gmail', 'yahoo'] as const;
  * upserts can rewrite foreign keys onto the preserved local IDs.
  */
 async function syncEmailIntegrations(): Promise<Map<string, string>> {
-  const emailIntegrations = await remote.integration.findMany({
-    where: {
-      userId: DEV_USER_ID,
-      name: { in: [...EMAIL_INTEGRATION_NAMES] },
-    },
-    select: PROD_INTEGRATION_COLUMNS,
+  const emailIntegrations = await findProdIntegrations({
+    userId: DEV_USER_ID,
+    name: { in: [...EMAIL_INTEGRATION_NAMES] },
   });
   const remoteToLocal = new Map<string, string>();
   for (const integration of emailIntegrations) {
@@ -433,15 +485,21 @@ async function syncEmailIntegrations(): Promise<Map<string, string>> {
   return remoteToLocal;
 }
 
-/** Rewrite credential.integrationId onto the local Integration id when IDs diverge. */
+/**
+ * Rewrite credential.integrationId onto the local Integration id when IDs diverge.
+ * Production may not have the health columns yet, so every authoritative sync
+ * must also clear stale local failures instead of preserving them through upsert.
+ */
 function remapEmailCredentialIntegrationIds<
   T extends { integrationId: string; [key: string]: unknown },
 >(creds: T[], remoteToLocal: Map<string, string>): T[] {
-  return creds.map((cred) => {
-    const localId = remoteToLocal.get(cred.integrationId);
-    if (!localId || localId === cred.integrationId) return cred;
-    return { ...cred, integrationId: localId };
-  });
+  return creds.map((cred) => ({
+    ...cred,
+    integrationId: remoteToLocal.get(cred.integrationId) ?? cred.integrationId,
+    state: 'connected',
+    lastErrorReason: null,
+    lastFailedSyncAt: null,
+  }));
 }
 
 /**
@@ -450,12 +508,9 @@ function remapEmailCredentialIntegrationIds<
  * preserves local primary keys via (userId, name).
  */
 async function emailIntegrationIdMap(): Promise<Map<string, string>> {
-  const remoteRows = await remote.integration.findMany({
-    where: {
-      userId: DEV_USER_ID,
-      name: { in: [...EMAIL_INTEGRATION_NAMES] },
-    },
-    select: { id: true, userId: true, name: true, accountId: true },
+  const remoteRows = await findProdIntegrations({
+    userId: DEV_USER_ID,
+    name: { in: [...EMAIL_INTEGRATION_NAMES] },
   });
   const remoteToLocal = new Map<string, string>();
   for (const row of remoteRows) {
@@ -1057,6 +1112,7 @@ async function sync() {
     await syncTable('Email Credentials', async () => {
       const creds = await remote.emailIntegrationCredential.findMany({
         where: { userId: DEV_USER_ID },
+        select: PROD_EMAIL_CREDENTIAL_COLUMNS,
       });
       return upsertById(
         local.emailIntegrationCredential,
@@ -1113,6 +1169,7 @@ async function sync() {
   await syncTable('Email Credentials', async () => {
     const creds = await remote.emailIntegrationCredential.findMany({
       where: { userId: DEV_USER_ID },
+      select: PROD_EMAIL_CREDENTIAL_COLUMNS,
     });
     const remoteToLocal = await emailIntegrationIdMap();
     return upsertById(

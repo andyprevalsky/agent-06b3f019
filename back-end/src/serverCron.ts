@@ -19,6 +19,49 @@ import { runPlaidTransactionSyncJob } from './domains/integrations/service.plaid
 import { runGmailSyncJob } from './services/integrations/gmailSync';
 import { reconcileWorkflowLiveness } from './providers/workflowLivenessReconciler';
 import { cleanupTerminalAgentWorkflowZombies } from './providers/workflowTerminalCleanup';
+import { runTerminalAgentBrowserReleaseReconcileWithLease } from './providers/agentCleanup';
+
+function scheduleTerminalBrowserReleaseReconcile(isProduction: boolean): void {
+  const cronLog = createLogger('Cron');
+  if (!isProduction || process.env.DISABLE_TERMINAL_BROWSER_RELEASE_RECONCILE === '1') {
+    cronLog.info('Terminal browser release reconcile disabled', {
+      reason: !isProduction ? 'non-production' : 'DISABLE_TERMINAL_BROWSER_RELEASE_RECONCILE',
+    });
+    return;
+  }
+  let running = false;
+  const run = () => {
+    if (running) {
+      cronLog.info('Terminal browser release reconcile already running; skipping overlapping tick');
+      return;
+    }
+    running = true;
+    runTerminalAgentBrowserReleaseReconcileWithLease({
+      batchSize: 100,
+      deadlineAtMs: Date.now() + 50_000,
+    })
+      .then(({ acquired, summary }) => {
+        if (!acquired) {
+          cronLog.info('Terminal browser release reconcile lease held by another replica');
+          return;
+        }
+        if (summary.discovered > 0) {
+          cronLog.info('Terminal browser release reconcile summary', { ...summary });
+        }
+      })
+      .catch((error) => {
+        cronLog.error('Terminal browser release reconcile failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = false;
+      });
+  };
+  run();
+  cron.schedule('* * * * *', run);
+  cronLog.info('Terminal browser release reconcile scheduled (every minute)');
+}
 
 function scheduleWorkflowLivenessReconcile(isProduction: boolean): void {
   const cronLog = createLogger('Cron');
@@ -251,6 +294,7 @@ function scheduleProactiveSmsOutreach(isProduction: boolean): void {
 export function registerCronJobs(isProduction: boolean): void {
   scheduleTemporalWorkflowCleanup(isProduction);
   scheduleWorkflowLivenessReconcile(isProduction);
+  scheduleTerminalBrowserReleaseReconcile(isProduction);
   scheduleGmailSync();
   schedulePlaidSync();
   schedulePurchaseHoldReconcile();
