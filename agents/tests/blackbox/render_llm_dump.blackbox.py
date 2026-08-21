@@ -337,6 +337,56 @@ def test_message_renderer_compacts_structured_response_values():
     assert "added_to_cart: True" in html
 
 
+def test_publish_dump_https_uploads_and_returns_presigned_url():
+    """HTTPS publish must return a clickable URL (not a local artifact path)."""
+    renderer = _load_renderer()
+
+    class _FakeClient:
+        def __init__(self):
+            self.put = None
+
+        def put_object(self, **kwargs):
+            self.put = kwargs
+
+        def generate_presigned_url(self, _op, Params=None, ExpiresIn=None):
+            assert Params is not None
+            assert ExpiresIn == 7 * 24 * 3600
+            return f"https://example.r2.dev/{Params['Key']}?X-Amz-Signature=test"
+
+    fake = _FakeClient()
+
+    def _fake_r2():
+        return fake, "trace-bucket"
+
+    setattr(renderer, "_r2_client", _fake_r2)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        html_path = Path(tmp) / "dump.html"
+        html_path.write_text("<html>ok</html>", encoding="utf-8")
+        url = renderer.publish_dump_https(html_path, agent_id="agent-1")
+        assert url is not None
+        assert url.startswith("https://")
+        assert "file://" not in url
+        assert "/opt/cursor/artifacts" not in url
+        assert fake.put is not None
+        assert fake.put["Bucket"] == "trace-bucket"
+        assert fake.put["ContentType"].startswith("text/html")
+        assert "agent-1" in fake.put["Key"]
+
+
+def test_publish_dump_https_returns_none_without_r2():
+    renderer = _load_renderer()
+
+    def _missing():
+        return None, ""
+
+    setattr(renderer, "_r2_client", _missing)
+    with tempfile.TemporaryDirectory() as tmp:
+        html_path = Path(tmp) / "dump.html"
+        html_path.write_text("<html>ok</html>", encoding="utf-8")
+        assert renderer.publish_dump_https(html_path, agent_id="a") is None
+
+
 def test_publish_rendered_dump_copies_html_and_assets():
     renderer = _load_renderer()
 
@@ -480,6 +530,14 @@ async def run_all_tests():
     r.record(
         "publish_rendered_dump_copies_html_and_assets",
         test_publish_rendered_dump_copies_html_and_assets,
+    )
+    r.record(
+        "publish_dump_https_uploads_and_returns_presigned_url",
+        test_publish_dump_https_uploads_and_returns_presigned_url,
+    )
+    r.record(
+        "publish_dump_https_returns_none_without_r2",
+        test_publish_dump_https_returns_none_without_r2,
     )
     r.record(
         "published_dump_is_viewable_without_sidecar_assets",

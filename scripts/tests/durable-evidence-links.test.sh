@@ -97,6 +97,8 @@ PY
 FORMAT="$ROOT/.claude/shared/approval-format.md"
 grep -Fq 'https://roselabs.ai/?agent-id=' "$FORMAT" || fail "approval format missing durable FE"
 grep -Fq 'omit the recording player entirely' "$FORMAT" || fail "approval format missing invalid-recording ban"
+grep -Fq 'HTTPS URL' "$FORMAT" || fail "approval format missing HTTPS dump URL requirement"
+grep -Fq 'vscode-remote' "$FORMAT" || fail "approval format missing vscode-remote blank-viewer warning"
 
 # 4) Gate must stay wired into /deploy structural suites (both docs + registry).
 DEPLOY="$ROOT/.claude/commands/deploy.md"

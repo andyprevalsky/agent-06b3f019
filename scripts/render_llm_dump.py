@@ -2488,10 +2488,10 @@ def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) ->
     """Copy a self-contained HTML dump to a viewer-reachable artifacts dir.
 
     `file://` URLs only work on the machine that rendered the dump. Cursor Cloud
-    reviewers open artifacts from `/opt/cursor/artifacts`, so the renderer must
-    publish a single self-contained HTML file there (when the directory exists)
-    instead of asking humans to click a VM-local file URI or rely on a sidecar
-    `_assets/` tree that many artifact viewers cannot resolve.
+    stores copies under `/opt/cursor/artifacts`, but markdown links to those
+    paths open blank `vscode-remote://` viewers — reviewers need an HTTPS URL
+    from `publish_dump_https()` (printed by main). Still publish the local copy
+    for screenshot / offline use.
     """
     target_root = artifacts_dir if artifacts_dir is not None else DEFAULT_ARTIFACTS_DIR
     if not target_root.is_dir():
@@ -2512,6 +2512,63 @@ def publish_rendered_dump(html_path: Path, artifacts_dir: Path | None = None) ->
         except OSError:
             pass
     return dest
+
+
+def _r2_client():
+    """Build a boto3 S3 client for Cloudflare R2, or None when unset/unavailable."""
+    account = (os.environ.get("R2_ACCOUNT_ID") or "").strip()
+    access = (os.environ.get("R2_ACCESS_KEY_ID") or "").strip()
+    secret = (os.environ.get("R2_SECRET_ACCESS_KEY") or "").strip()
+    bucket = (os.environ.get("R2_BUCKET_TRACE_ARCHIVE") or "").strip()
+    if not account or not access or not secret or not bucket:
+        return None, ""
+    try:
+        import boto3
+        from botocore.config import Config
+    except ImportError:
+        return None, ""
+    client = boto3.client(
+        "s3",
+        endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
+        aws_access_key_id=access,
+        aws_secret_access_key=secret,
+        region_name="auto",
+        config=Config(signature_version="s3v4"),
+    )
+    return client, bucket
+
+
+def publish_dump_https(
+    html_path: Path,
+    *,
+    agent_id: str | None = None,
+    expires_in: int = 7 * 24 * 3600,
+) -> str | None:
+    """Upload self-contained HTML to R2 and return a presigned HTTPS GET URL.
+
+    Cursor Cloud markdown links to `/opt/cursor/artifacts/*.html` open blank
+    `vscode-remote://` pages. A presigned HTTPS URL is what reviewers can
+    actually open. Returns None when R2 env/creds are missing.
+    """
+    standalone = make_html_self_contained(html_path)
+    body = standalone.read_bytes()
+    client, bucket = _r2_client()
+    if client is None or not bucket:
+        return None
+    safe_agent = slug(agent_id or "unknown-agent")
+    key = f"evidence/llm-dumps/{safe_agent}/{standalone.name}"
+    client.put_object(
+        Bucket=bucket,
+        Key=key,
+        Body=body,
+        ContentType="text/html; charset=utf-8",
+        CacheControl="public, max-age=31536000, immutable",
+    )
+    return client.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket, "Key": key},
+        ExpiresIn=expires_in,
+    )
 
 
 def _copy_tree_best_effort(src: Path, dst: Path) -> None:
@@ -2610,16 +2667,34 @@ def main() -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(build_html(data, dump_path.resolve(), output_path.resolve()), encoding="utf-8")
     published = publish_rendered_dump(output_path.resolve(), args.artifacts_dir)
-    if published is not None:
+    https_url = publish_dump_https(
+        (published or output_path).resolve(),
+        agent_id=str(data.get("agent_id") or ""),
+    )
+    # Prefer HTTPS for reviewers — local artifact paths open blank in Cursor Browser.
+    if https_url:
+        print(https_url)
+        if published is not None:
+            print(f"local_artifact={published}", file=sys.stderr)
+    elif published is not None:
         print(str(published))
+        print(
+            "warning: no R2 HTTPS publish; /opt/cursor/artifacts paths are not clickable "
+            "for remote reviewers (vscode-remote blank). Set R2_* env to fix.",
+            file=sys.stderr,
+        )
     else:
         print(output_path.resolve().as_uri())
         print(
-            "warning: no artifacts directory; do not send a file:// link to a remote reviewer",
+            "warning: no artifacts directory / R2 publish; do not send a file:// link "
+            "to a remote reviewer",
             file=sys.stderr,
         )
     if not args.no_open:
-        webbrowser.open(published.as_uri() if published is not None else output_path.resolve().as_uri())
+        open_target = https_url or (
+            published.as_uri() if published is not None else output_path.resolve().as_uri()
+        )
+        webbrowser.open(open_target)
     return 0
 
 

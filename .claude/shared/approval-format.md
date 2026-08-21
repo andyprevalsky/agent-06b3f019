@@ -65,15 +65,16 @@ Render the last LLM call in the entire trajectory — root agent plus every
 spawned sub-agent. Collect `.llm-dumps/<agent_id>/*.json` for all of those
 ids, sort by the millisecond prefix in the filename, and render the latest
 file with `python3 scripts/render_llm_dump.py <dump> --no-open`. Link the
-path the renderer prints. That command copies the HTML plus its `_assets`
-sidecar into `/opt/cursor/artifacts` when that directory exists so a remote
-reviewer can open it. The published HTML must be self-contained: browser
-recording frames are copied into `_assets` (never `file://` paths). If frames
-are missing or unreadable, omit the recording player entirely — never attach an
-invalid/broken recording section. Never link a `file://` URL — those only exist on the
-render machine and show `ERR_FILE_NOT_FOUND` in the reviewer's browser. Never
-pick an earlier failing call, a directory listing, or raw JSON. If there was
-no LLM call, write `**LLM dump:** Not applicable — <reason>`.
+**HTTPS URL** the renderer prints on stdout (R2 presigned when `R2_*` is
+configured). Never link a VM-local path such as `/opt/cursor/artifacts/*.html`,
+`vscode-remote://…`, or `file://…` — those open blank/broken pages for remote
+reviewers in Cursor Browser. The HTML must be self-contained (browser recording
+frames inlined as data URIs; never `file://` frame paths). If frames are missing
+or unreadable, omit the recording player entirely — never attach an
+invalid/broken recording section. As a secondary check, also embed a screenshot
+of the rendered dump via an `<img src="/opt/cursor/artifacts/…">` tag when
+available. Never pick an earlier failing call, a directory listing, or raw JSON.
+If there was no LLM call, write `**LLM dump:** Not applicable — <reason>`.
 
 **Local repro (<wall-clock>):**
 
