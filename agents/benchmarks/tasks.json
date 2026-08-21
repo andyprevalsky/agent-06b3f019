@@ -1590,7 +1590,7 @@
   {
     "name": "browser-doordash-usb-c-cable",
     "title": "DoorDash USB-C Cable Delivery",
-    "description": "Buy a constrained electronics item through rapid local retail delivery.",
+    "description": "Stage a constrained DoorDash electronics checkout and stop at the unresolved place-order write lock.",
     "prompt": "Use DoorDash to order one USB-C to USB-C charging cable for delivery to my saved address in San Francisco. It must be at least 6 feet long, support at least 60W charging, cost no more than $30 before taxes and fees, and arrive at the earliest available time. Do not buy a USB-A cable, adapter, multi-pack, or cable with a permanently attached wall charger. Complete checkout.",
     "timeout_seconds": 900,
     "is_chat_mode": false,
@@ -1608,12 +1608,9 @@
     "requires_browser_agent": true,
     "requires_claude_code": false,
     "attachment": null,
-    "approval_handling": "auto_approve",
+    "approval_handling": "ignore",
     "expected_approval_count": 1,
-    "expected_attention_kind_any_of": [
-      "payment_approval",
-      "write_lock"
-    ],
+    "expected_attention_kind": "write_lock",
     "expected_tool_counts": {
       "spawn_browser_agent": 1
     },
@@ -1637,7 +1634,7 @@
       "live_targets": [
         "https://www.doordash.com/products/usbc-cable/ugp_c671cf61-ba10-4433-b46a-3cce19227d69"
       ],
-      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, delivery timing, and one auto-approved checkout boundary. The task may exercise guest checkout and does not require an injected cookie bundle.",
+      "context_notes": "Live DoorDash retail inventory, saved delivery details, product-spec comparison, and delivery timing. The runner treats the final place-order write lock as completion, leaves that request unresolved, and does not place the order. The task may exercise guest checkout and does not require an injected cookie bundle.",
       "live_cookie_domains": [
         "doordash.com"
       ]
@@ -1649,7 +1646,8 @@
         "criteria": [
           "No tool call fails",
           "Exactly one browser-agent session is used",
-          "The root agent completes after exactly one auto-approved attention request"
+          "Exactly one final DoorDash place-order write lock is triggered and left unresolved",
+          "The approval request identifies a USB-C cable and its price"
         ],
         "checks": [
           {
@@ -1661,12 +1659,15 @@
             "max": 1
           },
           {
-            "type": "agent_status",
-            "value": "COMPLETED"
-          },
-          {
             "type": "approval_request_count",
             "value": 1
+          },
+          {
+            "type": "approval_request_details",
+            "required_strings": [
+              "USB-C"
+            ],
+            "require_amount": true
           }
         ]
       },
@@ -1676,9 +1677,11 @@
         "criteria": [
           "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
           "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
-          "The agent reaches the payment/write-lock or completed checkout with the earliest available delivery"
+          "The selected delivery option is the earliest available time to the saved San Francisco address",
+          "The final Place order or Pay action triggers exactly one unresolved write_lock request",
+          "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Review product details, cart evidence, and attention requests. Pass only when every connector, length, wattage, quantity, price, exclusion, and delivery constraint is grounded in the transcript."
+        "judge_prompt": "Pass only when browser/tool evidence grounds one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, uses the earliest available delivery to the saved San Francisco address, and stops at exactly one unresolved final DoorDash place-order write lock. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
