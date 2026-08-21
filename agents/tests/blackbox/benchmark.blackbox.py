@@ -838,6 +838,16 @@ def test_purchase_gate_benchmarks_enable_bundled_frontend_before_stack_start():
         local.configure_task_environment(["gate-kyc-card-mint"])
         assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
 
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("BENCHMARK_BUNDLED_FRONTEND", None)
+        os.environ.pop("BENCHMARK_FRONTEND_URL", None)
+        # Admin-bypass shares /test_payment + public Kernel tunnel; omitting it
+        # from TEST_PAYMENT_FRONTEND_TASK_NAMES served Vite DEV and left #root
+        # blank for minutes under pass@5 concurrency.
+        local.configure_task_environment(["gate-subscription-card-mint-admin-bypass"])
+        assert os.environ["BENCHMARK_BUNDLED_FRONTEND"] == "true"
+        assert local.needs_frontend_tunnel(["gate-subscription-card-mint-admin-bypass"])
+
 
 def test_benchmark_bundled_frontend_build_has_cloud_heap_budget():
     """Cloud build hosts default near 2GB old-space, below the frontend bundle need."""
