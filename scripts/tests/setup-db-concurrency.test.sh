@@ -265,9 +265,12 @@ mkdir -p "$TMP/locks"
 CHILD_MARKER="$TMP/orphan-child-alive"
 rm -f "$CHILD_MARKER"
 # The seed stub for this case parks a long-lived grandchild exactly the way the
-# real seed does, and keeps touching a marker so survival is observable.
+# real seed does, ignores graceful termination, and keeps touching a marker so
+# survival is observable. Teardown must retain the lock through its grace window
+# and then force this child to stop.
 cat > "$TMP/fake-repo/back-end/scripts/long-seed.sh" <<STUB
 #!/usr/bin/env bash
+trap '' INT TERM
 for _ in \$(seq 1 200); do
   printf '%s\n' "alive" > "$CHILD_MARKER"
   sleep 0.1
@@ -284,8 +287,10 @@ chmod +x "$TMP/fake-repo/back-end/scripts/long-seed.sh"
     CONDUCTOR_PORT=59000 \
     CONDUCTOR_WORKSPACE_NAME=term-ws \
     CONDUCTOR_WORKSPACE_PATH="$TMP/fake-repo" \
+    ROSE_TRUST_CONDUCTOR_WORKSPACE_NAME=1 \
     ROSE_WORKSPACE_DB_LOCK_DIR="$TMP/locks" \
     ROSE_USE_SYSTEM_PG=false \
+    SETUP_DB_TEARDOWN_GRACE_SECONDS=1 \
     SETUP_DB_TEST_SEED_COMMAND="$TMP/fake-repo/back-end/scripts/long-seed.sh" \
     python3 -c 'import os, sys; os.setsid(); os.execv("/bin/bash", ["bash", sys.argv[1]])' \
       "$TMP/fake-repo/scripts/setup-db.sh"
@@ -297,9 +302,14 @@ for _ in $(seq 1 200); do
 done
 if [ -f "$CHILD_MARKER" ]; then
   kill -TERM "$term_pid" 2>/dev/null || true
+  sleep 0.1
+  kill -INT "$term_pid" 2>/dev/null || true
+  sleep 0.1
+  [ -f "$TMP/locks/victoria-db-term-ws.lock" ] || fail \
+    "case 6: teardown released the workspace DB lock while a TERM-resistant seed child was still alive"
   wait "$term_pid" 2>/dev/null || true
   rm -f "$CHILD_MARKER"
-  sleep 1
+  sleep 0.3
   [ ! -f "$CHILD_MARKER" ] || fail \
     "case 6: a TERM'd setup-db.sh left its seed child running — it keeps writing to a
 database the next holder already claimed"
