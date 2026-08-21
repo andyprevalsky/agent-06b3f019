@@ -10,21 +10,18 @@ first_bad_boundary: agents/domains/spawn_browser_agent_v3/challenge_recovery.py 
 symptoms:
   - 'A cookie variant looked clean in isolation, but unknown cookies are preserved; continuing with browser/IP search.'
   - 'No stable browser configuration cleared the challenge'
-  - 'browser_challenge_recovery_failed'
   - 'Expected payment_approval attention request (to ignore) but none was triggered'
   - 'Refusing to leave pinned page host ''www.google.com'''
-  - 'google.com/sorry/index'
   - browser-hotel-booking Timeout after 904s
 tags:
   - browser-agent
   - challenge-recovery
-  - hotels.com
+  - hotels-com
   - guest-checkout
   - antibot
-  - payment_approval
+  - payment-approval
 sources:
   - agent 42cc9eb7-bca7-4d87-8373-faadcd33f8ef
-  - agents/benchmarks/runs/20260821_170244_browser-hotel-booking.json
   - commit e347a232e
 repro: scripts/run-bench --local browser-hotel-booking
 status: open
