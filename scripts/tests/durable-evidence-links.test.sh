@@ -29,8 +29,12 @@ require_text "$RESULTS" "print_durable_agent_links" \
   "BenchmarkRun.save must print durable FE links"
 require_text "$PUBLISH" "/opt/cursor/artifacts/rca_evidence" \
   "publish_evidence_links must write Cursor artifacts"
-require_text "$PUBLISH" "www.roselabs.ai/open-agent" \
-  "publish_evidence_links must verify durable open-agent URLs"
+require_text "$PUBLISH" "www.roselabs.ai" \
+  "publish_evidence_links must target the durable www.roselabs.ai origin"
+require_text "$PUBLISH" "/?agent-id=" \
+  "publish_evidence_links must use Terminal /?agent-id= deep links"
+require_text "$HUB" "/?agent-id=" \
+  "durable_open_agent_url must use Terminal /?agent-id= (not a missing /open-agent path alone)"
 require_text "$AGENTS_MD" "publish_evidence_links.py" \
   "AGENTS.md must instruct Cloud Agents to publish durable evidence"
 

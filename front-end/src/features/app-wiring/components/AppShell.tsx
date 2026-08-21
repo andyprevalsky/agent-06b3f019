@@ -14,6 +14,7 @@
  *   +--> "/research/:slug" --> <ResearchBlogPost />
  *   +--> "/download" --> <Download />
  *   +--> "/waitlist" --> main Terminal + automatic phone login
+ *   +--> "/open-agent" --> <OpenAgentRedirect /> (durable ?agent-id deep link)
  *   +--> "*" --> <NotFound />
  *
  * WaitlistGate overlays every route: authenticated users without a redeemed

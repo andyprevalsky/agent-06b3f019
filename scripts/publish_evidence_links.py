@@ -4,8 +4,9 @@
 Local ``scripts/run-bench --local`` stacks tear down after the run. Evidence
 cited in approvals must outlive that stack:
 
-  * FE  → ``https://www.roselabs.ai/open-agent?agent-id=…`` after the run
+  * FE  → ``https://www.roselabs.ai/?agent-id=…`` after the run
     bundle is on the always-on Benchmark Hub (dual-write or explicit upload)
+    (``/open-agent?agent-id=…`` is an alias that redirects to the same URL)
   * LLM dump → HTML under ``/opt/cursor/artifacts/rca_evidence/<agent_id>/``
     (Cursor uploads these for multi-day reachability in the agent UI)
 
@@ -60,7 +61,7 @@ def _auth_headers() -> dict[str, str]:
 
 
 def durable_fe_url(agent_id: str) -> str:
-    return f"{DURABLE_ORIGIN}/open-agent?agent-id={agent_id}"
+    return f"{DURABLE_ORIGIN}/?agent-id={agent_id}"
 
 
 def upload_run_json(run_json: Path) -> str:

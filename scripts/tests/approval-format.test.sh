@@ -87,8 +87,10 @@ require_text "$FORMAT" 'expired/unreachable' \
   "approval requests must report dead FE links honestly"
 require_text "$FORMAT" 'restore an archived viewer without rerunning a' \
   "approval requests must restore archived FE evidence when safe"
-require_text "$FORMAT" 'https://www.roselabs.ai/open-agent?agent-id=' \
-  "approval FE links must prefer the durable open-agent deep link"
+require_text "$FORMAT" 'https://www.roselabs.ai/?agent-id=' \
+  "approval FE links must prefer the durable Terminal /?agent-id= deep link"
+require_text "$FORMAT" 'Oops! Page not found' \
+  "approval FE links must not cite SPA NotFound paths like undeployed /open-agent"
 require_text "$FORMAT" 'python3 scripts/publish_evidence_links.py' \
   "approval Evidence must publish FE + LLM dumps via publish_evidence_links"
 require_text "$FORMAT" '/opt/cursor/artifacts' \

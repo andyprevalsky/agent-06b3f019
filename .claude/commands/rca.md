@@ -211,7 +211,7 @@ boundary, exact local repro command + recorded failure, and proposed
 generalizable fix. Then stop for agreement before implementing using the
 canonical approval narrative from `.claude/shared/approval-format.md`. Evidence
 must include a task-framed `What failed:` sentence, the durable FE link
-(`https://www.roselabs.ai/open-agent?agent-id=…` after
+(`https://www.roselabs.ai/?agent-id=…` after
 `python3 scripts/publish_evidence_links.py`), last-call rendered LLM dump under
 `/opt/cursor/artifacts/rca_evidence/…`, numbered local-repro steps with a
 `Tests:` assertion and measured wall-clock, and Environment (evaluators with

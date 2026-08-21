@@ -59,10 +59,12 @@ Landed in stages:
    `run-bench` stacks still fail-closed-register against the ephemeral Hub, but
    terminal bundles are mirrored to the always-on production Hub
    (`agents/benchmarks/hub_upload.py::mirror_run_bundle_to_durable_hub`) and
-   runs print `https://www.roselabs.ai/open-agent?agent-id=…`. Cloud Agents
+   runs print `https://www.roselabs.ai/?agent-id=…`. Cloud Agents
    (`CURSOR_AGENT`) fail closed if the durable mirror fails. RCA/approval
    Evidence must use that durable URL via
-   `scripts/publish_evidence_links.py`, not localhost/ngrok.
+   `scripts/publish_evidence_links.py`, not localhost/ngrok. `/open-agent` is
+   only an alias that must redirect into `/?agent-id=` — citing `/open-agent`
+   before that route existed rendered SPA NotFound while HTTP stayed 200.
 2. **Still open:** rewrite archived `recording_file_pointer` to durable R2
    media, and guarantee cloud/fleet runs finalize media into the indexed
    bundle. Plan remnants may still live under `docs/plans/`.

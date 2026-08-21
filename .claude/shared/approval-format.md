@@ -50,10 +50,13 @@ the expected tool>`. Do not start from the bug; start from the goal.
 
 The URL must open the concrete agent run that proves the reported failure or
 outcome, not a generic dashboard. Prefer the durable always-on deep link
-`https://www.roselabs.ai/open-agent?agent-id=<id>` (Hub-archive rehydrate). Do
-**not** cite an ephemeral localhost / ngrok / trycloudflare FE as the approval
-Evidence link — those die when the isolated stack tears down. Before presenting
-approval, run `python3 scripts/publish_evidence_links.py --run-json <run.json>
+`https://www.roselabs.ai/?agent-id=<id>` (Hub-archive rehydrate via the Terminal
+route). `/open-agent?agent-id=<id>` is an alias that must redirect to the same
+query — never cite a path that renders the SPA NotFound ("Oops! Page not found")
+while HTTP stays 200. Do **not** cite an ephemeral localhost / ngrok /
+trycloudflare FE as the approval Evidence link — those die when the isolated
+stack tears down. Before presenting approval, run
+`python3 scripts/publish_evidence_links.py --run-json <run.json>
 --agent-id <id>` (or confirm the run was dual-written to the durable Hub) and
 probe agent detail until messages are present. Check the link immediately before
 presenting the approval and report `verified rendered`, `verified reachable`

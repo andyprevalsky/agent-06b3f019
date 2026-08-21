@@ -45,8 +45,14 @@ def is_ephemeral_hub_url(url: str | None) -> bool:
 
 
 def durable_open_agent_url(agent_id: str) -> str:
-    """Always-on FE deep link that rehydrates archived bench agents from the Hub."""
-    return f"{DURABLE_OPEN_AGENT_ORIGIN}/open-agent?agent-id={agent_id}"
+    """Always-on FE deep link that rehydrates archived bench agents from the Hub.
+
+    Canonical shape is ``/?agent-id=…`` (Terminal route). ``/open-agent`` is an
+    alias that the SPA redirects to the same query — never cite a path the
+    production route table does not serve, or the SPA renders NotFound while
+    HTTP still returns 200.
+    """
+    return f"{DURABLE_OPEN_AGENT_ORIGIN}/?agent-id={agent_id}"
 
 
 def resolve_hub_upload_url(base_url: str | None = None) -> str:
@@ -59,7 +65,7 @@ def resolve_hub_upload_url(base_url: str | None = None) -> str:
 
     Ephemeral (localhost) registration stays fail-closed against the stack
     under test; ``mirror_run_bundle_to_durable_hub`` dual-writes the terminal
-    bundle to ``DEFAULT_HUB_URL`` so ``roselabs.ai/open-agent`` keeps working
+    bundle to ``DEFAULT_HUB_URL`` so ``roselabs.ai/?agent-id=`` keeps working
     after teardown.
     """
     configured = (os.getenv("BENCHMARK_HUB_UPLOAD_URL") or "").rstrip("/")
@@ -174,7 +180,7 @@ def mirror_run_bundle_to_durable_hub(
     Fail-closed launch registration still targets the local stack (so a prod
     outage cannot deadlock ``/deploy``). After the run finishes, mirror the
     final bundle to ``DEFAULT_HUB_URL`` whenever the configured Hub is
-    localhost/127.0.0.1 — otherwise ``roselabs.ai/open-agent`` 404s once the
+    localhost/127.0.0.1 — otherwise ``roselabs.ai/?agent-id=`` rot once the
     isolated stack tears down.
 
     Best-effort by default. Cloud Agent sessions (``CURSOR_AGENT`` set) treat a

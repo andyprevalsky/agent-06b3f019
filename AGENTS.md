@@ -33,8 +33,10 @@ accounts).
   approval Evidence. After a bench/agent run, publish with
   `python3 scripts/publish_evidence_links.py --run-json <run.json> --agent-id <id>`
   (uploads the Hub bundle to prod if needed, verifies
-  `https://www.roselabs.ai/open-agent?agent-id=<id>`, writes the last LLM dump
-  under `/opt/cursor/artifacts/rca_evidence/<id>/`). Local benches dual-write
+  `https://www.roselabs.ai/?agent-id=<id>`, writes the last LLM dump under
+  `/opt/cursor/artifacts/rca_evidence/<id>/`). Do not cite `/open-agent` unless
+  it redirects into `/?agent-id=` — a bare `/open-agent` path historically
+  rendered SPA NotFound while HTTP stayed 200. Local benches dual-write
   terminal Hub bundles to prod automatically; Cloud Agents fail closed if that
   mirror fails.
 - Standard run/test commands: `CLAUDE.md` + `docs/testing.md`.

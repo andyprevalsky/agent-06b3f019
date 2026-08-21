@@ -17,6 +17,7 @@ import MobilePreview, { PREVIEW_AGENT_CONTEXT } from '@/features/mobile-preview'
 import { AgentContext, type AgentContextValue } from '@/features/agent-context';
 import { PlaidOAuthRedirect } from '@/features/integrations';
 import Waitlist from '@/pages/Waitlist';
+import OpenAgentRedirect from '@/features/open-agent-redirect';
 
 function MobilePreviewRoute() {
   return createElement(
@@ -45,6 +46,7 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
   { path: '/research/:slug', component: ResearchBlogPost },
   { path: '/download', component: Download },
   { path: '/waitlist', component: Waitlist },
+  { path: '/open-agent', component: OpenAgentRedirect },
   { path: '/test_payment', component: TestPayment },
   { path: '/gate-playground', component: GatePlayground },
   { path: '/plaid-oauth-redirect', component: PlaidOAuthRedirect },

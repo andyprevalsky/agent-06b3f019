@@ -76,7 +76,7 @@ def test_is_ephemeral_hub_url():
 def test_durable_open_agent_url():
     assert (
         durable_open_agent_url("42cc9eb7-bca7-4d87-8373-faadcd33f8ef")
-        == "https://www.roselabs.ai/open-agent?agent-id=42cc9eb7-bca7-4d87-8373-faadcd33f8ef"
+        == "https://www.roselabs.ai/?agent-id=42cc9eb7-bca7-4d87-8373-faadcd33f8ef"
     )
 
 
