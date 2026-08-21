@@ -41,8 +41,10 @@ export interface ComputeGrantBrowser {
  */
 export async function openComputeGrantBrowser(label: string): Promise<ComputeGrantBrowser> {
   if (computeGrantBrowserProvider() === 'steel') {
-    const { createSteelRecoverySession, releaseSteelRemoteSession } =
-      await import('../../providers/steel/session');
+    const [{ createSteelRecoverySession }, { releaseSteelRemoteSession }] = await Promise.all([
+      import('../../providers/steel/sessionRecovery'),
+      import('../../providers/steel/session'),
+    ]);
     const s = await createSteelRecoverySession({
       proxyLocation: DEFAULT_GEOLOCATION,
       proxyMode: 'managed',

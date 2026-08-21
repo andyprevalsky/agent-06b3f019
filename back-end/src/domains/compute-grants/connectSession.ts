@@ -29,24 +29,18 @@ import { seedConnectPasskeys, waitForAuthorizePage } from './connectSession.gran
 
 import { buildAuthorizeUrl } from '../../providers/browser/claudeGrantMint';
 import { buildCodexAuthorizeUrl } from '../../providers/browser/codexGrantMint';
-import { type CdpClient, attachCdp } from './cdp';
+import { attachCdp } from './cdp';
 import { finish } from './connectSession.lifecycle';
+import { pending } from './connectSession.state';
 import { startSignInWatcher } from './connectSession.watcher';
-import type { PasskeySeed } from './cdp.passkeys';
+import type { ConnectProviderConfig, ConnectStage, PendingConnect } from './connectSession.types';
+
+export type { ConnectProviderConfig, ConnectStage, PendingConnect } from './connectSession.types';
 
 const log = createLogger('ComputeGrants');
 
 const SIGN_IN_POLL_MS = 2000; // how often the server checks the remote browser for sign-in.
 const CONNECT_SESSION_TTL_MS = 10 * 60 * 1000; // sign-in abandoned > completed; never bill past this.
-
-/** Where each provider's session lives, and how we recognise "signed in". */
-export interface ConnectProviderConfig {
-  loginUrl: string;
-  cookieUrls: string[];
-  sessionCookie: string;
-  profileUrl: string;
-  authRealm: string;
-}
 
 const PROVIDER_CONFIG: Record<string, ConnectProviderConfig> = {
   claude: {
@@ -73,44 +67,7 @@ export interface ConnectSessionHandle {
   expiresAt: string;
 }
 
-export interface PendingConnect {
-  stage: ConnectStage;
-  connectId: string;
-  userId: string;
-  provider: string;
-  /** Populated once provisioning finishes; null while the browser is booting. */
-  steelSessionId: string | null;
-  cdpBase: string | null;
-  liveViewUrl: string | null;
-  /** Provider-agnostic teardown, captured at open time so cancel/complete
-   *  release the browser that was actually opened (Kernel or Steel). */
-  release: (() => Promise<void>) | null;
-  /**
-   * Long-lived CDP client.
-   *
-   * Re-attaching per poll opened a fresh websocket to a REMOTE browser every
-   * couple of seconds; measured, those attaches hung and the HTTP poll stopped
-   * responding entirely (server logged 2 requests while the client saw 30s
-   * timeouts). One connection is opened during setup and reused.
-   */
-  cdp: CdpClient | null;
-  /** Decrypted passkeys, loaded once, re-seeded onto new targets each tick. */
-  passkeys?: PasskeySeed[];
-  authVerifier?: string;
-  authState?: string;
-  authRedirectUri?: string;
-  accountId?: string;
-  accountEmail?: string;
-  deadline: number;
-  done: boolean;
-  /** Set when provisioning fails, so the poll can report it instead of hanging. */
-  failed?: string;
-  /** When a SUCCESSFUL connect released its browser but is held for the FE to
-   *  observe `connected`. The reaper deletes held entries after a grace window. */
-  finishedAt?: number;
-}
-
-export const pending = new Map<string, PendingConnect>();
+export { pending } from './connectSession.state';
 export { reapExpiredConnectSessions } from './connectSession.lifecycle';
 
 export class ConnectError extends Error {}
@@ -262,15 +219,6 @@ export type ConnectPollState = 'pending' | 'connected' | 'expired' | 'unknown';
  * than guessed client-side -- a single spinner covering ~10s of setup plus an
  * unbounded human wait is what made a working flow read as a hang.
  */
-export type ConnectStage =
-  | 'creating_browser'
-  | 'restoring_session'
-  | 'loading_authorize'
-  | 'awaiting_human'
-  | 'capturing'
-  | 'minting'
-  | 'connected';
-
 export interface ConnectPollResult {
   stage?: ConnectStage;
   /** Sent once the cloud browser has booted; null while still provisioning. */

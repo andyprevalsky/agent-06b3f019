@@ -238,7 +238,8 @@ export async function upsertIntegrationForUpload(params: {
  * reintroduce the same data loss under concurrency: two OAuth starts racing
  * each other both read the pre-write config, and the loser's write erases keys
  * the winner (or an interleaved callback) just persisted. It would also race
- * the `@@unique([userId, name])` constraint and fail one request outright.
+ * the legacy-account `@@unique([userId, name, accountId])` identity and fail one
+ * request outright.
  * Being a single atomic statement, this is safe to run concurrently and on
  * retry.
  */
@@ -248,18 +249,19 @@ export async function upsertIntegrationForOAuthStart(params: {
   config: Record<string, unknown>;
 }) {
   const rows = await prisma.$queryRaw<Array<{ id: string }>>`
-    INSERT INTO "Integration" ("id", "userId", "name", "type", "status", "config", "createdAt", "updatedAt")
+    INSERT INTO "Integration" ("id", "userId", "name", "accountId", "type", "status", "config", "createdAt", "updatedAt")
     VALUES (
       gen_random_uuid(),
       ${params.userId},
       ${params.name},
+      '',
       ${IntegrationType.DATA_SOURCE}::"IntegrationType",
       ${IntegrationStatus.SYNCING}::"IntegrationStatus",
       ${JSON.stringify(params.config)}::jsonb,
       NOW(),
       NOW()
     )
-    ON CONFLICT ("userId", "name") DO UPDATE
+    ON CONFLICT ("userId", "name", "accountId") DO UPDATE
       SET "config" = COALESCE("Integration"."config", '{}'::jsonb) || EXCLUDED."config",
           "updatedAt" = NOW()
     RETURNING "id"
