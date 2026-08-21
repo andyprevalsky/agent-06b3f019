@@ -686,7 +686,7 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   "machine start must wait out Fly stopping/replacing before request_machine_start"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'build_controller_authenticated_git_sync_cmd' \
-  "refresh-deps must use controller GitHub token for private-repo git-sync"
+  "controller authenticated git-sync helper must remain available for stdin/SFTP delivery"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'ssh_exec_controller_git_sync' \
   "controller git-sync must deliver the auth header via stdin, not argv"
@@ -807,24 +807,24 @@ require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'GITHUB_DISPATCH_TOKEN' \
   "token resolution must fall back to GITHUB_DISPATCH_TOKEN when GITHUB_TOKEN is stale"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'AUTH_HDR_DURABLE' \
-  "refresh-deps must deliver a durable auth header via stdin for warm-box git-sync retry"
+  'warm_source_fetch_ref' \
+  "refresh-deps/wmh must sync via warm_source_fetch_ref (controller token + fetch-ref.sh)"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
   "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'primary GitHub token auth failed; retrying with durable fallback' \
-  "refresh-deps must retry git fetch with the durable token after primary auth failure"
+  'resolve_github_token' \
+  "warm-source git-sync must Contents-validate via resolve_github_token"
 
 # Owning-boundary regression: a stale/empty warm-box GITHUB_TOKEN must not be
-# the only auth path for refresh-deps. Controller auth is stdin-delivered
-# (primary + optional durable) and the remote script retries via _try_fetch.
+# the only auth path for refresh-deps. warm_source_fetch_ref uses the controller
+# token + cloudbench-fetch-ref.sh (same as guest drivers).
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  '_try_fetch' \
-  "refresh-deps SSH sync must try controller primary token then durable fallback via _try_fetch"
+  'cloudbench-fetch-ref.sh' \
+  "refresh-deps SSH sync must use cloudbench-fetch-ref.sh with a controller token"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'ssh_exec_controller_git_sync' \
-  "refresh-deps must deliver controller git auth via stdin, not flyctl argv"
+  'warm_source_fetch_ref "$mid" "$EXPECTED_REF"' \
+  "refresh-deps must call warm_source_fetch_ref for the exact expected ref"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
   'FLY secrets set --stage -a "$APP"' \
   "Machines API apps must stage the app-level environment before machine updates"
@@ -1343,23 +1343,15 @@ def mode_block(mode: str) -> str:
 
 deps = mode_block("refresh-deps")
 wmh = mode_block("refresh-wmh")
-# refresh-deps: argv-safe stdin controller auth (+ durable retry).
-if "build_controller_authenticated_git_sync_cmd" not in deps:
-    raise SystemExit("refresh-deps must call build_controller_authenticated_git_sync_cmd")
-if "ssh_exec_controller_git_sync" not in deps:
-    raise SystemExit("refresh-deps must deliver auth via ssh_exec_controller_git_sync")
-for line in deps.splitlines():
-    if "ssh_exec_controller_git_sync" in line and "|| true" in line:
-        raise SystemExit("refresh-deps must not mask git-sync failures with || true")
-if "GITHUB_TOKEN:-" in deps:
-    raise SystemExit("refresh-deps must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
-# refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
-if "warm_source_fetch_ref" not in wmh:
-    raise SystemExit("refresh-wmh must call warm_source_fetch_ref")
-if "warm_source_fetch_ref" in wmh:
-    for line in wmh.splitlines():
+# refresh-deps + refresh-wmh: shared SHA-pinned warm_source_fetch_ref (fail-closed).
+for name, block in (("refresh-deps", deps), ("refresh-wmh", wmh)):
+    if "warm_source_fetch_ref" not in block:
+        raise SystemExit(f"{name} must call warm_source_fetch_ref")
+    for line in block.splitlines():
         if "warm_source_fetch_ref" in line and "|| true" in line:
-            raise SystemExit("refresh-wmh must not mask warm_source_fetch_ref failures")
+            raise SystemExit(f"{name} must not mask warm_source_fetch_ref failures")
+    if "GITHUB_TOKEN:-" in block and "build_controller_authenticated_git_sync_cmd" in block:
+        raise SystemExit(f"{name} must not optionally skip AUTH_HDR when box GITHUB_TOKEN is empty")
 
 def extract_bash_function(source: str, name: str) -> str:
     marker = f"{name}() {{"
@@ -1384,6 +1376,38 @@ def extract_bash_function(source: str, name: str) -> str:
             if depth == 0:
                 return source[start : idx + 1]
     raise SystemExit(f"{name} helper is missing closing brace")
+
+# warm_source_fetch_ref must Contents-validate via resolve_github_token (not
+# unvalidated cloudbench_controller_github_token).
+warm_fn = extract_bash_function(src, "warm_source_fetch_ref")
+if "resolve_github_token" not in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must use resolve_github_token")
+if "cloudbench_controller_github_token" in warm_fn:
+    raise SystemExit("warm_source_fetch_ref must not use unvalidated cloudbench_controller_github_token")
+
+# --setup clone: keep AUTH_HDR off git argv; use GIT_CONFIG_GLOBAL; wipe remotes
+# on partial SFTP failure so a lone token file cannot linger.
+clone_start = src.find("SETUP_GITHUB_TOKEN=")
+clone_end = src.find("park_warm_source", clone_start)
+if clone_start < 0 or clone_end < 0:
+    raise SystemExit("--setup clone block missing")
+clone = src[clone_start:clone_end]
+if "GIT_CONFIG_GLOBAL" not in clone:
+    raise SystemExit("--setup clone must use GIT_CONFIG_GLOBAL for http.extraheader")
+if "-c http.extraheader=" in clone:
+    raise SystemExit("--setup clone must not put AUTH_HDR on git -c argv")
+if "rm -f '$remote_setup_token' '$remote_setup_cmd'" not in clone:
+    raise SystemExit("--setup must rm remote token/cmd on SFTP failure")
+# Existing-repo fetch must reset origin to the trusted URL BEFORE git_auth so a
+# retained/altered remote cannot receive the controller token.
+fetch_idx = clone.find("repo already present")
+if fetch_idx < 0:
+    raise SystemExit("--setup existing-repo fetch branch missing")
+fetch_branch = clone[fetch_idx : clone.find("else", fetch_idx)]
+set_url_at = fetch_branch.find("remote set-url origin")
+fetch_at = fetch_branch.find("fetch --quiet origin")
+if set_url_at < 0 or fetch_at < 0 or set_url_at > fetch_at:
+    raise SystemExit("--setup must set trusted origin before authenticated fetch")
 
 helper = extract_bash_function(src, "build_controller_authenticated_git_sync_cmd")
 
@@ -1510,118 +1534,84 @@ printf '%s' "$hub_key_guard" | grep -q 'back-end/.env does not exist' ||
 printf '%s' "$hub_key_guard" | grep -q 'prepare-deploy-worktree.sh' ||
   fail "the in-app Hub key failure must name the provisioning command that fixes it"
 
-# Epoch 4: injected GITHUB_TOKEN is invalid (`gh auth status`: "The token in
-# GITHUB_TOKEN is invalid") but `gh auth token` still returns it. Warm-box
-# fetch-ref then 401s as `could not read Username for 'https://github.com'`.
-# The controller must ignore that env token and use gh's hosts.yml credential
-# (`env -u GITHUB_TOKEN gh auth token`) — the same ghs_ token git insteadOf uses.
-require_text "$HELPER_SRC" \
-  'cloudbench_controller_github_token() {' \
-  "controller GitHub token resolution must live in the shared helper"
-require_text "$HELPER_SRC" \
-  'env -u GITHUB_TOKEN gh auth token' \
-  "controller token resolution must ignore injected GITHUB_TOKEN when asking gh"
+# ── Validated GitHub token for private-repo git-sync (descend I-01 + #1034) ──
+# Fleet run 20260820-202356-7298 aborted before any task machine on a stale
+# ambient GITHUB_TOKEN. Merged with #1034 durable/ephemeral split: ephemeral
+# resolve_github_token validates Contents access; Fly secrets use durable tokens;
+# refresh-deps retries durable fallback after primary auth failure.
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_controller_github_token' \
-  "warm-source git-sync must use the shared controller token helper"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_controller_github_token' \
-  "fleet worker token cache must use the shared controller token helper"
-
-GITHUB_TOKEN="github_pat_INVALID"
-resolved_token="$(cloudbench_controller_github_token)" \
-  || fail "controller token helper must succeed when gh hosts.yml or git insteadOf exists"
-[ "$resolved_token" != "$GITHUB_TOKEN" ] \
-  || fail "controller token helper must not return the injected invalid GITHUB_TOKEN"
-[ -n "$resolved_token" ] \
-  || fail "controller token helper must return a non-empty hosts.yml/insteadOf token"
-unset GITHUB_TOKEN
-
-# insteadOf fallback when gh cannot return a token
-instead_home="$TMP_ROOT/token-home"
-instead_bin="$TMP_ROOT/token-bin"
-mkdir -p "$instead_home" "$instead_bin"
-printf '%s\n' '#!/bin/sh' 'exit 1' > "$instead_bin/gh"
-chmod +x "$instead_bin/gh"
-printf '%s\n' \
-  '[url "https://x-access-token:ghs_INSTEADOF@github.com/"]' \
-  '	insteadOf = https://github.com/' \
-  > "$instead_home/.gitconfig"
-instead_token="$(
-  env -u GITHUB_TOKEN HOME="$instead_home" GIT_CONFIG_GLOBAL="$instead_home/.gitconfig" \
-    PATH="$instead_bin:/usr/bin:/bin" \
-    bash -c "source $(printf '%q' "$HELPER_SRC"); cloudbench_controller_github_token"
-)" || fail "insteadOf fallback must succeed when gh is unavailable"
-[ "$instead_token" = "ghs_INSTEADOF" ] \
-  || fail "insteadOf fallback must parse the rewrite token (got ${instead_token:-empty})"
-
-# Epoch 6: I-03 ignored the invalid injected token for fetch-ref but left
-# process $GITHUB_TOKEN and local .env on that github_pat_. Export must
-# overwrite both so children inherit the working hosts.yml / insteadOf token.
-require_text "$HELPER_SRC" \
-  'cloudbench_export_controller_github_token() {' \
-  "controller token export must live in the shared helper"
-require_text "$ROOT_DIR/scripts/cloud-init.sh" \
-  'cloudbench_export_controller_github_token agents/.env back-end/.env' \
-  "cloud-init must export a working GITHUB_TOKEN into process env and local .env"
+  'github_token_can_fetch_repo()' \
+  "cloudbench must validate GitHub tokens against the private rose repo"
 require_text "$ROOT_DIR/scripts/run-bench-cloud" \
-  'cloudbench_export_controller_github_token' \
-  "run-bench-cloud must export a working GITHUB_TOKEN into the controller env"
-require_text "$ROOT_DIR/scripts/run-bench-fleet" \
-  'cloudbench_export_controller_github_token' \
-  "run-bench-fleet must export a working GITHUB_TOKEN into the controller env"
+  'api.github.com/repos/Rose-Ai-Labs/rose/contents' \
+  "token validation must require Contents access (not metadata-only GET /repos)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'resolve_durable_github_token' \
+  "Fly secret injection must use a durable GitHub token, not an ephemeral gh auth token"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'set_args+=("GITHUB_TOKEN=$gh_token")' \
+  "Fly secret staging must always set GITHUB_TOKEN (empty clears a stale staged credential)"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'env -u GITHUB_TOKEN -u GH_TOKEN -u GH_HOST gh auth token --hostname github.com' \
+  "token resolver must ignore ambient GH_TOKEN/GITHUB_TOKEN/GH_HOST when reading gh auth"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  't="${GITHUB_TOKEN:-${GH_TOKEN:-}}"' \
+  "resolve_github_token must honor exported GITHUB_TOKEN/GH_TOKEN before durable dotenv fallback"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'build_controller_authenticated_git_sync_cmd' \
+  "controller authenticated git-sync helper must remain for stdin/SFTP delivery paths"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'primary GitHub token auth failed; retrying with durable fallback' \
+  "authenticated git-sync must retry git fetch with the durable token after primary auth failure"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  '_try_fetch' \
+  "authenticated git-sync must try controller primary token then durable fallback via _try_fetch"
+# Prove the live resolver rejects the ambient stale GITHUB_TOKEN and still
+# returns a credential with Contents access (requires network).
+resolve_snippet="$(mktemp)"
+awk '
+  /^github_token_can_fetch_repo\(\)/ { capture = 1 }
+  capture { print }
+  capture && /^resolve_render_env_value\(\)/ { exit }
+' "$ROOT_DIR/scripts/run-bench-cloud" | sed '$d' > "$resolve_snippet"
+sed -i '/^resolve_render_env_value()/,$d' "$resolve_snippet"
+(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  source "$resolve_snippet"
+  tok="$(resolve_github_token)"
+  [ -n "$tok" ] || fail "resolve_github_token returned empty despite available controller credentials"
+  code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+    -H "Authorization: Bearer ${tok}" \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'User-Agent: cloudbench-env-test' \
+    'https://api.github.com/repos/Rose-Ai-Labs/rose/contents')"
+  [ "$code" = "200" ] || fail "resolve_github_token returned a token without Contents access to rose (HTTP $code)"
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    stale_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+      -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'User-Agent: cloudbench-env-test' \
+      'https://api.github.com/repos/Rose-Ai-Labs/rose/contents' || true)"
+    if [ "$stale_code" != "200" ] && [ "$tok" = "$GITHUB_TOKEN" ]; then
+      fail "resolve_github_token returned the ambient stale GITHUB_TOKEN"
+    fi
+  fi
+) || fail "validated GitHub token resolver regression failed"
+rm -f "$resolve_snippet"
 
-persist_a="$TMP_ROOT/persist-a.env"
-persist_b="$TMP_ROOT/persist-b.env"
-printf 'GITHUB_TOKEN=github_pat_STALE\nOTHER=keep-me\n' > "$persist_a"
-printf 'FOO=bar\n' > "$persist_b"
-GITHUB_TOKEN="github_pat_INVALID"
-export GITHUB_TOKEN
-cloudbench_export_controller_github_token "$persist_a" "$persist_b" >/dev/null \
-  || fail "export helper must succeed when a controller token exists"
-[ "$GITHUB_TOKEN" != "github_pat_INVALID" ] \
-  || fail "export helper must overwrite process GITHUB_TOKEN"
-[ -n "$GITHUB_TOKEN" ] \
-  || fail "export helper must set a non-empty process GITHUB_TOKEN"
-persisted_a="$(cloudbench_env_value "$persist_a" GITHUB_TOKEN)"
-persisted_b="$(cloudbench_env_value "$persist_b" GITHUB_TOKEN)"
-other="$(cloudbench_env_value "$persist_a" OTHER)"
-foo="$(cloudbench_env_value "$persist_b" FOO)"
-[ "$persisted_a" = "$GITHUB_TOKEN" ] \
-  || fail "export helper must persist the working token to the first dest"
-[ "$persisted_b" = "$GITHUB_TOKEN" ] \
-  || fail "export helper must persist the working token to the second dest"
-[ "$persisted_a" != "github_pat_STALE" ] \
-  || fail "export helper must replace a stale GITHUB_TOKEN in .env"
-[ "$other" = "keep-me" ] \
-  || fail "export helper must preserve other keys in the dest .env"
-[ "$foo" = "bar" ] \
-  || fail "export helper must preserve unrelated keys when appending GITHUB_TOKEN"
-unset GITHUB_TOKEN
 
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'BENCH_NEEDS_PAYMENT_FIXTURE=0' \
-  "cloudbench-run must track whether a sandbox payment fixture is required"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'agent-payment-test-shop|agent-payment-idempotent-abandonment|agent-payment-abandonment|agent-payment-setup-resume)' \
-  "cloudbench-run must treat the four sandbox AgentCard lifecycle tasks as payment-fixture work"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'BENCH_NEEDS_PAYMENT_FIXTURE=1' \
-  "sandbox AgentCard lifecycle tasks must request the isolated payment fixture"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1' \
-  "cloudbench-run must force the customer mint path for sandbox payment benches"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30' \
-  "cloudbench-run must run sandbox payment benches as the admin account"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'npx tsx scripts/setup-benchmark-payment.ts --user-id' \
-  "cloudbench-run must seed the isolated payment fixture after the stack is healthy"
-require_text "$ROOT_DIR/scripts/cloudbench-run.sh" \
-  'sh -c '\''cd "$1" && exec npx tsx scripts/setup-benchmark-payment.ts --user-id "$2"'\''' \
-  "cloudbench-run must pass payment fixture paths as argv instead of interpolating them into a shell string"
-if grep -Fq "bash -lc \"cd '\$REPO_DIR/back-end'" "$ROOT_DIR/scripts/cloudbench-run.sh"; then
-  fail "cloudbench-run must not interpolate REPO_DIR/PAYMENT_USER_ID into bash -lc"
-fi
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT' \
+  "ssh_exec must honor an optional timeout so hung refresh-deps sessions fail closed"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'ssh_exec timed out after' \
+  "ssh_exec must report timeout distinctly from auth/checkout failures"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'CLOUDBENCH_SSH_EXEC_TIMEOUT="$SYNC_SSH_TIMEOUT"' \
+  "refresh-deps must bound warm_source_fetch_ref via CLOUDBENCH_SSH_EXEC_TIMEOUT"
+require_text "$ROOT_DIR/scripts/run-bench-cloud" \
+  'return "$sync_rc"' \
+  "warm_source_fetch_ref must preserve ssh_exec status including timeout 124"
 
 echo "All cloud benchmark environment checks passed."

@@ -24,6 +24,8 @@ from config import load_config
 from helpers.attachments import (
     FilePointer,
     build_attachment_metadata_text,
+    build_attachment_text_content,
+    build_file_pointer_label,
     get_cached_file,
     get_file_from_pointer,
 )
@@ -1095,7 +1097,7 @@ async def _resolve_verifier_file_evidence(
                 if file_content is not None and fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
-                        result_text = f"[File: {fp.original_filename}]\n```\n{text_content}\n```"
+                        result_text = build_attachment_text_content(fp, text_content)
                         content_inlined = True
                     except UnicodeDecodeError:
                         result_text = build_attachment_metadata_text(fp)
@@ -1779,6 +1781,9 @@ async def build_llm_messages(
                     content.append(
                         {"type": "image_url", "image_url": {"url": f"data:{fp.mime_type};base64,{base64_data}"}}
                     )
+                    # Filename must travel with the inline image — spawn_agent
+                    # attachments match on exact original_filename only.
+                    metadata_texts.append(build_attachment_metadata_text(fp, inlined=True))
                 elif fp.is_pdf():
                     content.append(
                         {
@@ -1792,7 +1797,7 @@ async def build_llm_messages(
                 elif fp.is_text():
                     try:
                         text_content = file_content.decode("utf-8")
-                        metadata_texts.append(f"[File: {fp.original_filename}]\n```\n{text_content}\n```")
+                        metadata_texts.append(build_attachment_text_content(fp, text_content))
                     except UnicodeDecodeError:
                         metadata_texts.append(build_attachment_metadata_text(fp))
             except Exception as e:
@@ -1844,13 +1849,14 @@ async def build_llm_messages(
 
             if content:
                 # LLM APIs reject multimodal blocks in assistant messages.
-                # Convert image/PDF blocks to metadata text so content isn't silently lost.
+                # Convert image/PDF blocks to keyed file_pointer text so content
+                # isn't silently lost (images already have metadata_texts).
                 for block in content:
                     if block.get("type") == "image_url":
-                        full_text += "\n\n[Attached image]"
-                    elif block.get("type") == "file":
+                        continue
+                    if block.get("type") == "file":
                         fname = block.get("file", {}).get("filename", "file")
-                        full_text += f"\n\n[Attached file: {fname}]"
+                        full_text += f"\n\n{build_file_pointer_label(fname)}"
 
             assistant_msg: Dict[str, Any] = {"role": llm_role, "content": full_text}
             codex_reasoning_items = metadata.get("codex_reasoning_items")
@@ -1946,10 +1952,10 @@ async def build_llm_messages(
                     if content:
                         for block in content:
                             if block.get("type") == "image_url":
-                                sections.append("[Attached image]")
-                            elif block.get("type") == "file":
+                                continue
+                            if block.get("type") == "file":
                                 fname = block.get("file", {}).get("filename", "file")
-                                sections.append(f"[Attached file: {fname}]")
+                                sections.append(build_file_pointer_label(fname))
                     tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
                     label = tool_name or "tool"
                     messages.append({"role": "user", "content": f"{ts_prefix}[{label} result]: {tool_content}"})
@@ -1966,10 +1972,10 @@ async def build_llm_messages(
                 if content:
                     for block in content:
                         if block.get("type") == "image_url":
-                            sections.append("[Attached image]")
-                        elif block.get("type") == "file":
+                            continue
+                        if block.get("type") == "file":
                             fname = block.get("file", {}).get("filename", "file")
-                            sections.append(f"[Attached file: {fname}]")
+                            sections.append(build_file_pointer_label(fname))
                 tool_content = _append_llm_context_sections_preserving_reference(tool_content, sections)
 
                 tool_msg: Dict[str, Any] = {
