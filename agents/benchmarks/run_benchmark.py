@@ -3861,7 +3861,11 @@ async def poll_agent(
                             if task.approval_handling == "ignore":
                                 kind_label = (
                                     f" ({observed_kind})"
-                                    if task.expected_attention_kind or task.expected_attention_kinds
+                                    if (
+                                        task.expected_attention_kind
+                                        or task.expected_attention_kinds
+                                        or task.expected_attention_kind_any_of
+                                    )
                                     else ""
                                 )
                                 print(f"    ✅ Approval request observed{kind_label} {req_id[:8]}")
@@ -4233,6 +4237,12 @@ def evaluate_task(
     # that the approval was actually triggered (the agent won't complete).
     if task.approval_handling == "ignore":
         if approvals_triggered == 0:
+            if task.expected_attention_kind_any_of:
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kind_any_of} attention requests "
+                    f"(to ignore) but none was triggered",
+                )
             if task.expected_attention_kinds:
                 return (
                     False,
@@ -4245,19 +4255,26 @@ def evaluate_task(
                 )
             return False, "Expected approval request (to ignore) but none were triggered"
         benchmark_state = data.get("_benchmark", {})
+        observed_kind = benchmark_state.get("attention_request_kind_seen")
+        if task.expected_attention_kind_any_of:
+            if observed_kind not in task.expected_attention_kind_any_of:
+                return (
+                    False,
+                    f"Expected one of {task.expected_attention_kind_any_of} attention requests, "
+                    f"observed {observed_kind}",
+                )
         if task.expected_attention_kind:
             if benchmark_state.get("expected_attention_kind_seen") != task.expected_attention_kind:
                 return False, f"Expected {task.expected_attention_kind} attention request but it was not observed"
         if task.expected_attention_kinds:
-            benchmark_state = data.get("_benchmark", {})
-            observed_kind = benchmark_state.get("attention_request_kind_seen")
             if observed_kind not in task.expected_attention_kinds:
                 return (
                     False,
                     f"Expected one of {task.expected_attention_kinds} attention requests, observed {observed_kind}",
                 )
-        if task.expected_payment_receipt and benchmark_state.get("expected_payment_receipt_seen") is not True:
-            return False, "Expected validated payment-card request but none was observed"
+        if task.expected_payment_receipt and observed_kind == "payment_approval":
+            if benchmark_state.get("expected_payment_receipt_seen") is not True:
+                return False, "Expected validated payment-card request but none was observed"
         return True, None
 
     if task.name == CALENDLY_TASK_NAME:
@@ -8359,6 +8376,11 @@ def _run_declared_static_check(
     for check in evaluator.get("checks", []):
         check_type = check.get("type")
         if check_type == "expected_payment_receipt":
+            required_when = check.get("required_when_attention_kinds")
+            observed_kind = benchmark_state.get("attention_request_kind_seen")
+            if isinstance(required_when, list) and required_when:
+                if observed_kind not in required_when:
+                    continue
             if benchmark_state.get("expected_payment_receipt_seen") is not True:
                 return False, "Expected validated payment receipt was not observed"
             continue
@@ -8503,6 +8525,31 @@ def _run_declared_static_check(
                     for request in matching
                 ):
                     return False, f"{kind}: {_approval_request_detail_failure(kind_check)}"
+            continue
+        if check_type == "approval_request_details_for_seen_kind":
+            observed_kind = benchmark_state.get("attention_request_kind_seen")
+            details_by_kind = check.get("details_by_kind") or {}
+            if not isinstance(observed_kind, str) or not observed_kind:
+                return False, "No observed attention kind for detail check"
+            if observed_kind not in details_by_kind:
+                return (
+                    False,
+                    f"Observed attention kind {observed_kind} has no declared detail contract",
+                )
+            kind_check = details_by_kind[observed_kind]
+            if not isinstance(kind_check, dict):
+                return False, f"{observed_kind}: detail contract must be an object"
+            requests = benchmark_state.get("attention_requests_seen") or []
+            matching = [request for request in requests if _attention_request_kind(request) == observed_kind]
+            if not any(
+                _approval_request_satisfies_detail_check(
+                    request,
+                    kind_check,
+                    user_visible_only=True,
+                )
+                for request in matching
+            ):
+                return False, f"{observed_kind}: {_approval_request_detail_failure(kind_check)}"
             continue
         return False, f"Unsupported enforced static check: {check_type}"
     return True, "All declared static checks passed"
