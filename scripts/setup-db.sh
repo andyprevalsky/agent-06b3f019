@@ -200,27 +200,121 @@ fi
 # signals the script, so a TERM'd setup-db released its lock and exited while its
 # seed child kept writing prod rows into a database another process had just
 # claimed — a "stopped" reset that silently corrupts a concurrent blackbox run.
-# Kill the whole process group first so stopping this script actually stops it.
+# Stop every child before releasing the lock so stopping this script actually
+# stops the destructive section. A child may handle/ignore TERM, so teardown has
+# a bounded grace period followed by KILL. INT and TERM stay ignored throughout
+# cleanup: a second Ctrl-C must not strand the lock or let a surviving child
+# overlap the next reset.
+setup_db_child_pids() {
+    local group="$1"
+    if [ -n "$group" ] && [ "$group" = "$$" ]; then
+        ps -axo pid=,pgid=,stat= 2>/dev/null | awk -v self="$$" -v group="$group" '
+            $2 == group && $1 != self && $3 !~ /^Z/ { print $1 }
+        '
+        return
+    fi
+
+    # setup-db normally shares its caller's process group, which must never be
+    # signalled wholesale. Resolve the full descendant tree from one ps snapshot
+    # instead; this includes wrappers such as npx plus the seed process beneath.
+    ps -axo pid=,ppid=,stat= 2>/dev/null | awk -v root="$$" '
+        {
+            order[NR] = $1
+            parent[$1] = $2
+            state[$1] = $3
+        }
+        END {
+            for (i = 1; i <= NR; i++) {
+                candidate = order[i]
+                if (candidate == root || state[candidate] ~ /^Z/) continue
+                ancestor = parent[candidate]
+                for (hops = 0; ancestor != "" && ancestor != 1 && hops < NR; hops++) {
+                    if (ancestor == root) {
+                        print candidate
+                        break
+                    }
+                    ancestor = parent[ancestor]
+                }
+            }
+        }
+    '
+}
+
+setup_db_pid_is_running() {
+    local state
+    state="$(ps -o stat= -p "$1" 2>/dev/null | awk 'NR == 1 { print $1 }')"
+    [ -n "$state" ] && [[ "$state" != Z* ]]
+}
+
 setup_db_teardown() {
     local exit_code=$?
-    trap - EXIT INT TERM
-    local group
-    local ignored_self_term=false
+    local group targets current pid any_running
+    local grace="${SETUP_DB_TEARDOWN_GRACE_SECONDS:-10}"
+    local grace_started force_started
+
+    # Remove the recursive EXIT handler, but keep both interactive termination
+    # signals masked until descendants are gone and the lock is released.
+    trap '' INT TERM
+    trap - EXIT
+    case "$grace" in
+        ''|*[!0-9]*) grace=10 ;;
+    esac
+
     group="$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')"
+    targets="$(setup_db_child_pids "$group")"
     if [ -n "$group" ] && [ "$group" = "$$" ]; then
-        # Signalling the whole group includes this shell. Keep TERM ignored until
-        # the destructive-section lock is released; otherwise the shell can die
-        # here and strand the lock before cleanup reaches the release below.
-        trap '' TERM
-        ignored_self_term=true
+        # This shell ignores TERM above, so signalling its private group safely
+        # reaches every current descendant and any child spawned during cleanup.
         kill -TERM -"$group" 2>/dev/null || true
     else
-        pkill -TERM -P $$ 2>/dev/null || true
+        for pid in $targets; do
+            kill -TERM "$pid" 2>/dev/null || true
+        done
     fi
+
+    grace_started=$SECONDS
+    while [ $((SECONDS - grace_started)) -lt "$grace" ]; do
+        current="$(setup_db_child_pids "$group")"
+        targets="$targets $current"
+        any_running=false
+        for pid in $targets; do
+            if setup_db_pid_is_running "$pid"; then
+                any_running=true
+                break
+            fi
+        done
+        $any_running || break
+        sleep 0.1
+    done
+
+    # Re-scan immediately before escalation so late descendants are included.
+    current="$(setup_db_child_pids "$group")"
+    targets="$targets $current"
+    for pid in $targets; do
+        setup_db_pid_is_running "$pid" || continue
+        kill -KILL "$pid" 2>/dev/null || true
+    done
+
+    # Give KILL a short bounded window to take effect. Zombies do not write and
+    # are excluded by setup_db_pid_is_running; reap direct children below.
+    force_started=$SECONDS
+    while [ $((SECONDS - force_started)) -lt 2 ]; do
+        any_running=false
+        for pid in $targets; do
+            if setup_db_pid_is_running "$pid"; then
+                any_running=true
+                break
+            fi
+        done
+        $any_running || break
+        sleep 0.1
+    done
+    for pid in $targets; do
+        setup_db_pid_is_running "$pid" || wait "$pid" 2>/dev/null || true
+    done
+
     release_workspace_db_lock
-    if $ignored_self_term; then
-        trap - TERM
-    fi
+    trap - INT TERM
     exit "$exit_code"
 }
 trap setup_db_teardown EXIT INT TERM
