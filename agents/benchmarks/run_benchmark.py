@@ -1119,6 +1119,15 @@ def _validate_payment_receipt(
     if not receipt:
         return "missing requestPaymentCard metadata"
 
+    # Catalog `expected_payment_receipt: true` means "any well-formed payment-card request"
+    # (e.g. gate-subscription-card-mint-admin-bypass). Calling `.get` on the bool raised
+    # AttributeError, which the poll loop swallowed as "Approval check error" and delayed
+    # auto-approve + never set expected_payment_receipt_seen on that first sighting.
+    if expected is True:
+        return None
+    if not isinstance(expected, dict):
+        return f"invalid expected_payment_receipt type: {type(expected).__name__}"
+
     required_fields = expected.get("requiredFields", [])
     for field in required_fields:
         if field not in receipt:

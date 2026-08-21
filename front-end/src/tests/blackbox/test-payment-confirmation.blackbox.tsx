@@ -70,10 +70,22 @@ const CONFIRMATION: TestPaymentConfirmation = {
 describe('test-payment Confirmation receipt', () => {
   afterEach(() => {
     window.history.replaceState({}, '', '/');
+    window.localStorage.removeItem('rose.test_payment.last_confirmation');
     startTestPaymentCheckout.mockClear();
     startTestPaymentCheckout.mockResolvedValue({
       url: 'https://checkout.stripe.com/c/pay/cs_test',
     });
+  });
+
+  it('restores a prior confirmation from localStorage so a new tab still shows the receipt', () => {
+    window.localStorage.setItem(
+      'rose.test_payment.last_confirmation',
+      JSON.stringify(CONFIRMATION),
+    );
+    window.history.replaceState({}, '', '/test_payment');
+    render(<TestPaymentPage />);
+    expect(screen.getByTestId('payment-confirmation')).toBeInTheDocument();
+    expect(screen.getByText(/Order tp_abc12345 was paid successfully/)).toBeInTheDocument();
   });
 
   it('shows a stable pre-submit checkout reference', () => {

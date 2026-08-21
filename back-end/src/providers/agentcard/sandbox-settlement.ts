@@ -33,6 +33,8 @@ export interface HeldPurchase {
 
 interface AgentCardSandboxSettlementDependencies {
   findHeldPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
+  /** Optional override for already-CLEARED replay (unit tests / offline fixtures). */
+  findClearedPurchasesByTotal?: (amountCents: number) => Promise<HeldPurchase[]>;
   getCardPan?: (userId: string, agentId: string | null, cardId: string) => Promise<string>;
   claimHeldPurchaseForCharge?: (purchaseId: string) => Promise<boolean>;
   releaseHeldPurchaseClaim?: (purchaseId: string) => Promise<void>;
@@ -56,6 +58,29 @@ export class AgentCardSandboxSettlementError extends Error {
 export async function findHeldPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
   return prisma.purchaseSpend.findMany({
     where: { totalCents: amountCents, status: PurchaseSpendStatus.HELD, cardId: { not: null } },
+    orderBy: { createdAt: 'desc' },
+    take: 10,
+    select: {
+      id: true,
+      userId: true,
+      agentId: true,
+      cardId: true,
+      stripePaymentIntentId: true,
+    },
+  });
+}
+
+/**
+ * Already-settled purchases at this total. Used to replay a successful sandbox confirm when the
+ * shopper (or browser agent) re-submits Pay after the HELD → CLEARED transition — without this,
+ * the second confirm 404s on the held-only lookup, `confirmTestPayment` falls through to raw-PAN
+ * Stripe tokenization, and Stripe returns a PCI 500 while the merchant UI shows a false failure
+ * (gate-subscription-card-mint-admin-bypass: confirm 200 then confirm 500 "Sending credit card
+ * numbers directly to the Stripe API").
+ */
+export async function findClearedPurchasesByTotal(amountCents: number): Promise<HeldPurchase[]> {
+  return prisma.purchaseSpend.findMany({
+    where: { totalCents: amountCents, status: PurchaseSpendStatus.CLEARED, cardId: { not: null } },
     orderBy: { createdAt: 'desc' },
     take: 10,
     select: {
@@ -200,11 +225,45 @@ export async function markPurchaseCleared(purchaseId: string): Promise<void> {
   });
 }
 
+async function readMatchingPurchasePan(
+  purchase: HeldPurchase,
+  inputCardNumber: string,
+  readPan: (userId: string, agentId: string | null, cardId: string) => Promise<string>
+): Promise<'match' | 'mismatch' | 'skip_not_found'> {
+  if (purchase.cardId === null) return 'mismatch';
+  // A candidate whose card the provider explicitly does not have is simply NOT this card — skip
+  // it. Settlement is attempted for every PAN (routing is by ownership, not BIN), so an unrelated
+  // shopper card can legitimately scan past stale HELD/CLEARED purchases whose provider card no
+  // longer exists; throwing there would fail an ordinary Stripe checkout because of someone else's
+  // abandoned purchase. Any OTHER failure means the PAN could not be READ, which is not evidence
+  // of a mismatch — swallowing it silently mislabels the real Rose card as an ordinary card and
+  // leaves its purchase HELD while Stripe charges it raw. Fail closed on those.
+  let pan: string;
+  try {
+    pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
+  } catch (error) {
+    if (isCardNotFoundFailure(error)) return 'skip_not_found';
+    log.error('AgentCard PAN lookup failed during settlement', {
+      purchaseId: purchase.id,
+      cardId: purchase.cardId,
+      userId: purchase.userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw new AgentCardSandboxSettlementError(
+      'Could not read the Rose card for a candidate purchase; refusing to treat it as a non-Rose card',
+      502
+    );
+  }
+  return pan.replace(/\s+/g, '') === inputCardNumber ? 'match' : 'mismatch';
+}
+
 export async function settleAgentCardSandboxPayment(
   input: AgentCardSandboxSettlementInput,
   dependencies: AgentCardSandboxSettlementDependencies = {}
 ): Promise<AgentCardSandboxSettlementResult> {
   const findPurchases = dependencies.findHeldPurchasesByTotal ?? findHeldPurchasesByTotal;
+  const findClearedPurchases =
+    dependencies.findClearedPurchasesByTotal ?? findClearedPurchasesByTotal;
   const readPan = dependencies.getCardPan ?? getCardPan;
   const claimForCharge = dependencies.claimHeldPurchaseForCharge ?? claimHeldPurchaseForCharge;
   const releaseClaim = dependencies.releaseHeldPurchaseClaim ?? releaseHeldPurchaseClaim;
@@ -214,30 +273,8 @@ export async function settleAgentCardSandboxPayment(
 
   for (const purchase of candidates) {
     if (purchase.cardId === null) continue;
-    // A candidate whose card the provider explicitly does not have is simply NOT this card — skip
-    // it. Settlement is attempted for every PAN (routing is by ownership, not BIN), so an unrelated
-    // shopper card can legitimately scan past stale HELD purchases whose provider card no longer
-    // exists; throwing there would fail an ordinary Stripe checkout because of someone else's
-    // abandoned purchase. Any OTHER failure means the PAN could not be READ, which is not evidence
-    // of a mismatch — swallowing it silently mislabels the real Rose card as an ordinary card and
-    // leaves its purchase HELD while Stripe charges it raw. Fail closed on those.
-    let pan: string;
-    try {
-      pan = await readPan(purchase.userId, purchase.agentId, purchase.cardId);
-    } catch (error) {
-      if (isCardNotFoundFailure(error)) continue;
-      log.error('AgentCard PAN lookup failed during settlement', {
-        purchaseId: purchase.id,
-        cardId: purchase.cardId,
-        userId: purchase.userId,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw new AgentCardSandboxSettlementError(
-        'Could not read the Rose card for a candidate purchase; refusing to treat it as a non-Rose card',
-        502
-      );
-    }
-    if (pan.replace(/\s+/g, '') !== input.cardNumber) continue;
+    const panMatch = await readMatchingPurchasePan(purchase, input.cardNumber, readPan);
+    if (panMatch === 'skip_not_found' || panMatch === 'mismatch') continue;
 
     // Validate the actual Stripe hold BEFORE charging so we never move funds against a purchase we
     // cannot later capture. ADMIN purchases are the one legitimate exception: `issueAdminCompanyCard`
@@ -275,6 +312,20 @@ export async function settleAgentCardSandboxPayment(
       await releaseClaim(purchase.id);
       throw error;
     }
+    return {
+      purchaseId: purchase.id,
+      cardId: purchase.cardId,
+      stripePaymentIntentId: purchase.stripePaymentIntentId,
+    };
+  }
+
+  // Idempotent replay: a prior confirm already CLEARED this Rose card at this total. Re-submitting
+  // Pay must return the settled result — never fall through to raw-PAN Stripe.
+  const clearedCandidates = await findClearedPurchases(input.amountCents);
+  for (const purchase of clearedCandidates) {
+    if (purchase.cardId === null) continue;
+    const panMatch = await readMatchingPurchasePan(purchase, input.cardNumber, readPan);
+    if (panMatch !== 'match') continue;
     return {
       purchaseId: purchase.id,
       cardId: purchase.cardId,

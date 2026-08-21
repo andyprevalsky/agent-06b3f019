@@ -12,8 +12,9 @@
  * [HOSTED_CHECKOUT_REDIRECT] -- SPA stayed put --> show Continue-to-Stripe link (same url)
  * [CHECKOUT_READY] -- live Place order (optional last4 when card number filled) --> checkout-session
  * [CHECKOUT_READY] -- submit card (sandbox) --> [CONFIRMING]
- * [CONFIRMING] -- success --> [CONFIRMED]
+ * [CONFIRMING] -- success --> [CONFIRMED] (also persist to localStorage + ?order=)
  * [CONFIRMING] -- API/Stripe error --> [CHECKOUT_ERROR]
+ * [ACCESS_GATE/LOADING] -- localStorage last confirmation present --> [CONFIRMED]
  *
  * This page is a local benchmark merchant. It intentionally exposes real card
  * fields so browser agents can use request_payment_card before Stripe hosted
@@ -27,6 +28,11 @@
  * in finally — clearing re-enabled Place order while Steel browsers sometimes
  * stay on /test_payment, so agents re-clicked and never completed Stripe pay.
  * A visible Continue link carries the same hosted URL as a clickable fallback.
+ *
+ * Sandbox Pay success persists the confirmation in localStorage and mirrors the
+ * order id into `?order=` so a browser agent that opens a fresh tab still lands
+ * on the receipt instead of an empty checkout form (re-Pay then looked like a
+ * failure even when the first confirm had already settled).
  *
  * Each product card renders the fields a payment-line-item receipt requires:
  * name, description, imageUrl, priceCents, an absolute productUrl
@@ -85,6 +91,47 @@ function DisabledPage() {
       <h1 className="text-2xl font-semibold">Not found</h1>
     </main>
   );
+}
+
+/** Survives new tabs in the same origin (sessionStorage is per-tab). */
+const LAST_CONFIRMATION_STORAGE_KEY = 'rose.test_payment.last_confirmation';
+
+function isTestPaymentConfirmation(value: unknown): value is TestPaymentConfirmation {
+  if (value === null || typeof value !== 'object') return false;
+  const candidate = value as Partial<TestPaymentConfirmation>;
+  return (
+    typeof candidate.orderId === 'string' &&
+    candidate.orderId.length > 0 &&
+    typeof candidate.status === 'string' &&
+    candidate.receipt !== undefined &&
+    typeof candidate.receipt === 'object' &&
+    Array.isArray(candidate.receipt.lineItems) &&
+    candidate.receipt.totals !== undefined &&
+    typeof candidate.receipt.totals === 'object'
+  );
+}
+
+function readStoredConfirmation(): TestPaymentConfirmation | null {
+  try {
+    const raw = window.localStorage.getItem(LAST_CONFIRMATION_STORAGE_KEY);
+    if (raw === null || raw === '') return null;
+    const parsed: unknown = JSON.parse(raw);
+    return isTestPaymentConfirmation(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistConfirmation(confirmation: TestPaymentConfirmation): void {
+  try {
+    window.localStorage.setItem(LAST_CONFIRMATION_STORAGE_KEY, JSON.stringify(confirmation));
+  } catch {
+    // Storage may be unavailable in locked-down browser profiles; confirmation still renders in-state.
+  }
+  const params = new URLSearchParams(window.location.search);
+  params.set('order', confirmation.orderId);
+  const next = `${window.location.pathname}?${params.toString()}`;
+  window.history.replaceState({}, '', next);
 }
 
 function ProductGrid({
@@ -430,7 +477,9 @@ export default function TestPaymentPage() {
     isLiveLifecycleFixture ? [LIVE_LIFECYCLE_ITEM.id] : [...REQUIRED_ITEM_IDS],
   );
   const [card, setCard] = useState<TestPaymentCardForm>(EMPTY_CARD_FORM);
-  const [confirmation, setConfirmation] = useState<TestPaymentConfirmation | null>(null);
+  const [confirmation, setConfirmation] = useState<TestPaymentConfirmation | null>(() =>
+    typeof window === 'undefined' ? null : readStoredConfirmation(),
+  );
   const [loading, setLoading] = useState(!isLiveLifecycleFixture && !isAbandonmentFixture);
   const [submitting, setSubmitting] = useState(false);
   // Hosted Checkout URL after Place order — kept when location.href handoff does not unload
@@ -447,7 +496,10 @@ export default function TestPaymentPage() {
     if (checkoutSessionId === null || checkoutSessionId === '') return;
     setSubmitting(true);
     settleTestPaymentCheckout(checkoutSessionId)
-      .then(setConfirmation)
+      .then((result) => {
+        persistConfirmation(result);
+        setConfirmation(result);
+      })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)))
       .finally(() => setSubmitting(false));
   }, []);
@@ -539,7 +591,9 @@ export default function TestPaymentPage() {
                 window.location.href = url;
                 return;
               }
-              setConfirmation(await confirmTestPayment(selectedIds, card));
+              const confirmed = await confirmTestPayment(selectedIds, card);
+              persistConfirmation(confirmed);
+              setConfirmation(confirmed);
             } catch (err) {
               setError(err instanceof Error ? err.message : String(err));
             } finally {
