@@ -3115,6 +3115,49 @@ def test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment(
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field():
+    """Live agent API exposes body as `text`; ignore must not require artifact `message`.
+
+    Local repro: browser-imax-group-tickets agent
+    00479d10-d10a-46d9-8103-631bf8586ffa reached payment_approval after the same
+    Element with index 0 not found ERROR, but live evaluation still failed
+    no_tool_failures because `_tool_runtime_failures` only read `message` while
+    GET /api/agents/:id returns `text`.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    data = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": "Element with index 0 not found",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_7LpBdNsmsuxr9qlZcJNKey7Q",
+                    "title": "Scrolled down 450px",
+                    "error": True,
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "toolu_payment_card_api",
+                    "title": "Payment card requested ($95.94)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data) == []
+    assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
+
+
 def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
     """A terminal unrecovered DOM index miss remains a grounded tool failure."""
     from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
@@ -3124,7 +3167,7 @@ def test_no_tool_failures_still_rejects_unrecovered_element_index_miss():
         "messages": [
             {
                 "role": "TOOL",
-                "message": "Element with index 0 not found",
+                "text": "Element with index 0 not found",
                 "metadata": {
                     "toolName": "spawn_browser_agent",
                     "toolStatus": "ERROR",
@@ -14118,6 +14161,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_recoverable_element_index_miss",
         test_no_tool_failures_ignores_recoverable_element_index_miss_before_payment,
+    )
+    r.record(
+        "declared_static_no_tool_failures_ignores_recoverable_element_index_miss_api_text",
+        test_no_tool_failures_ignores_recoverable_element_index_miss_on_api_text_field,
     )
     r.record(
         "declared_static_no_tool_failures_rejects_unrecovered_element_index_miss",

@@ -41,3 +41,12 @@ recovery-noise exclusion in the same helper.
 Ignore browser `Element with index N not found` ERROR rows only when a later
 browser event proves recovery (FINISHED non-error action or
 `request_payment_card`). Unrecovered terminal misses still fail closed.
+
+## Follow-up (H-03)
+
+Outcome-proof agent `00479d10-d10a-46d9-8103-631bf8586ffa` still failed
+`no_tool_failures` on the same recovered index miss because live
+`GET /api/agents/:id` exposes body as `text`, while H-02 only read
+artifact-shaped `message`. Post-hoc on saved `logs.messages` (keyed
+`message`) already passed. Fix: `_tool_message_body` reads `text` or
+`message`.
