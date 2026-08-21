@@ -13,6 +13,8 @@
 
 import { AlertTriangle, Plus } from 'lucide-react';
 
+import ConnectedLabel from './ConnectedLabel';
+
 interface SectionToggleButtonProps {
   isConnected: boolean;
   /**
@@ -41,9 +43,7 @@ export default function SectionToggleButton({
             Needs Reconnection
           </span>
         ) : (
-          <span className="bg-gradient-to-bl from-[#FE7503] via-[#FD5776] to-[#7A6BEC] bg-clip-text text-xs font-medium text-transparent">
-            Connected
-          </span>
+          <ConnectedLabel />
         ))}
       <button
         onClick={onClick}

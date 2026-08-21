@@ -2,7 +2,7 @@ import { AuthService } from '../services/auth';
 import {
   IMPERSONATED_MACHINE_DATA_MESSAGE,
   sessionForLocalMachineData,
-} from '../domains/auth/impersonation';
+} from '../base/impersonation';
 
 export async function getLocalMachineDataSession(): Promise<{
   session: Awaited<ReturnType<typeof AuthService.getSession>>;

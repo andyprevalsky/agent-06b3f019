@@ -20,8 +20,9 @@ export async function fetchTestPaymentItems(): Promise<TestPaymentItem[]> {
  * live-mode raw-PAN tokenization, so the only way to authorize one is a real acquirer.
  *
  * `cardLast4` disambiguates when more than one HELD Rose purchase shares this cart total (leftover
- * or concurrent lifecycle probes). The backend proves the last4 against candidate card PANs —
- * without it, Place order 409s with "Multiple held Rose purchases…".
+ * or concurrent lifecycle probes). The backend proves the last4 against candidate card PANs.
+ * When omitted, checkout-session still succeeds if exactly one HELD matches the cart total
+ * (production-purchase preflights close leftover $1 holds for that reason).
  */
 export async function startTestPaymentCheckout(
   itemIds: string[],

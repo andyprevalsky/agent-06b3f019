@@ -2,9 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { IntegrationStatus, IntegrationType, PrismaClient } from '@prisma/client';
 import Stripe from 'stripe';
 import {
-  BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID,
+  BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID,
   BENCHMARK_PAYMENT_LIFECYCLE_USER_ID,
 } from '../src/domains/purchases/config';
+// providers/benchmarkPaymentIdentity owns the production identity. Importing it
+// from purchases/config resolved to `undefined`, so `--live` would have resolved
+// its seed identity to undefined and the sandbox/live guard never fired.
+import { BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID } from '../src/providers/benchmarkPaymentIdentity';
 import { applyResolvedBenchmarkAgentCardIds } from '../src/domains/test-payment/config';
 import { loadDotenvWithCallerOverrides } from '../src/providers/loadDotenvWithCallerOverrides';
 import { isAdminUser } from '../src/utils/adminAccess';
@@ -41,11 +45,11 @@ loadDotenvWithCallerOverrides();
 applyResolvedBenchmarkAgentCardIds();
 
 const STRIPE_API_VERSION = '2025-02-24.acacia' as const;
-// Keep payment settlement on the normal Stripe-backed path. The dedicated lifecycle identity is
-// intentionally non-admin so benchmarks exercise Stripe hold, capture, and refund behavior:
-// admins are routed to `issueAdminCompanyCard` (company-funded, no Stripe hold), which makes the
-// lifecycle benchmarks' `stripeHold` assertions unreachable.
-const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_USER_ID;
+// Isolated sandbox lifecycle benches run as the default admin account and force
+// the customer mint path (`BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH`). Seed that
+// same user on the local isolated DB. The disposable `…106` identity remains
+// valid for older fixtures.
+const DEFAULT_BENCHMARK_USER_ID = BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID;
 /** Where Stripe returns the operator after the one-time live card-on-file setup. */
 const LIVE_CARD_SETUP_RETURN_URL = 'https://roselabs.ai/?benchmark-payment-card-saved=1';
 /**
@@ -150,16 +154,22 @@ async function ensureBenchmarkCredits(prisma: PrismaClient, userId: string): Pro
  * benchmark's PurchaseSpend history, so aiming it at a real account would clobber that account.
  * `assertUserMatchesMode` then pins WHICH of the two a given invocation may touch.
  */
-function assertDedicatedBenchmarkUser(userId: string): void {
+function assertDedicatedBenchmarkUser(userId: string, mode: FixtureMode): void {
   if (
     userId === BENCHMARK_PAYMENT_LIFECYCLE_USER_ID ||
     userId === BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID
   ) {
     return;
   }
+  // Isolated sandbox benches may seed the default admin account (local DB only)
+  // when the customer mint path is forced. Never allow that identity on --live.
+  if (mode === 'sandbox' && userId === BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID) {
+    return;
+  }
   throw new Error(
     `Refusing to seed payment fixtures for ${userId}; this command is restricted to the ` +
-      `dedicated benchmark users ${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID} (sandbox) and ` +
+      `dedicated benchmark users ${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID} (sandbox), ` +
+      `${BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID} (sandbox admin run-user), and ` +
       `${BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID} (production)`
   );
 }
@@ -169,12 +179,17 @@ function assertDedicatedBenchmarkUser(userId: string): void {
  * produces. Seeding an admin here would silently re-route every benchmark purchase to
  * `issueAdminCompanyCard` and make those assertions unsatisfiable, so fail loudly instead.
  */
-function assertNonAdminBenchmarkUser(userId: string): void {
+function assertNonAdminBenchmarkUser(userId: string, mode: FixtureMode): void {
+  if (mode === 'sandbox' && userId === BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID) {
+    return;
+  }
   if (isAdminUser(userId)) {
     throw new Error(
       `Refusing to seed the payment-lifecycle fixture for admin user ${userId}: admins mint ` +
-        'company-funded cards with no Stripe hold, so the lifecycle benchmarks can never pass. ' +
-        `Use the dedicated non-admin benchmark user (${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID}).`
+        'company-funded cards with no Stripe hold unless BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH ' +
+        'is set. Use the dedicated non-admin benchmark user ' +
+        `(${BENCHMARK_PAYMENT_LIFECYCLE_USER_ID}) or the sandbox admin run-user ` +
+        `(${BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID}).`
     );
   }
 }
@@ -478,9 +493,9 @@ async function main(): Promise<void> {
     process.env.BENCHMARK_USER_ID,
     defaultUserId,
   ]);
-  assertDedicatedBenchmarkUser(userId);
+  assertDedicatedBenchmarkUser(userId, mode);
   assertUserMatchesMode(userId, mode);
-  assertNonAdminBenchmarkUser(userId);
+  assertNonAdminBenchmarkUser(userId, mode);
   const prisma = new PrismaClient();
   try {
     if (mode === 'live') {

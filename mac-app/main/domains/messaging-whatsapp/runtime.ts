@@ -23,7 +23,7 @@ import { BatchUploader } from '../../services/batchUploader';
 import { Uploader } from '../../services/uploader';
 import { MessageTransformer } from '../../services/messaging/MessageTransformer';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
-import { sessionForLocalMachineData } from '../auth/impersonation';
+import { sessionForLocalMachineData } from '../../base/impersonation';
 // Imported via the legacy shim path so blackbox tests' vi.mock() on
 // '../../main/services/messaging/platforms/whatsapp/WhatsAppClient'
 // intercepts the constructor used here (Vitest mocks module specifiers, not

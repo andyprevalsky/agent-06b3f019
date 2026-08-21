@@ -1,14 +1,16 @@
 import { createRoot } from 'react-dom/client';
 import ElectronApp from './features/electron-app';
 import UpdateIndicator from './features/update-indicator';
+import WhatsAppQRModal from './features/whats-app-qr-modal';
 import { Toaster } from '@/components/ui/toaster';
 import { Toaster as Sonner } from '@/components/ui/sonner';
 import { IntegrationHandlersProvider } from '@/features/integration-handlers-context';
 import './fonts.css';
 import '@/index.css';
-import React from 'react';
+import React, { useMemo } from 'react';
 import type { BrowserType } from '../shared/types/ipc';
 import { getElectronApi } from './lib/electron-api';
+import { useWhatsAppConnect } from './lib/useWhatsAppConnect';
 import { initViewportScale } from './lib/viewport-scale';
 import QuickQueryListener from './features/quick-query-listener';
 
@@ -142,17 +144,43 @@ const DragOverlay = () => (
   </>
 );
 
+/**
+ * WhatsApp pairing needs React state (the QR streams in over IPC while
+ * `connect()` is still pending), so its handler is composed here rather than in
+ * the module-level `electronHandlers` literal. The modal lives alongside the
+ * provider so the shared Integrations row can trigger pairing without the shared
+ * front-end depending on any QR rendering.
+ */
+const Root = () => {
+  const whatsApp = useWhatsAppConnect();
+  const handlers = useMemo(
+    () => ({
+      ...electronHandlers,
+      whatsApp: { isAvailable: whatsApp.isAvailable, connect: whatsApp.connect },
+    }),
+    [whatsApp.isAvailable, whatsApp.connect]
+  );
+
+  return (
+    <IntegrationHandlersProvider handlers={handlers}>
+      <>
+        <DragOverlay />
+        <ElectronApp />
+        <UpdateIndicator />
+        <QuickQueryListener />
+        <WhatsAppQRModal
+          isOpen={whatsApp.isModalOpen}
+          onClose={whatsApp.closeModal}
+          qrCode={whatsApp.qrCode}
+          isConnecting={whatsApp.isConnecting}
+        />
+      </>
+    </IntegrationHandlersProvider>
+  );
+};
+
 // Render main app with electron handlers
-createRoot(document.getElementById('root')!).render(
-  <IntegrationHandlersProvider handlers={electronHandlers}>
-    <>
-      <DragOverlay />
-      <ElectronApp />
-      <UpdateIndicator />
-      <QuickQueryListener />
-    </>
-  </IntegrationHandlersProvider>
-);
+createRoot(document.getElementById('root')!).render(<Root />);
 
 // Render toasters outside of root to avoid z-index stacking context issues
 const toasterContainer = document.createElement('div');

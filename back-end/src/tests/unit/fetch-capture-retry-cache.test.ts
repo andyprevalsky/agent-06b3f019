@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, unlinkSync } from 'node:fs';
+import { unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import {
@@ -54,6 +54,7 @@ async function run(): Promise<void> {
   process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = '1';
   installFetchCapture();
 
+  let cleanupError: unknown;
   try {
     assert.strictEqual((await fetch(url)).status, 429);
     assert.strictEqual((await fetch(url)).status, 200);
@@ -68,8 +69,20 @@ async function run(): Promise<void> {
     if (previousReplay === undefined) delete process.env.BLACKBOX_TEST_REPLAY_OUTBOUND;
     else process.env.BLACKBOX_TEST_REPLAY_OUTBOUND = previousReplay;
     await delay(100);
-    if (existsSync(cacheFile)) unlinkSync(cacheFile);
+    // Best-effort cleanup. The outbound-fetch NonBlockingFileCache namespace is
+    // shared across concurrent unit workers, so a sibling test clearing the
+    // namespace can remove this uniquely-named file between an existsSync check
+    // and the unlink. Tolerate that race instead of guarding with existsSync
+    // (which is itself a TOCTOU window) — the assertions above are the test.
+    // Defer any non-ENOENT throw until after finally so no-unsafe-finally does
+    // not swallow the original assertion error.
+    try {
+      unlinkSync(cacheFile);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') cleanupError = error;
+    }
   }
+  if (cleanupError !== undefined) throw cleanupError;
 
   process.stdout.write('fetch-capture retry cache tests passed\n');
 }

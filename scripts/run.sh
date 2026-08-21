@@ -123,12 +123,27 @@ docker_info_quick() {
 
 docker_available_for_workspace_db() {
     local db_container=$1
+    # An isolated benchmark stack creates its DB container later in the same run,
+    # so its name can never already be listed. Callers in that mode pass true.
+    local container_may_not_exist_yet=${2:-false}
+    local running_containers
     docker_info_quick && return 0
     # /deploy pre-starts the worktree-owned DB. A busy Docker Desktop can make
     # the broad daemon probe miss its startup budget even while this known
     # container is available; preserve isolation instead of falling through to
     # the shared system Postgres in that case.
-    docker_ps_ports_quick '{{.Names}}' | grep -Fxq "$db_container"
+    running_containers=$(docker_ps_ports_quick '{{.Names}}') || return 1
+    printf '%s\n' "$running_containers" | grep -Fxq "$db_container" && return 0
+    # For an isolated benchmark run there is no container to recognize yet, so
+    # requiring one made a healthy-but-slow `docker info` (Docker Desktop
+    # routinely answers in ~2s, over the 1s fast budget) silently downgrade the
+    # run to the shared system Postgres. The canonical base fixture is published
+    # per pg major, so a system PG17/18 host then aborted with "canonical base
+    # fixture is unavailable" instead of running the benchmark. A daemon that
+    # answers the bounded `docker ps` probe at all can serve this run;
+    # docker_can_create_container still rejects a daemon that cannot actually
+    # start containers.
+    [ "$container_may_not_exist_yet" = "true" ]
 }
 
 # True only when Docker can actually create+run a container. Daemon `info`
@@ -431,6 +446,27 @@ kill_stale_tree() {
 # smoke/agentcard lane and the deploy reports `run.sh exited early with code -15`
 # with no hint that a sibling stack killed it. Returns 0 when the pid belongs to
 # a live isolated run.
+# Elapsed seconds for a pid, portable across BSD (macOS) and GNU ps.
+#
+# `ps -o etimes=` is GNU-only. On macOS BSD ps it is not a valid keyword, and ps
+# answers by printing its ENTIRE keyword list — which the caller then captured
+# as "$age" and fed to `[ "$age" -lt ... ]`, producing "integer expression
+# expected" on every call. That made the young-process guard below fail open, so
+# startup cleanup would kill a benchmark that had not yet published
+# services.json — exactly what the guard exists to prevent. Parse `etime`
+# ([[dd-]hh:]mm:ss), which both implementations support.
+process_age_seconds() {
+    local pid="$1" raw
+    raw=$(ps -p "$pid" -o etime= 2>/dev/null | tr -d ' ')
+    [ -n "$raw" ] || return 0
+    printf '%s' "$raw" | awk -F'[-:]' '{
+        if (NF == 4)      { print (($1 * 24 + $2) * 60 + $3) * 60 + $4 }
+        else if (NF == 3) { print ($1 * 60 + $2) * 60 + $3 }
+        else if (NF == 2) { print $1 * 60 + $2 }
+        else              { print 0 }
+    }'
+}
+
 pid_belongs_to_active_isolated_benchmark() {
     local pid=$1
     # Walk the ancestry: manifests record root/service PIDs, but kill_stale_tree
@@ -463,7 +499,10 @@ def valid(value):
 pids = set()
 if valid(data.get("run_sh_pid")):
     pids.add(data["run_sh_pid"])
-for service in data.get("services") or []:
+services = data.get("services")
+if not isinstance(services, list):
+    services = []
+for service in services:
     if isinstance(service, dict) and valid(service.get("pid")):
         pids.add(service["pid"])
 try:
@@ -481,7 +520,7 @@ PYEOF
     # services.json, so a just-started stack has no manifest to match yet.
     # Treat very young processes as owned rather than racing them to SIGTERM.
     local age grace
-    age=$(ps -p "$pid" -o etimes= 2>/dev/null | tr -d ' ')
+    age=$(process_age_seconds "$pid")
     # Fall back to the default on any non-integer override. An arithmetic error
     # here would return "not owned" and let cleanup kill a just-started run
     # before it publishes services.json — fail toward preserving the stack.
@@ -663,7 +702,7 @@ fi
 DOCKER_OK=false
 if ! $PRESTARTED_WORKSPACE_DB && \
    [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
-   docker_available_for_workspace_db "$DB_CONTAINER"; then
+   docker_available_for_workspace_db "$DB_CONTAINER" "$BENCHMARK_ISOLATED_RUN"; then
     DOCKER_OK=true
 elif ! $PRESTARTED_WORKSPACE_DB && \
      [ "${ROSE_USE_SYSTEM_PG:-false}" != "true" ] && \
@@ -1279,7 +1318,10 @@ if data.get("next_page_uri"):
     if not reserved_domains or not isinstance(reserved_domains[-1], dict) or not reserved_domains[-1].get("id"):
         print("malformed:missing before_id cursor", file=sys.stderr)
         sys.exit(2)
-    print(f"next:{reserved_domains[-1]['id']}")
+    # Use double-quoted dict keys only: this python -c body is wrapped in
+    # bash single quotes, so a single-quoted dict key would terminate the
+    # shell string early and become KeyError(id) at runtime.
+    print("next:" + reserved_domains[-1]["id"])
 else:
     print("done")
 ' "$domain") || {
@@ -2389,6 +2431,7 @@ if $BENCHMARK_MODE; then
     export BLACKBOX_TEST_CAPTURE_OUTBOUND="${BLACKBOX_TEST_CAPTURE_OUTBOUND:-1}"
     export BLACKBOX_TEST_REPLAY_OUTBOUND="${BLACKBOX_TEST_REPLAY_OUTBOUND:-0}"
     export BLACKBOX_TEST_FAKE_SURGE="${BLACKBOX_TEST_FAKE_SURGE:-1}"
+    export BLACKBOX_TEST_FAKE_WHATSAPP="${BLACKBOX_TEST_FAKE_WHATSAPP:-1}"
     # SMS-supervisor benchmarks stub web_search through a file the backend
     # re-reads per call (the backend is already running when a task picks its
     # fixture, so an env var set by the benchmark process can never reach it).

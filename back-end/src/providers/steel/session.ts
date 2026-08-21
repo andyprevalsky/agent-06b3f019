@@ -12,10 +12,6 @@ import { SteelRateLimitError, type FingerprintData, log } from './types';
 import { createLocalBrowserSession, connectValidatedBrowser } from './sessionConnection';
 import { STEEL_API_BASE_URL, steelCdpUrl, steelDebugUrl } from './urls';
 import {
-  summarizeSteelCaptchaStatus,
-  type BrowserCaptchaTelemetry,
-} from '../browser/captchaTelemetry';
-import {
   envEnabled,
   rememberBenchmarkAnonSteelProfile,
   resolveSteelProfileForSession,
@@ -76,23 +72,6 @@ interface SteelSessionResult {
   debugUrl: string;
   profileId?: string | null;
   proxySource?: string | null;
-}
-
-interface SteelSessionHealth {
-  sessionId: string;
-  status: string | null;
-  createdAt: string | null;
-  timeoutMs: number | null;
-  expiresAt: string | null;
-  ttlMs: number | null;
-  profileId: string | null;
-}
-
-interface SteelSessionCookieSummary {
-  sessionId: string;
-  authRealm: string;
-  cookieCount: number;
-  checkedAt: string;
 }
 
 /**
@@ -424,60 +403,6 @@ export async function createSessionWithContext(
   );
 }
 
-/** Create a solver-enabled, profile-free Steel candidate for challenge search. */
-export function buildSteelRecoveryBrowserOptions(input: {
-  proxy: SteelProxyConfig;
-  userAgent?: string;
-}) {
-  return {
-    persistProfile: false,
-    userAgent: input.userAgent,
-    useProxy: input.proxy,
-    solveCaptcha: true,
-    debugConfig: { systemCursor: false },
-    stealthConfig: { humanizeInteractions: false, skipFingerprintInjection: true },
-    timeout: 900000,
-    dimensions: { width: 1288, height: 891 },
-  };
-}
-
-export async function createSteelRecoverySession(input: {
-  proxyLocation: ProxyGeoLocation;
-  proxyMode: 'managed' | 'fixed';
-  userAgent?: string;
-}) {
-  const proxySettings = buildSteelProxySettings(
-    input.proxyLocation,
-    input.proxyMode === 'managed' && isKnownRejectedProxyCity(input.proxyLocation),
-    false,
-    input.proxyMode
-  );
-  // Challenge search must never bypass the provider-native auto solver, even
-  // when normal sessions have it disabled for a local experiment.
-  const session = (await steel.sessions.create(
-    buildSteelRecoveryBrowserOptions({
-      proxy: proxySettings.config,
-      userAgent: input.userAgent,
-    })
-  )) as SteelSessionResult;
-  const wsUrl = steelCdpUrl(session.id);
-  const validationBrowser = await connectValidatedBrowser(wsUrl);
-  if (validationBrowser === null) {
-    await releaseSteelRemoteSession(session.id).catch(() => {});
-    throw new Error(`Steel recovery candidate ${session.id} failed CDP validation`);
-  }
-  return {
-    sessionId: session.id,
-    debugUrl: steelDebugUrl(session.debugUrl),
-    wsUrl,
-    proxySource: session.proxySource ?? proxySettings.source,
-    proxyLocation: input.proxyLocation,
-    profileId: null,
-    profileSource: 'challenge_candidate_ephemeral',
-    validationBrowser,
-  };
-}
-
 /**
  * Close a browser session.
  * @param pause - If true, sets status to PAUSED (resumable). If false, sets to CLOSED (terminal).
@@ -540,113 +465,4 @@ export async function releaseSteelRemoteSession(sessionId: string): Promise<void
       component: 'Steel session release',
     }
   );
-}
-
-/**
- * Resume a paused browser session by creating a NEW session with the same profile.
- * Validates the WebSocket connection works before returning.
- * If validation fails, retries up to MAX_SESSION_RETRIES times.
- *
- * @param taskId - The stable task ID (BrowserSession.id)
- * @returns Session info including saved URL to navigate back to
- */
-/**
- * Get session info from database.
- */
-export async function getSession(sessionId: string) {
-  return await prisma.browserSession.findUnique({
-    where: { sessionId },
-    include: { context: true },
-  });
-}
-
-export async function getSteelSessionHealth(sessionId: string): Promise<SteelSessionHealth> {
-  const remote = (await steel.sessions.retrieve(sessionId)) as {
-    id?: string;
-    status?: string;
-    createdAt?: string;
-    timeout?: number;
-    profileId?: string | null;
-  };
-  const createdAtMs =
-    remote.createdAt !== undefined ? new Date(remote.createdAt).getTime() : Number.NaN;
-  const timeoutMs = typeof remote.timeout === 'number' ? remote.timeout : null;
-  const expiresAtMs =
-    Number.isFinite(createdAtMs) && timeoutMs !== null ? createdAtMs + timeoutMs : Number.NaN;
-  return {
-    sessionId: remote.id ?? sessionId,
-    status: remote.status ?? null,
-    createdAt: remote.createdAt ?? null,
-    timeoutMs,
-    expiresAt: Number.isFinite(expiresAtMs) ? new Date(expiresAtMs).toISOString() : null,
-    ttlMs: Number.isFinite(expiresAtMs) ? Math.max(0, expiresAtMs - Date.now()) : null,
-    profileId: remote.profileId ?? null,
-  };
-}
-
-export async function getSteelCaptchaTelemetry(
-  sessionId: string
-): Promise<BrowserCaptchaTelemetry> {
-  const statuses = await steel.sessions.captchas.status(sessionId);
-  return summarizeSteelCaptchaStatus(statuses);
-}
-
-export async function getSteelSessionCookieSummary(
-  sessionId: string,
-  authRealm: string
-): Promise<SteelSessionCookieSummary> {
-  const context = (await steel.sessions.context(sessionId)) as {
-    cookies?: Array<{ domain?: string; expires?: number }>;
-  };
-  const normalizedRealm = authRealm.toLowerCase().replace(/^\./, '');
-  const nowSeconds = Date.now() / 1000;
-  const cookieCount = (context.cookies ?? []).filter((cookie) => {
-    const domain = (cookie.domain ?? '').toLowerCase().replace(/^\./, '');
-    const domainMatches = domain === normalizedRealm || domain.endsWith(`.${normalizedRealm}`);
-    const expires = cookie.expires;
-    const live = expires === undefined || expires <= 0 || expires > nowSeconds;
-    return domainMatches && live;
-  }).length;
-  return {
-    sessionId,
-    authRealm: normalizedRealm,
-    cookieCount,
-    checkedAt: new Date().toISOString(),
-  };
-}
-
-/**
- * Close all active browser sessions (for cleanup).
- */
-export async function closeAllActiveSessions(): Promise<number> {
-  log.info('🌐 Finding all active browser sessions...');
-
-  const activeSessions = await prisma.browserSession.findMany({
-    where: { status: 'ACTIVE' },
-    select: { sessionId: true, agentId: true },
-  });
-
-  log.info(`   Found ${activeSessions.length} active session(s)`);
-
-  if (activeSessions.length === 0) {
-    return 0;
-  }
-
-  let closedCount = 0;
-
-  for (const session of activeSessions) {
-    try {
-      log.info(`   Closing session ${session.sessionId} (agent: ${session.agentId})...`);
-      await closeSession(session.sessionId);
-      closedCount++;
-    } catch (error) {
-      log.error(`Failed to close session ${session.sessionId}`, {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-
-  log.info(`✅ Closed ${closedCount}/${activeSessions.length} session(s)`);
-
-  return closedCount;
 }

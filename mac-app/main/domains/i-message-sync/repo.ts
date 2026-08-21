@@ -2,7 +2,7 @@ import { AuthService } from '../../services/auth';
 import { IMessageReader } from '../../services/iMessageReader';
 import { BatchUploader } from '../../services/batchUploader';
 import { IntegrationCache } from '../../services/sync/IntegrationCache';
-import { sessionForLocalMachineData } from '../auth/impersonation';
+import { sessionForLocalMachineData } from '../../base/impersonation';
 import type {
   AuthSession,
   IMessageData,

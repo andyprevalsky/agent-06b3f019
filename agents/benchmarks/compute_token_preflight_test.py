@@ -713,6 +713,7 @@ def test_anthropic_excluded_live_fixture_prefers_gpt_without_requiring_codex():
         patch.dict(os.environ, {"ROSE_EXCLUDE_ANTHROPIC_FAMILY": "1"}),
         patch.object(rb, "_is_simulate_mode", return_value=False),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_email_credentials", return_value=True),
         patch.object(rb, "_sync_browser_credentials", return_value=True),
     ):
         rb._apply_live_fixture(ctx)
@@ -937,6 +938,7 @@ def test_live_fixture_sync_tolerates_missing_gpt_code():
     with (
         patch.object(rb, "_is_simulate_mode", return_value=False),
         patch.object(rb, "_sync_compute_tokens", side_effect=fake_sync),
+        patch.object(rb, "_sync_email_credentials", return_value=True),
         patch.object(rb, "_sync_browser_credentials", return_value=True),
     ):
         rb._apply_live_fixture(ctx)
@@ -964,6 +966,26 @@ def test_live_fixture_still_fails_closed_when_claude_code_sync_fails():
             raise AssertionError("expected RuntimeError when compute-token sync fails")
         except RuntimeError as exc:
             assert "compute tokens" in str(exc).lower()
+
+
+def test_live_fixture_fails_closed_when_email_credential_sync_fails():
+    """message_person paths need usable from_email; a failed overlay must abort."""
+    ctx = rb.LiveFixtureContext(
+        base_url="http://127.0.0.1:3999",
+        user_id=rb.USER_ID if hasattr(rb, "USER_ID") else "u",
+        auth_realm="local",
+    )
+    with (
+        patch.object(rb, "_is_simulate_mode", return_value=False),
+        patch.object(rb, "_sync_compute_tokens", return_value=True),
+        patch.object(rb, "_sync_email_credentials", return_value=False),
+        patch.object(rb, "_sync_browser_credentials", return_value=True),
+    ):
+        try:
+            rb._apply_live_fixture(ctx)
+            raise AssertionError("expected RuntimeError when email-credential sync fails")
+        except RuntimeError as exc:
+            assert "email credentials" in str(exc).lower()
 
 
 def test_preflight_raises_when_sync_fails():

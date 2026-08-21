@@ -1,4 +1,4 @@
-import { IntegrationStatus, IntegrationType } from '@prisma/client';
+import { IntegrationStatus, IntegrationType, PurchaseSpendStatus } from '@prisma/client';
 import { prisma } from '../../providers/database';
 
 export async function resetBenchmarkAgentCardSetup(userId: string): Promise<void> {
@@ -121,4 +121,25 @@ export async function findAgentOwnerId(agentId: string): Promise<string | null> 
     select: { userId: true },
   });
   return agent?.userId ?? null;
+}
+
+/**
+ * HELD lifecycle-probe purchases for one user, with the agent that owns each.
+ *
+ * Scoped to the $1 probe cart so the harness preflight can only clear holds
+ * belonging to that probe -- never an unrelated real purchase.
+ */
+export async function findHeldLifecycleProbePurchases(
+  userId: string,
+  totalCents: number
+): Promise<Array<{ id: string; agentId: string | null }>> {
+  return prisma.purchaseSpend.findMany({
+    where: {
+      userId,
+      status: PurchaseSpendStatus.HELD,
+      cardId: { not: null },
+      totalCents,
+    },
+    select: { id: true, agentId: true },
+  });
 }

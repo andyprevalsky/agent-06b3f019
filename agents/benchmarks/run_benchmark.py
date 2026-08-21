@@ -172,8 +172,9 @@ AGENT_PAYMENT_SANDBOX_TASK_NAMES = {
     "agent-payment-idempotent-abandonment",
     "agent-payment-abandonment",
 }
-AGENT_PAYMENT_BENCHMARK_USER_ID = "00000000-0000-4000-8000-000000000106"
+AGENT_PAYMENT_BENCHMARK_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_BENCHMARK_USER_ID_ENV = "BENCHMARK_AGENT_PAYMENT_USER_ID"
+AGENT_PAYMENT_FORCE_CUSTOMER_PATH_ENV = "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH"
 BENCHMARK_FORCE_SHOW_PASSWORDS_ENV = "BENCHMARK_FORCE_SHOW_PASSWORDS"
 BAD_AMAZON_PASSWORD_USERNAME = "andyprevalsky@yahoo.com"
 BAD_AMAZON_COOKIE_SOURCE = "benchmark_bad_auth"
@@ -199,15 +200,13 @@ SOURCE_CONNECT_GATE_USER_ID = "00000000-0000-4000-8000-000000000104"
 # Synthetic admin user for admin-bypass benchmarks — must match ADMIN_USER_IDS_EXTRA in the
 # benchmark backend env so isAdminUser() treats it as an admin. Never a real admin's account.
 ADMIN_SUBSCRIPTION_BYPASS_USER_ID = "00000000-0000-4000-8000-000000000105"
-# The AgentCard payment-lifecycle benchmarks assert the REAL end-user funding path: a personal
-# Stripe hold is authorized, the company-funded card is minted, the hold is captured, and the
-# purchase clears or is refunded. `resolveAndIssuePurchaseCard` routes ADMIN users to
-# `issueAdminCompanyCard`, which never authorizes a hold, so running these as the default
-# (admin) benchmark user makes every `stripeHold` assertion unsatisfiable by construction.
-# They therefore run as a dedicated NON-ADMIN synthetic user seeded by
-# back-end/scripts/setup-benchmark-payment.ts. Must equal
-# BENCHMARK_PAYMENT_LIFECYCLE_USER_ID in back-end/src/domains/purchases/config.ts.
-AGENT_PAYMENT_LIFECYCLE_USER_ID = "00000000-0000-4000-8000-000000000106"
+# Sandbox AgentCard lifecycle benches run as the default admin account so the
+# credit gate uses unlimited admin credits. BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+# (honored only when BENCHMARK_MODE or BENCHMARK_ISOLATED_RUN is on) forces
+# resolveAndIssuePurchaseCard onto chargeAndIssueCard so stripeHold remains
+# reachable. Must equal BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID in
+# back-end/src/domains/purchases/config.ts.
+AGENT_PAYMENT_LIFECYCLE_USER_ID = "1f85ff25-6e29-4c1b-8739-f917bd101a30"
 AGENT_PAYMENT_LIFECYCLE_TASK_NAMES = {
     AGENT_PAYMENT_TEST_SHOP_TASK_NAME,
     "agent-payment-setup-resume",
@@ -1552,8 +1551,9 @@ def _benchmark_user_id_for_task(task_name: str, base_url: Optional[str] = None) 
     if task_name in AGENT_PAYMENT_SANDBOX_TASK_NAMES:
         if base_url is not None and not _is_local_base_url(base_url):
             return None
-        # USER_ID is a real admin and therefore takes the intentional company-funded/no-Stripe-hold
-        # path. Settlement benchmarks must cover the ordinary customer's complete Stripe lifecycle.
+        # Sandbox lifecycle benches run as the default admin account. The backend
+        # keeps admin credits (unlimited) and BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH
+        # forces the charged Stripe-hold mint path.
         return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_BENCHMARK_USER_ID
     return None
 
@@ -1570,15 +1570,17 @@ def benchmark_run_user_id_for_task(task_name: str) -> Optional[str]:
 
     Single source of truth for the run-user override so the mapping can be asserted directly
     instead of being buried in `run_single_task`. Getting it wrong is not a cosmetic bug: the
-    payment-lifecycle tasks assert a personal Stripe hold, which only the NON-admin funding path in
-    `resolveAndIssuePurchaseCard` produces, and the default benchmark user is a hardcoded admin.
+    sandbox payment-lifecycle tasks assert a Stripe hold. They run as the admin
+    account with BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH so credits stay
+    unlimited while minting still authorizes a hold. Production tasks stay on
+    the dedicated non-admin live identity.
     """
     if task_name == FREE_CREDIT_SUBSCRIPTION_GATE_TASK_NAME:
         return _free_credit_subscription_gate_user_id()
     if task_name in GATE_FIXTURE_TASK_USER_IDS:
         return GATE_FIXTURE_TASK_USER_IDS[task_name]
     if task_name in AGENT_PAYMENT_LIFECYCLE_TASK_NAMES:
-        return AGENT_PAYMENT_LIFECYCLE_USER_ID
+        return os.environ.get(AGENT_PAYMENT_BENCHMARK_USER_ID_ENV, "").strip() or AGENT_PAYMENT_LIFECYCLE_USER_ID
     if task_name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES:
         return AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID
     return None
@@ -1717,6 +1719,32 @@ async def _preflight_production_payment_identity(base_url: str) -> None:
     )
 
 
+async def _preflight_close_purchase_reuse_gate(base_url: str) -> None:
+    """Close leftover HELD $1 lifecycle-probe cards so this run must request payment_approval.
+
+    Only `agent-payment-production-purchase` sets disable_purchase_reuse. Other prod Stripe
+    tasks keep the 24h cart-fingerprint reuse path.
+    """
+    headers = await _api_headers()
+    async with httpx.AsyncClient(timeout=180) as client:
+        resp = await client.post(
+            f"{base_url}/api/test-payment/lifecycle/close-held-reuse",
+            headers=headers,
+            json={"userId": AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Failed to close held purchase reuse for {AGENT_PAYMENT_LIFECYCLE_PROD_USER_ID}: "
+            f"{resp.status_code} {resp.text[:300]}"
+        )
+    payload = resp.json() if resp.content else {}
+    print(
+        "    💳 Closed held purchase reuse for production purchase probe: "
+        f"heldFound={payload.get('heldFound')} agentsCleaned={payload.get('agentsCleaned')} "
+        f"orphanHeldIgnored={payload.get('orphanHeldIgnored')}"
+    )
+
+
 def _benchmark_agent_source_override() -> str:
     source = (os.environ.get("BENCHMARK_AGENT_SOURCE") or "MAC_APP").strip().upper()
     if source not in {"WEB", "MAC_APP", "SMS"}:
@@ -1733,6 +1761,14 @@ def _apply_local_agent_source_override(agent_id: str, source: str) -> None:
 
 
 def _local_benchmark_task_queue(base_url: str) -> Optional[str]:
+    """Local benchmark agents are scheduled onto the queue the harness preflights.
+
+    Production ``--prod`` agents must stay on the shared production Temporal
+    queue (generation-scoped workers). Cloudbench starts local workers too, but
+    they do not reliably consume prod-API workflows on an isolated queue —
+    routing ``--prod`` there leaves agents STARTING_UP until the liveness
+    reconciler fails them (fleet 8bfe3691).
+    """
     if not _is_local_base_url(base_url):
         return None
     workspace = os.environ.get("CONDUCTOR_WORKSPACE_NAME")
@@ -1812,6 +1848,12 @@ async def create_agent(
     # that shortcut without touching the prompt or the pass criteria.
     if task.context_gates:
         body["context_gates"] = task.context_gates
+
+    # A task may pin its root agent to a specific Rose pool. Used when the
+    # default pool's primary declines the task's prompt outright, which is a
+    # model-policy outcome no retry can change.
+    if task.model:
+        body["model"] = task.model
 
     if task.start_phase:
         body["start_phase"] = task.start_phase
@@ -4949,6 +4991,29 @@ def _grep_fixture_env() -> dict:
     return env
 
 
+def _prod_source_database_url_for_fixture(target_database_url: str) -> Optional[str]:
+    """Resolve a remote/prod DB URL for one-shot fixture freezes.
+
+    Isolated local runs set process ``DATABASE_URL`` to the per-run Victoria
+    database. Reading that process value as the freeze *source* makes
+    ``source == target``, so ``BENCHMARK_*_SOURCE_DATABASE_URL`` is never set
+    and a missing frozen fixture file fails closed with "no source URL".
+    Always read the backend ``.env`` file (not process env), preferring
+    direct URLs when present.
+    """
+    source_database_url = (
+        load_env_var("DIRECT_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DIRECT_DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+        or load_env_var("DATABASE_URL", _BACKEND_ENV, include_process_env=False)
+    )
+    if not source_database_url:
+        return None
+    source_database_url = _psql_compatible_database_url(source_database_url)
+    if source_database_url == target_database_url:
+        return None
+    return source_database_url
+
+
 def _plaid_transactions_fixture_env() -> dict:
     database_url = _local_victoria_database_url()
     if not database_url:
@@ -4956,11 +5021,9 @@ def _plaid_transactions_fixture_env() -> dict:
     env = os.environ.copy()
     env["DATABASE_URL"] = database_url
     env["BENCHMARK_USER_ID"] = USER_ID
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_PLAID_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5020,11 +5083,9 @@ def _user_data_fixture_env() -> dict:
     env["BENCHMARK_USER_ID"] = USER_ID
     # Source (prod) URL lets the fixture freeze real documents once if the frozen
     # file is missing. When the frozen file already exists, apply is fully offline.
-    source_database_url = load_env_var("DATABASE_URL", _BACKEND_ENV)
+    source_database_url = _prod_source_database_url_for_fixture(database_url)
     if source_database_url:
-        source_database_url = _psql_compatible_database_url(source_database_url)
-        if source_database_url != database_url:
-            env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
+        env["BENCHMARK_USER_DATA_SOURCE_DATABASE_URL"] = source_database_url
     return env
 
 
@@ -5372,6 +5433,41 @@ def _sync_browser_credentials(cookie_domains: tuple[str, ...] = ()) -> bool:
     return True
 
 
+def _sync_email_credentials() -> bool:
+    """Refresh Gmail/Yahoo integration rows + EmailIntegrationCredential from prod.
+
+    The canonical base-image dump can freeze abandoned OAuth rows (null email /
+    null accessToken). Connected Integrations then omits every send-from address
+    and ``message_person`` fails closed with ``Missing from_email`` before any
+    email_send approval can fire. Same pattern as ``_sync_compute_tokens``.
+    """
+    database_url = _local_victoria_database_url()
+    if not database_url:
+        print("    ⚠ Email credential sync skipped: local Victoria DB not found")
+        return False
+    env = os.environ.copy()
+    env["DATABASE_URL"] = database_url
+    env["DIRECT_URL"] = database_url
+    try:
+        result = _run_seed_subprocess(
+            ["npx", "tsx", "scripts/seed-local.ts", "--email-credentials-only"],
+            cwd=REPO_ROOT / "back-end",
+            env=env,
+            timeout=120,
+        )
+    except subprocess.TimeoutExpired as exc:
+        print(f"    ⚠ Email credential sync timed out after {exc.timeout}s: {_seed_sync_error_detail(exc)}")
+        return False
+    except Exception as exc:
+        print(f"    ⚠ Email credential sync error: {exc}")
+        return False
+    if result.returncode != 0:
+        print(f"    ⚠ Email credential sync failed: {_seed_sync_error_detail(result)}")
+        return False
+    print("    ✉️  Refreshed email credentials from prod")
+    return True
+
+
 def _sync_passkeys() -> None:
     """Refresh only passkeys from prod into the isolated benchmark DB.
 
@@ -5649,6 +5745,8 @@ def _apply_live_fixture(ctx: LiveFixtureContext) -> dict:
         )
     if not synced_compute_tokens:
         raise RuntimeError("Live fixture could not refresh compute tokens")
+    if not _sync_email_credentials():
+        raise RuntimeError("Live fixture could not refresh email credentials")
     if not _sync_browser_credentials(ctx.cookie_domains):
         raise RuntimeError("Live fixture could not refresh complete browser auth state")
     # A green sync only proves the command exited 0. For domains whose task
@@ -8374,6 +8472,10 @@ async def run_single_task(
         os.environ["BENCHMARK_RUN_USER_ID"] = run_user_id_override
     if task.name in AGENT_PAYMENT_PRODUCTION_LIFECYCLE_TASK_NAMES and not _is_local_base_url(base_url):
         await _preflight_production_payment_identity(base_url)
+    if getattr(task, "disable_purchase_reuse", False):
+        if _is_local_base_url(base_url):
+            raise RuntimeError(f"{task.name} disable_purchase_reuse requires a remote/production backend")
+        await _preflight_close_purchase_reuse_gate(base_url)
 
     if task.name in MINTED_AGENT_ACCOUNT_TASK_NAMES:
         return await run_minted_agent_account_task(base_url, task, keep_failed_agents)
@@ -10087,6 +10189,15 @@ async def main_async(args):
             require_claude_code=bool(claude_code_tasks_for_refresh)
             and not allow_claude_code_credential_skip,
         )
+        # Base-image dumps can freeze unusable Gmail OAuth rows; any local task
+        # that must send email (message_person) needs a fresh credential overlay
+        # or Connected Integrations never lists a from_email and the harness
+        # fails before an email_send approval can fire.
+        if any("message_person" in (t.expected_tools or []) for t in tasks):
+            if not _sync_email_credentials():
+                raise RuntimeError(
+                    "Benchmark run could not refresh email credentials for message_person tasks"
+                )
 
     # Pre-flight: check provider-typed compute credentials for code-agent tests.
     # Default (fleet/cloud): missing Claude Code credentials after a required

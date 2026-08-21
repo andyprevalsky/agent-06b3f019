@@ -50,42 +50,41 @@ export const AGENTCARD_COMPANY_FLOW_RETRY_MS = parsePositiveIntEnv(
 const BENCHMARK_KYC_REQUIRED_USER_ID = '00000000-0000-4000-8000-000000000103';
 
 /**
- * Dedicated synthetic identity for the AgentCard payment-lifecycle benchmarks
- * (`agent-payment-test-shop`, `-setup-resume`, `-idempotent-abandonment`, `-abandonment`).
+ * Disposable non-admin identity for charged-path unit/blackbox fixtures.
  *
- * It MUST stay OUT of `ADMIN_USER_IDS` / `ADMIN_USER_IDS_EXTRA`: `resolveAndIssuePurchaseCard`
- * routes admins to `issueAdminCompanyCard`, which mints off the AgentCard org transfer and never
- * authorizes a personal Stripe hold. Those benchmarks assert the real end-user lifecycle
- * (hold -> mint -> capture -> clear/refund), so running them as an admin makes their
- * `stripeHold` assertions unsatisfiable by construction. Seeded by
- * `back-end/scripts/setup-benchmark-payment.ts`; the agents harness runs those tasks as this user.
- * The admin funding path keeps its own benchmark (`gate-subscription-card-mint-admin-bypass`).
+ * Isolated sandbox AgentCard lifecycle benches no longer run as this user: they
+ * run as `BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID` with
+ * `BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH` so credit checks stay unlimited-admin
+ * while minting still goes through `chargeAndIssueCard`. Keep this id out of
+ * `ADMIN_USER_IDS` so those in-process fixtures can still exercise the
+ * non-admin charged path without the force flag. The admin no-force path keeps
+ * its own benchmark (`gate-subscription-card-mint-admin-bypass`).
  */
 export const BENCHMARK_PAYMENT_LIFECYCLE_USER_ID = '00000000-0000-4000-8000-000000000106';
-
-/**
- * Production counterpart of `BENCHMARK_PAYMENT_LIFECYCLE_USER_ID`, used by the two production-only
- * AgentCard lifecycle probes (`agent-payment-production-abandonment`, which is /deploy Step 13c,
- * and `agent-payment-production-purchase`). Same rule: it MUST stay out of `ADMIN_USER_IDS` /
- * `ADMIN_USER_IDS_EXTRA`, or `resolveAndIssuePurchaseCard` mints a company-funded card with no
- * personal Stripe hold and the probes' `stripeHold` / `stripePaymentIntentCount` assertions become
- * unsatisfiable.
- *
- * It is deliberately a SEPARATE id from the sandbox one rather than a shared "benchmark payer":
- * a user owns exactly one `Subscription` row (unique `userId`, one `stripeCustomerId`) and one
- * `Integration` row per name (unique `(userId, 'agentcard')`, one `cardholderId`). Production needs
- * LIVE-mode values there; the sandbox fixture needs TEST-mode values. One identity cannot hold
- * both, and sharing it would let `setup-benchmark-payment.ts` overwrite the live pointers with
- * sandbox ones (its default `DATABASE_URL` in `back-end/.env` is the production database).
- * Provisioned once by `back-end/scripts/setup-benchmark-payment.ts --live`.
- */
-export const BENCHMARK_PAYMENT_LIFECYCLE_PROD_USER_ID = '00000000-0000-4000-8000-000000000107';
 
 function benchmarkModeEnabled(): boolean {
   const enabled = new Set(['1', 'true', 'yes', 'on']);
   return (
     enabled.has((process.env.BENCHMARK_MODE ?? '').trim().toLowerCase()) ||
     enabled.has((process.env.BENCHMARK_ISOLATED_RUN ?? '').trim().toLowerCase())
+  );
+}
+
+/**
+ * Isolated sandbox AgentCard lifecycle benches run as the default admin account
+ * (`1f85ff25-…`) so credit checks keep the unlimited-admin path. This env flag
+ * (only honored in benchmark/isolated mode) forces `resolveAndIssuePurchaseCard`
+ * onto `chargeAndIssueCard` so `stripeHold` / `payment_approval` stay reachable.
+ * Never honored in production process env: `benchmarkModeEnabled()` is false there.
+ */
+export const BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH_ENV = 'BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH';
+export const BENCHMARK_PAYMENT_LIFECYCLE_ADMIN_RUN_USER_ID = '1f85ff25-6e29-4c1b-8739-f917bd101a30';
+
+export function benchmarkForceCustomerPurchasePath(): boolean {
+  if (!benchmarkModeEnabled()) return false;
+  const enabled = new Set(['1', 'true', 'yes', 'on']);
+  return enabled.has(
+    (process.env.BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH ?? '').trim().toLowerCase()
   );
 }
 

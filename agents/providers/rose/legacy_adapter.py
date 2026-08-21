@@ -35,6 +35,7 @@ _MODEL_TO_POOL: dict[str, PoolName] = {
     "rose-labs/rose-1-lite": "rose-1-lite",
     "rose-labs/rose-1-ultra": "rose-1-ultra",
     "rose-labs/rose-1-browser-use": "rose-1-browser-use",
+    "rose-labs/rose-1-oss": "rose-1-oss",
     "rose": "rose-1-lite",
     "rose-mini": "rose-1-mini",
     "rose-ultra": "rose-1-ultra",
@@ -63,6 +64,8 @@ def pool_for_model(model: str) -> Optional[PoolName]:
     if "rose-labs" in lowered:
         if "browser-use" in lowered:
             return "rose-1-browser-use"
+        if "oss" in lowered:
+            return "rose-1-oss"
         if "ultra" in lowered:
             return "rose-1-ultra"
         if "mini" in lowered:

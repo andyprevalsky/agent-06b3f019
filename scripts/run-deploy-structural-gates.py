@@ -81,6 +81,14 @@ GATES = (
         "setup-db-concurrency",
         ("bash", "scripts/tests/setup-db-concurrency.test.sh"),
     ),
+    # Pins run.sh's per-workspace port/bundle isolation and its Docker-vs-system
+    # Postgres selection. It was never wired into any suite, so a regression in
+    # the Docker probe (which silently downgrades an isolated benchmark stack to
+    # the shared system Postgres) could not be caught by any gate.
+    Gate(
+        "run-port-collision",
+        ("bash", "scripts/tests/run-port-collision.test.sh"),
+    ),
 )
 
 
