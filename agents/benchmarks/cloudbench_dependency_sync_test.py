@@ -6956,6 +6956,225 @@ def test_refresh_deps_mode_contract() -> None:
     assert fleet.index("warm_deps_preflight || exit 1\n") < fleet.index("# ── Phase 1:")
 
 
+
+def test_refresh_deps_git_sync_uses_controller_fetch_ref() -> None:
+    """RCA 2026-08-19: --refresh-deps fetched a private SHA with optional
+    box-side $GITHUB_TOKEN. The warm-box ssh login had no token, so git asked
+    for a username on https://github.com and aborted the whole fleet before any
+    task machine started ('exact remote checkout failed'). Guest drivers already
+    use cloudbench-fetch-ref.sh + CLOUDBENCH_GITHUB_TOKEN_B64; maintenance must
+    use that same controller-token path and fail closed when it is missing."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = cloud[cloud.index("warm_source_fetch_ref() {") : cloud.index("ssh_exec() {")]
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
+    wmh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert "cloudbench-fetch-ref.sh" in helper
+    assert "CLOUDBENCH_GITHUB_TOKEN_B64" in helper
+    assert "No controller GitHub token" in helper
+    # Contents-validated resolver — not the unvalidated hosts.yml helper alone.
+    assert "resolve_github_token" in helper
+    assert "rm -f /data/cloudbench-fetch-ref.sh" in helper
+    assert "warm_source_fetch_ref" in refresh
+    assert "warm_source_fetch_ref" in wmh
+    for mode in (refresh, wmh, helper):
+        assert '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' not in mode
+        assert "checkout -f FETCH_HEAD" not in mode
+
+
+def test_warm_source_fetch_ref_retries_transient_sftp_tunnel_timeout(
+    tmp_path: Path,
+) -> None:
+    """Epoch 3: Fly `ssh sftp put` of cloudbench-fetch-ref.sh failed once with
+    `tunnel unavailable: ... timed out (context deadline exceeded)` and
+    warm_source_fetch_ref aborted the fleet before any task started. Guest
+    driver staging already retries sftp; maintenance git-sync must too."""
+    cloud = CLOUD_SCRIPT.read_text()
+    helper = _extract_fleet_function(cloud, "warm_source_fetch_ref() {")
+    retry = _extract_fleet_function(
+        ENV_HELPER_SCRIPT.read_text(), "cloudbench_retry_command() {"
+    )
+    sha = "f9ad6715cc0d572a5ad54c3dbedae73bf5c5ee00"
+    calls = tmp_path / "sftp-calls.txt"
+    script = f"""
+set -uo pipefail
+APP=bench-app
+ROOT_DIR={shlex.quote(str(ROOT))}
+REMOTE_REPO=/data/repo
+CALLS={shlex.quote(str(calls))}
+SFTP_ATTEMPTS=0
+CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS=5
+CLOUDBENCH_WARM_FETCH_REF_SFTP_RETRY_SECONDS=0
+gh() {{ echo 'test-token'; }}
+resolve_github_token() {{ echo 'test-token'; }}
+cloudbench_controller_github_token() {{ echo 'test-token'; }}
+ssh_exec() {{
+  echo checkout {sha[:8]}
+  echo "::CLOUDBENCH-REF::{sha}"
+  return 0
+}}
+FLY() {{
+  printf '%s\\n' "$*" >> "$CALLS"
+  if [ "$1 $2 $3" = "ssh sftp put" ]; then
+    SFTP_ATTEMPTS=$((SFTP_ATTEMPTS + 1))
+    if [ "$SFTP_ATTEMPTS" -eq 1 ]; then
+      echo 'Error: tunnel unavailable: Error contacting Fly.io API when probing "app": timed out (context deadline exceeded)' >&2
+      return 1
+    fi
+  fi
+  return 0
+}}
+sleep() {{ :; }}
+{retry}
+{helper}
+if ! warm_source_fetch_ref mid123 {sha}; then
+  echo "FETCH_REF_ABORTED attempts=$SFTP_ATTEMPTS"
+  exit 14
+fi
+echo "FETCH_REF_OK attempts=$SFTP_ATTEMPTS"
+"""
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    # Two SFTP puts per attempt (fetch-ref.sh + token file); first attempt fails
+    # on the first put, second attempt succeeds both → 3 total put calls.
+    assert "FETCH_REF_OK attempts=3" in result.stdout
+    assert "ssh sftp put" in calls.read_text()
+    assert helper.count("ssh sftp put") >= 1
+    assert "cloudbench_retry_command" in helper
+    assert "CLOUDBENCH_WARM_FETCH_REF_SFTP_ATTEMPTS" in helper
+
+
+def test_refresh_deps_git_sync_uses_controller_token_not_box_secret() -> None:
+    """RCA (2026-08-20): fleet warm-deps heal aborted before any task machine
+    with `fatal: could not read Username for 'https://github.com'` because
+    maintenance auth came only from a durable/box-side GITHUB_TOKEN. Prefer the
+    live controller token path (cloudbench_controller_github_token + export).
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    env_lib = (ROOT / "scripts/lib/cloudbench-env.sh").read_text()
+    refresh = cloud[cloud.index('if [ "$MODE" = "refresh-deps" ]; then') : cloud.index("# MODE: --refresh-wmh")]
+    refresh_wmh = cloud[cloud.index('if [ "$MODE" = "refresh-wmh" ]; then') : cloud.index("# MODE: run (default)")]
+
+    assert "cloudbench_resolve_controller_github_token" in env_lib
+    assert "cloudbench_controller_github_token" in env_lib
+    assert "cloudbench_git_insteadof_github_token" in env_lib
+    assert "cloudbench_export_controller_github_token" in env_lib
+    assert "cloudbench_export_controller_github_token" in cloud
+    assert "warm_source_fetch_ref" in refresh
+    assert "warm_source_fetch_ref" in refresh_wmh
+    assert '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' not in refresh
+    assert '[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=' not in refresh_wmh
+    preflight = _extract_fleet_function(fleet, "warm_deps_preflight() {")
+    assert "controller_github_token_b64" in preflight
+    assert 'export CLOUDBENCH_GITHUB_TOKEN_B64=' in preflight
+    assert "cloudbench_controller_github_token" in fleet
+
+
+def test_warm_source_park_retries_fly_machine_lease() -> None:
+    """RCA (2026-08-20): fleet aborted at park with Fly 'lease currently held'
+    after a failed --refresh-deps left the warm donor oversized. Park/resize
+    must retry lease conflicts instead of a single fail-closed abort.
+    """
+    cloud = CLOUD_SCRIPT.read_text()
+    fleet = FLEET_SCRIPT.read_text()
+    resize = _extract_fleet_function(cloud, "resize_stopped_warm_source() {")
+    assert "lease currently held" in resize
+    assert "CLOUDBENCH_WARM_RESIZE_LEASE_ATTEMPTS" in resize
+    assert "warm resize lease held — retry" in resize
+    assert "parking warm source at" in fleet
+    assert "CLOUDBENCH_WARM_PARK_LEASE_ATTEMPTS" in fleet
+    assert "park lease held — retry" in fleet
+    assert "could not park warm source for fleet capacity headroom (lease held)" in fleet
+
+
+def test_controller_github_token_prefers_git_insteadof_over_stale_env(
+    tmp_path: Path,
+) -> None:
+    """Invalid injected GITHUB_TOKEN must not beat a live git insteadOf credential."""
+    script = f"""
+set -euo pipefail
+source {shlex.quote(str(ROOT / "scripts/lib/cloudbench-env.sh"))}
+export GITHUB_TOKEN=github_pat_INVALID_MUST_NOT_WIN
+export GH_TOKEN=
+unset CLOUDBENCH_GITHUB_TOKEN_B64
+# Simulate Cursor Cloud: working cred lives only in url.insteadOf.
+git config --global --unset-all url.https://x-access-token:good-token@github.com/.insteadof 2>/dev/null || true
+git config --global url.https://x-access-token:good-token@github.com/.insteadOf https://github.com/
+tok="$(cloudbench_controller_github_token)"
+printf '%s' "$tok"
+"""
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+    }
+    (tmp_path / "gitconfig").write_text("")
+    result = subprocess.run(
+        ["bash", "-c", script],
+        text=True,
+        capture_output=True,
+        check=False,
+        env=env,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "good-token", result.stdout + result.stderr
+
+
+def test_refresh_deps_controller_auth_header_fetches_private_repo() -> None:
+    """Owning-boundary repro: empty AUTH_HDR fails private fetch; controller
+    header succeeds. Mirrors the warm-box failure mode without Fly."""
+    cfg = subprocess.check_output(
+        ["git", "config", "--get-regexp", r"url\..*\.insteadof"],
+        text=True,
+    )
+    match = re.search(r"https://x-access-token:([^@]+)@github\.com/", cfg)
+    assert match, "controller workspace must expose a git insteadOf GitHub token"
+    token = match.group(1)
+    auth = "Authorization: Basic " + base64.b64encode(
+        f"x-access-token:{token}".encode()
+    ).decode()
+    url = "https://github.com/rose-ai-labs/rose.git"
+    env = {
+        **os.environ,
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "HOME": "/tmp/cloudbench-refresh-deps-auth-repro",
+    }
+    Path(env["HOME"]).mkdir(parents=True, exist_ok=True)
+    base = ["git", "-c", "credential.helper="]
+    bug = subprocess.run(
+        base + ["-c", "http.extraheader=", "ls-remote", url, "HEAD"],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert bug.returncode != 0
+    assert "could not read Username" in (bug.stderr or "")
+    fixed = subprocess.run(
+        base + ["-c", f"http.extraheader={auth}", "ls-remote", url, "HEAD"],
+        text=True,
+        capture_output=True,
+        env=env,
+        timeout=30,
+        check=False,
+    )
+    assert fixed.returncode == 0, fixed.stderr
+    assert re.match(r"^[0-9a-f]{40}\s+HEAD$", fixed.stdout.strip().splitlines()[0])
+
+
+
 def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     """bash reads scripts lazily from disk: editing run-bench-fleet or
     run-bench-cloud while a controller is mid-run shifts bytes under the
@@ -6971,12 +7190,13 @@ def test_controller_execs_from_a_script_snapshot(tmp_path: Path) -> None:
     snap_at = fleet.index('exec bash "$CLOUDBENCH_SCRIPT_SNAPSHOT/run-bench-fleet"')
     assert snap_at < fleet.index("while [ $# -gt 0 ]; do")
     assert snap_at < fleet.index("cloudbench_controller_lock_acquire")
-    # the snapshot carries all three co-versioned interpreter files
+    # the snapshot carries all co-versioned interpreter + lib files
     for f in (
         "run-bench-fleet",
         "run-bench-cloud",
         "cloudbench-port-lease.py",
         "cloudbench-env.sh",
+        "cloudbench-github-token.sh",
     ):
         assert f in fleet[fleet.index("cloudbench-scripts.XXXXXX") : snap_at], f"{f} missing from snapshot copy set"
     # every child/preflight/verify call goes through the snapshot binary —
@@ -7555,6 +7775,36 @@ def test_warm_source_parks_between_maintenance_and_fleet_runs() -> None:
     assert 'prepare_warm_source "$mid" || exit 1' in cloud
     assert 'park_warm_source "${mid:-${maintenance_mid:-}}" || true' in cloud
     assert cloud.count('park_warm_source "${mid:-${maintenance_mid:-}}" || true') == 2
+
+
+def test_fleet_waits_for_warm_source_stopped_before_provisioning() -> None:
+    """Parallel fleet launches must wait out concurrent warm maintenance instead
+    of hard-failing the first non-stopped sample into INFRA."""
+    fleet = FLEET_SCRIPT.read_text()
+    wait_log = fleet.index(
+        "warm source is $warm_state; waiting until stopped before fleet provisioning"
+    )
+    wait_helper = fleet.index(
+        'cloudbench_wait_machine_stopped pool_machine_state "$WARM_ID"',
+        wait_log,
+    )
+    gate = fleet.index("warm source must be stopped before fleet provisioning")
+    park_at = fleet.index("parking warm source at $WARM_PARKED_VM_SIZE")
+    fanout_at = fleet.index("# ── Phase 1:")
+    # Wait log → shared helper → timeout gate → parking → Phase-1 fanout.
+    assert wait_log < wait_helper < gate < park_at < fanout_at
+    assert 'warm_stop_attempts="${CLOUDBENCH_WARM_STOP_ATTEMPTS:-60}"' in fleet
+    assert 'warm_stop_sleep="${CLOUDBENCH_WARM_STOP_SLEEP_SECONDS:-5}"' in fleet
+    # Must re-list machines after the wait settles (not cache the first sample).
+    relist_at = fleet.index(
+        'warm_json="$(FLY machines list -a "$APP" --json 2>/dev/null || echo \'[]\')"',
+        wait_helper,
+    )
+    assert wait_helper < relist_at < park_at
+    # Never stop/destroy the shared warm donor from the fleet wait path.
+    wait_block = fleet[wait_log:park_at]
+    assert "machine stop" not in wait_block
+    assert "machines destroy" not in wait_block
 
 
 def test_controller_names_the_signal_that_killed_it() -> None:
@@ -9173,6 +9423,81 @@ exit 0
     assert "rc=7" in result.stdout
 
 
+
+def test_run_bench_routes_production_only_batches_off_fly_fleet() -> None:
+    """RCA (2026-08-20): production-only descend tasks never need a Fly guest.
+
+    Under multi-workspace warm-box contention, fleet provisioning fails closed
+    before any trustworthy --prod verdict. scripts/run-bench must detect an
+    all-production_only batch and invoke run_benchmark.py --prod on the
+    controller (same path as /deploy Step 13c).
+    """
+    run_bench = (ROOT / "scripts" / "run-bench").read_text()
+    helper = (ROOT / "scripts" / "cloudbench-production-only-tasks.py").read_text()
+    assert "cloudbench-production-only-tasks.py" in run_bench
+    assert "production-only batch — controller-local --prod" in run_bench
+    assert "run_benchmark.py --task" in run_bench
+    assert "--prod" in run_bench
+    assert "skipping Fly fleet" in run_bench
+    assert run_bench.index("cloudbench-production-only-tasks.py") < run_bench.index(
+        'exec bash "$ROOT_DIR/scripts/run-bench-fleet"'
+    )
+    # RCA (2026-08-21): --single-box must reject before the production-only
+    # classifier. Sandbox multi-workstream has no tasks.json; classifier exit-2
+    # otherwise masks the parallel-safe message (scenario 14).
+    assert run_bench.index('if [[ "${1:-}" == "--single-box" ]]') < run_bench.index(
+        "cloudbench-production-only-tasks.py"
+    )
+    assert "not parallel-safe" in run_bench
+    assert "production_only" in helper
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "cloudbench-production-only-tasks.py"),
+            "agent-payment-production-abandonment",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "agent-payment-production-abandonment"
+
+    mixed = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "cloudbench-production-only-tasks.py"),
+            "agent-payment-production-abandonment",
+            "single-creator-arm",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert mixed.returncode == 1
+
+    unsafe_name = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts" / "cloudbench-production-only-tasks.py"),
+            "name with space",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert unsafe_name.returncode == 2, unsafe_name.stderr
+
+    assert "return 2" in helper
+    assert "JSONDecodeError" in helper
+    assert "PROD_ONLY_STATUS" in run_bench
+    assert "while IFS= read -r task" in run_bench
+    assert 'done <<< "$PROD_ONLY_TASKS"' in run_bench
+    assert "set -- $PROD_ONLY_TASKS" not in run_bench
+    assert 'exit 2' in run_bench
+
+
 def test_isolated_backend_production_only_cloud_route_targets_production() -> None:
     """A canonical production-only task must never be sent to the local box.
 
@@ -9291,6 +9616,11 @@ def test_cloud_agentcard_payment_tasks_provide_onboarding_callback_env() -> None
     assert "AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL=" in driver
     assert 'STACK_ENV+=("AGENTCARD_ONBOARDING_RETURN_URL=$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL")' in driver
     assert "export AGENTCARD_ONBOARDING_RETURN_URL='$AGENTCARD_BENCHMARK_ONBOARDING_RETURN_URL'" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=0" in driver
+    assert "BENCH_NEEDS_PAYMENT_FIXTURE=1" in driver
+    assert "BENCHMARK_FORCE_CUSTOMER_PURCHASE_PATH=1" in driver
+    assert "BENCHMARK_AGENT_PAYMENT_USER_ID=1f85ff25-6e29-4c1b-8739-f917bd101a30" in driver
+    assert "scripts/setup-benchmark-payment.ts --user-id" in driver
 
 
 def test_cloud_stack_failure_surfaces_frontend_build_log() -> None:
