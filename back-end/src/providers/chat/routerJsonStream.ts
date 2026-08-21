@@ -53,6 +53,79 @@ export function extractCompleteStringField(json: string, fieldName: string): str
   return extractStringField(json, fieldName, true);
 }
 
+interface ScannedJsonString {
+  value: string;
+  nextIndex: number;
+}
+
+function scanCompleteJsonString(json: string, startIndex: number): ScannedJsonString | null {
+  if (json[startIndex] !== '"') return null;
+  let escaped = false;
+  for (let index = startIndex + 1; index < json.length; index++) {
+    const char = json[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (char !== '"') continue;
+    try {
+      return {
+        value: JSON.parse(json.slice(startIndex, index + 1)) as string,
+        nextIndex: index + 1,
+      };
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read only complete top-level string fields from an in-progress JSON object.
+ * Values embedded inside another string can never masquerade as route fields.
+ */
+export function extractCompleteTopLevelStringFields(json: string): Record<string, string> | null {
+  const fields: Record<string, string> = {};
+  let index = 0;
+  const skipWhitespace = (): void => {
+    while (/\s/.test(json[index] ?? '')) index++;
+  };
+
+  skipWhitespace();
+  if (json[index] !== '{') return null;
+  index++;
+
+  while (index < json.length) {
+    skipWhitespace();
+    if (json[index] === '}') return fields;
+    if (json[index] === ',') {
+      index++;
+      skipWhitespace();
+    }
+
+    const key = scanCompleteJsonString(json, index);
+    if (!key) return fields;
+    index = key.nextIndex;
+    skipWhitespace();
+    if (json[index] !== ':') return null;
+    index++;
+    skipWhitespace();
+
+    const value = scanCompleteJsonString(json, index);
+    if (!value) return fields;
+    fields[key.value] = value.value;
+    index = value.nextIndex;
+    skipWhitespace();
+    if (index < json.length && json[index] !== ',' && json[index] !== '}') return null;
+  }
+
+  return fields;
+}
+
 export function detectActionFromPartialJson(json: string): string | null {
   const match = json.match(/"action"\s*:\s*"([^"]+)"/);
   return match ? match[1] : null;
