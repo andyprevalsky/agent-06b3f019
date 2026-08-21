@@ -26,8 +26,8 @@ sources:
   - agent 19a568fb-406c-45ff-bf22-fb0346a00b4b
   - agent b393b72c-e7d2-4055-b1d5-2ec245945596
   - fleet run 713f68b9-7af0-402d-b930-1c969c47bf02
-repro: agents/tests/blackbox/benchmark.blackbox.py — test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors (proposed)
-status: open
+repro: agents/tests/blackbox/benchmark.blackbox.py — test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors
+status: fixed
 ---
 
 ## Problem
@@ -77,16 +77,20 @@ recovery path). Novel: evaluate hard-recovery ERROR not in intermediate filter.
 
 ## Solution
 
-Proposed (not landed — awaiting approval): extend
-`_is_intermediate_browser_retry_failure` to ignore browser ERROR rows whose
-failure text includes hard renderer recovery /
-`renderer_main_thread_blocked` / evaluate action timeout after recovery, matching
-the Eventim pattern. Cement with
-`test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors`.
-Outcome proof: re-run exact alchemy bench; agents that hit recovery then payment
-must not fail runtime-contract on that ERROR alone.
+Landed: `_is_intermediate_evaluate_hard_recovery_failure` ignores browser ERROR
+rows whose failure text includes hard renderer recovery +
+`renderer_main_thread_blocked` (and the `action_timeout_evaluate` + hard recovery
+pair). Wired into `_is_intermediate_browser_retry_failure`. Cemented by
+`test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors`
+(archived `message` + live `text` shapes; unrelated evaluate ERROR still fails).
 
-Do not relax selection/terminal judges or bump timeouts.
+Offline replay of k=5 agents `1336b4b4` / `19a568fb`: `_tool_runtime_failures`
+returns `[]` after the fix (was non-empty before).
+
+Outcome proof: re-run exact `scripts/run-bench --local browser-alchemy-springs-sauna`.
+
+Do not relax selection/terminal judges or bump timeouts. Cohort B
+(auth_assistance before selection) remains a separate open thread.
 
 ## Human feedback
 

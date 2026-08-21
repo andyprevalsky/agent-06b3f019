@@ -3119,6 +3119,108 @@ def test_no_tool_failures_ignores_intermediate_challenge_recovery_errors():
     assert _run_declared_static_check(evaluator, data) == (True, "All declared static checks passed")
 
 
+def test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors():
+    """Evaluate hard-recovery ERRORs may precede payment; do not fail closed.
+
+    Local repro: browser-alchemy-springs-sauna agents
+    1336b4b4-22e2-4212-923e-8cdfa002742b and 19a568fb-406c-45ff-bf22-fb0346a00b4b
+    reached grounded $50.65 payment_approval after
+    `evaluate timed out … hard renderer recovery … renderer_main_thread_blocked`,
+    then failed only on alchemy-sauna-runtime-contract / no_tool_failures.
+
+    Archived transcripts use `message`; live agent GET uses `text` — both shapes
+    must classify.
+    """
+    from benchmarks.run_benchmark import _run_declared_static_check, _tool_runtime_failures
+
+    evaluator = {"checks": [{"type": "no_tool_failures"}]}
+    error_body = (
+        "Browser action 'evaluate' timed out after 330s; hard renderer recovery ran "
+        "after CDP classified renderer_main_thread_blocked."
+    )
+    data_archived = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": error_body,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_mn7KK2m41QCa5JgmTeu3uupx",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "message": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_after_recover",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    data_live = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "text": error_body,
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_ulc7Bp59ZxD3eLDm7m4wFQjf",
+                    "title": "evaluate",
+                },
+            },
+            {
+                "role": "TOOL",
+                "text": "",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "FINISHED",
+                    "action_type": "request_payment_card",
+                    "toolCallId": "call_payment_after_recover_live",
+                    "title": "Payment card requested ($50.65)",
+                },
+            },
+        ]
+    }
+    assert _tool_runtime_failures(data_archived) == []
+    assert _run_declared_static_check(evaluator, data_archived) == (
+        True,
+        "All declared static checks passed",
+    )
+    assert _tool_runtime_failures(data_live) == []
+    assert _run_declared_static_check(evaluator, data_live) == (
+        True,
+        "All declared static checks passed",
+    )
+    # Unrelated evaluate ERROR must still fail closed.
+    data_real_fail = {
+        "messages": [
+            {
+                "role": "TOOL",
+                "message": "Browser action 'evaluate' failed with TypeError: boom",
+                "metadata": {
+                    "toolName": "spawn_browser_agent",
+                    "toolStatus": "ERROR",
+                    "action_type": "error",
+                    "toolCallId": "call_real_evaluate_fail",
+                    "title": "evaluate",
+                },
+            }
+        ]
+    }
+    assert _tool_runtime_failures(data_real_fail) == [
+        "spawn_browser_agent call_real_evaluate_fail status=ERROR"
+    ]
+
+
 def test_no_tool_failures_ignores_intermediate_stale_dom_node_errors():
     """Stale selector-map / invalid backendNodeId humanize ERRORs are retry noise.
 
@@ -14335,6 +14437,10 @@ async def run_all_tests():
     r.record(
         "declared_static_no_tool_failures_ignores_challenge_recovery",
         test_no_tool_failures_ignores_intermediate_challenge_recovery_errors,
+    )
+    r.record(
+        "no_tool_failures_ignores_evaluate_hard_recovery",
+        test_no_tool_failures_ignores_intermediate_evaluate_hard_recovery_errors,
     )
     r.record(
         "declared_static_no_tool_failures_ignores_stale_dom_node",
