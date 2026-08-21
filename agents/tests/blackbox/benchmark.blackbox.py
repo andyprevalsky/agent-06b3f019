@@ -6795,16 +6795,23 @@ async def test_claude_code_preflight_uses_runtime_credential_route():
 
 
 async def test_claude_code_preflight_rejects_generic_claude_compute_token():
-    """A generic Claude compute token cannot prove Claude Code session credentials exist."""
+    """A generic Claude compute token cannot prove Claude Code session credentials exist.
+
+    After the OAuth credential route 404s, preflight still probes the funded
+    Anthropic/OpenRouter fallback via anthropic-key/cooldown — rejection requires
+    that probe to report neither a clear shared key nor OpenRouter.
+    """
     import benchmarks.run_benchmark as bench
 
     calls = []
 
     class FakeResponse:
-        status_code = 404
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
 
         def json(self):
-            return {"error": "Claude Code credentials not found"}
+            return self._body
 
     class FakeClient:
         async def __aenter__(self):
@@ -6815,7 +6822,14 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
 
         async def get(self, url, *, headers, timeout):
             calls.append((url, headers, timeout))
-            return FakeResponse()
+            if url.endswith("/api/integrations/claude-code/credentials/token"):
+                return FakeResponse(404, {"error": "Claude Code credentials not found"})
+            if url.endswith("/api/integrations/compute-code/anthropic-key/cooldown"):
+                return FakeResponse(
+                    200,
+                    {"configured": False, "onCooldown": False, "openrouterConfigured": False},
+                )
+            raise AssertionError(f"unexpected URL {url}")
 
     original_headers = bench._api_headers
     original_client = bench.httpx.AsyncClient
@@ -6837,7 +6851,12 @@ async def test_claude_code_preflight_rejects_generic_claude_compute_token():
             "http://localhost:55120/api/integrations/claude-code/credentials/token",
             {"X-API-Key": "test-key"},
             10.0,
-        )
+        ),
+        (
+            "http://localhost:55120/api/integrations/compute-code/anthropic-key/cooldown",
+            {"X-API-Key": "test-key"},
+            10.0,
+        ),
     ]
 
 
