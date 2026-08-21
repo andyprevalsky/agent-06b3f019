@@ -213,6 +213,12 @@ PURCHASE_BUTTON_PHRASES = [
     "proceed to pay",
     "checkout now",
     "complete checkout",
+]
+
+# Return/refund confirmation phrases are a separate irreversible gate from purchase.
+# Bundling them under purchase forced purchase-shaped notification metadata that
+# return pages cannot satisfy (no PDP rating / product_url).
+RETURN_BUTTON_PHRASES = [
     "confirm your return",
     "confirm return",
     "complete return",
@@ -428,6 +434,22 @@ def is_purchase_button(element_text: str) -> bool:
     return False
 
 
+def is_return_button(element_text: str) -> bool:
+    """Check if element text indicates a return/refund confirmation control."""
+    if not element_text:
+        return False
+
+    for signal in element_text.split("\n"):
+        text_lower = normalize_write_lock_text(signal)
+        if not text_lower:
+            continue
+        for phrase in RETURN_BUTTON_PHRASES:
+            if normalize_write_lock_text(phrase) in text_lower:
+                logger.debug(f"Element text '{signal[:80]}' matched return pattern: {phrase}")
+                return True
+    return False
+
+
 async def is_payment_field(
     session: Any,
     element: Any,
@@ -548,7 +570,7 @@ def get_write_lock_approval_question(
     """Generate an approval question for a write lock violation.
 
     Args:
-        action_type: "payment", "purchase", "social_post", or "email_send"
+        action_type: "payment", "purchase", "return", "social_post", or "email_send"
         url: Current page URL
         element_text: Text of the element being interacted with
         field_description: Description of the field (for payment)
@@ -570,6 +592,14 @@ def get_write_lock_approval_question(
             f"**Purchase Detected**\n\n"
             f"{system_name} wants to place an order on **{domain}**.\n\n"
             f"**Button:** {element_text or 'Place order'}\n"
+            f"**Page:** {url}"
+        )
+    elif action_type == "return":
+        domain = urlparse(url).netloc if url else "unknown"
+        return (
+            f"**Return Detected**\n\n"
+            f"{system_name} wants to confirm a return on **{domain}**.\n\n"
+            f"**Button:** {element_text or 'Confirm return'}\n"
             f"**Page:** {url}"
         )
     elif action_type == "social_post":

@@ -2385,6 +2385,7 @@ async def _click_write_lock_result(
         get_write_lock_approval_question,
         is_email_send_button,
         is_purchase_button,
+        is_return_button,
         is_social_domain,
         is_submit_button,
     )
@@ -2424,6 +2425,7 @@ async def _click_write_lock_result(
     checks = (
         ("social_post", is_social_domain(current_url) and is_submit_button(element_text), "social posting"),
         ("email_send", is_email_send_button(element_text), "email send"),
+        ("return", is_return_button(element_text), "return confirmation"),
         ("purchase", is_purchase_button(element_text), "purchase button"),
     )
     suffix = " (coordinate click)" if coordinate_click else ""

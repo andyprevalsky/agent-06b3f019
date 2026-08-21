@@ -2433,28 +2433,9 @@ async def _run_browser_supervisor_recovery(
     return recovery
 
 
-# Return/refund confirmation phrases share the purchase write-lock gate (irreversible
-# post-purchase state change) but must NOT use trigger_type=purchase for notification
-# metadata: purchase items require product-detail rating/review_count/product_url that
-# return pages and return-only trajectories do not expose (browser-amazon-return
-# 28e6e1a6 / write_lock_notification_fork_14).
-_RETURN_WRITE_LOCK_PHRASES = (
-    "confirm your return",
-    "confirm return",
-    "complete return",
-    "submit return",
-)
-
-
-def _is_return_like_write_lock(*, current_url: str, write_lock_result: Dict[str, Any]) -> bool:
-    """True when the gated control is a return/refund confirmation, not a buy."""
-    from browser_tools.write_lock import normalize_write_lock_text
-
-    element_text = normalize_write_lock_text(str(write_lock_result.get("element_text") or ""))
-    if any(normalize_write_lock_text(phrase) in element_text for phrase in _RETURN_WRITE_LOCK_PHRASES):
-        return True
-    url = (current_url or "").lower()
-    return "/returns/" in url or "/spr/returns" in url or "/return/" in url
+# Max fork attempts including the first call. Every gate retries with the
+# validation/tool error in context before falling back to the deterministic question.
+_WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS = 3
 
 
 def _write_lock_notification_prompt(
@@ -2475,36 +2456,103 @@ def _write_lock_notification_prompt(
     if media_candidates:
         evidence["media_candidates"] = media_candidates[:12]
 
-    if _is_return_like_write_lock(current_url=current_url, write_lock_result=write_lock_result):
-        guidance = (
-            "Describe the real-world action the user is approving, not the clicked button or DOM "
-            "mechanic. This write lock gates a RETURN or REFUND confirmation (purchase-like "
-            "irreversible gate). Use trigger_type=generic_write — NOT purchase. Purchase requires "
-            "numeric rating, review count, and a canonical product-detail URL that return pages and "
-            "return-only trajectories do not expose; do not invent those fields. Populate "
-            "generic_write.label (for example 'Confirm Amazon return'), generic_write.target with "
-            "the visible item title being returned, and generic_write.payload_summary with the "
-            "visible refund amount, original payment method, selected drop-off or shipping method, "
-            "and return-by date when shown. Set media to exactly one returned-item image when "
-            "media_candidates includes one. For payment fields, never include secrets such as card "
-            "numbers, CVV, passwords, tokens, or one-time codes."
-        )
-    else:
-        guidance = (
-            "Describe the real-world action the user is approving, not the clicked button or DOM "
-            "mechanic. For purchases, include every visible item being bought and set media to exactly one "
-            "image when any product, checkout, or page image is visible; for multiple items, use one "
-            "rendered_summary image if available. For each "
-            "purchase item, use the item key title, not name. You MUST include its real numeric rating and "
-            "review count plus its canonical product-detail URL; never substitute the current cart, checkout, "
-            "payment, or order URL. Those required fields must already exist in the browser trajectory; do not "
-            "invent them or perform a browser action in this fork. Also include "
-            "visible price, quantity, description under 80 characters, seller, delivery details, product image URL, order totals, "
-            "delivery address, and payment method when visible. If Runtime evidence includes media_candidates, use only those "
-            "URLs for media and item image_url, preferring the candidate whose alt or nearby_text best "
-            "matches the purchased item. For payment, never include secrets such as card numbers, CVV, "
-            "passwords, tokens, or one-time codes."
-        )
+    # Example-driven: the model picks trigger_type from the real-world action.
+    # Do not hardcode gate→trigger mapping here; approval_type is only a hint.
+    examples = """
+Pick the trigger_type whose example best matches the real-world irreversible action.
+Use only fields already visible in the browser trajectory — never invent ratings,
+review counts, product URLs, recipients, or secrets. If Runtime evidence includes
+media_candidates, use only those URLs for media and item image_url.
+
+### Purchases (buying / placing an order) → trigger_type=purchase
+{
+  "trigger_type": "purchase",
+  "action": "buy items",
+  "service": {"name": "Amazon", "domain": "amazon.com", "url": "<current page url>"},
+  "media": [{"url": "<one product or rendered_summary image>", "alt": "<item title>", "kind": "product"}],
+  "purchase": {
+    "items": [{
+      "title": "<visible item title>",
+      "price": "<visible price>",
+      "quantity": "<visible qty>",
+      "description": "<variant details, under 80 chars>",
+      "rating": "<numeric rating already in trajectory, e.g. 4.6 stars>",
+      "review_count": "<numeric count already in trajectory, e.g. 312 reviews>",
+      "image_url": "<product image from media_candidates when available>",
+      "product_url": "<canonical product-detail URL already visited — never cart/checkout/order/return URL>",
+      "seller": "<visible seller>",
+      "shipping": "<visible delivery details>"
+    }],
+    "totals": {"subtotal": "...", "shipping": "...", "tax": "...", "total": "..."},
+    "payment_method": "<visible redacted payment method>",
+    "delivery_address": "<visible address>"
+  }
+}
+Include every visible item being bought. Set media to exactly one image when any
+product/checkout/page image is visible; for multiple items prefer one
+rendered_summary. Required per item: title, real numeric rating, review count,
+and canonical product-detail URL that already exist in the trajectory.
+
+### Emails / outbound messages → trigger_type=message
+{
+  "trigger_type": "message",
+  "action": "send email",
+  "service": {"name": "Gmail", "domain": "mail.google.com", "url": "<current page url>"},
+  "media": [],
+  "message": {
+    "to": ["<visible recipient>"],
+    "cc": [],
+    "bcc": [],
+    "subject": "<visible subject>",
+    "body": "<visible body>",
+    "attachments": [{"name": "<filename>", "url": "<preview url when visible>"}]
+  }
+}
+
+### Social posts → trigger_type=social_post
+{
+  "trigger_type": "social_post",
+  "action": "post publicly",
+  "service": {"name": "X", "domain": "x.com", "url": "<current page url>"},
+  "media": [],
+  "social_post": {
+    "destination": "<profile, subreddit, or channel>",
+    "audience": "<Public / followers / etc.>",
+    "body": "<visible post body>",
+    "attachments": [{"url": "<preview url when visible>", "description": "<alt>"}]
+  }
+}
+
+### Returns / refund confirmations → trigger_type=generic_write
+{
+  "trigger_type": "generic_write",
+  "action": "confirm return",
+  "service": {"name": "Amazon", "domain": "amazon.com", "url": "<current page url>"},
+  "media": [{"url": "<returned item image>", "alt": "<item title>", "kind": "product"}],
+  "generic_write": {
+    "label": "Confirm return",
+    "target": "<visible item title being returned>",
+    "payload_summary": "<refund amount>, <original payment method>, <drop-off or shipping method>, <return-by date when shown>"
+  }
+}
+Do not use trigger_type=purchase for returns — purchase requires PDP rating /
+review_count / product_url that return-only pages usually lack.
+
+### Payment field entry → trigger_type=payment
+{
+  "trigger_type": "payment",
+  "action": "enter payment details",
+  "service": {"name": "<merchant>", "domain": "<domain>", "url": "<current page url>"},
+  "media": [{"url": "<page preview when available>", "alt": "Checkout page preview", "kind": "page_preview"}],
+  "payment": {
+    "merchant": "<visible merchant>",
+    "amount": "<visible amount>",
+    "purpose": "<visible purpose>",
+    "fields": ["card number", "expiration date", "CVV"]
+  }
+}
+Never include card numbers, CVV, passwords, tokens, or one-time codes.
+""".strip()
 
     return (
         "WRITE_LOCK_NOTIFICATION_FORK_REQUEST\n\n"
@@ -2512,7 +2560,10 @@ def _write_lock_notification_prompt(
         "current conversation, browser trajectory, latest page context, and pending action.\n\n"
         "Do not perform any browser action. Do not continue the task. Do not ask the user for "
         "approval. Generate structured approval metadata only.\n\n"
-        f"{guidance}\n\n"
+        "Describe the real-world action the user is approving, not the clicked button or DOM "
+        "mechanic. Match one of the examples below; approval_type in Runtime evidence is only a "
+        "hint from the deterministic gate.\n\n"
+        f"{examples}\n\n"
         f"Runtime evidence:\n{json_dumps_compact(evidence)}"
     )
 
@@ -2522,16 +2573,34 @@ class PurchaseApprovalContextError(RuntimeError):
 
 
 class PurchaseApprovalNotificationRetryableError(RuntimeError):
-    """Raised when transient notification generation should preserve checkout state for retry."""
+    """Raised when transient notification generation should preserve checkout state for retry.
+
+    Kept for backwards-compatible imports/tests. Write-lock notification forks now
+    retry with the error in context for every gate and fall back to the deterministic
+    question instead of aborting the browser session.
+    """
 
 
 def _enforce_write_lock_notification_failure_policy(approval_type: str, error: Exception) -> None:
-    if approval_type == "purchase":
-        if isinstance(error, PurchaseApprovalContextError):
-            raise error
-        raise PurchaseApprovalNotificationRetryableError(
-            "Purchase approval notification generation failed transiently; retry with the checkout session paused"
-        ) from error
+    """All gates fall through to the deterministic fallback question after fork retries."""
+    logger.info(
+        "Write-lock notification fork exhausted; using fallback question",
+        approval_type=approval_type,
+        error_type=type(error).__name__,
+        error=str(error)[:300],
+    )
+
+
+def _write_lock_notification_retry_feedback(error: Exception) -> str:
+    detail = getattr(error, "detail", None) or str(error)
+    return (
+        "Your previous generate_write_lock_notification call failed:\n"
+        f"{detail}\n"
+        "Call generate_write_lock_notification exactly once again. Choose the trigger_type "
+        "whose example matches the real-world action and satisfy that example's required "
+        "fields using only evidence already in the browser trajectory. Do not invent "
+        "unavailable fields."
+    )
 
 
 def _format_write_lock_value(label: str, value: Any) -> Optional[str]:
@@ -2896,11 +2965,10 @@ async def _generate_write_lock_notification(
     )
     extra_user_messages: List[Dict[str, Any]] = [{"role": "user", "content": prompt}]
     fork_result: Dict[str, Any] = {}
-    action: Dict[str, Any] = {}
-    # One schema-feedback retry: the main browser loop feeds BrowserToolArgsValidationError
-    # back to the model, but this fork previously aborted the whole session on the first
-    # invalid generate_write_lock_notification payload (Amazon return 28e6e1a6).
-    for attempt in range(2):
+    validated_notification: Any = None
+    # Same policy for every gate: retry with the error in context, then let the
+    # caller fall back to the deterministic question.
+    for attempt in range(_WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS):
         try:
             fork_result = await _call_browser_use_with_rotation(
                 rose_client=rose_client,
@@ -2931,49 +2999,34 @@ async def _generate_write_lock_notification(
                     "fork_attempt": attempt,
                 },
             )
-        except BrowserToolArgsValidationError as validation_error:
+            action = fork_result.get("action") or {}
+            if action.get("action") != "generate_write_lock_notification":
+                raise ValueError(
+                    "write-lock notification fork did not call generate_write_lock_notification; "
+                    f"got {action.get('action')!r}"
+                )
+            try:
+                validated_notification = GenerateWriteLockNotificationTool.model_validate(
+                    {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
+                    context={"trusted_page_urls": [*trusted_page_urls, current_url]},
+                )
+            except ValueError as error:
+                raise PurchaseApprovalContextError(str(error)) from error
+            break
+        except (BrowserToolArgsValidationError, PurchaseApprovalContextError, ValueError) as fork_error:
             logger.info(
-                "Write-lock notification fork tool args rejected; retrying once with validation feedback",
+                "Write-lock notification fork failed; retrying with error in context",
                 attempt=attempt,
-                tool_name=validation_error.tool_name,
-                detail=validation_error.detail,
-                tool_arg_keys=sorted(validation_error.tool_args.keys()),
+                approval_type=approval_type,
+                error_type=type(fork_error).__name__,
+                detail=str(getattr(fork_error, "detail", fork_error))[:400],
             )
-            if attempt >= 1:
+            if attempt >= _WRITE_LOCK_NOTIFICATION_FORK_ATTEMPTS - 1:
                 raise
             extra_user_messages = [
                 {"role": "user", "content": prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        "Your previous generate_write_lock_notification call failed validation:\n"
-                        f"{validation_error.detail}\n"
-                        "Call generate_write_lock_notification exactly once again with corrected "
-                        "arguments. For return/refund confirmations use trigger_type=generic_write "
-                        "with label/target/payload_summary covering the item, refund amount, original "
-                        "payment method, and drop-off — do not use trigger_type=purchase unless every "
-                        "required purchase item field already exists in the browser trajectory."
-                    ),
-                },
+                {"role": "user", "content": _write_lock_notification_retry_feedback(fork_error)},
             ]
-            continue
-
-        action = fork_result.get("action") or {}
-        if action.get("action") != "generate_write_lock_notification":
-            raise ValueError(
-                "write-lock notification fork did not call generate_write_lock_notification; "
-                f"got {action.get('action')!r}"
-            )
-        try:
-            validated_notification = GenerateWriteLockNotificationTool.model_validate(
-                {"tool": "generate_write_lock_notification", **dict(action.get("params") or {})},
-                context={"trusted_page_urls": [*trusted_page_urls, current_url]},
-            )
-        except ValueError as error:
-            raise PurchaseApprovalContextError(
-                "Purchase approval blocked because reviews and a canonical product link could not be verified"
-            ) from error
-        break
     else:
         raise RuntimeError("write-lock notification fork exhausted without a validated notification")
 

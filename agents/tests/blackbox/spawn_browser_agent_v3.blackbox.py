@@ -10501,7 +10501,7 @@ async def test_execute_click_write_lock_return_confirmation_triggers_approval():
     )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -10548,7 +10548,7 @@ async def test_execute_click_write_lock_uses_nearest_ancestor_text_for_shadow_in
         )
 
     assert out["status"] == "needs_write_approval"
-    assert out["approval_type"] == "purchase"
+    assert out["approval_type"] == "return"
     assert "Confirm your return" in out["element_text"]
     ah.record_action.assert_not_awaited()
 
@@ -10580,16 +10580,20 @@ def test_element_write_lock_signal_stops_after_nearest_bounded_ancestor_text():
 
 def test_write_lock_purchase_button_detects_order_controls():
     """Final transaction buttons are gated; cart, checkout, and return navigation are not."""
-    from browser_tools.write_lock import is_purchase_button
+    from browser_tools.write_lock import is_purchase_button, is_return_button
 
     assert is_purchase_button("Buy Now")
     assert is_purchase_button("Place your order")
-    assert is_purchase_button("Confirm your return")
-    assert is_purchase_button("Submit return request")
+    assert not is_purchase_button("Confirm your return")
+    assert not is_purchase_button("Submit return")
+    assert is_return_button("Confirm your return")
+    assert is_return_button("Submit return")
+    assert not is_return_button("Buy Now")
     assert not is_purchase_button("Add to Cart")
     assert not is_purchase_button("Go to Cart")
     assert not is_purchase_button("Proceed to checkout")
     assert not is_purchase_button("Return to your orders")
+    assert not is_return_button("Return to your orders")
 
 
 def test_write_lock_purchase_button_excludes_terms_consent_prose():
@@ -13327,8 +13331,8 @@ async def test_generate_write_lock_notification_retries_once_on_schema_rejection
     assert fork_mock.await_args_list[1].kwargs["call_site"] == "write_lock_notification_fork_14_retry1"
     retry_messages = fork_mock.await_args_list[1].kwargs["extra_user_messages"]
     assert len(retry_messages) == 2
-    assert "failed validation" in retry_messages[1]["content"]
-    assert "generic_write" in retry_messages[1]["content"]
+    assert "failed" in retry_messages[1]["content"].lower()
+    assert "trigger_type" in retry_messages[1]["content"]
     assert result["notification"]["trigger_type"] == "generic_write"
     assert "$10.84" in result["question"]
     assert result["request_id"] == "req-return-retry"
@@ -13500,45 +13504,32 @@ def test_write_lock_notification_prompt_includes_media_candidates():
 
     assert "media_candidates" in prompt
     assert "https://m.media-amazon.com/images/I/beanie.jpg" in prompt
-    assert "use only those URLs for media and item image_url" in prompt
-    assert "description under 80 characters" in prompt
-    assert "must already exist in the browser trajectory" in prompt
+    assert "trigger_type=purchase" in prompt
+    assert "trigger_type=message" in prompt
+    assert "trigger_type=social_post" in prompt
+    assert "trigger_type=generic_write" in prompt
+    assert "trigger_type=payment" in prompt
+    assert "Returns / refund confirmations" in prompt
+    assert "never invent" in prompt.lower() or "Never invent" in prompt or "never invent" in prompt
     assert "Visit the product page" not in prompt
-    assert "trigger_type=generic_write" not in prompt
 
 
-def test_write_lock_notification_prompt_routes_return_confirmations_to_generic_write():
-    """Return confirmations share the purchase write-lock gate but must not demand
-    purchase item rating/product_url fields that return-only trajectories lack.
+def test_write_lock_notification_prompt_is_example_driven_for_all_gates():
+    """Fork prompt teaches via examples; it does not hardcode gate→trigger routing."""
+    from domains.spawn_browser_agent_v3.handler import _write_lock_notification_prompt
 
-    Repro boundary from browser-amazon-return agent 28e6e1a6: Confirm your return on
-    /spr/returns/contract with approval_type=purchase produced
-    trigger_type=purchase without purchase details → schema rejection → browser fail.
-    """
-    from domains.spawn_browser_agent_v3.handler import (
-        _is_return_like_write_lock,
-        _write_lock_notification_prompt,
-    )
-
-    write_lock_result = {
-        "status": "needs_write_approval",
-        "approval_type": "purchase",
-        "element_text": "Confirm your return",
-        "url": (
+    return_prompt = _write_lock_notification_prompt(
+        approval_type="return",
+        current_url=(
             "https://www.amazon.com/spr/returns/contract/"
             "626471e1-e0fd-48e4-9f10-5329ad7f8e65?ref_=spr_res_post"
         ),
-    }
-    assert _is_return_like_write_lock(
-        current_url=write_lock_result["url"],
-        write_lock_result=write_lock_result,
-    )
-
-    prompt = _write_lock_notification_prompt(
-        approval_type="purchase",
-        current_url=write_lock_result["url"],
         pending_action={"action": "click", "params": {"index": 58768}},
-        write_lock_result=write_lock_result,
+        write_lock_result={
+            "status": "needs_write_approval",
+            "approval_type": "return",
+            "element_text": "Confirm your return",
+        },
         media_candidates=[
             {
                 "url": "https://m.media-amazon.com/images/I/81W5UTTEaYL._AC_AA152_.jpg",
@@ -13546,12 +13537,27 @@ def test_write_lock_notification_prompt_routes_return_confirmations_to_generic_w
             }
         ],
     )
+    purchase_prompt = _write_lock_notification_prompt(
+        approval_type="purchase",
+        current_url="https://www.amazon.com/checkout/spc",
+        pending_action={"action": "click", "params": {"index": 1}},
+        write_lock_result={"status": "needs_write_approval", "approval_type": "purchase"},
+    )
 
-    assert "trigger_type=generic_write" in prompt
-    assert "NOT purchase" in prompt
-    assert "refund amount" in prompt
-    assert "drop-off" in prompt
-    assert "You MUST include its real numeric rating" not in prompt
+    # Same example catalog regardless of gate; only runtime evidence differs.
+    for needle in (
+        "### Purchases",
+        "### Emails / outbound messages",
+        "### Social posts",
+        "### Returns / refund confirmations",
+        "### Payment field entry",
+        "approval_type in Runtime evidence is only a hint",
+    ):
+        assert needle in return_prompt
+        assert needle in purchase_prompt
+    assert '"approval_type": "return"' in return_prompt or '"approval_type":"return"' in return_prompt.replace(
+        " ", ""
+    )
 
 
 def test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write():
@@ -13608,23 +13614,25 @@ def test_return_write_lock_notification_rejects_purchase_without_details_and_acc
     assert "original payment" in question
 
 
-def test_purchase_write_lock_notification_failure_blocks_approval_fallback():
+def test_purchase_write_lock_notification_failure_falls_back_for_all_gates():
     from domains.spawn_browser_agent_v3.handler import (
         PurchaseApprovalContextError,
-        PurchaseApprovalNotificationRetryableError,
         _enforce_write_lock_notification_failure_policy,
     )
 
-    with pytest.raises(PurchaseApprovalContextError):
+    # Unified policy: every gate falls through to the deterministic fallback question.
+    assert (
         _enforce_write_lock_notification_failure_policy(
             "purchase",
             PurchaseApprovalContextError("missing reviews"),
         )
-
-    with pytest.raises(PurchaseApprovalNotificationRetryableError):
-        _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout"))
-
+        is None
+    )
+    assert _enforce_write_lock_notification_failure_policy("purchase", TimeoutError("provider timeout")) is None
+    assert _enforce_write_lock_notification_failure_policy("return", ValueError("metadata unavailable")) is None
     assert _enforce_write_lock_notification_failure_policy("message", ValueError("metadata unavailable")) is None
+    assert _enforce_write_lock_notification_failure_policy("email_send", ValueError("metadata unavailable")) is None
+
 
 def test_normalize_write_lock_notification_media_uses_matching_media_candidate():
     from domains.spawn_browser_agent_v3.handler import (
@@ -17560,16 +17568,16 @@ async def run_all_tests():
         test_write_lock_notification_prompt_includes_media_candidates,
     )
     r.record(
-        "write_lock_notification_prompt_return_generic_write",
-        test_write_lock_notification_prompt_routes_return_confirmations_to_generic_write,
+        "write_lock_notification_prompt_example_driven",
+        test_write_lock_notification_prompt_is_example_driven_for_all_gates,
     )
     r.record(
         "return_write_lock_notification_schema_red_green",
         test_return_write_lock_notification_rejects_purchase_without_details_and_accepts_generic_write,
     )
     r.record(
-        "purchase_write_lock_notification_failure_blocks_fallback",
-        test_purchase_write_lock_notification_failure_blocks_approval_fallback,
+        "purchase_write_lock_notification_failure_falls_back",
+        test_purchase_write_lock_notification_failure_falls_back_for_all_gates,
     )
     r.record(
         "normalize_write_lock_notification_media_candidate",

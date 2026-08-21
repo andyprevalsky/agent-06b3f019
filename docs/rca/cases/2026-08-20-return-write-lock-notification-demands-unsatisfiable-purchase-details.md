@@ -54,15 +54,18 @@ before `dump_llm_context` in `complete_browser_use`.
 
 ## Solution
 
-1. Detect return-like write locks (`Confirm your return`, `/spr/returns`, …) and
-   instruct the fork to use `trigger_type=generic_write` with refund/drop-off/
-   payment-method payload instead of unsatisfiable purchase fields.
-2. Retry the fork once on `BrowserToolArgsValidationError` with validation
-   feedback (mirrors the main browser loop).
-3. Cement prompt routing, schema red/green, and retry behavior in
-   `spawn_browser_agent_v3.blackbox.py`.
+1. Split return confirmations into their own deterministic write-lock gate
+   (`is_return_button` / `approval_type=return`), no longer bundled under purchase.
+2. Make the notification fork prompt example-driven (purchase, message, social_post,
+   return→generic_write, payment) so the model picks `trigger_type` from the
+   real-world action; `approval_type` is only a hint.
+3. Unify fork failure policy for every gate: retry with the error in context
+   (up to 3 attempts), then fall back to the deterministic question — never abort
+   the browser session solely because notification metadata failed.
+4. Cement prompt examples, return gate, schema red/green, unified fallback, and
+   retry behavior in `spawn_browser_agent_v3.blackbox.py`.
 
-10k-agent: O(1) extra fork call only on schema rejection; no shared fan-in.
+10k-agent: O(1) extra fork calls only on schema/tool rejection; no shared fan-in.
 
 ## Human feedback
 
