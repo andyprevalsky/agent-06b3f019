@@ -46,6 +46,7 @@
     "src/domains/waitlist/types.ts",
     "src/domains/webhooks/types.ts",
     "src/domains/blueprints/types.ts",
+    "src/domains/admin-health/types.ts",
     "src/domains/browser-session/config.ts",
     "node_modules/**",
     "**/*.d.ts",
