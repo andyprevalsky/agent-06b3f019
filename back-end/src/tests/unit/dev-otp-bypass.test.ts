@@ -92,7 +92,6 @@ test('production can NEVER bypass, even with the benchmark flag', () => {
   );
 });
 
-
 test('spaced formatting of the admin phone still bypasses', () => {
   assert.strictEqual(
     devTestPhoneBypassApplies('+1 972 977 7432', {
