@@ -12,6 +12,7 @@ const log = createLogger('Agents');
 
 interface UpdateAgentConfigDependencies {
   signalPriceLimit?: (workflowId: string, newLimitCents: number) => Promise<void>;
+  broadcastUpdate?: typeof broadcastAgentUpdate;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,13 +167,22 @@ export async function updateAgentConfig(
       )
     : true;
 
-  if (accepted && body.tree_cost_cents !== undefined) {
-    await broadcastAgentUpdate(agentId, {
-      treeCostCents: body.tree_cost_cents,
-    });
-  }
-
   const updatedAgent = await repo.findAgentWithFullRelations(agentId);
+
+  if (accepted && updatedAgent !== null) {
+    const realtimeUpdate: Parameters<typeof broadcastAgentUpdate>[1] = {};
+    if (body.tree_cost_cents !== undefined) {
+      realtimeUpdate.treeCostCents = body.tree_cost_cents;
+    }
+    if (body.generated_title !== undefined && updatedAgent.parentAgentId === null) {
+      // Broadcast the stored value, not the candidate, so a concurrent human
+      // rename can never be replaced in the UI by a stale generated title.
+      realtimeUpdate.title = updatedAgent.title;
+    }
+    if (Object.keys(realtimeUpdate).length > 0) {
+      await (dependencies.broadcastUpdate ?? broadcastAgentUpdate)(agentId, realtimeUpdate);
+    }
+  }
 
   // Signal Temporal AFTER all DB writes to ensure persistence first
   if (

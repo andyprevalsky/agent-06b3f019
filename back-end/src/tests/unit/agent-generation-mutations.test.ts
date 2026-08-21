@@ -177,6 +177,12 @@ async function main(): Promise<void> {
   await test('generated titles apply once to root agents without overwriting human renames', async () => {
     const rootAgentId = await createAgent();
     const childAgentId = await createAgent();
+    const broadcasts: Array<{ agentId: string; title?: string | null }> = [];
+    const dependencies = {
+      broadcastUpdate: async (agentId: string, update: { title?: string | null }) => {
+        broadcasts.push({ agentId, title: update.title });
+      },
+    };
     try {
       await prisma.agent.update({
         where: { id: childAgentId },
@@ -190,13 +196,15 @@ async function main(): Promise<void> {
           response_schema: { fields: [{ name: 'first', type: 'str', required: true }] },
         },
         undefined,
-        rootAgentId
+        rootAgentId,
+        dependencies
       );
       assert.strictEqual(rootResult.mutation_accepted, true);
       assert.strictEqual(
         (await prisma.agent.findUniqueOrThrow({ where: { id: rootAgentId } })).title,
         'Generated Root Title'
       );
+      assert.deepStrictEqual(broadcasts, [{ agentId: rootAgentId, title: 'Generated Root Title' }]);
 
       await updateAgentConfig(rootAgentId, { title: 'Human Rename' });
       await updateAgentConfig(
@@ -206,7 +214,8 @@ async function main(): Promise<void> {
           response_schema: { fields: [{ name: 'second', type: 'str', required: true }] },
         },
         undefined,
-        rootAgentId
+        rootAgentId,
+        dependencies
       );
       const renamedRoot = await prisma.agent.findUniqueOrThrow({ where: { id: rootAgentId } });
       assert.strictEqual(renamedRoot.title, 'Human Rename');
@@ -221,7 +230,8 @@ async function main(): Promise<void> {
           response_schema: { fields: [{ name: 'child', type: 'str', required: true }] },
         },
         undefined,
-        childAgentId
+        childAgentId,
+        dependencies
       );
       assert.strictEqual(childResult.mutation_accepted, true);
       const child = await prisma.agent.findUniqueOrThrow({ where: { id: childAgentId } });
@@ -229,6 +239,10 @@ async function main(): Promise<void> {
       assert.deepStrictEqual(child.responseSchema, {
         fields: [{ name: 'child', type: 'str', required: true }],
       });
+      assert.deepStrictEqual(broadcasts, [
+        { agentId: rootAgentId, title: 'Generated Root Title' },
+        { agentId: rootAgentId, title: 'Human Rename' },
+      ]);
     } finally {
       await prisma.agent.update({
         where: { id: childAgentId },
