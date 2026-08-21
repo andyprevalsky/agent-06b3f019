@@ -8540,7 +8540,14 @@ def _run_declared_static_check(
             if not isinstance(kind_check, dict):
                 return False, f"{observed_kind}: detail contract must be an object"
             requests = benchmark_state.get("attention_requests_seen") or []
-            matching = [request for request in requests if _attention_request_kind(request) == observed_kind]
+
+            def _request_kind(request: dict) -> str:
+                stored = request.get("kind")
+                if isinstance(stored, str) and stored.strip():
+                    return stored
+                return _attention_request_kind(request)
+
+            matching = [request for request in requests if _request_kind(request) == observed_kind]
             if not any(
                 _approval_request_satisfies_detail_check(
                     request,
