@@ -250,19 +250,47 @@ async def _run_cutover_case(goal: str, tool_name: str, timeout: int) -> tuple[bo
                 f"never closed, its steps just got clobbered",
             )
 
-        # 2. the sealed generation must stop writing
-        late = [
+        # 2. the sealed generation must stop DOING WORK.
+        #
+        # An orphaned activity learns it is dead only by being told: Temporal
+        # terminate() does not cancel in-flight activities and the activity has
+        # no cancellation poll, so its first post-cutover write is the discovery
+        # mechanism. That write is REJECTED (409 -> WorkflowGenerationSealed ->
+        # the activity aborts). Demanding zero post-cutover writes would demand
+        # the worker know something nobody told it.
+        #
+        # So the contract is: nothing from the sealed generation may be ACCEPTED,
+        # and it may not keep producing. Before the fixes this test was written
+        # against, a replaced generation emitted 32-54 ACCEPTED writes over 13s
+        # (and 105 over 90min in prod). Now it emits at most its own discovery
+        # write, fenced, and stops.
+        sealed_writes = [
             m
             for m in _tool_messages(messages, tool_name)
-            if _metadata(m).get("subAgentId") in live_before
-            and _metadata(m).get("workflowGeneration") == generation_before
-            and _message_epoch(m) > cutover_at + 15
+            if _metadata(m).get("workflowGeneration") == generation_before
+            and _message_epoch(m) > cutover_at
         ]
-        if late:
+        accepted = [
+            m for m in sealed_writes if _metadata(m).get("errorCode") != "DEPLOY_INTERRUPTED"
+        ]
+        if accepted:
             return (
                 False,
-                f"WRONG: {len(late)} write(s) from the sealed generation "
-                f"{generation_before!r} landed after the cutover — the old activity is still running",
+                f"WRONG: {len(accepted)} write(s) from the sealed generation "
+                f"{generation_before!r} were ACCEPTED after the cutover — the old activity is "
+                f"still doing work",
+            )
+        discovery = [
+            m
+            for m in sealed_writes
+            if _metadata(m).get("subAgentId") in live_before
+            and _message_epoch(m) > cutover_at + 15
+        ]
+        if len(discovery) > 1:
+            return (
+                False,
+                f"WRONG: the sealed generation kept producing — {len(discovery)} fenced writes "
+                f"landed >15s after the cutover; at most one discovery write is expected",
             )
 
         # 3. its rented browser must be released
