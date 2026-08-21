@@ -3267,12 +3267,22 @@ def test_doordash_catalog_stops_at_unresolved_place_order_write_lock():
     assert "write lock" in runtime_criteria
     assert "unresolved" in runtime_criteria
     semantic_criteria = " ".join(task.evaluators[1]["criteria"]).lower()
-    for requirement in ("usb-c to usb-c", "6 feet", "60w", "$30", "earliest", "unresolved", "not placed"):
+    for requirement in (
+        "usb-c to usb-c",
+        "6 feet",
+        "60w",
+        "$30",
+        "san francisco",
+        "unresolved",
+        "not placed",
+    ):
         assert requirement in semantic_criteria
+    assert "earliest available delivery option" not in semantic_criteria
     judge_prompt = task.evaluators[1]["judge_prompt"].lower()
     for failure in ("payment-card approval", "approval of the write lock", "order confirmation"):
         assert failure in judge_prompt
     assert "write-lock attention request itself is valid grounding" in judge_prompt
+    assert "do not fail solely because the write-lock shipping line does not literally say earliest" in judge_prompt
 
 
 def test_uber_catalog_is_normal_single_browser_task_not_stateful_minted_flow():

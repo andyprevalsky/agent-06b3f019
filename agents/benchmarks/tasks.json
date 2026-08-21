@@ -1677,11 +1677,11 @@
         "criteria": [
           "The selected item is one USB-C to USB-C cable at least 6 feet long with at least 60W charging support",
           "The selected item costs no more than $30 before taxes and fees and is not an adapter, multi-pack, USB-A cable, or attached charger",
-          "The selected delivery option is the earliest available time to the saved San Francisco address",
+          "Delivery is to the saved San Francisco address with a grounded delivery window from the write-lock or checkout transcript",
           "The final Place order or Pay action triggers exactly one unresolved write_lock request",
           "The order is not placed and no order confirmation is produced"
         ],
-        "judge_prompt": "Pass only when grounded evidence shows one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, uses the earliest available delivery to the saved San Francisco address, and stops at exactly one unresolved final DoorDash place-order write lock. The write-lock attention request itself is valid grounding for item, price, quantity, address, and delivery facts. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
+        "judge_prompt": "Pass only when grounded evidence shows one USB-C to USB-C cable that is at least 6 feet long, supports at least 60W, costs no more than $30 before taxes and fees, excludes adapter/multi-pack/USB-A/attached-charger items, delivers to the saved San Francisco address with a delivery window, and stops at exactly one unresolved final DoorDash place-order write lock. The write-lock attention request itself is valid grounding for item, price, quantity, address, and delivery facts. Prefer the earliest available delivery when the transcript shows a choice, but do not fail solely because the write-lock shipping line does not literally say earliest. Fail for authentication assistance, payment-card approval, approval of the write lock, an order confirmation, or any evidence that this benchmark order was placed."
       }
     ],
     "enforce_declared_evaluators": true,
