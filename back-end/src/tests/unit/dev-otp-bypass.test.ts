@@ -4,17 +4,17 @@
 /**
  * Offline unit tests for the dev test-phone OTP login bypass predicate.
  *
- * Regression (PR #783): benchmark stacks set BLACKBOX_TEST_CAPTURE_OUTBOUND=1 to
- * capture the agent's outbound SMS, which flips IS_BLACKBOX_TEST and disabled the
- * dev-phone OTP bypass — deterministically breaking the message-person iMessage
- * relay's auto-login. BENCHMARK_ALLOW_DEV_OTP_LOGIN re-enables the login bypass
- * under capture, while staying IS_DEV-gated so production can never bypass.
+ * The shared admin/test phones (+19729777432 / +529729777432) must NEVER hit
+ * live Twilio Verify from local/blackbox/benchmark stacks — they share the
+ * production Verify service and have repeatedly rate-limited prod login.
+ * Capture/blackbox flags therefore cannot disable the bypass.
  */
 
 import assert from 'node:assert';
 import { devTestPhoneBypassApplies } from '../../domains/auth/service.twilio';
 
 const DEV_PHONE = '+19729777432';
+const LATAM_DEV_PHONE = '+529729777432';
 const NON_TEST_PHONE = '+15551239999';
 
 let passed = 0;
@@ -40,18 +40,29 @@ test('bypasses in plain dev (not blackbox)', () => {
   );
 });
 
-test('blackbox capture disables the bypass by default', () => {
+test('blackbox capture still bypasses (never burn prod Verify quota)', () => {
   assert.strictEqual(
     devTestPhoneBypassApplies(DEV_PHONE, {
       isDev: true,
       isBlackboxTest: true,
       benchmarkAllowDevOtpLogin: false,
     }),
-    false
+    true
   );
 });
 
-test('benchmark flag re-enables the bypass under capture (the relay fix)', () => {
+test('LATAM +52 dev phone also bypasses under capture', () => {
+  assert.strictEqual(
+    devTestPhoneBypassApplies(LATAM_DEV_PHONE, {
+      isDev: true,
+      isBlackboxTest: true,
+      benchmarkAllowDevOtpLogin: false,
+    }),
+    true
+  );
+});
+
+test('benchmark flag is irrelevant — bypass stays on under capture either way', () => {
   assert.strictEqual(
     devTestPhoneBypassApplies(DEV_PHONE, {
       isDev: true,
@@ -78,6 +89,18 @@ test('production can NEVER bypass, even with the benchmark flag', () => {
       benchmarkAllowDevOtpLogin: false,
     }),
     false
+  );
+});
+
+
+test('spaced formatting of the admin phone still bypasses', () => {
+  assert.strictEqual(
+    devTestPhoneBypassApplies('+1 972 977 7432', {
+      isDev: true,
+      isBlackboxTest: true,
+      benchmarkAllowDevOtpLogin: false,
+    }),
+    true
   );
 });
 
