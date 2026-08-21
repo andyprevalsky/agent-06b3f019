@@ -177,6 +177,9 @@ export const updateStatusSchema = z.object({
 export const updateAgentSchema = z.object({
   // Sidebar rename. `null` clears the override and falls back to the goal.
   title: z.string().trim().min(1).max(80).nullable().optional(),
+  // Internal schema-generator candidate. Applied only to an untitled root agent,
+  // so a concurrent human rename always wins and sub-agents never store titles.
+  generated_title: z.string().trim().min(1).max(80).optional(),
   // Sidebar pin toggle — maps to Agent.pinnedAt (now / null).
   pinned: z.boolean().optional(),
   model: z.string().optional(),
