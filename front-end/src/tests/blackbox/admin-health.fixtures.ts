@@ -1,10 +1,66 @@
 /**
- * Payload fixtures for the AdminHealth blackbox suite.
+ * Shared fixtures and harness for the Admin Health blackbox tests.
  *
- * Extracted from the suite itself to keep that file within its line budget;
- * mirrors the existing plaid.fixtures convention.
+ * Extracted so the spec files stay focused on assertions and none of them has
+ * to carry the metrics payload / directory builders past the max-lines budget.
+ *
+ * Consumed by:
+ *   - admin-health.blackbox.tsx (page + fetch layer)
+ *   - admin-health-users-invite.blackbox.tsx (waitlist invite flows)
+ *   - admin-health-users-list.blackbox.tsx (directory listing / search / paging)
  */
 
+import { http, HttpResponse } from 'msw';
+
+import type { AdminDirectoryPerson } from '@/lib/adminUsers';
+
+import { server } from './msw/server';
+
+export const API_BASE = 'http://localhost:3001/api';
+
+/** The real jsdom ResizeObserver, captured before any chart stub replaces it. */
+export const defaultResizeObserver = window.ResizeObserver;
+
+/**
+ * Recharts only paints once its container reports a non-zero size, which jsdom
+ * never does. This stub reports a fixed chart-sized box on observe().
+ */
+export class ChartResizeObserver {
+  private readonly callback: ResizeObserverCallback;
+
+  constructor(callback: ResizeObserverCallback) {
+    this.callback = callback;
+  }
+
+  observe(target: Element) {
+    this.callback(
+      [
+        {
+          target,
+          contentRect: { width: 1200, height: 420 } as DOMRectReadOnly,
+        } as ResizeObserverEntry,
+      ],
+      this as unknown as ResizeObserver,
+    );
+  }
+
+  unobserve() {}
+  disconnect() {}
+}
+
+export function mockSession() {
+  localStorage.setItem(
+    'rose-session',
+    JSON.stringify({
+      access_token: 'admin-token',
+      refresh_token: 'test-refresh',
+      expires_in: 3600,
+      expires_at: Math.floor(Date.now() / 1000) + 3600,
+      token_type: 'bearer',
+      user: { id: '1f85ff25-6e29-4c1b-8739-f917bd101a30' },
+    }),
+  );
+}
 export function makeSeries() {
   return Array.from({ length: 12 }, (_, index) => ({
     key: `2026-0${(index % 9) + 1}-01`,
@@ -154,4 +210,52 @@ export function adminHealthPayload(timeSlice = 'monthly') {
       },
     },
   };
+}
+export function directoryPerson(
+  overrides: Partial<AdminDirectoryPerson> = {},
+): AdminDirectoryPerson {
+  return {
+    key: 'user:acct-1',
+    userId: 'acct-1',
+    waitlistId: 'wl-1',
+    name: 'Ada Lovelace',
+    email: 'ada@example.com',
+    phone: '+13234498210',
+    joinedAt: '2026-07-01T00:00:00.000Z',
+    invitedAt: null,
+    hasAccount: true,
+    hasSubscription: false,
+    isGated: true,
+    isAdmin: false,
+    ...overrides,
+  };
+}
+
+export function directoryResponse(
+  people: AdminDirectoryPerson[],
+  options: { total?: number; page?: number; pageSize?: number; search?: string } = {},
+) {
+  const total = options.total ?? people.length;
+  const page = options.page ?? 1;
+  const pageSize = options.pageSize ?? 50;
+  return {
+    people,
+    total,
+    page,
+    pageSize,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    search: options.search ?? '',
+  };
+}
+
+export function installAdminHealthHandler() {
+  server.use(
+    http.get(`${API_BASE}/admin-health`, ({ request }) => {
+      const url = new URL(request.url);
+      return HttpResponse.json(adminHealthPayload(url.searchParams.get('timeSlice') ?? 'weekly'));
+    }),
+    // The Waitlist People section fetches this on mount; default to empty so the
+    // full-page tests don't trip the onUnhandledRequest guard.
+    http.get(`${API_BASE}/admin-health/users`, () => HttpResponse.json(directoryResponse([]))),
+  );
 }

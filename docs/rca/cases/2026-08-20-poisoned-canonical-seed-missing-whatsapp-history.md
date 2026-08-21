@@ -20,10 +20,8 @@ tags:
   - fixtures
   - whatsapp-history-recall
 sources:
-  - agents/benchmarks/runs/20260820_211517_whatsapp-history-recall.json
+  - fleet run 20260820_211517_whatsapp-history-recall
   - agent 76b73506-a102-4ebc-a623-c69f5c279206
-  - R2 key cc104a3f…-pg16-victoria-prod-sync-v1-whatsapp-v2 (poisoned 31MB / 0 WHATSAPP rows)
-  - prior good artifact 2667c51…-pg16-victoria-prod-sync-v1-whatsapp-v2 (152MB text / 3825 WHATSAPP rows)
 repro: bash scripts/tests/canonical-seed-whatsapp-content.test.sh
 status: fixed
 ---

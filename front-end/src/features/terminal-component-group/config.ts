@@ -17,11 +17,26 @@ export const API_BASE_WITH_PATH = backendApiUrl();
 export const CLAUDE_CODE_WS_RETRY_DELAYS = [100, 400, 800];
 export const CLAUDE_CODE_WS_MAX_RETRIES = 3;
 
-/** Expanded sidebar width in pixels. */
-export const SIDEBAR_WIDTH_EXPANDED = 256;
+/** Default expanded sidebar width in pixels (used until the user drags it). */
+export const SIDEBAR_WIDTH_EXPANDED = 300;
 
-/** Collapsed sidebar width in pixels. */
+/** Collapsed sidebar width in pixels (icon rail). */
 export const SIDEBAR_WIDTH_COLLAPSED = 64;
+
+/** Narrowest the user can drag the sidebar before it stops shrinking. */
+export const SIDEBAR_WIDTH_MIN = 220;
+
+/** Widest the user can drag the sidebar. */
+export const SIDEBAR_WIDTH_MAX = 480;
+
+/**
+ * Dragging narrower than this snaps to the collapsed rail. Sits below
+ * SIDEBAR_WIDTH_MIN so collapsing is a deliberate drag, not an accidental nudge.
+ */
+export const SIDEBAR_COLLAPSE_SNAP_WIDTH = 160;
+
+/** localStorage key holding the user's dragged sidebar width. */
+export const SIDEBAR_WIDTH_STORAGE_KEY = 'rose-sidebar-width';
 
 /** Poll interval (ms) for refreshing credit usage in the sidebar. */
 export const CREDITS_POLL_INTERVAL_MS = 30_000;

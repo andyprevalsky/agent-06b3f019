@@ -12,6 +12,7 @@ const log = createLogger('Agents');
 
 interface UpdateAgentConfigDependencies {
   signalPriceLimit?: (workflowId: string, newLimitCents: number) => Promise<void>;
+  broadcastUpdate?: typeof broadcastAgentUpdate;
 }
 
 // ---------------------------------------------------------------------------
@@ -21,6 +22,13 @@ interface UpdateAgentConfigDependencies {
 /** Build the agent update data from the request body. */
 function buildAgentUpdateData(body: UpdateAgentBody): Record<string, unknown> {
   const data: Record<string, unknown> = {};
+  // Rename: an explicit null clears the override so the UI falls back to `goal`.
+  if (body.title !== undefined) {
+    data.title = body.title;
+  }
+  if (body.pinned !== undefined) {
+    data.pinnedAt = body.pinned ? new Date() : null;
+  }
   if (body.model !== undefined && body.model !== '') {
     data.model = body.model;
   }
@@ -87,6 +95,9 @@ function formatAgentResponse(
     agent: {
       agent_id: agent.id,
       goal: agent.goal,
+      title: agent.title,
+      pinned_at: agent.pinnedAt,
+      archived_at: agent.deletedAt,
       model: agent.model,
       reasoning_max_tokens: agent.reasoningMaxTokens,
       progress: agent.progress,
@@ -142,23 +153,36 @@ export async function updateAgentConfig(
     return priceLimitError;
   }
 
-  const hasMutation = Object.keys(agentUpdateData).length > 0 || body.tool_ids !== undefined;
+  const hasMutation =
+    Object.keys(agentUpdateData).length > 0 ||
+    body.tool_ids !== undefined ||
+    body.generated_title !== undefined;
   const accepted = hasMutation
     ? await repo.updateAgentConfigMutation(
         agentId,
         agentUpdateData as Prisma.AgentUpdateManyMutationInput,
         body.tool_ids,
-        workflowGeneration
+        workflowGeneration,
+        body.generated_title
       )
     : true;
 
-  if (accepted && body.tree_cost_cents !== undefined) {
-    await broadcastAgentUpdate(agentId, {
-      treeCostCents: body.tree_cost_cents,
-    });
-  }
-
   const updatedAgent = await repo.findAgentWithFullRelations(agentId);
+
+  if (accepted && updatedAgent !== null) {
+    const realtimeUpdate: Parameters<typeof broadcastAgentUpdate>[1] = {};
+    if (body.tree_cost_cents !== undefined) {
+      realtimeUpdate.treeCostCents = body.tree_cost_cents;
+    }
+    if (body.generated_title !== undefined && updatedAgent.parentAgentId === null) {
+      // Broadcast the stored value, not the candidate, so a concurrent human
+      // rename can never be replaced in the UI by a stale generated title.
+      realtimeUpdate.title = updatedAgent.title;
+    }
+    if (Object.keys(realtimeUpdate).length > 0) {
+      await (dependencies.broadcastUpdate ?? broadcastAgentUpdate)(agentId, realtimeUpdate);
+    }
+  }
 
   // Signal Temporal AFTER all DB writes to ensure persistence first
   if (

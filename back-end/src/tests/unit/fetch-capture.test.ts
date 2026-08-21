@@ -212,10 +212,7 @@ async function run(): Promise<void> {
     assert.ok(!looksLikeUtf8ReplacementCorruption(jpegFixture));
 
     // %PDF prefix alone must not skip corruption detection.
-    const pdfCorrupted = Buffer.concat([
-      Buffer.from('%PDF-1.4\n'),
-      Buffer.alloc(400, 0xef),
-    ]);
+    const pdfCorrupted = Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(400, 0xef)]);
     // Fill with EF BF BD triplets above the 15%/100 threshold.
     for (let i = 9; i + 2 < pdfCorrupted.length; i += 3) {
       pdfCorrupted[i] = 0xef;
