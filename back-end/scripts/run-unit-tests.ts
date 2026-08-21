@@ -59,8 +59,12 @@ function resolveLocalDatabaseEnv(): Record<string, string> | undefined {
     }).trim();
     const port = /:(\d+)\s*$/.exec(mapping.split('\n')[0] ?? '')?.[1];
     if (port !== undefined) {
+      // Database name MUST be `victoria`, matching run-blackbox-tests.sh and the container's
+      // POSTGRES_DB. The default `postgres` database exists but is EMPTY, so pointing at it
+      // silently fails the schema probe below and falls through to the remote DB this function
+      // exists to avoid.
       candidates.push({
-        url: `postgresql://postgres:postgres@localhost:${port}/postgres`,
+        url: `postgresql://postgres:postgres@localhost:${port}/victoria`,
         label: `container victoria-db-${workspace} (:${port})`,
       });
     }
@@ -68,7 +72,7 @@ function resolveLocalDatabaseEnv(): Record<string, string> | undefined {
     // Docker unavailable or no container for this workspace.
   }
   candidates.push({
-    url: 'postgresql://postgres:postgres@localhost:5432/postgres',
+    url: 'postgresql://postgres:postgres@localhost:5432/victoria',
     label: 'system Postgres (:5432)',
   });
 
