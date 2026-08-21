@@ -17,6 +17,15 @@ export * from './AsciiLoader';
 export { default as AsciiLoader } from './AsciiLoader';
 export * from './AttentionInbox';
 export { default as AttentionInbox } from './AttentionInbox';
+export { AttentionRequestsProvider } from './attention-inbox/AttentionRequestsProvider';
+export {
+  unansweredAgentIds,
+  useAttentionRequestsContext,
+} from './attention-inbox/attentionRequestsContext';
+export { unansweredCount, useAttentionRequests } from './attention-inbox/useAttentionRequests';
+export * from './agentRunState';
+export * from './formatElapsed';
+export { default as AgentStatusIndicator } from './AgentStatusIndicator';
 export * from './BrowserBorderGlow';
 export { default as BrowserBorderGlow } from './BrowserBorderGlow';
 export * from './BrowserCursorOverlay';

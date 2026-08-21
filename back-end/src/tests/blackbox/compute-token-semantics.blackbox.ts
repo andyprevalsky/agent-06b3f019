@@ -658,22 +658,22 @@ const LEDGER_PATH = join(
   '../../../.compute-token-conformance.json'
 );
 const MAX_LIVE_STALENESS_DAYS = 7;
-/**
- * Tracked bootstrap for fresh checkouts. The first live verification predates
- * this ledger, and a gitignored local file cannot carry that evidence into a
- * new workspace. Newer successful live runs still supersede this baseline.
- */
-const REPOSITORY_LIVE_BASELINE_MS = Date.parse('2026-08-18T00:00:00.000Z');
+// A fresh worktree cannot contain the gitignored live-run ledger. Bootstrap it
+// from the real-provider measurement this suite was authored against so the
+// freshness gate remains meaningful across workspaces instead of reading
+// "never" immediately after checkout. Once this baseline ages past seven days,
+// only a successful LIVE run can refresh the local ledger.
+const DOCUMENTED_LIVE_BASELINE_MS = Date.parse('2026-08-18T00:00:00.000Z');
 
 function readLastLiveRun(): number | null {
   try {
-    if (!existsSync(LEDGER_PATH)) return REPOSITORY_LIVE_BASELINE_MS;
+    if (!existsSync(LEDGER_PATH)) return DOCUMENTED_LIVE_BASELINE_MS;
     const parsed = JSON.parse(readFileSync(LEDGER_PATH, 'utf8')) as { lastLiveRunMs?: number };
     return typeof parsed.lastLiveRunMs === 'number'
-      ? Math.max(parsed.lastLiveRunMs, REPOSITORY_LIVE_BASELINE_MS)
-      : REPOSITORY_LIVE_BASELINE_MS;
+      ? Math.max(parsed.lastLiveRunMs, DOCUMENTED_LIVE_BASELINE_MS)
+      : DOCUMENTED_LIVE_BASELINE_MS;
   } catch {
-    return REPOSITORY_LIVE_BASELINE_MS;
+    return DOCUMENTED_LIVE_BASELINE_MS;
   }
 }
 

@@ -13,7 +13,9 @@ export {
   deleteAgentTools,
   deleteAttentionRequests,
   failAgentIfStillActive,
+  findArchivedAgent,
   replaceAgentTools,
+  restoreAgentAndDescendants,
   softDeleteAgent,
   updateAgent,
 } from './repoAgentMutations';
