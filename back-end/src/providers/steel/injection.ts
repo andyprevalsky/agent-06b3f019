@@ -4,6 +4,7 @@
 
 import { prisma } from '../database';
 import { canonicalAuthRealm } from '../authRealm';
+import { cookieSelectionWhere } from '../browserCookies';
 import { benchmarkSavedBrowserAuthDisabled } from '../benchmarkBrowserAuth';
 import { type FingerprintData, log } from './types';
 import { steelCdpConnectionUrl } from './urls';
@@ -53,24 +54,22 @@ interface SteelRealmCookieSummary {
   checkedAt: string;
 }
 
-function cookieDomainWhere(authRealm: string) {
-  // CookieBundle.authRealm follows the browser start host, which can retain a
-  // leading `www.` for sites outside the small canonicalAuthRealm allowlist.
-  // Browser cookies are commonly scoped to the parent domain instead (for
-  // example authRealm=www.doordash.com with domain=.doordash.com). Selection
-  // and injection must use the same boundary-aware variants or we can advertise
-  // a CookieBundle while injecting zero cookies.
-  const normalizedRealm = authRealm.trim().toLowerCase().replace(/^\.+/, '');
-  const parentRealm = normalizedRealm.startsWith('www.')
-    ? normalizedRealm.slice('www.'.length)
-    : normalizedRealm;
-  const exactDomains = [...new Set([normalizedRealm, parentRealm])];
-  return {
-    OR: [
-      ...exactDomains.flatMap((domain) => [{ domain }, { domain: `.${domain}` }]),
-      ...exactDomains.map((domain) => ({ domain: { endsWith: `.${domain}` } })),
-    ],
-  };
+/**
+ * Cookie SELECTION for the browser agent: the target realm PLUS every SSO realm.
+ *
+ * Delegates to the shared canonical path (providers/browserCookies) so the agent
+ * and the compute connectors select cookies identically -- the browser agent
+ * always gets SSO cookies. Boundary-aware variants (`www.` → parent, `.domain`,
+ * subdomains) live in `cookieSelectionWhere`; the earlier inline copy is gone.
+ *
+ * INJECTION attribute-mapping below is intentionally NOT migrated yet: this path
+ * sources cookies from CookieBundle (which lacks the sameSite/profile fields the
+ * shared normaliser needs), and blindly applying profile-coherence could drop
+ * the target realm's own cookie. That is a deliberate follow-up, not a blind
+ * change to battle-tested behaviour.
+ */
+function cookieDomainWhere(authRealm: string): { OR: Array<Record<string, unknown>> } {
+  return cookieSelectionWhere(authRealm);
 }
 
 function envEnabled(name: string, defaultValue = true): boolean {
@@ -328,8 +327,11 @@ export async function injectUserData(
       where: { sessionId },
       include: { context: true },
     }),
-    prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    prisma.integration.findFirst({
+      // Integration's unique key now includes accountId; this lookup wants the
+      // user's browser_fingerprint row regardless of account, so findFirst keeps
+      // the original behaviour without pinning an accountId.
+      where: { userId, name: 'browser_fingerprint' },
     }),
     prisma.localStorageOrigin.findMany({ where: originDomainFilter }),
     prisma.indexedDBOrigin.findMany({ where: originDomainFilter }),

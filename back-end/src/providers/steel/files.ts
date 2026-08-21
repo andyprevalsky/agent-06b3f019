@@ -116,7 +116,7 @@ export async function getFingerprintInjectionData(userId: string): Promise<{
   timezone: string | null;
 } | null> {
   const integration = await prisma.integration.findUnique({
-    where: { userId_name: { userId, name: 'browser_fingerprint' } },
+    where: { userId_name_accountId: { userId, name: 'browser_fingerprint', accountId: '' } },
   });
 
   const fp = (integration?.config as { fingerprint?: FingerprintData } | null)?.fingerprint;

@@ -131,7 +131,7 @@ async function main(): Promise<void> {
       'onboarding session keys must be removed after promotion'
     );
     const row = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     });
     assert.equal(row?.status, IntegrationStatus.CONNECTED);
     assert.equal(row?.isActive, true);
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
     await saveOrgOnboardingConfig(userId, { sessionId: 'sess-3', setupUrl: 'https://s/3' });
     // orgManaged is true but cardholderId is blank -> not usable.
     await prisma.integration.update({
-      where: { userId_name: { userId, name: 'agentcard' } },
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
       data: { config: { orgManaged: true, cardholderId: '   ' } },
     });
     assert.equal(await getOrgManagedCardholderId(userId), undefined);
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     await clearUserToken(userId);
     assert.equal(await getUserToken(userId), undefined);
     const row = await prisma.integration.findUnique({
-      where: { userId_name: { userId, name: 'agentcard' } },
+      where: { userId_name_accountId: { userId, name: 'agentcard', accountId: '' } },
     });
     assert.equal(row?.status, IntegrationStatus.NOT_CONNECTED);
     assert.equal(row?.isActive, false);
