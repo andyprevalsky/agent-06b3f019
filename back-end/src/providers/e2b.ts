@@ -213,11 +213,35 @@ export function resolveClaudeCodeTokenSource(
 
 /**
  * Host ANTHROPIC_BASE_URL override for Claude Code sandboxes (Anthropic SDK
- * compatible gateways such as OpenRouter). Fast Mode proxy URL wins when set.
+ * compatible gateways such as OpenRouter).
  */
 export function resolveHostAnthropicBaseUrl(hostBaseUrl: string | undefined): string | undefined {
   const trimmed = hostBaseUrl?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Funded Anthropic-compatible gateways (OpenRouter auto-fallback when the shared
+ * Anthropic org is credit-dead) must win over the Fast Mode tee-proxy.
+ *
+ * The Fast Mode proxy forwards sandbox keys to api.anthropic.com. An OpenRouter
+ * key against that host returns HTTP 403 and zero Claude Code interactions —
+ * the fleet files-in-sub-agents failure mode on 2026-08-21. Local stacks often
+ * skip Fast Mode because the proxy URL is loopback-unreachable; fleet proxies
+ * are public, so without this precedence the OpenRouter transport never sticks.
+ */
+export function shouldPreferSandboxAnthropicBaseUrlOverFastMode(
+  sandboxBaseUrl: string | undefined
+): boolean {
+  const trimmed = sandboxBaseUrl?.trim();
+  if (!trimmed) return false;
+  try {
+    const host = new URL(trimmed).hostname.toLowerCase();
+    if (host === 'api.anthropic.com') return false;
+    return true;
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -383,50 +407,6 @@ export async function createClaudeCodeSession(
     CLAUDE_CODE_MODEL: model,
     CODE_AGENT_SYSTEM_PROMPT: systemPrompt,
   };
-  if (codeAgentFastModeActive) {
-    envs.CLAUDE_CODE_FAST_MODE = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
-    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
-  }
-
-  // Fast Mode: route the sandbox's Anthropic calls through our tee-proxy so they
-  // record/replay. The CLI's Anthropic SDK honors ANTHROPIC_BASE_URL. Only injected
-  // when Fast Mode is on AND a proxy URL is configured (else direct to Anthropic).
-  const fastModeEnv = buildFastModeAnthropicEnv(
-    goal,
-    fastModeCacheEnabled === true,
-    process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
-    fastModeWriteEnabled,
-    {
-      sessionId: taskId,
-      trace: {
-        goal,
-        systemPrompt,
-        model,
-        codeProvider: 'claude',
-        templateId,
-        runtimeFingerprint,
-        workDir,
-        githubRepoUrl,
-      },
-    }
-  );
-  if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
-    envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
-    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
-  } else {
-    const hostAnthropicBaseUrl = resolveHostAnthropicBaseUrl(process.env.ANTHROPIC_BASE_URL);
-    if (hostAnthropicBaseUrl) {
-      // Honor a host override (e.g. Anthropic-compatible OpenRouter transport when
-      // the direct Anthropic org is credit-dead). Fast Mode proxy wins when set.
-      envs.ANTHROPIC_BASE_URL = hostAnthropicBaseUrl;
-      log.info(`Routing sandbox Anthropic calls via host ANTHROPIC_BASE_URL=${envs.ANTHROPIC_BASE_URL}`);
-    } else if (fastModeWriteEnabled) {
-      log.warn(
-        'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
-      );
-    }
-  }
 
   // Try user's own credentials first, then rotate through the pool. The agent's
   // outer loop already rotates through pool tokens when Anthropic returns 429;
@@ -453,11 +433,68 @@ export async function createClaudeCodeSession(
     }
   );
   const sandboxApiKey = sandboxTransport.apiKey;
-  // Fast Mode proxy wins; otherwise use transport base (host override or
-  // OpenRouter auto-fallback when the shared Anthropic org is on cooldown).
-  if (!envs.ANTHROPIC_BASE_URL && sandboxTransport.baseUrl) {
+
+  // Attachment fingerprints keep Fast Mode traces distinct across H-02 eras
+  // (corrupted 369851-byte UTF-8 uploads vs intact 207364-byte JPEGs).
+  const attachmentFingerprint =
+    attachments && attachments.length > 0
+      ? attachments
+          .map((fp) => `${fp.original_filename}:${fp.size_bytes}:${fp.storage_path}`)
+          .sort()
+          .join('|')
+      : '';
+
+  // Fast Mode tee-proxy vs funded gateway: resolve transport first. OpenRouter
+  // (or any non-api.anthropic.com base) must not be overwritten by Fast Mode —
+  // the proxy forwards to api.anthropic.com and 403s gateway keys.
+  const preferSandboxBase = shouldPreferSandboxAnthropicBaseUrlOverFastMode(
+    sandboxTransport.baseUrl
+  );
+  // Fast Mode CLI flags only when we actually inject the tee-proxy. A funded
+  // OpenRouter transport must not advertise Fast Mode (stale cache / 403 path).
+  if (codeAgentFastModeActive && !preferSandboxBase) {
+    envs.CLAUDE_CODE_FAST_MODE = '1';
+    envs.CLAUDE_CODE_SKIP_FAST_MODE_NETWORK_ERRORS = '1';
+    envs.CLAUDE_CODE_SKIP_FAST_MODE_ORG_CHECK = '1';
+  }
+  const fastModeEnv: Record<string, string> = preferSandboxBase
+    ? {}
+    : buildFastModeAnthropicEnv(
+        goal,
+        fastModeCacheEnabled === true,
+        process.env.FAST_MODE_ANTHROPIC_PROXY_URL,
+        fastModeWriteEnabled,
+        {
+          sessionId: taskId,
+          trace: {
+            goal,
+            systemPrompt,
+            model,
+            codeProvider: 'claude',
+            templateId,
+            runtimeFingerprint: attachmentFingerprint
+              ? `${runtimeFingerprint}|att:${attachmentFingerprint}`
+              : runtimeFingerprint,
+            workDir,
+            githubRepoUrl,
+          },
+        }
+      );
+  if (preferSandboxBase && sandboxTransport.baseUrl) {
+    envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
+    log.info(
+      `Routing sandbox Anthropic calls via funded gateway ${envs.ANTHROPIC_BASE_URL} (Fast Mode proxy skipped)`
+    );
+  } else if (fastModeEnv.ANTHROPIC_BASE_URL !== undefined) {
+    envs.ANTHROPIC_BASE_URL = fastModeEnv.ANTHROPIC_BASE_URL;
+    log.info(`Fast Mode: routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+  } else if (sandboxTransport.baseUrl) {
     envs.ANTHROPIC_BASE_URL = sandboxTransport.baseUrl;
     log.info(`Routing sandbox Anthropic calls via ${envs.ANTHROPIC_BASE_URL}`);
+  } else if (fastModeWriteEnabled) {
+    log.warn(
+      'Fast Mode cache active but FAST_MODE_ANTHROPIC_PROXY_URL unset — code agent not cached'
+    );
   }
   const sandboxBaseUrl = envs.ANTHROPIC_BASE_URL;
   const ignoreSharedCooldown = shouldIgnoreAnthropicApiKeyCooldownForSandbox({

@@ -23,6 +23,7 @@ import {
   resolveCodexCodeAuthEnvs,
   resolveHostAnthropicBaseUrl,
   shouldIgnoreAnthropicApiKeyCooldownForSandbox,
+  shouldPreferSandboxAnthropicBaseUrlOverFastMode,
 } from '../../providers/e2b';
 
 /** Substrings that describe our credential inventory and must never reach a client body. */
@@ -185,6 +186,16 @@ function main(): void {
     sharedAnthropicApiKey: 'sk-ant-shared',
     sandboxBaseUrl: 'https://openrouter.ai/api',
   }), true);
+
+  assert.equal(
+    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://openrouter.ai/api'),
+    true
+  );
+  assert.equal(
+    shouldPreferSandboxAnthropicBaseUrlOverFastMode('https://api.anthropic.com'),
+    false
+  );
+  assert.equal(shouldPreferSandboxAnthropicBaseUrlOverFastMode(undefined), false);
 
   process.stdout.write('Code-agent credential redaction tests passed\n');
 }

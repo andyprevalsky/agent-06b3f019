@@ -63,10 +63,34 @@ Fix: detect binary `Content-Type`s, serialize as base64 with
 `x-rose-fetch-capture-body-encoding: base64`, decode when reconstructing.
 Cemented in `back-end/src/tests/unit/fetch-capture.test.ts`.
 
+## Recurrence (2026-08-21) — Fast Mode over OpenRouter + missing Content-Type
+
+Fleet `files-in-sub-agents` (`20260821-002517-708451`) still failed after the
+binary Content-Type fix:
+
+1. **Fast Mode tee-proxy won over OpenRouter.** Local stacks often skip Fast Mode
+   because `FAST_MODE_ANTHROPIC_PROXY_URL` is loopback-unreachable, so the funded
+   OpenRouter `ANTHROPIC_BASE_URL` sticks. Fleet proxies are public, so Fast Mode
+   overwrote the gateway URL; the proxy forwarded OpenRouter keys to
+   `api.anthropic.com` → repeated HTTP 403, 0 Claude Code interactions. Stale
+   Fast Mode cache hits also replayed prior corrupted-run outcomes
+   (`Agentic loop finished: 0 interactions` + SUCCESS/FAILED).
+2. **Missing/unknown Content-Type still used `response.text()`.** Allowlist text
+   types only; treat null/empty/unknown as binary. Guard
+   `downloadFromStorage` with `looksLikeUtf8ReplacementCorruption` so a corrupted
+   buffer never reaches E2B.
+
+Fix: `shouldPreferSandboxAnthropicBaseUrlOverFastMode` — funded non-Anthropic
+bases skip Fast Mode proxy/flags; text-only capture decoding; attachment
+fingerprint in Fast Mode traces. Cemented in fetch-capture + credential unit
+tests.
+
 ## Reusable lesson
 
 A capture/replay wrapper may serialize a request to build its cache key, but must
 never substitute that serialization for the request — pass unserializable bodies
 through untouched and mark them uncacheable. The same rule applies to **response**
 bodies: never force binary through `text()` / UTF-8; preserve bytes (e.g. base64)
-or pass the original `Response` through.
+or pass the original `Response` through. Prefer an allowlist for text decoding.
+Funded gateway transports must not be overwritten by a Fast Mode proxy that
+forwards to a different host.
