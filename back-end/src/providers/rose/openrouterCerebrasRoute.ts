@@ -2,8 +2,13 @@
  * Exclusive OpenRouter -> Cerebras boundary for synchronous Chat.
  *
  * The provider constraint is part of the request body, so OpenRouter cannot
- * silently serve GLM from another host. Provider and model fallbacks are both
- * disabled; any pre-content failure is surfaced to the caller.
+ * silently serve the chat model from another host. Provider and model
+ * fallbacks are both disabled; any pre-content failure is surfaced to the
+ * caller.
+ *
+ * Model note (2026-08-20): OpenRouter no longer has a Cerebras endpoint for
+ * `z-ai/glm-4.7` (direct Cerebras also archived that id). Pin the spill to
+ * `google/gemma-4-31b-it`, which Cerebras still serves via OpenRouter.
  */
 
 import {
@@ -19,7 +24,7 @@ import { postOpenRouterStream } from './transport';
 import { normalizeOpenAiToolCalls } from './transforms';
 import type { CompletionOptions, RoseStreamChunk } from './types';
 
-export const OPENROUTER_CEREBRAS_MODEL = 'z-ai/glm-4.7';
+export const OPENROUTER_CEREBRAS_MODEL = 'google/gemma-4-31b-it';
 export const OPENROUTER_CEREBRAS_POOL = 'openrouter-cerebras';
 
 export function buildOpenRouterCerebrasBody(
@@ -33,10 +38,11 @@ export function buildOpenRouterCerebrasBody(
     stream_options: { include_usage: true },
     reasoning: { effort: 'none', exclude: true },
     // Default (exclusive route): pin to Cerebras — OpenRouter must not silently
-    // serve GLM-4.7 from another host. Fallback mode (`allowProviderFallback`):
-    // still PREFER Cerebras (`order`), but let OpenRouter spill to another
-    // GLM-4.7 provider when Cerebras hits its 5-req/min org cap. Same model,
-    // just not stuck on the capped provider — never a generic model.
+    // serve the chat model from another host. Fallback mode
+    // (`allowProviderFallback`): still PREFER Cerebras (`order`), but let
+    // OpenRouter spill to another host of the same model when Cerebras hits
+    // its org rate cap. Same model, just not stuck on the capped provider —
+    // never a generic waterfall model.
     provider: opts.allowProviderFallback
       ? { order: ['cerebras'], allow_fallbacks: true, require_parameters: true }
       : { only: ['cerebras'], allow_fallbacks: false, require_parameters: true },
