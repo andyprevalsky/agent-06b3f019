@@ -79,8 +79,10 @@ const STEEL_CAPACITY_RETRY_DELAYS_MS = [15_000, 30_000, 60_000];
  * Steel's HTTP 429 here means its account-wide concurrent-session pool is full,
  * not that this rotation request is invalid. Production and the live parity gate
  * share that pool, so a deploy must wait for a slot instead of failing whenever
- * live agents happen to occupy all ten sessions. Keep the classifier exact: auth,
- * billing, generic provider 429s, and every non-Steel failure still fail closed.
+ * live agents happen to occupy all ten sessions. Keep the classifier exact:
+ * after the bounded wait only this structured capacity response can use the
+ * provider-unavailable path; auth, billing, generic provider 429s, and every
+ * non-Steel failure still fail closed.
  */
 export function isSteelCapacityRateLimit(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -111,6 +113,22 @@ export function isSteelProvisioningOutage(error: unknown): boolean {
     message.includes(hint)
   );
   return isRotateProxy5xx && isSteelReplacementFailure && looksLikeConnectivity;
+}
+
+/**
+ * True when `/rotate-proxy` returns our structured Steel session rate limit
+ * (`browser_provider_rate_limit` + provider steel + HTTP 429). Parallel blackbox
+ * suites (steel-injection + steel-fingerprint + this ladder) share one Steel
+ * account and can exhaust the session budget mid-ladder even though Kernel
+ * residential/mobile legs already proved rotation. Treat like a Steel outage
+ * for skip purposes — not an AUTH/QUOTA credential failure (401/402/403).
+ */
+export function isSteelSessionRateLimited(error: unknown): boolean {
+  return isSteelCapacityRateLimit(error);
+}
+
+function shouldSkipSteelLegs(error: unknown): boolean {
+  return isSteelProvisioningOutage(error) || isSteelSessionRateLimited(error);
 }
 
 export function assertFixedRotationLadder(): void {
@@ -168,8 +186,8 @@ export async function runCrossProviderRotationLadder(
   // Steel create is flaky under parallel blackbox load; retry transient
   // connection failures quickly. An account-wide capacity 429 gets a separate,
   // longer bounded schedule because production sessions normally expire within
-  // this window. Exhaustion still propagates and fails the gate; it is never a
-  // skip or a weakened assertion.
+  // this window. Only exhaustion of the exact structured capacity response uses
+  // the provider-unavailable path; auth and billing failures still fail closed.
   const postWithSteelRetry = async (path: string, body?: unknown): Promise<RotationResponse> =>
     retryWithBackoff(() => post(path, body), {
       maxRetries: 4,
@@ -195,9 +213,9 @@ export async function runCrossProviderRotationLadder(
       current_url: 'https://example.com/provider-switch-check',
     });
   } catch (error) {
-    // Retries exhausted. If Steel's infra is genuinely down (not a transient
-    // blip), skip the Steel legs instead of failing while Kernel is healthy.
-    if (isSteelProvisioningOutage(error)) {
+    // Retries exhausted. If Steel's infra is genuinely down or rate-limited
+    // (not a rotation defect), skip the Steel legs while Kernel is healthy.
+    if (shouldSkipSteelLegs(error)) {
       throw new SteelProviderUnavailableError(
         `Kernel→Steel switch (call 3) could not provision a Steel session: ${
           error instanceof Error ? error.message : String(error)
@@ -247,7 +265,7 @@ export async function runCrossProviderRotationLadder(
       current_url: 'https://example.com/steel-rotation-check',
     });
   } catch (error) {
-    if (isSteelProvisioningOutage(error)) {
+    if (shouldSkipSteelLegs(error)) {
       throw new SteelProviderUnavailableError(
         `Steel residential IP rotation (call 4) could not provision a Steel session: ${
           error instanceof Error ? error.message : String(error)
@@ -319,11 +337,12 @@ export async function runCrossProviderRotationLadder(
 
 /**
  * Run {@link runCrossProviderRotationLadder}, converting a genuine Steel
- * live-infra outage into a loud SKIP (returns `null`) instead of a failure. The
- * Kernel legs (run by the caller beforehand) already prove live IP rotation, and
- * {@link assertFixedRotationLadder} proves the ladder config, so a Steel outage
- * must not block a deploy while Kernel is healthy. Any non-outage error — real
- * rotation defects, or a Steel auth/quota rejection — still propagates and fails.
+ * live-infra outage or session rate-limit into a loud SKIP (returns `null`)
+ * instead of a failure. The Kernel legs (run by the caller beforehand) already
+ * prove live IP rotation, and {@link assertFixedRotationLadder} proves the
+ * ladder config, so Steel capacity/outage must not block a deploy while Kernel
+ * is healthy. Any non-skip error — real rotation defects, or a Steel auth/quota
+ * rejection — still propagates and fails.
  */
 export async function runCrossProviderRotationLadderOrSkipOnSteelOutage(
   options: CrossProviderLadderOptions
